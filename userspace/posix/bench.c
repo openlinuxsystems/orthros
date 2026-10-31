@@ -17,9 +17,15 @@
 // both systems the same virtio disk and NVMe disk, files on the host.
 // With --btrfs <directory> it reads, makes and removes files in that
 // directory, where `ob bench` has each system mount the same Btrfs disk.
+// With --network it also times TCP and UDP over the loopback interface
+// (127.0.0.1), which Radix's Spark lets it reach and linux-bench brings
+// up on Linux.
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
@@ -30,6 +36,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -384,6 +391,179 @@ static void futex_processes(const char *name, int other, uint64_t rounds) {
 	munmap(turns, sizeof(*turns));
 }
 
+// 127.0.0.1 and `port`.
+static struct sockaddr_in loopback(unsigned short port) {
+	struct sockaddr_in in;
+	memset(&in, 0, sizeof(in));
+	in.sin_family = AF_INET;
+	in.sin_port = htons(port);
+	in.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	return in;
+}
+
+// A socket of `type` bound to 127.0.0.1 at a port the kernel picks, and
+// that port in `port`; a TCP one listens.
+static int bound(int type, unsigned short *port) {
+	int fd = socket(AF_INET, type, 0);
+	if(fd < 0)
+		fail("socket");
+	struct sockaddr_in at = loopback(0);
+	socklen_t length = sizeof(at);
+	if(bind(fd, (struct sockaddr *)&at, sizeof(at)) != 0
+	   || getsockname(fd, (struct sockaddr *)&at, &length) != 0)
+		fail("bind");
+	if(type == SOCK_STREAM && listen(fd, 16) != 0)
+		fail("listen");
+	*port = ntohs(at.sin_port);
+	return fd;
+}
+
+// A TCP socket connected to 127.0.0.1 `port`, without Nagle's delay, as
+// a program that answers each message sets it.
+static int tcp_connected(unsigned short port) {
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if(fd < 0)
+		fail("socket");
+	int on = 1;
+	struct sockaddr_in to = loopback(port);
+	if(setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on)) != 0)
+		fail("TCP_NODELAY");
+	if(connect(fd, (struct sockaddr *)&to, sizeof(to)) != 0)
+		fail("connect");
+	return fd;
+}
+
+// A TCP connection made, taken and closed, by one process: its own
+// connect, accept, and both ends' close, on one CPU.
+static void tcp_connect(uint64_t rounds) {
+	unsigned short port;
+	int server = bound(SOCK_STREAM, &port);
+	struct mark started = start();
+	for(uint64_t i = 0; i < rounds; i++) {
+		int client = tcp_connected(port);
+		int accepted = accept(server, NULL, NULL);
+		if(accepted < 0)
+			fail("accept");
+		close(client);
+		close(accepted);
+	}
+	report("posix_tcp_connect", started, rounds);
+	close(server);
+}
+
+// A child answers each byte this process sends over a TCP connection,
+// or with `datagrams` each UDP datagram, with one of its own, the child
+// on `other`: the time of each round trip, but the first.
+static void net_roundtrip(const char *name, int datagrams, int other, uint64_t rounds) {
+	unsigned short port;
+	int listening = bound(datagrams ? SOCK_DGRAM : SOCK_STREAM, &port);
+	pid_t child = fork();
+	if(child < 0)
+		fail("fork");
+	if(child == 0) {
+		pin(other);
+		int fd = listening;
+		struct sockaddr_in from;
+		socklen_t length = sizeof(from);
+		if(!datagrams) {
+			fd = accept(listening, NULL, NULL);
+			int on = 1;
+			if(fd < 0 || setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on)) != 0)
+				_exit(1);
+		}
+		char byte;
+		for(uint64_t i = 0; i < rounds; i++) {
+			if(datagrams) {
+				length = sizeof(from);
+				if(recvfrom(fd, &byte, 1, 0, (struct sockaddr *)&from, &length) != 1
+				   || sendto(fd, &byte, 1, 0, (struct sockaddr *)&from, length) != 1)
+					_exit(1);
+			} else if(read(fd, &byte, 1) != 1 || write(fd, &byte, 1) != 1) {
+				_exit(1);
+			}
+		}
+		_exit(0);
+	}
+	int fd;
+	if(datagrams) {
+		fd = socket(AF_INET, SOCK_DGRAM, 0);
+		struct sockaddr_in to = loopback(port);
+		if(fd < 0 || connect(fd, (struct sockaddr *)&to, sizeof(to)) != 0)
+			fail("connect");
+	} else {
+		fd = tcp_connected(port);
+	}
+	char byte = 'x';
+	if(write(fd, &byte, 1) != 1 || read(fd, &byte, 1) != 1)
+		fail("the first round trip");
+	struct mark started = start();
+	for(uint64_t i = 1; i < rounds; i++)
+		if(write(fd, &byte, 1) != 1 || read(fd, &byte, 1) != 1)
+			fail("a round trip");
+	report(name, started, rounds - 1);
+	int status;
+	if(waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status))
+		fail("the answering child");
+	close(fd);
+	close(listening);
+}
+
+// A child sends PIPE_TOTAL bytes over a TCP connection, PIPE_CHUNK at a
+// time, and this process reads them, both on this CPU, as the pipe's
+// throughput is measured: the time per MiB.
+static void tcp_throughput(void) {
+	static char buffer[PIPE_CHUNK];
+	unsigned short port;
+	int listening = bound(SOCK_STREAM, &port);
+	struct mark started = start();
+	pid_t child = fork();
+	if(child < 0)
+		fail("fork");
+	if(child == 0) {
+		close(listening);
+		int fd = tcp_connected(port);
+		memset(buffer, 'x', sizeof(buffer));
+		for(size_t sent = 0; sent < PIPE_TOTAL; sent += PIPE_CHUNK)
+			for(size_t done = 0; done < PIPE_CHUNK;) {
+				ssize_t n = write(fd, buffer + done, PIPE_CHUNK - done);
+				if(n <= 0)
+					_exit(1);
+				done += (size_t)n;
+			}
+		_exit(0);
+	}
+	int fd = accept(listening, NULL, NULL);
+	if(fd < 0)
+		fail("accept");
+	size_t got = 0;
+	for(;;) {
+		ssize_t n = read(fd, buffer, sizeof(buffer));
+		if(n < 0)
+			fail("read");
+		if(n == 0)
+			break;
+		got += (size_t)n;
+	}
+	int status;
+	if(waitpid(child, &status, 0) != child || got != PIPE_TOTAL)
+		fail("the TCP writer");
+	report("posix_tcp_mib", started, PIPE_TOTAL >> 20);
+	close(fd);
+	close(listening);
+}
+
+// The network benchmarks, over the loopback interface.
+static void network(const int *cpus, int count) {
+	tcp_connect(2000);
+	net_roundtrip("posix_tcp_roundtrip_same_cpu", 0, cpus[0], 20000);
+	if(count > 1)
+		net_roundtrip("posix_tcp_roundtrip_cross_cpu", 0, cpus[1], 20000);
+	net_roundtrip("posix_udp_roundtrip_same_cpu", 1, cpus[0], 20000);
+	if(count > 1)
+		net_roundtrip("posix_udp_roundtrip_cross_cpu", 1, cpus[1], 20000);
+	tcp_throughput();
+}
+
 // How much of the disk the disk benchmarks go through, a transfer after
 // the other, before they start again at its beginning: more than the
 // largest transfer many times over, and less than the host's cache.
@@ -580,13 +760,16 @@ int main(int argc, char **argv) {
 	if(argc > 1 && !strcmp(argv[1], "--exit"))
 		return 0;
 	const char *disk_path = NULL, *nvme_path = NULL, *btrfs_path = NULL;
-	for(int i = 1; i + 1 < argc; i += 2) {
-		if(!strcmp(argv[i], "--disk"))
-			disk_path = argv[i + 1];
-		else if(!strcmp(argv[i], "--nvme"))
-			nvme_path = argv[i + 1];
-		else if(!strcmp(argv[i], "--btrfs"))
-			btrfs_path = argv[i + 1];
+	int networked = 0;
+	for(int i = 1; i < argc; i++) {
+		if(!strcmp(argv[i], "--network"))
+			networked = 1;
+		else if(i + 1 < argc && !strcmp(argv[i], "--disk"))
+			disk_path = argv[++i];
+		else if(i + 1 < argc && !strcmp(argv[i], "--nvme"))
+			nvme_path = argv[++i];
+		else if(i + 1 < argc && !strcmp(argv[i], "--btrfs"))
+			btrfs_path = argv[++i];
 	}
 	const char *self = argv[0];
 	if(!self || !strchr(self, '/')) {
@@ -611,6 +794,8 @@ int main(int argc, char **argv) {
 	futex_processes("posix_futex_shared_same_cpu", cpus[0], 50000);
 	if(count > 1)
 		futex_processes("posix_futex_shared_cross_cpu", cpus[1], 50000);
+	if(networked)
+		network(cpus, count);
 	if(disk_path)
 		disk(disk_path, 0);
 	if(nvme_path)

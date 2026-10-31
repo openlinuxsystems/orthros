@@ -12,7 +12,11 @@
 //! stack through its lock, and wake the thread when they gave it work.
 //! The loopback interface, `lo`, is one too, on a link that hands back
 //! what is sent on it, at 127.0.0.1/8 and every card's own address: what
-//! a program sends to the machine itself goes through it.
+//! a program sends to the machine itself goes through it. Its stack is
+//! polled at once by whoever gave it work, as Linux's loopback runs in
+//! the sender's context: a packet a program sends to itself is received
+//! before the call that sent it returns, and `lo`'s thread only wakes for
+//! the stack's timers.
 //!
 //! Until `netd` configures interfaces (12a.4), the first card takes the
 //! IPv4 address and router of the `ip=` and `gateway=` flags.
@@ -66,12 +70,14 @@ const SOCKETS: usize = 128;
 /// How long the thread sleeps when nothing is due: an interrupt wakes
 /// it sooner, and a card without one is polled this often.
 const IDLE_NS: u64 = 10_000_000;
-/// The loopback interface's MTU, as the longest packet a program's TCP
-/// sends to itself at once.
-const LOOPBACK_MTU: usize = 16_384;
+/// The loopback interface's MTU, the longest packet a program's TCP sends
+/// to itself at once: the most IPv4 allows, as on Linux, whose `lo` has
+/// 65,536.
+const LOOPBACK_MTU: usize = 65_535;
 /// The bytes of packets the loopback interface holds until its stack
-/// takes them back.
-const LOOPBACK_RING: usize = 65_536;
+/// takes them back: two of the longest, two windows of a socket's
+/// (`TCP_BUFFER`), or one and the ACKs that answer it.
+const LOOPBACK_RING: usize = Loopback::ring_for(2, LOOPBACK_MTU);
 /// The loopback interface's own address.
 pub const LOOPBACK: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
 /// How long an orphan has to finish closing before it is reset.
@@ -144,6 +150,20 @@ impl Link for Card {
             Card::Loopback(link) => link.flush(),
         }
     }
+
+    fn needs_checksums(&self) -> bool {
+        match self {
+            Card::Virtio { .. } => true,
+            Card::Loopback(link) => link.needs_checksums(),
+        }
+    }
+
+    fn loopback(&mut self) -> Option<&mut Loopback> {
+        match self {
+            Card::Virtio { .. } => None,
+            Card::Loopback(link) => link.loopback(),
+        }
+    }
 }
 
 /// Only a card whose setup failed is dropped: the card stops, and its
@@ -160,8 +180,9 @@ impl Drop for Card {
 }
 
 /// A TCP socket a program closed while its connection was still ending:
-/// its interface's thread takes it out of the stack, and its memory
-/// back, once the connection has gone, or resets it at `deadline_ns`.
+/// its interface takes it out of the stack, and its memory back, once the
+/// connection has gone (on the loopback link, once it reached TIME_WAIT),
+/// or resets it at `deadline_ns`.
 pub struct Orphan {
     pub handle: SocketHandle,
     pub leases: memory::TcpLeases,
@@ -183,13 +204,50 @@ pub struct Interface {
     /// with the stack's lock held.
     orphans: Mutex<Vec<Orphan, Kmalloc>>,
     thread: Once<ThreadRef>,
+    /// When its thread is next to wake by itself, by the clock of
+    /// `sched::now_ns` (`u64::MAX`: only when woken), set with the stack's
+    /// lock held: the loopback interface's poller wakes it sooner when a
+    /// timer is due before then.
+    wake_at: AtomicU64,
 }
 
 impl Interface {
-    /// Wakes the interface's thread, to poll its stack.
+    /// Gives its stack the work a caller just queued on it: the loopback
+    /// interface does it at once, in the caller's thread; a card's thread
+    /// is woken to do it. Called without its stack's lock.
     pub fn kick(&self) {
+        if self.is_loopback() {
+            self.poll_here();
+        } else {
+            self.wake();
+        }
+    }
+
+    /// Wakes the interface's thread, to poll its stack.
+    fn wake(&self) {
         if let Some(thread) = self.thread.get() {
             sched::wake(thread);
+        }
+    }
+
+    /// Polls its stack in the calling thread until what was sent on it has
+    /// been received, takes its orphans that have gone, and wakes its
+    /// thread if the stack has a timer due before the thread would wake.
+    fn poll_here(&self) {
+        let (changed, due, wake_at) = {
+            let mut stack = self.stack.lock();
+            let now = sched::now_ns();
+            let changed = stack.poll(now);
+            let orphans = self.reap(&mut stack, now);
+            let delay = stack.poll_delay(now).map(|delay| now.saturating_add(delay));
+            let due = [delay, orphans].into_iter().flatten().min();
+            (changed, due, self.wake_at.load(Ordering::Relaxed))
+        };
+        if changed {
+            self::changed();
+        }
+        if due.is_some_and(|due| due < wake_at) {
+            self.wake();
         }
     }
 
@@ -219,27 +277,32 @@ impl Interface {
         while index < orphans.len() {
             let orphan = &orphans[index];
             let state = stack.socket_mut::<tcp::Socket<'static>>(orphan.handle).map(|s| s.state());
-            match state {
-                Some(tcp::State::Closed) | None => {
-                    let orphan = orphans.swap_remove(index);
-                    memory::end_tcp(stack, orphan.handle, orphan.leases, self.name.as_str());
-                }
-                Some(_) => {
-                    if now_ns >= orphan.deadline_ns {
-                        // Closed now; the stack sends the reset, and the
-                        // next look takes it apart.
-                        if let Some(socket) =
-                            stack.socket_mut::<tcp::Socket<'static>>(orphan.handle)
-                        {
-                            socket.abort();
-                        }
-                    } else {
-                        next =
-                            Some(next.map_or(orphan.deadline_ns, |at| at.min(orphan.deadline_ns)));
-                    }
-                    index += 1;
-                }
+            // On the loopback link a connection in TIME_WAIT goes at once,
+            // with its memory and socket slot, rather than holding them for
+            // its ten seconds, which short connections to the machine itself
+            // would run out of: the FIN it acknowledged had its ACK at once
+            // (the smoltcp patch), and the link loses and delays nothing, so
+            // there is no stray segment for TIME_WAIT to wait out.
+            let gone = match state {
+                Some(tcp::State::Closed) | None => true,
+                Some(tcp::State::TimeWait) => self.is_loopback(),
+                Some(_) => false,
+            };
+            if gone {
+                let orphan = orphans.swap_remove(index);
+                memory::end_tcp(stack, orphan.handle, orphan.leases, self.name.as_str());
+                continue;
             }
+            if now_ns >= orphan.deadline_ns {
+                // Closed now; the stack sends the reset, and the next look
+                // takes it apart.
+                if let Some(socket) = stack.socket_mut::<tcp::Socket<'static>>(orphan.handle) {
+                    socket.abort();
+                }
+            } else {
+                next = Some(next.map_or(orphan.deadline_ns, |at| at.min(orphan.deadline_ns)));
+            }
+            index += 1;
         }
         next
     }
@@ -362,6 +425,7 @@ fn interface(name: TextBuf<8>, number: usize, stack: Stack<Card>) -> Option<Inte
         stack: Mutex::new(stack),
         orphans: Mutex::new(orphans),
         thread: Once::new(),
+        wake_at: AtomicU64::new(u64::MAX),
     })
 }
 
@@ -636,11 +700,11 @@ fn numbered(number: usize) -> Option<&'static Interface> {
 fn run(number: usize) {
     let Some(interface) = numbered(number) else { return };
     // A card is looked at this often even when nothing is due, in case
-    // it has no interrupt; the loopback interface is kicked whenever a
-    // packet goes on it, so it sleeps until then.
+    // it has no interrupt; the loopback interface is polled by whoever
+    // sends on it, and its thread only wakes for its timers.
     let idle = (!interface.is_loopback()).then_some(IDLE_NS);
     loop {
-        let (delay, orphans, changed) = {
+        let (wake_at, changed) = {
             let mut stack = interface.stack.lock();
             let now = sched::now_ns();
             let changed = stack.poll(now);
@@ -649,16 +713,21 @@ fn run(number: usize) {
                 return;
             }
             let orphans = interface.reap(&mut stack, now);
-            (stack.poll_delay(sched::now_ns()), orphans, changed)
+            let now = sched::now_ns();
+            let delay = [stack.poll_delay(now), idle].into_iter().flatten().min();
+            let wake_at =
+                [delay.map(|delay| now.saturating_add(delay)), orphans].into_iter().flatten().min();
+            // Under the stack's lock, so that a poller that sets a sooner
+            // timer after this sees when the thread means to wake.
+            interface.wake_at.store(wake_at.unwrap_or(u64::MAX), Ordering::Relaxed);
+            (wake_at, changed)
         };
         if changed {
             self::changed();
         }
-        let now = sched::now_ns();
-        let orphans = orphans.map(|at| at.saturating_sub(now));
-        match [delay, orphans, idle].into_iter().flatten().min() {
-            Some(0) => sched::yield_now(),
-            Some(delay) => sched::block_until(now.saturating_add(delay), "net"),
+        match wake_at {
+            Some(at) if at <= sched::now_ns() => sched::yield_now(),
+            Some(at) => sched::block_until(at, "net"),
             None => sched::block("net"),
         }
     }

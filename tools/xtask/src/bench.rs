@@ -3,9 +3,9 @@
 
 //! `ob bench`: the cost of system calls, IPC round trips, context
 //! switches, fresh pages, TLB shootdowns, memory bandwidth, files and
-//! POSIX processes, pipes, signals, futexes and raw disk transfers on
-//! Radix, with Linux as the baseline (docs/design/ipc.md, ADR 0035, ADR
-//! 0039, ADR 0106, ADR 0111).
+//! POSIX processes, pipes, signals, futexes, TCP and UDP over the loopback
+//! interface and raw disk transfers on Radix, with Linux as the baseline
+//! (docs/design/ipc.md, ADR 0035, ADR 0039, ADR 0106, ADR 0111, ADR 0185).
 //!
 //! It boots a test image with `selftest=bench` on 2 CPUs, where the
 //! benchmark programs of `userspace/usertests` print one `BENCH` line per
@@ -50,10 +50,11 @@ const CMDLINE: &str = "qemu-exit selftest=bench";
 
 /// The kernel command line of the POSIX benchmark boot: Spark runs the C
 /// program of [`POSIX_SOURCE`] from the boot archive, and nothing else,
-/// with the benchmarks' disks ([`disk_args`]), the Btrfs one where Spark
+/// giving it a network capability for the loopback benchmarks, with the
+/// benchmarks' disks ([`disk_args`]), the Btrfs one where Spark
 /// mounts it, to compress what is written to it, as Linux mounts it.
-const POSIX_CMDLINE: &str = "-- --compress vdb --posix /system/tests/posix/bench --disk /devices/vda \
-                             --nvme /devices/nvme0n1 --btrfs /volumes/vdb";
+const POSIX_CMDLINE: &str = "-- --compress vdb --posix --network /system/tests/posix/bench --network \
+                             --disk /devices/vda --nvme /devices/nvme0n1 --btrfs /volumes/vdb";
 
 /// The size of each disk both systems' POSIX benchmarks read and write:
 /// the 32 MiB they go through, with room.
@@ -146,6 +147,10 @@ pub const BUDGETS: &[(&str, u64)] = &[
     ("posix_poll", 1_300),                     // 1,092
     ("posix_futex_same_cpu", 5_300),           // 4,787
     ("posix_futex_shared_same_cpu", 5_800),    // 5,248
+    ("posix_tcp_connect", 50_000),             // 45,071
+    ("posix_tcp_roundtrip_same_cpu", 11_000),  // 9,274
+    ("posix_udp_roundtrip_same_cpu", 17_000),  // 14,637
+    ("posix_tcp_mib", 1_700_000),              // 1,515,375
 ];
 
 /// One measurement: a `BENCH name=... ns=... iterations=...` line.
@@ -361,6 +366,30 @@ const ROWS: &[Row] = &[
     posix(
         "posix_futex_shared_cross_cpu",
         "POSIX: futex wake and wait each way (semaphores in shared memory), two processes, two CPUs",
+    ),
+    posix(
+        "posix_tcp_connect",
+        "Net: TCP connection made, taken and closed over loopback (`connect`, `accept`, `close`)",
+    ),
+    posix(
+        "posix_tcp_roundtrip_same_cpu",
+        "Net: a byte there and back over a TCP connection on loopback, two processes, one CPU",
+    ),
+    posix(
+        "posix_tcp_roundtrip_cross_cpu",
+        "Net: a byte there and back over a TCP connection on loopback, two processes, two CPUs",
+    ),
+    posix(
+        "posix_udp_roundtrip_same_cpu",
+        "Net: a UDP datagram there and back on loopback, two processes, one CPU",
+    ),
+    posix(
+        "posix_udp_roundtrip_cross_cpu",
+        "Net: a UDP datagram there and back on loopback, two processes, two CPUs",
+    ),
+    posix(
+        "posix_tcp_mib",
+        "Net: TCP throughput on loopback, per MiB (64 KiB writes, two processes, one CPU)",
     ),
     disk("posix_disk_read_4k", "Disk: 4 KiB read raw from a virtio disk (`pread`)"),
     disk("posix_disk_write_4k", "Disk: 4 KiB written raw to a virtio disk (`pwrite`)"),

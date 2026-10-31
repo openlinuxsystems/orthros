@@ -107,6 +107,24 @@ impl<T, A: Allocator> Lease<T, A> {
     /// return value of a call, as smoltcp gives a socket's buffers back,
     /// and not through the caller's own arguments.
     pub unsafe fn end(self, values: *mut [T]) -> Result<(), Lease<T, A>> {
+        // SAFETY: the caller keeps to `take_back`'s contract, which is this
+        // one's.
+        unsafe { self.take_back(values) }.map(drop)
+    }
+
+    /// Ends the lease, given `values`, the slice [`lend`] lent, as
+    /// [`Lease::end`] does, but gives the memory back as the vector that
+    /// was lent, with the values the borrower left in it, to use again.
+    ///
+    /// # Errors
+    ///
+    /// The lease, which still holds the memory, if `values` is not where
+    /// the slice lent is ([`Lease::lent`]).
+    ///
+    /// # Safety
+    ///
+    /// As for [`Lease::end`].
+    pub unsafe fn take_back(self, values: *mut [T]) -> Result<Vec<T, A>, Lease<T, A>> {
         if !self.lent(values) {
             return Err(self);
         }
@@ -116,8 +134,7 @@ impl<T, A: Allocator> Lease<T, A> {
         // only the lease can still reach the memory, and nothing counts on
         // it staying there. `ptr`, `len`, `capacity` and `alloc` are the
         // vector's own, as `from_raw_parts_in` asks.
-        drop(unsafe { Vec::from_raw_parts_in(ptr.as_ptr(), len, capacity, alloc) });
-        Ok(())
+        Ok(unsafe { Vec::from_raw_parts_in(ptr.as_ptr(), len, capacity, alloc) })
     }
 }
 
@@ -182,6 +199,23 @@ mod tests {
         // used again.
         assert!(unsafe { lease.end(ptr::from_mut(slice)) }.is_ok());
         assert_eq!(drops.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn the_memory_comes_back_as_the_vector_with_what_was_written() {
+        let (lease, slice) = lend(vec![0u8; 8]);
+        let (place, capacity) = (slice.as_ptr(), 8);
+        slice.copy_from_slice(b"borrowed");
+        // SAFETY: `slice` is the slice lent, made in this test, and is not
+        // used again.
+        let back = unsafe { lease.take_back(ptr::from_mut(slice)) }.ok().unwrap();
+        assert_eq!(back, b"borrowed");
+        assert!(ptr::eq(back.as_ptr(), place) && back.capacity() >= capacity);
+        // Lent again, it is the same memory.
+        let (lease, slice) = lend(back);
+        assert!(ptr::eq(slice.as_ptr(), place));
+        // SAFETY: as above.
+        assert!(unsafe { lease.end(ptr::from_mut(slice)) }.is_ok());
     }
 
     #[test]
