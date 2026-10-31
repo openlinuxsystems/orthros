@@ -77,9 +77,10 @@ WireGuard. This page grows with each.
   describes. A call the program's capabilities do not allow fails with
   `EACCES`
   ([ADR 0184](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0184-services-and-the-c-library-use-the-network-capabilities-they-were-given.md)).
-- **Services get the network their files ask for**: a service file's
-  `network.outbound = yes` lets it connect out, and `network.listen`
-  names the ports it may listen on (spark(8)). A service that asks for
+- **Services get the network their files ask for**: under
+  `[permissions]`, a service file's `network.outbound = true` lets it
+  connect out, and `network.listen` names the ports it may listen on
+  (service.toml(5)). A service that asks for
   neither cannot use the network.
 
 Native programs use the sockets through radix-network(2) and

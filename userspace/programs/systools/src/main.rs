@@ -59,6 +59,7 @@ mod rtrace;
 mod script;
 mod scrub;
 mod sensors;
+mod servicefiles;
 mod sessions;
 mod signals;
 mod subvolume;

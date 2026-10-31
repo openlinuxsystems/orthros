@@ -4,9 +4,10 @@
 
 # Builds nano for Radix (ob(1), PORTS), on ncurses' wide-character
 # library and without translations, and installs it, rnano (its
-# restricted mode), their manual pages, the syntax files and the system
-# nanorc. The nanorc goes among the defaults Spark puts in
-# /system/settings at boot (spark(8)), as nano reads it from there.
+# restricted mode), their manual pages, the syntax files, Dukovo's own
+# for TOML among them (ADR 0216), and the system nanorc. The nanorc goes
+# among the defaults Spark puts in /system/settings at boot (spark(8)),
+# as nano reads it from there.
 set -eu
 
 cd "$PORT_BUILD"
@@ -20,6 +21,7 @@ make -j"$JOBS" >make.log 2>&1 || {
 	exit 1
 }
 make install DESTDIR="$SYSROOT" >/dev/null
+cp "$PORT_DIR/toml.nanorc" "$SYSROOT/system/resources/nano/toml.nanorc"
 
 defaults="$SYSROOT/system/resources/default-settings"
 mkdir -p "$defaults"

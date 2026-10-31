@@ -243,6 +243,35 @@ struct Service {
     killed: bool,
     /// How many times the out-of-memory policy had stopped its domain.
     oom_stops: u32,
+    /// The text of its file that `spec` was read from, kept as the last
+    /// good copy.
+    good: String,
+    /// What was wrong with its file when last read, said once.
+    complaint: Option<String>,
+}
+
+impl Service {
+    /// A stopped service that runs `spec`, read from `good`.
+    fn new(spec: Spec, good: String) -> Service {
+        Service {
+            spec,
+            state: State::Stopped,
+            domain: None,
+            output: None,
+            line: Vec::new(),
+            started_ns: 0,
+            quick: 0,
+            restarts: 0,
+            last: None,
+            held: false,
+            restarting: false,
+            stop_by: None,
+            killed: false,
+            oom_stops: 0,
+            good,
+            complaint: None,
+        }
+    }
 }
 
 /// The program Spark was asked to run, on a pseudo-terminal, until it
@@ -318,6 +347,8 @@ pub struct Supervisor {
     listener: Option<File>,
     connections: Vec<Connection>,
     services: Vec<Service>,
+    /// The directory the service files are in, beneath the root.
+    dir: String,
     program: Option<Program>,
     shutdown: Option<Shutdown>,
     /// The watchdog's timeout to ask for, 0 for none, and whether to stop
@@ -366,6 +397,7 @@ impl Supervisor {
             listener: None,
             connections: Vec::new(),
             services: Vec::new(),
+            dir: String::from(SERVICES_DIR),
             program: None,
             shutdown: None,
             watchdog_seconds: WATCHDOG_SECONDS,
@@ -454,55 +486,97 @@ impl Supervisor {
     }
 
     /// Reads the service files in `dir` and starts the enabled ones, in
-    /// their order.
+    /// their order. An old file is converted first; a file that does not
+    /// read runs its last good copy, if Spark kept one.
     pub fn start_services(&mut self, dir: &str) {
+        self.dir = String::from(dir);
+        services::convert_old(&self.root, dir);
         let entries = match self.root.open_dir(dir, Rights::READ).and_then(|d| d.entries()) {
             Ok(entries) => entries,
             Err(err) => return println!("spark: cannot read /{dir}: {err}"),
         };
-        let mut specs = Vec::new();
+        let mut loaded = Vec::new();
         for entry in entries {
-            let Some(name) = entry.name.strip_suffix(".service") else { continue };
+            let Some(name) = entry.name.strip_suffix(".toml") else { continue };
             if entry.kind != FileKind::File {
                 continue;
             }
-            let path = format!("{dir}/{}", entry.name);
-            let text = match self.root.read_file(&path) {
-                Ok(text) => String::from_utf8_lossy(&text).into_owned(),
-                Err(err) => {
-                    println!("spark: cannot read /{path}: {err}");
-                    continue;
-                }
-            };
-            match services::parse(name, &text) {
-                Ok(spec) => specs.push(spec),
-                Err(err) => println!("spark: /{path}: {err}; it is not started"),
+            match self.load(name) {
+                Ok(service) => loaded.push(service),
+                Err(err) => println!("spark: {err}; it is not started"),
             }
         }
-        specs.sort_by(|a, b| (a.order, &a.name).cmp(&(b.order, &b.name)));
-        let enabled = specs.iter().filter(|s| s.enabled).count();
-        println!("spark: {} services in /{dir}, {enabled} enabled", specs.len());
-        for spec in specs {
-            let enabled = spec.enabled;
-            self.services.push(Service {
-                spec,
-                state: State::Stopped,
-                domain: None,
-                output: None,
-                line: Vec::new(),
-                started_ns: 0,
-                quick: 0,
-                restarts: 0,
-                last: None,
-                held: false,
-                restarting: false,
-                stop_by: None,
-                killed: false,
-                oom_stops: 0,
-            });
+        loaded.sort_by(|a, b| (a.spec.order, &a.spec.name).cmp(&(b.spec.order, &b.spec.name)));
+        let enabled = loaded.iter().filter(|s| s.spec.enabled).count();
+        println!("spark: {} services in /{dir}, {enabled} enabled", loaded.len());
+        for service in loaded {
+            let enabled = service.spec.enabled;
+            self.services.push(service);
             if enabled {
                 let index = self.services.len() - 1;
                 self.start(index);
+            }
+        }
+    }
+
+    /// Service `name` as its file in the services directory says, or as
+    /// the last good copy of it says if the file does not read; what is
+    /// wrong with the file if neither does.
+    fn load(&self, name: &str) -> Result<Service, String> {
+        match services::read(&self.root, &self.dir, name) {
+            Ok((spec, text)) => {
+                if services::good(&self.root, name).is_none_or(|(_, good)| good != text) {
+                    services::keep_good(&self.root, name, &text);
+                }
+                Ok(Service::new(spec, text))
+            }
+            Err(err) => {
+                let (spec, good) = services::good(&self.root, name).ok_or_else(|| err.clone())?;
+                println!("spark: {err}; it runs its last good copy");
+                let mut service = Service::new(spec, good);
+                service.complaint = Some(err);
+                Ok(service)
+            }
+        }
+    }
+
+    /// Adds service `name` from its file in the services directory, which
+    /// Spark did not read at boot; returns its index, or why not.
+    fn add(&mut self, name: &str) -> Result<usize, String> {
+        let unknown = || format!("no service is called {name}");
+        services::check_name(name).map_err(|_| unknown())?;
+        services::convert_old(&self.root, &self.dir);
+        // Only a file that is there: a removed one's last good copy is not
+        // a service.
+        self.root.stat(&format!("{}/{name}.toml", self.dir)).map_err(|_| unknown())?;
+        let service = self.load(name).inspect_err(|err| {
+            println!("spark: {err}; it is not started");
+        })?;
+        self.services.push(service);
+        Ok(self.services.len() - 1)
+    }
+
+    /// Reads service `index`'s file again, as it starts: a file that reads
+    /// is its new last good copy; one that does not leaves it as it was,
+    /// and Spark says what is wrong with it once.
+    fn reread(&mut self, index: usize) {
+        let name = self.services[index].spec.name.clone();
+        match services::read(&self.root, &self.dir, &name) {
+            Ok((spec, text)) => {
+                let service = &mut self.services[index];
+                if text != service.good {
+                    services::keep_good(&self.root, &name, &text);
+                    service.good = text;
+                }
+                service.spec = spec;
+                service.complaint = None;
+            }
+            Err(err) => {
+                let service = &mut self.services[index];
+                if service.complaint.as_ref() != Some(&err) {
+                    println!("spark: {err}; it runs its last good copy");
+                    service.complaint = Some(err);
+                }
             }
         }
     }
@@ -522,8 +596,9 @@ impl Supervisor {
         }
     }
 
-    /// Starts service `index`.
+    /// Starts service `index`, as its file says now.
     fn start(&mut self, index: usize) {
+        self.reread(index);
         let started = self.spawn(index);
         let service = &mut self.services[index];
         match started {
@@ -573,6 +648,11 @@ impl Supervisor {
                     return Err(format!("cannot make its domain: {:#x}", status.0));
                 }
             }
+        } else if let Some(domain) = service.domain {
+            // Its file may have changed them since; its out-of-memory
+            // class is its domain's for good.
+            let _ = resource_domain::set_weight(&SYS, domain, spec.weight);
+            let _ = resource_domain::set_limit(&SYS, domain, spec.memory_pages.unwrap_or(NO_LIMIT));
         }
         let program = self
             .root
@@ -940,8 +1020,16 @@ impl Supervisor {
                 let Some(&name) = rest.first() else {
                     return format!("error: {verb} needs a service's name\n");
                 };
-                let Some(index) = self.services.iter().position(|s| s.spec.name == name) else {
-                    return format!("error: no service is called {name}\n");
+                // A file added since boot, as `service new` adds one, is
+                // read when its service is first started.
+                let found = match self.services.iter().position(|s| s.spec.name == name) {
+                    Some(index) => Ok(index),
+                    None if verb == "start" => self.add(name),
+                    None => Err(format!("no service is called {name}")),
+                };
+                let index = match found {
+                    Ok(index) => index,
+                    Err(err) => return format!("error: {err}\n"),
                 };
                 if self.shutdown.is_some_and(|s| matches!(s, Shutdown::Stopping { .. })) {
                     return "error: shutting down\n".into();

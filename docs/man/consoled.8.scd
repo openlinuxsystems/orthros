@@ -28,7 +28,7 @@ and every USB keyboard's, which can be plugged in and pulled out at any
 time.
 
 Spark starts consoled at boot as the *consoled* service
-(_/system/settings/spark/services/consoled.service_, *spark*(8)), first and
+(_/system/settings/spark/services/consoled.toml_, *spark*(8)), first and
 stopped last, and starts it again if it fails. Its file asks for
 *admin.hardware*, so that root's shells may set the fans, the LEDs and
 the ARGB header with *ectool*(8). Without a screen, as on
@@ -145,7 +145,7 @@ _/system/settings/keyboard_
 _/system/settings/keymaps/name.keymap_
 	One's own layouts (*keymap*(5)).
 
-_/system/settings/spark/services/consoled.service_
+_/system/settings/spark/services/consoled.toml_
 	The service.
 
 _/system/live/notify/socket_

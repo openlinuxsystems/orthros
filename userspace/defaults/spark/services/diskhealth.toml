@@ -4,10 +4,15 @@
 # Disk health: diskhealth(8) reads each disk's SMART record or NVMe health
 # log at boot and every half hour, and writes a line to the kernel log
 # when a disk's verdict changes, as smartd(8) does on Linux.
+#
+# service.toml(5) explains each setting. `service check diskhealth`
+# checks this file, and `service edit diskhealth` checks it as you save.
 
-description = Disk health
-program = /system/commands/diskhealth
-arguments = --watch
+service_version = 1
+description = "Disk health"
+program = "/system/commands/diskhealth"
+arguments = ["--watch"]
 # After the disks are mounted and the consoles are up.
 order = 50
-restart = on-failure
+# Started again if it fails: always, on-failure or never.
+restart = "on-failure"

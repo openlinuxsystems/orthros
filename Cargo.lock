@@ -38,6 +38,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "manifest"
+version = "0.10.4"
+dependencies = [
+ "radix-abi",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -53,6 +62,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "radix-abi"
+version = "0.10.4"
+dependencies = [
+ "ridlc",
 ]
 
 [[package]]
@@ -239,6 +255,7 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 name = "xtask"
 version = "0.10.4"
 dependencies = [
+ "manifest",
  "radix-bootfs",
  "radix-fbcon",
  "radix-hal",

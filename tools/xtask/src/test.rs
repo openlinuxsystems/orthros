@@ -1233,6 +1233,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "services",
+        about: "service files in TOML: every shipped one reads with service check and is kept as Spark's last good copy; Spark converts a file of before Phase 13 with its comments as it starts its service; service new writes a template and service edit puts a file in place only once it reads; a file broken under a running service leaves its last good copy running",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "lockdep -- --services --posix /system/tests/posix/servicetest",
+        cpus: 2,
+        memory: "512M",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: services,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "spark-network",
         about: "Spark gives each service the network its file asks for, and none to one that asks for nothing",
         firmware: Firmware::Uefi,
@@ -7120,6 +7136,40 @@ fn principals(vm: &mut Vm, case: &Case) -> Result<(), String> {
         return Err(format!("principals exited with code {code}"));
     }
     vm.expect("spark: nothing more to do; waiting")
+}
+
+/// The `services` test: Spark starts the shipped services from their
+/// TOML files and servicetest (userspace/posix/servicetest.c), which
+/// checks them, has Spark convert an old file, writes and edits a new one,
+/// and breaks one under its running service (ADR 0216).
+fn services(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_anywhere("spark: 5 services in /system/settings/spark/services, 5 enabled")?;
+    vm.expect_ahead("spark: started /system/tests/posix/servicetest as process ")?;
+    let code = program_line(vm, "(/system/tests/posix/servicetest) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> =
+        log.lines().filter(|line| line.contains("servicetest: FAILED")).map(str::trim).collect();
+    if !failed.is_empty() {
+        return Err(format!("servicetest failed: {}", failed.join("; ")));
+    }
+    if code != "0x0" || !log.contains("servicetest: every check passed") {
+        return Err(format!("servicetest exited with code {code}"));
+    }
+    for said in [
+        "spark: converted /system/settings/spark/services/legacy.service to legacy.toml; the old \
+         file is legacy.service.old",
+        "spark: /system/settings/spark/services/fresh.toml: line 5: restart must be always, \
+         on-failure or never, not `sometimes`; it is not started",
+        "spark: /system/settings/spark/services/demo.toml: line 5: restart must be always, \
+         on-failure or never, not `sometimes`; it runs its last good copy",
+    ] {
+        if !log.contains(said) {
+            return Err(format!("Spark did not say \"{said}\""));
+        }
+    }
+    Ok(())
 }
 
 /// The `views` test: Spark starts views (userspace/posix/views.c) as

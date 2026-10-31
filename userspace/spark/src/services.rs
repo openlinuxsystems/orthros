@@ -1,18 +1,26 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Service files (spark(8)): what Spark starts at boot and keeps running.
+//! Service files (service.toml(5), ADR 0216): what Spark starts at boot
+//! and keeps running.
 //!
-//! Each `NAME.service` file in `/system/settings/spark/services`
-//! describes one service, as lines of `key = value`; `#` starts a
-//! comment. The system's own come from
+//! Each `NAME.toml` file in `/system/settings/spark/services` describes
+//! one service, in TOML, read by the manifest crate as `service check`
+//! reads it. The system's own come from
 //! `/system/resources/default-settings/spark/services`, which Spark copies
 //! in when they are missing, so an administrator turns one off with
-//! `enabled = no` rather than by removing it.
+//! `enabled = false` rather than by removing it.
+//!
+//! Spark reads a service's file again each time it starts the service.
+//! A file that does not read never takes a service down: Spark says which
+//! line is wrong and why, and runs the last copy that read, which it keeps
+//! in `/system/state/spark/good`. An old file of Phases 9 to 12,
+//! `NAME.service` with lines of `key = value` (ADR 0101), is converted to
+//! `NAME.toml` with its comments, and kept as `NAME.service.old`.
 //!
 //! A service reaches the network only as its file says (ADR 0183):
-//! `network.outbound = yes` lets it connect out, and `network.listen`
-//! names the ports it may listen on. `admin.hardware = yes` gives it the
+//! `network.outbound = true` lets it connect out, and `network.listen`
+//! names the ports it may listen on. `admin.hardware = true` gives it the
 //! platform capability, which sets the fans, the LEDs and the ARGB header
 //! (ADR 0208).
 
@@ -20,34 +28,22 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use libradix::abi::resource_domain::{NAME_MAX, OomClass, WEIGHT_DEFAULT, WEIGHT_MAX};
-use libradix::abi::startup::NETWORK_SLOTS;
+use libradix::abi::capability::Rights;
+use libradix::abi::errors::File as FileError;
+use libradix::abi::resource_domain::OomClass;
+use manifest::service::{self, Oom};
+use radix_rt::fs::Dir;
+use radix_rt::println;
 
-/// When a service that ended is started again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Restart {
-    /// Whatever its end.
-    Always,
-    /// When it failed: an exit code other than 0, or a signal.
-    OnFailure,
-    /// Never.
-    Never,
-}
+pub use manifest::service::{Restart, check_name};
 
-impl Restart {
-    pub fn name(self) -> &'static str {
-        match self {
-            Restart::Always => "always",
-            Restart::OnFailure => "on-failure",
-            Restart::Never => "never",
-        }
-    }
-}
+/// Where Spark keeps the last copy of each service file that read.
+pub const GOOD: &str = "system/state/spark/good";
 
-/// One service file.
+/// One service file, as Spark runs it.
 #[derive(Clone, Debug)]
 pub struct Spec {
-    /// The file's name without `.service`: the service's and its domain's.
+    /// The file's name without `.toml`: the service's and its domain's.
     pub name: String,
     pub description: String,
     /// The program's absolute path.
@@ -81,187 +77,129 @@ impl Spec {
     }
 }
 
-/// The ports `value` names, as `network.listen` takes them: ports and
-/// ranges of ports (`8000-8009`), with commas or blanks between, as
-/// (first, count), each range once.
-fn ports(value: &str) -> Result<Vec<(u32, u32)>, String> {
-    let mut ranges: Vec<(u32, u32)> = Vec::new();
-    let port = |text: &str| -> Result<u32, String> {
-        match text.trim().parse::<u32>() {
-            Ok(port) if (1..=65_535).contains(&port) => Ok(port),
-            _ => Err(format!("`{text}` is not a port from 1 to 65535")),
-        }
-    };
-    for item in value.split(|c: char| c == ',' || c.is_ascii_whitespace()) {
-        if item.is_empty() {
-            continue;
-        }
-        let (first, last) = match item.split_once('-') {
-            Some((first, last)) => (port(first)?, port(last)?),
-            None => (port(item)?, port(item)?),
-        };
-        if last < first {
-            return Err(format!("the range `{item}` ends before it starts"));
-        }
-        let range = (first, last - first + 1);
-        let overlaps = ranges.iter().any(|&(at, count)| first < at + count && at <= last);
-        if overlaps {
-            return Err(format!("`{item}` overlaps another range"));
-        }
-        ranges.push(range);
-    }
-    Ok(ranges)
-}
-
-/// Splits `text` into words at blanks, a pair of double quotes keeping
-/// blanks in a word.
-fn words(text: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let (mut quoted, mut any) = (false, false);
-    for c in text.chars() {
-        match c {
-            '"' => {
-                quoted = !quoted;
-                any = true;
-            }
-            ' ' | '\t' if !quoted => {
-                if any {
-                    words.push(core::mem::take(&mut word));
-                    any = false;
-                }
-            }
-            c => {
-                word.push(c);
-                any = true;
-            }
-        }
-    }
-    if any {
-        words.push(word);
-    }
-    words
-}
-
-/// A size such as `64M`, `512K`, `2G` or a number of bytes, in pages; or
-/// none.
-fn memory(value: &str) -> Result<Option<u64>, String> {
-    if value == "none" || value.is_empty() {
-        return Ok(None);
-    }
-    let (digits, unit) = match value.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
-        Some((at, _)) => value.split_at(at),
-        None => (value, ""),
-    };
-    let scale: u64 = match unit {
-        "" => 1,
-        "K" | "k" | "KiB" => 1 << 10,
-        "M" | "m" | "MiB" => 1 << 20,
-        "G" | "g" | "GiB" => 1 << 30,
-        _ => return Err(format!("`{value}` is not a size such as 64M")),
-    };
-    let number: u64 = digits.parse().map_err(|_| format!("`{value}` is not a size"))?;
-    let bytes = number.checked_mul(scale).ok_or(format!("`{value}` is too large"))?;
-    Ok(Some(bytes.div_ceil(4096).max(1)))
-}
-
-fn yes_no(value: &str) -> Result<bool, String> {
-    match value {
-        "yes" | "true" | "on" => Ok(true),
-        "no" | "false" | "off" => Ok(false),
-        _ => Err(format!("`{value}` is neither yes nor no")),
-    }
-}
-
-/// Reads the service file `name`.service with `text`.
+/// Reads the service file `name`.toml with `text`.
 pub fn parse(name: &str, text: &str) -> Result<Spec, String> {
-    if name.is_empty() || name.len() > NAME_MAX as usize {
-        return Err(format!("a service's name has 1 to {NAME_MAX} bytes"));
-    }
-    let mut spec = Spec {
+    check_name(name)?;
+    let file = service::from_toml(text).map_err(|err| err.to_string())?;
+    let network = &file.permissions.network;
+    Ok(Spec {
         name: name.to_string(),
-        description: String::new(),
-        program: String::new(),
-        arguments: Vec::new(),
-        order: 50,
-        restart: Restart::Always,
-        weight: WEIGHT_DEFAULT,
-        memory_pages: None,
-        oom: OomClass::Service,
-        environment: Vec::new(),
-        enabled: true,
-        outbound: false,
-        listen: Vec::new(),
-        hardware: false,
-    };
-    for (number, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        description: file.description,
+        program: file.program,
+        arguments: file.arguments,
+        order: file.order,
+        restart: file.restart,
+        weight: file.limits.cpu_weight,
+        memory_pages: file.limits.memory.map(|bytes| bytes.div_ceil(4096)),
+        oom: match file.limits.oom {
+            Oom::Service => OomClass::Service,
+            Oom::App => OomClass::App,
+        },
+        environment: file
+            .environment
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect(),
+        enabled: file.enabled,
+        outbound: network.outbound,
+        listen: network.listen.iter().map(|p| (u32::from(p.first), p.count())).collect(),
+        hardware: file.permissions.admin.hardware,
+    })
+}
+
+/// The read and write rights.
+const READ_WRITE: Rights = Rights::READ.union(Rights::WRITE);
+
+/// Converts each old `NAME.service` in `dir` that has no `NAME.toml` to
+/// one, keeping the old file as `NAME.service.old`; returns how many.
+pub fn convert_old(root: &Dir, dir: &str) -> usize {
+    let Ok(at) = root.open_dir(dir, READ_WRITE) else { return 0 };
+    let Ok(entries) = at.entries() else { return 0 };
+    let mut converted = 0;
+    for entry in entries {
+        let Some(name) = entry.name.strip_suffix(".service") else { continue };
+        if at.stat(&format!("{name}.toml")).is_ok() {
             continue;
         }
-        let at = |message: String| format!("line {}: {message}", number + 1);
-        let Some((key, value)) = line.split_once('=') else {
-            return Err(at(format!("`{line}` is not `key = value`")));
-        };
-        let (key, value) = (key.trim(), value.trim());
-        match key {
-            "description" => spec.description = value.to_string(),
-            "program" => {
-                if !value.starts_with('/') {
-                    return Err(at(format!("the program `{value}` is not an absolute path")));
-                }
-                spec.program = value.to_string();
+        match convert(&at, name) {
+            Ok(()) => {
+                println!(
+                    "spark: converted /{dir}/{name}.service to {name}.toml; the old file is \
+                     {name}.service.old"
+                );
+                converted += 1;
             }
-            "arguments" => spec.arguments = words(value),
-            "order" => {
-                spec.order = value.parse().map_err(|_| at(format!("`{value}` is not a number")))?;
-            }
-            "restart" => {
-                spec.restart = match value {
-                    "always" => Restart::Always,
-                    "on-failure" => Restart::OnFailure,
-                    "never" => Restart::Never,
-                    _ => return Err(at("restart is always, on-failure or never".into())),
-                }
-            }
-            "weight" => {
-                let weight: u32 =
-                    value.parse().map_err(|_| at(format!("`{value}` is not a number")))?;
-                if !(1..=WEIGHT_MAX).contains(&weight) {
-                    return Err(at(format!("the weight is 1 to {WEIGHT_MAX}")));
-                }
-                spec.weight = weight;
-            }
-            "memory" => spec.memory_pages = memory(value).map_err(at)?,
-            "oom" => {
-                spec.oom = match value {
-                    "service" => OomClass::Service,
-                    "app" => OomClass::App,
-                    _ => return Err(at("oom is service or app".into())),
-                }
-            }
-            "environment" => {
-                spec.environment = words(value);
-                if let Some(bad) = spec.environment.iter().find(|w| !w.contains('=')) {
-                    return Err(at(format!("`{bad}` is not NAME=value")));
-                }
-            }
-            "enabled" => spec.enabled = yes_no(value).map_err(at)?,
-            "network.outbound" => spec.outbound = yes_no(value).map_err(at)?,
-            "network.listen" => spec.listen = ports(value).map_err(at)?,
-            "admin.hardware" => spec.hardware = yes_no(value).map_err(at)?,
-            _ => return Err(at(format!("unknown key `{key}`"))),
+            Err(err) => println!("spark: cannot convert /{dir}/{name}.service: {err}"),
         }
     }
-    if spec.program.is_empty() {
-        return Err("it names no program".into());
+    converted
+}
+
+/// Converts `name`.service in `dir` to `name`.toml.
+fn convert(dir: &Dir, name: &str) -> Result<(), String> {
+    let old = format!("{name}.service");
+    let text = dir.read_file(&old).map_err(|err| format!("{err}"))?;
+    let text = String::from_utf8(text).map_err(|_| String::from("it is not UTF-8 text"))?;
+    let converted = manifest::legacy::convert(&text).map_err(|err| err.to_string())?;
+    write_new(dir, &format!("{name}.toml"), &converted)?;
+    dir.rename(&old, dir, &format!("{old}.old")).map_err(|err| format!("{err}"))
+}
+
+/// Writes `text` to `path` in `dir` whole or not at all: to a new file
+/// first, then renamed over it.
+fn write_new(dir: &Dir, path: &str, text: &str) -> Result<(), String> {
+    let new = format!("{path}.new");
+    dir.write_file(&new, text.as_bytes()).and_then(|()| dir.rename(&new, dir, path)).map_err(
+        |err| {
+            let _ = dir.remove(&new);
+            format!("cannot write {path}: {err}")
+        },
+    )
+}
+
+/// Reads service `name`'s file in `dir`: what it says and its text.
+pub fn read(root: &Dir, dir: &str, name: &str) -> Result<(Spec, String), String> {
+    // A name is never a path.
+    check_name(name)?;
+    let path = format!("{dir}/{name}.toml");
+    let text = root.read_file(&path).map_err(|err| format!("/{path}: {err}"))?;
+    let text = String::from_utf8(text).map_err(|_| format!("/{path}: it is not UTF-8 text"))?;
+    let spec = parse(name, &text).map_err(|err| format!("/{path}: {err}"))?;
+    Ok((spec, text))
+}
+
+/// The last copy of service `name`'s file that read, if Spark kept one.
+pub fn good(root: &Dir, name: &str) -> Option<(Spec, String)> {
+    read(root, GOOD, name).ok()
+}
+
+/// Keeps `text` as the last good copy of service `name`'s file.
+pub fn keep_good(root: &Dir, name: &str, text: &str) {
+    let kept = make_dirs(root, GOOD)
+        .and_then(|()| root.open_dir(GOOD, READ_WRITE).map_err(|err| format!("{err}")))
+        .and_then(|dir| write_new(&dir, &format!("{name}.toml"), text));
+    if let Err(err) = kept {
+        println!("spark: cannot keep a good copy of {name}'s file in /{GOOD}: {err}");
     }
-    if spec.network_grants() > NETWORK_SLOTS as usize {
-        return Err(format!(
-            "it asks for {} network capabilities, one to connect out and one for each range \
-             of ports; a program gets at most {NETWORK_SLOTS}",
-            spec.network_grants()
-        ));
+}
+
+/// Makes `path` beneath `root` and each directory on the way.
+fn make_dirs(root: &Dir, path: &str) -> Result<(), String> {
+    let mut at = String::new();
+    for part in path.split('/') {
+        if !at.is_empty() {
+            at.push('/');
+        }
+        at.push_str(part);
+        // One that is there may be on a read-only filesystem, as
+        // /system is, where making it fails as read-only.
+        if root.stat(&at).is_ok() {
+            continue;
+        }
+        match root.make_dir(&at) {
+            Err(err) if !err.is(FileError::Exists) => return Err(format!("/{at}: {err}")),
+            _ => {}
+        }
     }
-    Ok(spec)
+    Ok(())
 }

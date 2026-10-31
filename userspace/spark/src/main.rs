@@ -29,8 +29,9 @@
 //!    (each partition, or the whole disk if it has none) at
 //!    `/volumes/<name>`;
 //! 3. listens for requests at `/system/live/spark/control` and, with no
-//!    arguments (a normal boot), starts the services
-//!    `/system/settings/spark/services` describes (`supervisor`);
+//!    arguments (a normal boot), starts the services the TOML files in
+//!    `/system/settings/spark/services` describe (`services`,
+//!    `supervisor`), converting the files of before Phase 13 first;
 //! 4. with arguments, as the boot tests boot it, starts one program
 //!    from `/system`, the one they name, with the arguments after it, and
 //!    starts no services unless `--services` comes first, or
@@ -231,6 +232,9 @@ fn run() -> Option<Supervisor> {
     if !build(&root, volumes, &compress) {
         return None;
     }
+    // An old service file an update finds is converted before the new
+    // defaults come in, so that it is the one kept (ADR 0216).
+    services::convert_old(&root, SERVICES_DIR);
     seed_settings(&root);
     let Ok(supervised) = Dir::at(root.slot()) else { return None };
     let mut supervisor = Supervisor::new(supervised);

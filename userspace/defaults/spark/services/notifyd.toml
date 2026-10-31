@@ -4,10 +4,17 @@
 # Notifications: notifyd(8) takes them from notify-send(1) and other
 # programs and passes them to consoled(8), which shows them on the
 # screen's bottom line (ADR 0212).
+#
+# service.toml(5) explains each setting. `service check notifyd` checks
+# this file, and `service edit notifyd` checks it as you save.
 
-description = Notifications
-program = /system/commands/notifyd
+service_version = 1
+description = "Notifications"
+program = "/system/commands/notifyd"
 # Before consoled, so that the consoles find it when they start.
 order = 7
-restart = always
-memory = 16M
+# Started again whenever it ends: always, on-failure or never.
+restart = "always"
+
+[limits]
+memory = "16M"

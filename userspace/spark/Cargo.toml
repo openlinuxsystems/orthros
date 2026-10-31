@@ -17,6 +17,8 @@ bench = false
 
 [dependencies]
 libradix = { path = "../libradix" }
+# Service files, read as the service command reads them (ADR 0216).
+manifest = { path = "../programs/manifest" }
 radix-rt = { path = "../radix-rt" }
 
 [lints]

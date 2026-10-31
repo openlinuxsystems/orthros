@@ -205,10 +205,11 @@ fn check_coverage(ctx: &Ctx) -> Result<Vec<String>> {
     let boot_tests: Vec<&str> = test::CASES.iter().map(|case| case.name).collect();
     let kernel_flags: Vec<&str> = radix_hal::cmdline::FLAGS.iter().map(|f| f.name).collect();
     let kdb_commands: Vec<&str> = radix_kdb::COMMANDS.iter().map(|c| c.name).collect();
-    let lists: [(&str, &str, &[&str]); 6] = [
+    let lists: [(&str, &str, &[&str]); 7] = [
         ("docs/man/ob.1.scd", "command", &ob_commands),
         ("docs/man/ob.1.scd", "boot test", &boot_tests),
         ("docs/man/dukovo.toml.5.scd", "key", config::KEYS),
+        ("docs/man/service.toml.5.scd", "setting", manifest::service::KEYS),
         ("docs/man/dukovo-boot.7.scd", "kernel flag", &kernel_flags),
         ("docs/man/radix-debug.7.scd", "kdb command", &kdb_commands),
         ("docs/man/radix-debug.7.scd", "self-test", radix_hal::cmdline::SELFTESTS),

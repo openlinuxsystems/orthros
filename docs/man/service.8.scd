@@ -5,13 +5,19 @@ service(8) "Dukovo" "Dukovo Manual"
 
 # NAME
 
-service - start, stop and look at the services
+service - start, stop and look at the services, and check their files
 
 # SYNOPSIS
 
 *service* _name_ *start* | *stop* | *restart* | *--full-restart* | *reload* | *status*
 
 *service --status-all*
+
+*service check* [_name_ | _file_]...
+
+*service new* _name_
+
+*service edit* _name_
 
 # DESCRIPTION
 
@@ -42,21 +48,49 @@ after it ended:
 
 The command line is Debian's.
 
+*check*, *new* and *edit* work on the services' files
+(*service.toml*(5)), with the same reader Spark uses:
+
+*check* [_name_ | _file_]...
+	Check the file of each service named, or each file given by a path
+	(one with a */* or ending in _.toml_), or every file in
+	_/system/settings/spark/services_. Prints _file_*: ok* for each that
+	reads, and for each that does not, which line is wrong and why on
+	the standard error; says which files are of before Phase 13 and
+	not converted yet.
+
+*new* _name_
+	Write a new file for the service _name_ with every setting
+	explained, which starts nothing at boot (*enabled = false*) and runs
+	_/system/commands/true_ until it is edited. Refuses a name that is
+	taken.
+
+*edit* _name_
+	Edit the service's file as *visudo*(8) edits sudoers: copy it to
+	_.name.toml.edit_ beside it, open the copy in *$VISUAL*, *$EDITOR*
+	or *nano*(1), and once the editor ends, check it. A copy that reads
+	takes the file's place; one that does not shows what is wrong and
+	asks *What now? (e)dit again, or e(x)it without saving*. The file
+	changes only when its new text reads. Spark reads it when the
+	service next starts: *service* _name_ *restart*.
+
 # EXIT STATUS
 
 0 for a request Spark took, and for *status* of a running service; 3
 for *status* of a service that does not run; 4 for a service Spark does
 not know; 1 when Spark refused the request or could not be reached; 2
-for a command it does not know.
+for a command it does not know. *check* gives 1 when a file does not
+read, *new* when the file is there already, and *edit* when the edit
+was given up.
 
 # FILES
 
-_/system/settings/spark/services/_*name*_.service_
-	The services.
+_/system/settings/spark/services/_*name*_.toml_
+	The services' files (*service.toml*(5)).
 
 _/system/live/spark/control_
 	Spark's control socket.
 
 # SEE ALSO
 
-*spark*(8), *shutdown*(8), *systools*(1)
+*spark*(8), *service.toml*(5), *shutdown*(8), *systools*(1)

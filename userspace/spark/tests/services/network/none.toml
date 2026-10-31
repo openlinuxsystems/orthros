@@ -4,7 +4,8 @@
 # A service of the spark-network boot test: it asks for no network, and
 # checks that it has none.
 
-description = Asks for no network
-program = /system/tests/posix/netgrant
-arguments = none
-restart = never
+service_version = 1
+description = "Asks for no network"
+program = "/system/tests/posix/netgrant"
+arguments = ["none"]
+restart = "never"

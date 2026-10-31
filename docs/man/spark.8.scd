@@ -194,78 +194,41 @@ spark: nothing more to do; waiting
 # SERVICES
 
 A service is a program Spark starts at boot and keeps running. Each is
-described by a file _/system/settings/spark/services/_*name*_.service_, whose
-_name_, of 1 to 23 bytes, is the service's and its domain's. The
-system's own come from _/system/resources/default-settings/spark/services_; to
-turn one off, set *enabled = no* in its file rather than removing it,
-or the next boot brings it back.
-
-A service file is lines of _key_ *=* _value_; blank lines and lines
-that start with *#* are left out. The keys:
-
-*program* = _path_
-	The program's absolute path. The only key a file must have.
-
-*arguments* = _word_ ...
-	Its arguments, after its path. Double quotes keep blanks in a word.
-
-*description* = _text_
-	What it is, for *service*(8).
-
-*order* = _number_
-	When it starts: lower first, 50 by default. Shutting down stops the
-	highest first, so the services that others need want a low one.
-
-*restart* = *always* | *on-failure* | *never*
-	When it is started again after it ended: whatever its end (the
-	default), only after an exit code other than 0 or a signal, or not
-	at all.
-
-*weight* = _number_
-	Its domain's CPU weight, 1 to 10000, 100 by default: a busy domain
-	of weight 200 gets twice the CPU time of one of 100 when they
-	compete (*radix-scheduling*(7)).
-
-*memory* = _size_ | *none*
-	Its domain's memory limit, as bytes or with *K*, *M* or *G*, such as
-	*64M*; none by default.
-
-*oom* = *service* | *app*
-	Its domain's out-of-memory class: *service*, the default, is stopped
-	only after every app domain, when memory runs out
-	(*radix-resource-domain*(2)).
-
-*environment* = _NAME_*=*_value_ ...
-	More of its environment.
-
-*enabled* = *yes* | *no*
-	Whether Spark starts it at boot; *yes* by default. *service* _name_
-	*start* starts a disabled one.
-
-*network.outbound* = *yes* | *no*
-	Whether it may connect out, to any address and port, and send
-	datagrams; *no* by default (see *THE NETWORK*).
-
-*network.listen* = _port_ | _first_*-*_last_ ...
-	The ports it may bind to and listen on, with commas or blanks
-	between, such as *22, 8000-8009*; none by default. Ranges may not
-	overlap, and with *network.outbound* there are at most eight.
-
-*admin.hardware* = *yes* | *no*
-	Whether it may set the machine's fans, LEDs and ARGB header, with
-	the platform capability; *no* by default (see *THE PLATFORM*).
-
-A file Spark cannot read, or with a key it does not know, is logged and
-left out. For example, _consoled.service_:
+described by a file _/system/settings/spark/services/_*name*_.toml_, in
+TOML, whose _name_, of 1 to 23 bytes, is the service's and its domain's;
+*service.toml*(5) has its settings. The system's own come from
+_/system/resources/default-settings/spark/services_; to turn one off,
+set *enabled = false* in its file rather than removing it, or the next
+boot brings it back. For example, _consoled.toml_:
 
 ```
-description = Virtual consoles
-program = /system/commands/consoled
+service_version = 1
+description = "Virtual consoles"
+program = "/system/commands/consoled"
 order = 10
-restart = on-failure
-weight = 200
-memory = none
-admin.hardware = yes
+restart = "on-failure"
+
+[limits]
+cpu_weight = 200
+memory = "none"
+
+[permissions]
+admin.hardware = true
+```
+
+Spark reads a service's file at boot and again each time it starts the
+service, and keeps a copy of each file that read in
+_/system/state/spark/good_. A file that does not read never takes a
+service down: Spark logs which line is wrong and why, once, and runs the
+last copy that read; a service whose file never read is not started. A
+file added since boot is read when *start* first names its service. An
+old file, _name_*.service* with lines of _key_ *=* _value_ (ADR 0101),
+is converted to _name_*.toml* with its comments, at boot before the
+defaults are copied in, and kept as _name_*.service.old* (ADR 0216):
+
+```
+spark: converted /system/settings/spark/services/web.service to web.toml; the old file is web.service.old
+spark: /system/settings/spark/services/web.toml: line 6: restart must be always, on-failure or never, not `sometimes`; it runs its last good copy
 ```
 
 Spark starts each service as a POSIX program (*radix-posix*(7)) in a
@@ -337,7 +300,9 @@ presses.
 	again, or stop one and start it again, whatever its *restart*
 	says. Stopping sends it SIGTERM; one that has not ended 5 seconds
 	later has its domain stopped, as systemd sends SIGKILL after
-	TimeoutStopSec.
+	TimeoutStopSec. Starting reads its file again; *start* of a
+	service whose file was added since boot reads it then, and answers
+	with what is wrong with it if it does not read.
 
 *reload* _name_
 	Send a running service SIGHUP, which asks a service that reads
@@ -446,7 +411,7 @@ Spark acts for root, and its root directory has the bypass right, which
 passes the owners and modes of files (*radix-names*(2), ADR 0214). The
 programs and services it starts act for root too, with that right on the
 root it gives them, until sign-in (Phase 13b.5) and service files that
-name an account (13b.4). With *--names* before the program, a POSIX
+declare what a service holds (13b.4b). With *--names* before the program, a POSIX
 program gets the names capability as its descriptor 3, as the
 *principals* boot test (*ob*(1)) needs to start processes for other
 users: *-- --posix --names /system/tests/posix/principals*.
