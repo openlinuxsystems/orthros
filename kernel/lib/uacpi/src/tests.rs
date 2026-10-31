@@ -52,6 +52,7 @@ const SCI: u16 = 9;
 const INIT_PORT: u16 = 0x700;
 const PTS_PORT: u16 = 0x701;
 const GPE_PORT: u16 = 0x702;
+const EVT_PORT: u16 = 0x703;
 
 /// The embedded controller's ports and general-purpose event.
 const EC_DATA: u16 = 0x62;
@@ -503,6 +504,20 @@ fn a_machine_runs_its_firmwares_aml_from_start_to_power_off() {
     assert_eq!(eval(c"\\_SB.EC0.STOP"), 0);
     assert_eq!(machine.ec.lock().unwrap().space[0x11], 0);
     assert_eq!(battery.integer(c"_NONE").map_err(Error::is_not_found), Err(true));
+
+    // A GPIO controller's nodes, by its resources' paths, and its
+    // events' methods: one run with the pin's number.
+    let gpio = device(c"AMDI0030");
+    assert!(gpio.find("\\_SB.GPI0") == Some(gpio));
+    assert!(gpio.find("^GPI0") == Some(gpio));
+    assert!(gpio.find("_E09").is_some());
+    assert!(gpio.find("_E0A").is_none());
+    assert!(gpio.find("\\_SB.NONE").is_none());
+    assert_eq!(gpio.bytes(c"_AEI", <[u8]>::len), Ok(2 + 2 * 35));
+    gpio.run(c"_E09").unwrap();
+    assert_eq!(machine.port(EVT_PORT), 9);
+    gpio.run_with(c"_EVT", 0x2a).unwrap();
+    assert_eq!(machine.port(EVT_PORT), 0x2a);
 
     // Its events: two queued, its GPE raised. The interrupt queues the
     // queries, which run each event's `_Qxx`; their `Notify`s reach the

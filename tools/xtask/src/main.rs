@@ -250,6 +250,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   framework-ec     a Framework EC's ACPI device with no EC behind it, and ectool
   smbus            q35's SMBus controller, its memory modules' EEPROMs and DDR4 SPD data
   smbios           QEMU's SMBIOS tables under UEFI, /sys/class/dmi/id and hwinfo
+  gpio             an AMD and an Intel GPIO controller in a test device's memory,
+                   and the firmware's events on their pins
   msr              a read of an MSR the CPU lacks faults and goes on
   caps             no capability forged or widened; revokes against 3 CPUs
   stack-overflow   a kernel stack overflow stops at its guard page

@@ -278,6 +278,16 @@ impl Devices for Arch {
         0
     }
 
+    fn route_interrupt(
+        _gsi: u32,
+        _level: bool,
+        _active_low: bool,
+        _handler: fn(usize),
+        _arg: usize,
+    ) -> Option<u32> {
+        None
+    }
+
     fn start_keyboard(_byte: fn(u8)) -> Option<&'static str> {
         None
     }

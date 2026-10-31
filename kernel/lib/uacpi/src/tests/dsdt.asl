@@ -8,7 +8,8 @@
  *     iasl -p dsdt dsdt.asl
  *
  * Its methods write what they did to I/O ports the test reads back. Its
- * embedded controller keeps a battery, an AC adapter and a lid.
+ * embedded controller keeps a battery, an AC adapter and a lid; its GPIO
+ * controller has events.
  */
 DefinitionBlock ("dsdt.aml", "DSDT", 2, "DUKOVO", "TESTDSDT", 1)
 {
@@ -18,6 +19,7 @@ DefinitionBlock ("dsdt.aml", "DSDT", 2, "DUKOVO", "TESTDSDT", 1)
         INIT, 8,    // _INI writes 0x42
         PTS, 8,     // _PTS writes the sleep state
         GPE, 8,     // _L00 counts its runs
+        EVT, 8,     // GPI0's event methods write the pin
     }
 
     Name (_S5, Package () { 5, 5, 0, 0 })
@@ -181,6 +183,35 @@ DefinitionBlock ("dsdt.aml", "DSDT", 2, "DUKOVO", "TESTDSDT", 1)
             Method (_LID)
             {
                 Return (\_SB.EC0.LIDO)
+            }
+        }
+
+        // A GPIO controller whose pins' events the firmware takes: an
+        // edge on pin 9 runs _E09, and pin 0x2A's level _EVT.
+        Device (GPI0)
+        {
+            Name (_HID, "AMDI0030")
+            Name (_CRS, ResourceTemplate ()
+            {
+                Interrupt (ResourceConsumer, Level, ActiveLow, Shared, ,, ) {7}
+                Memory32Fixed (ReadWrite, 0xFED81500, 0x00000400)
+            })
+            Name (_AEI, ResourceTemplate ()
+            {
+                GpioInt (Edge, ActiveLow, Exclusive, PullNone, 0x0000,
+                    "\\_SB.GPI0", 0x00, ResourceConsumer, ,) {9}
+                GpioInt (Level, ActiveHigh, Exclusive, PullNone, 0x0000,
+                    "\\_SB.GPI0", 0x00, ResourceConsumer, ,) {0x2A}
+            })
+
+            Method (_E09)
+            {
+                EVT = 9
+            }
+
+            Method (_EVT, 1)
+            {
+                EVT = Arg0
             }
         }
 

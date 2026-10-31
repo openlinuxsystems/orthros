@@ -137,6 +137,7 @@ name = "radix"
 version = "0.10.4"
 dependencies = [
  "radix-abi",
+ "radix-acpi",
  "radix-ahci",
  "radix-arch-aarch64",
  "radix-arch-x86_64",
@@ -150,6 +151,7 @@ dependencies = [
  "radix-ext4",
  "radix-fat",
  "radix-fbcon",
+ "radix-gpio",
  "radix-hal",
  "radix-hid",
  "radix-hw",
@@ -330,6 +332,13 @@ version = "0.10.4"
 dependencies = [
  "radix-hal",
  "radix-klog",
+]
+
+[[package]]
+name = "radix-gpio"
+version = "0.10.4"
+dependencies = [
+ "radix-hw",
 ]
 
 [[package]]

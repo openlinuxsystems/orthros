@@ -600,6 +600,14 @@ _target/userspace/_).
 		show the system, the board with their serial numbers, and the
 		memory device.
 
+	*gpio*
+		Boot with QEMU's _pc-testdev_ and an SSDT of the test's whose
+		AMD and Intel GPIO controllers have their registers in the test
+		device's memory and its ISA interrupts 5 and 6: the kernel must
+		set both up, route their interrupts, and ask for the firmware's
+		events on their pins that the controllers' _\_AEI_ list, then run
+		*selftest=gpio*, whose events must each run their method once.
+
 	*msr*
 		Boot with *selftest=msr*: EFER must read, and with KVM a read
 		of an MSR no processor has must fault and go on, as the

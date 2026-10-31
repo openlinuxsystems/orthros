@@ -32,6 +32,9 @@
 //! - `user`, `ipc`, `fuzz` and `bench` start user-mode programs from the
 //!   `usertests` boot module: system calls and faults, IPC between
 //!   programs, random system calls, and the benchmarks (`usertest`).
+//! - `gpio` fires the firmware's events on the GPIO controllers the `gpio`
+//!   boot test's SSDT names, and checks that each runs its method once
+//!   (`gpio`).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -72,6 +75,7 @@ pub fn run(name: &str) {
         "bench" => usertest::bench(),
         "iommu" => iommutest::run(),
         "net" => crate::net::selftest(),
+        "gpio" => crate::gpio::selftest(),
         _ => warn!("selftest: no test called `{name}`; the tests are {SELFTESTS:?}"),
     }
 }

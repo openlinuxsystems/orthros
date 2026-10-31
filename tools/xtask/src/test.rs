@@ -47,6 +47,9 @@ const THERMAL_TABLE: &str = "file=thermal.aml";
 /// The SSDT of the `framework-ec` case: a Framework EC's ACPI device.
 const CROSEC_AML: &[u8] = include_bytes!("acpi/crosec.aml");
 const CROSEC_TABLE: &str = "file=crosec.aml";
+/// The SSDT `gpio` gives QEMU (`src/acpi/gpio.asl`), likewise.
+const GPIO_AML: &[u8] = include_bytes!("acpi/gpio.aml");
+const GPIO_TABLE: &str = "file=gpio.aml";
 /// The SMBIOS memory device of the `smbus` case, which QEMU gives in place
 /// of its own ([`ddr4_device`]).
 const DDR4_DEVICE: &str = "file=ddr4.smbios";
@@ -75,6 +78,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-ext4",
     "radix-fat",
     "radix-fbcon",
+    "radix-gpio",
     "radix-hal",
     "radix-hid",
     "radix-hw",
@@ -1430,6 +1434,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "gpio",
+        about: "QEMU with a test device's memory as an AMD and an Intel GPIO controller's registers, which an ACPI table of the test's names: the kernel sets both up and routes their interrupts, asks for the firmware's events on their pins, and each event the table's AML fires runs its method once",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit selftest=gpio",
+        cpus: 1,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-device", "pc-testdev", "-acpitable", GPIO_TABLE],
+        script: gpio,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "msr",
         about: "a read of an MSR the CPU lacks faults and goes on",
         firmware: Firmware::Bios,
@@ -2543,6 +2563,7 @@ fn run_case(
             POWER_TABLE => ("power.aml", POWER_AML.to_vec()),
             THERMAL_TABLE => ("thermal.aml", THERMAL_AML.to_vec()),
             CROSEC_TABLE => ("crosec.aml", CROSEC_AML.to_vec()),
+            GPIO_TABLE => ("gpio.aml", GPIO_AML.to_vec()),
             DDR4_DEVICE => ("ddr4.smbios", ddr4_device()),
             _ => continue,
         };
@@ -4674,6 +4695,18 @@ fn ddr4_device() -> Vec<u8> {
     }
     bytes.push(0);
     bytes
+}
+
+fn gpio(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect_anywhere("GPIO: AMD's controller \\_SB_.GPIO: 184 pins, interrupt 5 (rising edge)")?;
+    vm.expect_anywhere(
+        "GPIO: Intel Sunrise Point-LP's controller \\_SB_.GPI0: 152 pins, interrupt 6 (rising edge)",
+    )?;
+    vm.expect_anywhere("GPIO: the firmware's events on \\_SB_.GPIO: pins 9 (_E09), 42 (_EVT)")?;
+    vm.expect_anywhere("GPIO: the firmware's events on \\_SB_.GPI0: pins 53 (_L35)")?;
+    selftest_passed(vm, "gpio")?;
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 
 fn smbios(vm: &mut Vm, case: &Case) -> Result<(), String> {

@@ -455,6 +455,22 @@ impl Devices for Arch {
         devices::count(vector)
     }
 
+    fn route_interrupt(
+        gsi: u32,
+        level: bool,
+        active_low: bool,
+        handler: fn(usize),
+        arg: usize,
+    ) -> Option<u32> {
+        let (vector, _) = devices::allocate(None, 0, handler, arg)?;
+        let destination = smp::info(0).map_or(0, |cpu| cpu.hardware_id);
+        if apic::route_gsi(gsi, level, active_low, vector as u8, destination).is_none() {
+            devices::free(vector);
+            return None;
+        }
+        Some(vector)
+    }
+
     fn start_keyboard(byte: fn(u8)) -> Option<&'static str> {
         i8042::start(byte)
     }

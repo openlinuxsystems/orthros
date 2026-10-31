@@ -512,6 +512,21 @@ pub trait Devices {
     /// How many interrupts vector `vector` has delivered.
     fn interrupt_count(vector: u32) -> u64;
 
+    /// Routes global system interrupt `gsi`, as a device's ACPI
+    /// resources name it, to `handler(arg)` on the boot CPU, with
+    /// interrupts masked: level-triggered or edge-triggered, active low or
+    /// high, as they say (ADR 0233). Returns its vector, or `None` if no
+    /// interrupt controller has it, it is routed already, or no vector is
+    /// free. A level-triggered interrupt's handler must quiet its device
+    /// before it returns.
+    fn route_interrupt(
+        gsi: u32,
+        level: bool,
+        active_low: bool,
+        handler: fn(usize),
+        arg: usize,
+    ) -> Option<u32>;
+
     /// Starts the machine's built-in keyboard, if it has one: on a PC the
     /// PS/2 keyboard behind the i8042 controller (Phase 9). `byte` is
     /// called, in an interrupt handler with interrupts masked, with each

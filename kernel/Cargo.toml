@@ -21,6 +21,7 @@ members = [
     "drivers/ahci",
     "drivers/amdvi",
     "drivers/crosec",
+    "drivers/gpio",
     "drivers/nvme",
     "drivers/scsi",
     "drivers/smbus",
