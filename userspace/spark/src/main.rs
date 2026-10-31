@@ -555,6 +555,14 @@ fn seed(from: &Dir, to: &Dir, depth: usize, added: &mut usize) {
                     *added += 1;
                 })
             }
+            // A link, such as resolv.conf's to netd's (ADR 0191), whose
+            // target may not be there yet.
+            FileKind::Symlink if to.read_link(name).is_err() && to.stat(name).is_err() => {
+                from.read_link(name).and_then(|target| {
+                    let target = String::from_utf8_lossy(&target);
+                    to.make_link(name, &target).map(|()| *added += 1)
+                })
+            }
             _ => Ok(()),
         };
         if let Err(err) = done {

@@ -9,7 +9,8 @@
  *
  * Its methods write what they did to I/O ports the test reads back. Its
  * embedded controller keeps a battery, an AC adapter and a lid; its GPIO
- * controller has events.
+ * controller has events; its I2C controller is a PCI function, with a
+ * touchpad on it.
  */
 DefinitionBlock ("dsdt.aml", "DSDT", 2, "DUKOVO", "TESTDSDT", 1)
 {
@@ -212,6 +213,48 @@ DefinitionBlock ("dsdt.aml", "DSDT", 2, "DUKOVO", "TESTDSDT", 1)
             Method (_EVT, 1)
             {
                 EVT = Arg0
+            }
+        }
+
+        // An I2C controller on a PCI bus, found by its _ADR, and the
+        // devices on it: a touchpad, and one that is not there.
+        Scope (PCI0)
+        {
+            Device (I2C1)
+            {
+                Name (_ADR, 0x00150001)
+                Device (TPD0)
+                {
+                    Name (_HID, EisaId ("PNP0C50"))
+                    Name (_CRS, ResourceTemplate ()
+                    {
+                        I2cSerialBusV2 (0x002C, ControllerInitiated, 400000,
+                            AddressingMode7Bit, "\\_SB.PCI0.I2C1", 0x00,
+                            ResourceConsumer, , Exclusive, )
+                    })
+
+                    // HID over I2C's: its HID descriptor's register.
+                    Method (_DSM, 4, Serialized)
+                    {
+                        If (Arg0 == ToUUID ("3cdff6f7-4267-4555-ad05-b30a3d8938de"))
+                        {
+                            If ((Arg1 == 1) && (Arg2 == 1))
+                            {
+                                Return (0x20)
+                            }
+                        }
+
+                        Return (Buffer (1) { 0 })
+                    }
+                }
+                Device (TPD1)
+                {
+                    Name (_HID, "SYNA0000")
+                    Method (_STA)
+                    {
+                        Return (0)
+                    }
+                }
             }
         }
 

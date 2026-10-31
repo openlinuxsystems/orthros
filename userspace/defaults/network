@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# How netd(8) sets the network cards up (network(5), ADR 0191). A card
+# gets its address, router and DNS servers by DHCP unless a section
+# names it, by its name or its MAC address. `service netd reload` reads
+# this file again.
+#
+# A card with addresses of its own, at most four, and up to three DNS
+# servers:
+#
+#   [net0]
+#   address = 192.168.1.10/24
+#   router = 192.168.1.1
+#   dns = 192.168.1.1
+#
+# A card netd leaves alone, for ip(8) or the kernel's ip= flag:
+#
+#   [52:54:00:12:34:56]
+#   dhcp = no

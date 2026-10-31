@@ -616,6 +616,22 @@ boots.
 	within a second, and the level-triggered pins be unmasked after.
 	Reports *selftest gpio: passed*.
 
+*i2c*
+	Needs QEMU's _pc-testdev_ and the SSDT of the *i2c* case of *ob
+	test*, whose Intel LPSS and AMD DesignWare I2C controllers have
+	their registers in the test device's memory (ADR 0234). Reads back
+	through the SSDT what the kernel set: the Intel controller in fast
+	mode with the firmware's _FMCN_ counts and SDA hold, its _\_PS0_
+	run, LPSS out of reset with its DMA engine told the window's
+	address; the AMD one in standard mode with counts for its 150 MHz
+	clock. The devices found must be the SSDT's two. A write on _i2c-1_,
+	whose memory says a stop was seen, must reach the controller and
+	end; a read on _i2c-2_, whose memory says no device answered, must
+	fail so; a bus that does not exist must be refused. First it waits
+	for the thread _i2c-hid_ to give up the SSDT's touchpad, whose HID
+	descriptor the memory never answers (ADR 0235). Reports
+	*selftest i2c: passed*.
+
 # TRACE POINTS
 
 A trace point is a named place in the kernel code that records an event
