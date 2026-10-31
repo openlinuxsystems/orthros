@@ -13,3 +13,8 @@ arguments = [
 ]
 order = 90
 restart = "never"
+
+[permissions]
+# It drives Spark through its control socket, which no service's view
+# holds, and powers the machine off.
+runs-with-your-access = true

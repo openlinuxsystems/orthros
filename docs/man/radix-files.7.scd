@@ -263,7 +263,7 @@ on it at every boot. Each folder is named for what it holds:
 |  _/kernel_
 :< the kernel's view of the hardware and its settings (*radix-sysfs*(5))
 |  _/volumes_
-:< disks, USB sticks and SD cards, one directory each
+:< a tmpfs: disks, USB sticks and SD cards, one directory each
 
 Unix's names for these are symbolic links in the root, for Unix
 programs, scripts and people: _/bin_ and _/sbin_ lead to

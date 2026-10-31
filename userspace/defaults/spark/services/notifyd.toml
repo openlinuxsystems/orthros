@@ -18,3 +18,9 @@ restart = "always"
 
 [limits]
 memory = "16M"
+
+# What it holds beyond what every service reads (service.toml(5)): its
+# folder, where it answers on a socket. Every other service may only
+# connect there.
+[permissions]
+files.read-write = ["/system/live/notify"]

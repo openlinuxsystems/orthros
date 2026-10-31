@@ -24,7 +24,10 @@ restart = "on-failure"
 cpu_weight = 200
 memory = "none"
 
+# What it holds: the whole tree, as Spark does, since it starts root's
+# shells on the consoles until sign-in comes (Phase 13b.5).
 [permissions]
+runs-with-your-access = true
 # Root's shells may set the fans, the LEDs and the ARGB header with
 # ectool(8), as root may on Linux; from Phase 13 an administrator's do,
 # once elevated.

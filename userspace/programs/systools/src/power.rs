@@ -270,6 +270,9 @@ pub fn service(args: &mut Args) -> Result<i32, Fail> {
                 println!(
                     "       service check [ service_name | file ]... | new service_name | edit service_name"
                 );
+                println!(
+                    "       service secret set service_name secret | list service_name | remove service_name secret"
+                );
                 return Ok(0);
             }
             Arg::Operand(value) => operands.push(value.to_string_lossy().into_owned()),
@@ -282,6 +285,7 @@ pub fn service(args: &mut Args) -> Result<i32, Fail> {
         Some("check") => return servicefiles::check(&operands[1..]),
         Some("new") => return servicefiles::new(&operands[1..]),
         Some("edit") => return servicefiles::edit(&operands[1..]),
+        Some("secret") => return servicefiles::secret(&operands[1..]),
         _ => {}
     }
     let (Some(name), Some(command)) = (operands.first(), operands.get(1)) else {

@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use alloc::{format, vec};
 
 use crate::legacy;
-use crate::service::{self, Oom, Ports, Restart};
+use crate::service::{self, Oom, Place, Ports, Restart};
 
 /// The service files Dukovo ships, and those of the boot tests.
 const SHIPPED: &[(&str, &str)] = &[
@@ -120,6 +120,46 @@ network.listen = [80, "443", "8000-8009"]
 }
 
 #[test]
+fn what_a_view_holds_and_the_secrets() {
+    let text = file(
+        "secrets = [\"api-token\", \"db_password\"]\n\
+         [permissions]\n\
+         files.read = [\"/devices\", \"/system/settings\"]\n\
+         files.read-write = [\"/system/state/web\", \"/system/live/notify\"]\n\
+         files.mount = [\"/volumes\"]\n\
+         files.shared = [\"media\"]\n",
+    );
+    let service = service::from_toml(&text).unwrap();
+    assert_eq!(service.secrets, ["api-token", "db_password"]);
+    assert!(!service.permissions.runs_with_your_access);
+    // In the order Spark attaches them: what it reads, then what it
+    // changes. A place every service reads may be named, to change it, and
+    // so may one that holds such a place.
+    let place = |path: &str, write| Place { path: path.into(), write };
+    assert_eq!(
+        service.permissions.places(),
+        [
+            place("/devices", false),
+            place("/system/settings", false),
+            place("/system/state/web", true),
+            place("/system/live/notify", true),
+            place("/volumes", true),
+            place("/shared/media", true),
+        ]
+    );
+    assert_eq!(service::secrets_dir("web"), "/system/state/spark/secrets/web");
+    let whole = service::from_toml(&file("[permissions]\nruns-with-your-access = true")).unwrap();
+    assert!(whole.permissions.runs_with_your_access && whole.permissions.places().is_empty());
+    // Nothing named, nothing beyond what every service reads.
+    assert!(service::from_toml(&file("")).unwrap().permissions.places().is_empty());
+    let mounts = file("[permissions]\nfiles.mount = [\"/a\", \"/b\", \"/c\", \"/d\", \"/e\"]");
+    assert_eq!(error(&mounts), "line 3: files.mount names at most 4 places");
+    for (secret, fits) in [("api-token", true), ("_x.1", true), ("", false), ("a/b", false)] {
+        assert_eq!(service::check_secret(secret).is_ok(), fits, "{secret}");
+    }
+}
+
+#[test]
 fn errors_name_their_line_in_plain_words() {
     let cases: &[(&str, &str)] = &[
         (
@@ -163,8 +203,48 @@ fn errors_name_their_line_in_plain_words() {
             "line 4: network.listen: 70-90 overlaps 80",
         ),
         (
+            "[permissions]\ndevices.camera = true",
+            "line 4: `devices` is not a setting here; service.toml(5) lists them",
+        ),
+        (
             "[permissions]\nfiles.read = [\"/\"]",
-            "line 4: `files` is not a setting here; service.toml(5) lists them",
+            "line 4: files holds places beneath /, not / itself: runs-with-your-access gives a \
+             service the whole tree",
+        ),
+        (
+            "[permissions]\nfiles.read-write = [\"/system/state/../log\"]",
+            "line 4: files takes absolute paths without `.`, `..` or `//`, such as \
+             /system/state/log, not `/system/state/../log`",
+        ),
+        (
+            "[permissions]\nfiles.read = [\"/devices\"]\nfiles.read-write = [\"/devices/sda\"]",
+            "line 3: files names /devices/sda and /devices, one within the other: name one",
+        ),
+        (
+            "[permissions]\nfiles.read-write = [\"/system/settings/web\"]",
+            "line 3: every service reads /system/settings already, so its view cannot hold \
+             /system/settings/web apart; name /system/settings with files.read-write to change \
+             what is in it",
+        ),
+        (
+            "[permissions]\nfiles.read = [\"/system/state\"]",
+            "line 3: no service holds /system/state/spark, where Spark keeps its files and the \
+             services' secrets, so it cannot hold /system/state",
+        ),
+        (
+            "[permissions]\nruns-with-your-access = true\nfiles.read = [\"/devices\"]",
+            "line 3: runs-with-your-access holds every file already: leave out files.*",
+        ),
+        (
+            "[permissions]\nfiles.shared = [\"../users\"]",
+            "line 4: files.shared takes names of folders in /shared, such as \"media\", not \
+             `../users`",
+        ),
+        ("secrets = [\"api-token\", \"api-token\"]", "line 3: secrets names api-token twice"),
+        (
+            "secrets = [\"../key\"]",
+            "line 3: `../key` is not a secret's name: it has 1 to 23 letters, digits, `-`, `_` \
+             and `.`, and starts with a letter, a digit or `_`",
         ),
         (
             "[permissions]\nnetwork.inbound = true",
@@ -275,6 +355,9 @@ memory = \"none\"
 # ectool(8), as root may on Linux; from Phase 13 an administrator's do,
 # once elevated.
 admin.hardware = true
+# Before Phase 13 a service held the whole tree, and this one still does;
+# narrow it to what it needs with files.* instead (service.toml(5)).
+runs-with-your-access = true
 "
     );
     assert_eq!(service::from_toml(&converted).unwrap(), service::from_toml(SHIPPED[0].1).unwrap());
@@ -312,6 +395,8 @@ weight = 50
     assert_eq!(service.environment[0].1, "hello there");
     assert_eq!(service.network_grants(), 3);
     assert!(service.permissions.admin.hardware);
+    // It keeps the whole tree it held.
+    assert!(service.permissions.runs_with_your_access);
     assert!(converted.contains(
         "[permissions]\n# Comments move with their settings.\nnetwork.outbound = true\n"
     ));

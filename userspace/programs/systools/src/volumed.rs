@@ -86,20 +86,34 @@ fn open_device(name: &str) -> io::Result<(File, MountFlags)> {
     }
 }
 
+/// The directory to mount beneath at the absolute `path`, as a slot, and
+/// `path` beneath it: a place Spark handed this program as a descriptor
+/// from 3 on, as its service file's `files.mount` asks, which
+/// `MOUNT_PLACES` names in order (ADR 0217), since nothing is mounted
+/// through a view; or else the root, as for eject(1) in root's shell.
+fn mount_base(path: &str) -> (u32, String) {
+    let places = std::env::var("MOUNT_PLACES").unwrap_or_default();
+    for (fd, place) in (3..).zip(places.split(':').filter(|p| !p.is_empty())) {
+        if let Some(rest) = path.strip_prefix(place).and_then(|r| r.strip_prefix('/')) {
+            return (sys::slot_of(fd), rest.to_string());
+        }
+    }
+    (startup::SLOT_ROOT, path.trim_start_matches('/').to_string())
+}
+
 /// Mounts `device` at `/volumes/<at>` as a filesystem of `kind`, read-only
 /// if it refuses writes or Radix does not write it, as Spark does.
 fn mount_as(at: &str, kind: &[u8], device: &File, flags: MountFlags) -> Result<MountFlags, Status> {
-    let path = format!("volumes/{at}");
+    let (base, path) = mount_base(&format!("/volumes/{at}"));
     let source = sys::slot_of(device.as_raw_fd());
-    match directory::mount(&SYS, startup::SLOT_ROOT, path.as_bytes(), kind, source, flags) {
+    match directory::mount(&SYS, base, path.as_bytes(), kind, source, flags) {
         Err(status)
             if !flags.contains(MountFlags::READ_ONLY)
                 && (FileError::from_status(status) == Some(FileError::ReadOnly)
                     || Kernel::from_status(status) == Some(Kernel::InvalidArgument)) =>
         {
             let flags = MountFlags::READ_ONLY;
-            directory::mount(&SYS, startup::SLOT_ROOT, path.as_bytes(), kind, source, flags)
-                .map(|()| flags)
+            directory::mount(&SYS, base, path.as_bytes(), kind, source, flags).map(|()| flags)
         }
         done => done.map(|()| flags),
     }
@@ -156,9 +170,8 @@ pub fn volume_mounts() -> io::Result<Vec<Mount>> {
 
 /// Unmounts the volume at `path` and removes its directory.
 pub fn unmount(path: &Path) -> Result<(), String> {
-    let text = path.to_string_lossy();
-    let relative = text.trim_start_matches('/');
-    directory::unmount(&SYS, startup::SLOT_ROOT, relative.as_bytes())
+    let (base, relative) = mount_base(&path.to_string_lossy());
+    directory::unmount(&SYS, base, relative.as_bytes())
         .map_err(|status| util::strip_os_error(&sys::io_error(status)))?;
     std::fs::remove_dir(path).map_err(|err| util::strip_os_error(&err))
 }

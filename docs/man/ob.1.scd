@@ -525,7 +525,13 @@ _target/userspace/_).
 		place once it is fixed; has Spark start the new service, and
 		refuse one whose file does not read; and breaks the file of a
 		running service, which Spark then restarts from its last good
-		copy, saying which line is wrong (ADR 0216).
+		copy, saying which line is wrong (ADR 0216). Then gives the
+		service _inside_ a secret with *service secret set*, after Spark
+		has refused to start it without one, and has it check from
+		inside its view (ADR 0217): its secret as a read-only file and in
+		no variable, what every service reads, _/bin/sh_ and
+		_/usr/bin/env_, its own folder and _/tmp_, nothing past them,
+		and a file of mode 000 closed to it.
 
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test

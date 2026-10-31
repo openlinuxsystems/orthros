@@ -63,6 +63,7 @@ use radix_rt::fs::{Dir, File};
 use radix_rt::{SYS, println, slots};
 
 use crate::services::{self, Restart, Spec};
+use crate::views;
 
 /// Where the service files are.
 pub const SERVICES_DIR: &str = "system/settings/spark/services";
@@ -248,6 +249,9 @@ struct Service {
     good: String,
     /// What was wrong with its file when last read, said once.
     complaint: Option<String>,
+    /// Why it could not start, when it last could not, for the request
+    /// that asked.
+    why: Option<String>,
 }
 
 impl Service {
@@ -270,6 +274,7 @@ impl Service {
             oom_stops: 0,
             good,
             complaint: None,
+            why: None,
         }
     }
 }
@@ -613,6 +618,7 @@ impl Supervisor {
             }
             Err(what) => {
                 println!("spark: could not start {}: {what}", service.spec.name);
+                service.why = Some(what);
                 // As if it had ended at once.
                 self.schedule(index, None);
             }
@@ -658,6 +664,12 @@ impl Supervisor {
             .root
             .open(spec.program.trim_start_matches('/'), OpenFlags::NONE, Rights::READ)
             .map_err(|err| format!("{}: {err}", spec.program))?;
+        // Its root: a view of what its file declares (ADR 0217).
+        let view = views::build(&self.root, spec)?;
+        let root = match &view.root {
+            views::Root::View(dir) => dir.slot(),
+            views::Root::Spark => root,
+        };
         let null = self
             .root
             .open("devices/null", OpenFlags::NONE, Rights::READ.union(Rights::WRITE))
@@ -707,17 +719,29 @@ impl Supervisor {
             (write, SLOT_FD_BASE + 1),
             (write, SLOT_FD_BASE + 2),
         ];
+        // The places it mounts beneath, as descriptors from 3.
+        let mounts = view.mounts.iter().zip(3..).map(|(dir, fd)| (dir.slot(), SLOT_FD_BASE + fd));
         let args: Vec<&str> = spec.arguments.iter().map(String::as_str).collect();
+        let mut environment = spec.environment.clone();
+        if !spec.secrets.is_empty() {
+            environment
+                .push(format!("SECRETS_DIRECTORY={}", manifest::service::secrets_dir(&spec.name)));
+        }
+        if !spec.mounts.is_empty() {
+            environment.push(format!("MOUNT_PLACES={}", spec.mounts.join(":")));
+        }
         let started = shares
             .iter()
-            .try_for_each(|&(from, to)| {
+            .copied()
+            .chain(mounts)
+            .try_for_each(|(from, to)| {
                 process::share(&SYS, child, from, to, Rights::ALL, 0)
                     .map_err(|status| format!("sharing slot {to} failed: {:#x}", status.0))
             })
             .and_then(|()| grant_network(self.network, spec, child))
             .and_then(|()| grant_platform(self.platform, spec, child))
             .and_then(|()| {
-                let block = exec_block(&spec.program, &args, &spec.environment);
+                let block = exec_block(&spec.program, &args, &environment);
                 process::exec(&SYS, child, program.slot(), &block)
                     .map_err(|status| format!("exec failed: {:#x}", status.0))
             });
@@ -1072,8 +1096,10 @@ impl Supervisor {
                 }
                 audit!("asked to start {name}, by process {peer}");
                 self.start(index);
-                match self.services[index].state {
-                    State::Running(pid) => format!("ok: started {name} as process {pid}\n"),
+                let service = &mut self.services[index];
+                match (service.state, service.why.take()) {
+                    (State::Running(pid), _) => format!("ok: started {name} as process {pid}\n"),
+                    (_, Some(why)) => format!("error: could not start {name}: {why}\n"),
                     _ => format!("error: could not start {name}\n"),
                 }
             }

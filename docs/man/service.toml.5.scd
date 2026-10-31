@@ -77,6 +77,13 @@ wrong in plain words:
 	default), only after an exit code other than 0 or a signal, or not
 	at all.
 
+*secrets* = [_"name"_, ...]
+	The names of its secrets, such as a database's password or an API
+	token, each written as a service's name is; none unless set. Set
+	each with *service secret set* _service_ _name_ (*service*(8)).
+	Spark hands them over as read-only files, never in its environment
+	(see SECRETS).
+
 *limits*
 	A table of what its resource domain may use:
 
@@ -109,6 +116,34 @@ wrong in plain words:
 		such as *[22, "8000-8009"]*; none unless set. Ranges may not
 		overlap, and with *network.outbound* there are at most eight.
 
+	*files.read* = [_"path"_, ...]
+		Places of the tree it may read, directories or files, each at
+		its own path; none unless set. Each must be there when the
+		service starts, or Spark does not start it and says which.
+
+	*files.read-write* = [_"path"_, ...]
+		Places it may read and change. Spark makes a directory for one
+		that is not there yet, as systemd's StateDirectory= does.
+
+	*files.mount* = [_"path"_, ...]
+		Places it may read, change and mount filesystems beneath, as
+		*volumed*(8) does _/volumes_; at most 4. Nothing is mounted
+		through a view, so Spark also hands each over as a descriptor,
+		from 3 on, and *MOUNT_PLACES* names them in that order, with *:*
+		between them. Each wants to be the root of a mount, as
+		_/volumes_ is, or the kernel cannot name by path what is
+		mounted beneath it.
+
+	*files.shared* = [_"name"_, ...]
+		Folders of _/shared_ it may read and change, by name, such as
+		*["media"]*.
+
+	*runs-with-your-access* = *true* | *false*
+		Whether it holds the whole tree as Spark does, past the owners
+		and modes of files, in place of a view; *false* unless set, and
+		not with *files.\**. Only a service that starts other people's
+		shells needs it, as *consoled*(8) does until sign-in.
+
 	*admin.hardware* = *true* | *false*
 		Whether it may set the machine's fans, their curves, its LEDs
 		and its ARGB header, with the platform capability
@@ -116,9 +151,66 @@ wrong in plain words:
 		*consoled*(8)'s file sets it, so that root's shells may use
 		*ectool*(8).
 
+	Paths are absolute, without *.*, *..* or *//*; none is _/_ itself
+	or within another, none is within a place every service reads
+	(name that whole place instead), and none is or holds
+	_/system/state/spark_, where Spark keeps its files and the secrets.
+
 	A dotted name is TOML's for a table in a table: *network.listen
 	= [80]* under *[permissions]* is the same as *listen = [80]* under
 	*[permissions.network]*.
+
+# WHAT A SERVICE SEES
+
+Each service's root is a view of the tree (ADR 0215, 0217), which Spark
+builds each time it starts the service: the places its file names, each
+at its own path, and what every service has without asking:
+
+- _/system/commands_, _/system/libraries_, _/system/resources_ and
+  _/system/settings_, read-only;
+- _/processes_ and _/kernel_, read-only;
+- _/devices/null_, and _/devices/zero_, _/devices/random_ and
+  _/devices/urandom_ read-only;
+- _/system/live/notify_, read-only, as notifications are always allowed
+  (*notifyd*(8));
+- its program;
+- a _/tmp_ of its own, which is _/system/live/spark/tmp/name_ in the
+  tree and is emptied at each boot;
+- the symbolic links of _/_ and _/system_, so _/bin/sh_ and
+  _/usr/bin/env_ work.
+
+Nothing else of the tree is there: not the homes, not _/shared_, not
+another service's files, not Spark's. It acts for root, but without the
+right to pass the owners and modes of files, so a file whose mode closes
+it to root is closed to it too. A place its file names that is one of
+the list takes that one's place, so notifyd's
+*files.read-write = ["/system/live/notify"]* lets it change its folder.
+
+A place it names that is not there, or a secret that is not set, keeps it
+from starting, and Spark says why in the log and in the answer to
+*service* _name_ *start*.
+
+# SECRETS
+
+A service's secrets are in _/system/state/spark/secrets/service/name_,
+mode 0600 in a folder of mode 0700, which only root reads. *service
+secret set* _service_ _name_ reads the value from the terminal without
+showing it, or from its input:
+
+```
+service secret set web db-password
+printf '%s' "$TOKEN" | service secret set web api-token
+```
+
+Spark attaches the service's folder of secrets read-only at that same
+path in its view, and names it in *SECRETS_DIRECTORY*, so the service
+reads _$SECRETS_DIRECTORY/db-password_. A value is never put in a
+variable, which _/processes_, crash reports and logs could show. A
+service whose secret is not set is not started:
+
+```
+spark: could not start web: its secret db-password is not set: set it with `service secret set web db-password`
+```
 
 # WHEN SPARK READS A FILE
 
@@ -150,12 +242,16 @@ above the setting it was above, and keeps the old file as
 _name_*.service.old*. *weight* becomes *cpu_weight*, and with *memory*
 and *oom* goes in *[limits]*; *environment* becomes a table; and
 *network.outbound*, *network.listen* and *admin.hardware* go in
-*[permissions]*. A file with an error is not converted, and Spark logs
-why.
+*[permissions]*, with *runs-with-your-access = true* and a comment, since
+a service of before Phase 13 held the whole tree: narrow it with
+*files.\** instead. A file with an error is not converted, and Spark
+logs why.
 
 # EXAMPLE
 
-A web server on ports 80 and 443, started after the system's services:
+A web server on ports 80 and 443, started after the system's services,
+which serves the folder _/shared/web_, keeps its logs in
+_/system/state/web_ and reads its TLS key from its secrets:
 
 ```
 service_version = 1
@@ -164,6 +260,7 @@ program = "/applications/commands/nginx"
 arguments = ["-g", "daemon off;"]
 order = 60
 restart = "on-failure"
+secrets = ["tls-key"]
 
 [environment]
 TZ = "UTC"
@@ -173,6 +270,8 @@ memory = "256M"
 
 [permissions]
 network.listen = [80, 443]
+files.read-write = ["/system/state/web"]
+files.shared = ["web"]
 ```
 
 # FILES
@@ -185,6 +284,12 @@ _/system/resources/default-settings/spark/services_
 
 _/system/state/spark/good/name.toml_
 	The last copy of each that read.
+
+_/system/state/spark/secrets/name_
+	A service's secrets.
+
+_/system/live/spark/tmp/name_
+	A service's _/tmp_.
 
 # SEE ALSO
 

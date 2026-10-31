@@ -19,3 +19,9 @@ restart = "always"
 
 [limits]
 memory = "64M"
+
+# What it holds beyond what every service reads (service.toml(5)): the
+# kernel log, which it reads, and the log's folders, which it writes.
+[permissions]
+files.read = ["/devices/kmsg"]
+files.read-write = ["/system/state/log", "/system/live/log"]

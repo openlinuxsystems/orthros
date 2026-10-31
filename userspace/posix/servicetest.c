@@ -7,11 +7,15 @@
 // it starts the service; writes a new one with `service new` and edits it
 // with `service edit`, which puts a file in place only once it reads; and
 // breaks a file under a running service, which Spark then runs from its
-// last good copy. Run as `servicetest --editor good|bad FILE`, it is the
-// editor `service edit` runs.
+// last good copy. Then (ADR 0217) it gives a service a secret with
+// `service secret` and starts it, as `servicetest --inside`, in the view
+// Spark builds of what its file declares, which it checks from inside.
+// Run as `servicetest --editor good|bad FILE`, it is the editor `service
+// edit` runs.
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "check.h"
 #include "programs.h"
@@ -44,6 +48,24 @@ static const char LEGACY[] = "# The legacy service: written as Phases 9 to 12 di
 		"# Never again once it ends.\n"
 		"restart = never\n"
 		"memory = 8M\n";
+
+// The service that checks its view from inside: it reads its secret and
+// writes in its own folder, and nothing more.
+static const char INSIDE[] = "service_version = 1\n"
+		"description = \"Checks its view\"\n"
+		"program = \"" SELF "\"\n"
+		"arguments = [\"--inside\"]\n"
+		"restart = \"never\"\n"
+		"secrets = [\"token\"]\n"
+		"\n"
+		"[permissions]\n"
+		"files.read-write = [\"/system/state/inside\"]\n";
+
+// Its own folder, where it says how its checks went.
+#define OWN "/system/state/inside"
+#define SECRETS "/system/state/spark/secrets/inside"
+
+extern char **environ;
 
 // Writes `text` to `path`.
 static void write_file(const char *path, const char *text) {
@@ -205,13 +227,110 @@ static void broken(void) {
 	STATUS(0, SERVICE, "demo", "stop");
 }
 
+// What the inside service checks: that its view holds what every service
+// reads, its own folder, its secret and a /tmp of its own, and nothing
+// past them; and that it acts for root without the bypass right.
+static void inside(void) {
+	// Its secret is a file, read-only, and in no variable.
+	const char *dir = getenv("SECRETS_DIRECTORY");
+	CHECK(dir && !strcmp(dir, SECRETS));
+	char text[64];
+	CHECK(!strcmp(read_file(SECRETS "/token", text, sizeof(text)), "s3cret"));
+	for(char **variable = environ; *variable; variable++)
+		CHECK(!strstr(*variable, "s3cret"));
+	CHECK_ERROR(open(SECRETS "/other", O_WRONLY | O_CREAT | O_CLOEXEC, 0600), EROFS);
+	CHECK(!exists("/system/state/spark/good"));
+
+	// What every service reads, read-only, and the root's links and
+	// /system's, so that #!/usr/bin/env finds env.
+	CHECK(exists("/system/settings/passwd"));
+	CHECK_ERROR(open("/system/settings/inside", O_WRONLY | O_CREAT | O_CLOEXEC, 0644), EROFS);
+	CHECK(access("/usr/bin/env", X_OK) == 0);
+	CHECK(access("/bin/sh", X_OK) == 0);
+	char path[64];
+	snprintf(path, sizeof(path), "/processes/%d/status", getpid());
+	CHECK(exists(path));
+	CHECK(exists("/kernel/block"));
+	CHECK(exists("/devices/null") && exists("/devices/urandom"));
+	CHECK(exists("/system/live/notify"));
+
+	// Nothing past them.
+	const char *gone[] = {"/users", "/shared", "/volumes", "/applications", "/devices/kmsg",
+			"/system/state/log", "/system/live/spark", "/system/live/log", "/system/boot"};
+	for(size_t i = 0; i < sizeof(gone) / sizeof(gone[0]); i++) {
+		if(exists(gone[i]))
+			printf("inside: %s is in its view\n", gone[i]);
+		CHECK(!exists(gone[i]));
+	}
+
+	// Its own folder, and a /tmp of its own.
+	write_file(OWN "/written", "yes");
+	write_file("/tmp/mark", "inside");
+	CHECK(exists("/tmp/mark"));
+
+	// Root's file of mode 000 is closed to it: it has no bypass right.
+	CHECK_ERROR(open(OWN "/locked", O_RDONLY | O_CLOEXEC), EACCES);
+}
+
+// Waits up to `seconds` for `path` to be there.
+static int appears(const char *path, int seconds) {
+	long long deadline = check_now_ns() + seconds * 1000000000LL;
+	while(!exists(path)) {
+		if(check_now_ns() >= deadline)
+			return 0;
+		check_sleep_ms(200);
+	}
+	return 1;
+}
+
+// A service in the view its file declares, with a secret.
+static void viewed(void) {
+	write_file(DIR "/inside.toml", INSIDE);
+	CHECK(mkdir(OWN, 0755) == 0);
+	write_file(OWN "/locked", "closed");
+	CHECK(chmod(OWN "/locked", 0) == 0);
+	// Its secret is not set yet, so it does not start.
+	STATUS(1, SERVICE, "inside", "start");
+	CHECK(!exists(OWN "/done"));
+
+	OUTPUT("s3cret\n", "set inside's secret token; inside reads it when it next starts: `service "
+			"inside restart`\n", SERVICE, "secret", "set", "inside", "token");
+	OUTPUT("", "token\n", SERVICE, "secret", "list", "inside");
+	struct stat st;
+	CHECK(stat(SECRETS "/token", &st) == 0 && (st.st_mode & 07777) == 0600);
+	CHECK(stat(SECRETS, &st) == 0 && (st.st_mode & 07777) == 0700);
+	char text[64];
+	CHECK(!strcmp(read_file(SECRETS "/token", text, sizeof(text)), "s3cret"));
+	STATUS(1, SERVICE, "secret", "set", "inside", "../token");
+	STATUS(1, SERVICE, "secret", "remove", "inside", "nothing");
+
+	STATUS(0, SERVICE, "inside", "start");
+	CHECK(appears(OWN "/done", 20));
+	CHECK(!strcmp(read_file(OWN "/done", text, sizeof(text)), "every check passed"));
+	CHECK(!strcmp(read_file(OWN "/written", text, sizeof(text)), "yes"));
+	// Its /tmp is its own.
+	CHECK(!strcmp(read_file("/system/live/spark/tmp/inside/mark", text, sizeof(text)), "inside"));
+	CHECK(!exists("/tmp/mark"));
+
+	OUTPUT("", "", SERVICE, "secret", "remove", "inside", "token");
+	OUTPUT("", "", SERVICE, "secret", "list", "inside");
+}
+
 int main(int argc, char **argv) {
 	if(argc == 4 && !strcmp(argv[1], "--editor"))
 		return editor(argv[2], argv[3]);
+	if(argc == 2 && !strcmp(argv[1], "--inside")) {
+		check_start("inside");
+		RUN(inside);
+		int status = check_end();
+		write_file(OWN "/done", status ? "failed" : "every check passed");
+		return status;
+	}
 	check_start("servicetest");
 	RUN(shipped);
 	RUN(converted);
 	RUN(written);
 	RUN(broken);
+	RUN(viewed);
 	return check_end();
 }

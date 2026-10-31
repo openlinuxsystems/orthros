@@ -8,7 +8,9 @@
 //! file beside it as `NAME.service.old`. The conversion keeps every
 //! comment, with the setting it is above; the settings that TOML puts in
 //! tables (`weight`, `memory` and `oom` in `[limits]`, `environment`, and
-//! `network.*` in `[permissions]`) move there with their comments.
+//! `network.*` in `[permissions]`) move there with their comments. A
+//! converted service keeps the whole tree it held, with
+//! `runs-with-your-access`, until its file says what it needs.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -16,6 +18,14 @@ use alloc::vec::Vec;
 
 use crate::Error;
 use crate::service::{self, VERSION};
+
+/// What a converted file's `[permissions]` ends with: the whole tree, as
+/// the service held before.
+const WHOLE_TREE: [&str; 3] = [
+    "# Before Phase 13 a service held the whole tree, and this one still does;",
+    "# narrow it to what it needs with files.* instead (service.toml(5)).",
+    "runs-with-your-access = true",
+];
 
 /// The tables a converted setting goes in, in the order they are written.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -73,6 +83,10 @@ pub fn convert(text: &str) -> Result<String, Error> {
         lines_of.extend(pending.drain(..).map(|l| (None, l.to_string())));
         lines_of.extend(lines.into_iter().map(|l| (Some(key), l)));
     }
+    // A service held the whole tree before Phase 13, and keeps it until
+    // its file says what it needs (ADR 0217).
+    tables[Table::Permissions as usize]
+        .extend(WHOLE_TREE.iter().map(|line| (None, line.to_string())));
     let mut out = String::new();
     for line in &header {
         out.push_str(line);

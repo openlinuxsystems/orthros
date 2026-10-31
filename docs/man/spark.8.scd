@@ -91,9 +91,10 @@ Init: /system/commands/spark is process 1
 . It makes the root's nine directories, _/system_, _/applications_,
   _/users_, _/shared_, _/tmp_, _/devices_, _/processes_, _/kernel_ and
   _/volumes_ (see *radix-files*(7) for what each is for).
-. It mounts tmpfs on _/tmp_, and the *dev*, *proc* and *sys* trees on
-  _/devices_, _/processes_ and _/kernel_ (*radix-proc*(5),
-  *radix-sysfs*(5)).
+. It mounts tmpfs on _/tmp_ and on _/volumes_, the second of mode 0755
+  and for this boot's volumes, as Linux's _/run/media_ is, and the *dev*,
+  *proc* and *sys* trees on _/devices_, _/processes_ and _/kernel_
+  (*radix-proc*(5), *radix-sysfs*(5)).
 . It looks for disks in _/devices_ and mounts the FAT, exFAT, Btrfs or
   ext4 filesystem of each partition, or of each disk with no partition
   table, at _/volumes/_*name*, read-write, or read-only when the device
@@ -164,7 +165,7 @@ Its lines in the kernel log start with *spark:*, after the kernel's
 ```
 spark: Spark v2 is process 1, moved by 0x10ae4974a000
 spark: boot archive of 86929 KiB with 706 files at 0x20e61a756000
-spark: built the hierarchy of 9 directories and mounted 8 filesystems
+spark: built the hierarchy of 9 directories and mounted 9 filesystems
 spark: added 6 default settings to /system/settings
 spark: listening at /system/live/spark/control
 spark: 4 services in /system/settings/spark/services, 4 enabled
@@ -179,7 +180,7 @@ hierarchy line comes after the root's:
 
 ```
 spark: /system is Dukovo's root on sda5, compressed (zstd)
-spark: built the hierarchy of 9 directories and mounted 11 filesystems
+spark: built the hierarchy of 9 directories and mounted 12 filesystems
 ```
 
 and in a boot test that names a program:
@@ -236,8 +237,13 @@ domain of its own below *services*, which it makes the first time and
 keeps for the restarts, with _/devices/null_ as its standard input, a pipe as
 its standard output and error, _/_ as its working directory, and the
 environment *PATH=/system/commands*, *HOME=/*, *TERM=dumb*, *LANG=C.UTF-8*
-and *EDITOR=nano* with the file's *environment* over it. It copies what
-the service writes, line by line, to the kernel log, after the service's
+and *EDITOR=nano* with the file's *environment* over it, and
+*SECRETS_DIRECTORY* and *MOUNT_PLACES* when its file names secrets or
+*files.mount*. Its root is a view of
+the tree that holds what its file declares and what every service
+reads (*service.toml*(5), ADR 0217), built at each start; one whose
+file sets *runs-with-your-access* gets Spark's own root instead. It
+copies what the service writes, line by line, to the kernel log, after the service's
 name and a colon unless the line starts with them already, and keeps a
 level the line starts with (*<3>* for an error, as systemd's services
 write) in front, where the kernel takes it. *logd*(8) keeps these
@@ -405,17 +411,6 @@ capability too, in _SLOT_NETWORK_ (*radix-startup*(2)); a program
 started without it cannot use the network at all. The *sockets* boot
 test (*ob*(1)) boots with *-- --network /system/tests/sockets virtio*.
 
-# NAMES
-
-Spark acts for root, and its root directory has the bypass right, which
-passes the owners and modes of files (*radix-names*(2), ADR 0214). The
-programs and services it starts act for root too, with that right on the
-root it gives them, until sign-in (Phase 13b.5) and service files that
-declare what a service holds (13b.4b). With *--names* before the program, a POSIX
-program gets the names capability as its descriptor 3, as the
-*principals* boot test (*ob*(1)) needs to start processes for other
-users: *-- --posix --names /system/tests/posix/principals*.
-
 A service gets only what its file asks for, derived from that
 capability: with *network.outbound*, one with the send right for every
 port, and for each range of *network.listen*, one with the receive
@@ -431,12 +426,24 @@ The kernel gives Spark the platform capability, with the rights to ask
 and to change: the fans' duties and curves, the LEDs and the ARGB
 header that the machine's embedded controller keeps
 (*radix-platform*(2), ADR 0208). A service whose file says
-*admin.hardware = yes* gets a copy in _SLOT_PLATFORM_
+*admin.hardware = true* gets a copy in _SLOT_PLATFORM_
 (*radix-startup*(2)), with the copy and transfer rights, so that its
 children get it through *fork* and *exec*: *consoled*(8)'s does, so that
 root's shells may run *ectool*(8). A service that does not ask cannot
 change them; the hardware monitor's files under _/kernel/class/hwmon_
 still show the fans and sensors to everyone (*radix-sysfs*(5)).
+
+# NAMES
+
+Spark acts for root, and its root directory has the bypass right, which
+passes the owners and modes of files (*radix-names*(2), ADR 0214). The
+program it starts from its command line acts for root too, with that
+right on the root it gives it, until sign-in (Phase 13b.5). A service
+acts for root without it, in its view, unless its file sets
+*runs-with-your-access* (*service.toml*(5)). With *--names* before the
+program, a POSIX program gets the names capability as its descriptor 3,
+as the *principals* boot test (*ob*(1)) needs to start processes for
+other users: *-- --posix --names /system/tests/posix/principals*.
 
 # EXAMPLES
 

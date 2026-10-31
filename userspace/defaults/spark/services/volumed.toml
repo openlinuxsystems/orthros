@@ -15,3 +15,9 @@ program = "/system/commands/volumed"
 order = 40
 # Started again whenever it ends: always, on-failure or never.
 restart = "always"
+
+# What it holds beyond what every service reads (service.toml(5)): the
+# disks, and /volumes, where it mounts them.
+[permissions]
+files.read-write = ["/devices"]
+files.mount = ["/volumes"]

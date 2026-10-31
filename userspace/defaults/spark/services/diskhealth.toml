@@ -16,3 +16,8 @@ arguments = ["--watch"]
 order = 50
 # Started again if it fails: always, on-failure or never.
 restart = "on-failure"
+
+# What it holds beyond what every service reads (service.toml(5)): the
+# disks, to read their health.
+[permissions]
+files.read = ["/devices"]

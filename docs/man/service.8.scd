@@ -19,6 +19,8 @@ service - start, stop and look at the services, and check their files
 
 *service edit* _name_
 
+*service secret* *set* _name_ _secret_ | *list* _name_ | *remove* _name_ _secret_
+
 # DESCRIPTION
 
 service asks Spark, over its control socket _/system/live/spark/control_
@@ -74,14 +76,31 @@ The command line is Debian's.
 	changes only when its new text reads. Spark reads it when the
 	service next starts: *service* _name_ *restart*.
 
+*secret* keeps the secrets a service's file names, such as a database's
+password, which Spark hands it as read-only files (*service.toml*(5),
+ADR 0217). No command shows a value back.
+
+*secret set* _name_ _secret_
+	Set the service's secret: read its value from the terminal without
+	showing it, or else from the standard input, less one line end
+	after it, and keep it in
+	_/system/state/spark/secrets/name/secret_, mode 0600. An empty
+	value is refused. The service reads it when it next starts.
+
+*secret list* _name_
+	List the names of the service's secrets that are set.
+
+*secret remove* _name_ _secret_
+	Remove one.
+
 # EXIT STATUS
 
 0 for a request Spark took, and for *status* of a running service; 3
 for *status* of a service that does not run; 4 for a service Spark does
 not know; 1 when Spark refused the request or could not be reached; 2
 for a command it does not know. *check* gives 1 when a file does not
-read, *new* when the file is there already, and *edit* when the edit
-was given up.
+read, *new* when the file is there already, *edit* when the edit
+was given up, and *secret* when the secret could not be kept or removed.
 
 # FILES
 
@@ -90,6 +109,9 @@ _/system/settings/spark/services/_*name*_.toml_
 
 _/system/live/spark/control_
 	Spark's control socket.
+
+_/system/state/spark/secrets/_*name*
+	The service's secrets.
 
 # SEE ALSO
 

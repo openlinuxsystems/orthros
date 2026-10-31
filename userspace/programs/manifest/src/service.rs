@@ -56,9 +56,15 @@ pub const KEYS: &[&str] = &[
     "cpu_weight",
     "memory",
     "oom",
+    "secrets",
     "permissions",
     "network.outbound",
     "network.listen",
+    "files.read",
+    "files.read-write",
+    "files.mount",
+    "files.shared",
+    "runs-with-your-access",
     "admin.hardware",
 ];
 
@@ -125,6 +131,8 @@ pub struct Service {
     pub restart: Restart,
     /// What its resource domain may use.
     pub limits: Limits,
+    /// The names of the secrets Spark hands it as read-only files.
+    pub secrets: Vec<String>,
     /// What it may do beyond running.
     pub permissions: Permissions,
 }
@@ -160,14 +168,31 @@ impl Default for Limits {
 
 /// What it may do beyond running: the permission list's names, in groups.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawPermissions")]
 pub struct Permissions {
     /// `network.*`: what of the network it may use.
-    #[serde(default)]
     pub network: Network,
+    /// `files.*`: the places of the tree its view holds, beyond
+    /// [`ALWAYS`].
+    pub files: Files,
+    /// `runs-with-your-access`: the whole tree as Spark holds it, with
+    /// the bypass right, in place of a view.
+    pub runs_with_your_access: bool,
     /// `admin.*`: what of the machine it may administer.
-    #[serde(default)]
     pub admin: Admin,
+}
+
+impl Permissions {
+    /// Every place its view holds beyond [`ALWAYS`], in the order Spark
+    /// attaches them.
+    pub fn places(&self) -> Vec<Place> {
+        let files = &self.files;
+        let read = files.read.iter().map(|path| Place { path: path.clone(), write: false });
+        let write = files.read_write.iter().chain(&files.mount);
+        let write = write.map(|path| Place { path: path.clone(), write: true });
+        let shared = files.shared.iter().map(|name| Place { path: shared(name), write: true });
+        read.chain(write).chain(shared).collect()
+    }
 }
 
 /// The administration group: `admin.hardware`.
@@ -178,6 +203,139 @@ pub struct Admin {
     /// fans, LEDs and ARGB header (ADR 0208).
     #[serde(default)]
     pub hardware: bool,
+}
+
+/// The files group: the places of the tree a service's view holds, each
+/// at its real path.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Files {
+    /// `files.read`: places it may read.
+    #[serde(default, deserialize_with = "places")]
+    pub read: Vec<String>,
+    /// `files.read-write`: places it may read and change.
+    #[serde(default, rename = "read-write", deserialize_with = "places")]
+    pub read_write: Vec<String>,
+    /// `files.mount`: places it may read, change and mount filesystems
+    /// beneath, which it gets as descriptors from 3 too.
+    #[serde(default, deserialize_with = "places")]
+    pub mount: Vec<String>,
+    /// `files.shared`: folders of `/shared` it may read and change, by
+    /// name.
+    #[serde(default, deserialize_with = "folders")]
+    pub shared: Vec<String>,
+}
+
+/// A place of the tree in a service's view: a directory or a file, at its
+/// real path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    /// Its absolute path.
+    pub path: String,
+    /// Whether the service may change it, or only read it.
+    pub write: bool,
+}
+
+/// What every service's view holds without asking (ADR 0217): the
+/// system's programs, libraries, resources and settings, the processes'
+/// and the kernel's files, read-only; the devices every program uses; and
+/// notifyd's folder, as notifications are always allowed. Its program,
+/// its own `/tmp`, the root's links and its secrets come on top. A place
+/// a file names that is one of these takes its place.
+pub const ALWAYS: &[(&str, bool)] = &[
+    ("/system/commands", false),
+    ("/system/libraries", false),
+    ("/system/resources", false),
+    ("/system/settings", false),
+    ("/system/live/notify", false),
+    ("/processes", false),
+    ("/kernel", false),
+    ("/devices/null", true),
+    ("/devices/zero", false),
+    ("/devices/random", false),
+    ("/devices/urandom", false),
+];
+
+/// Where Spark keeps its own files: no service holds them, or what is
+/// in them, the secrets among them.
+pub const SPARK_STATE: &str = "/system/state/spark";
+
+/// Where Spark keeps the secrets of service `name`, and where the
+/// service finds them, as `SECRETS_DIRECTORY` says.
+pub fn secrets_dir(name: &str) -> String {
+    format!("{SPARK_STATE}/secrets/{name}")
+}
+
+/// The most places `files.mount` names: they are descriptors 3 and on.
+pub const MOUNT_MAX: usize = 4;
+
+/// The path of the folder `name` of `/shared`.
+fn shared(name: &str) -> String {
+    format!("/shared/{name}")
+}
+
+/// Whether `inner` is `outer` or beneath it.
+fn within(inner: &str, outer: &str) -> bool {
+    inner.strip_prefix(outer).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// The `permissions` table as written, before the checks of the whole.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPermissions {
+    #[serde(default)]
+    network: Network,
+    #[serde(default)]
+    files: Files,
+    #[serde(default, rename = "runs-with-your-access")]
+    runs_with_your_access: bool,
+    #[serde(default)]
+    admin: Admin,
+}
+
+impl TryFrom<RawPermissions> for Permissions {
+    type Error = String;
+
+    fn try_from(raw: RawPermissions) -> Result<Permissions, String> {
+        let permissions = Permissions {
+            network: raw.network,
+            files: raw.files,
+            runs_with_your_access: raw.runs_with_your_access,
+            admin: raw.admin,
+        };
+        let places = permissions.places();
+        if permissions.runs_with_your_access && !places.is_empty() {
+            return Err("runs-with-your-access holds every file already: leave out files.*".into());
+        }
+        if permissions.files.mount.len() > MOUNT_MAX {
+            return Err(format!("files.mount names at most {MOUNT_MAX} places"));
+        }
+        for (i, place) in places.iter().enumerate() {
+            let path = place.path.as_str();
+            if let Some(other) =
+                places[..i].iter().find(|o| within(path, &o.path) || within(&o.path, path))
+            {
+                return Err(if path == other.path {
+                    format!("files names {path} twice")
+                } else {
+                    format!("files names {path} and {}, one within the other: name one", other.path)
+                });
+            }
+            if within(path, SPARK_STATE) || within(SPARK_STATE, path) {
+                return Err(format!(
+                    "no service holds {SPARK_STATE}, where Spark keeps its files and the \
+                     services' secrets, so it cannot hold {path}"
+                ));
+            }
+            if let Some((always, _)) = ALWAYS.iter().find(|(a, _)| path != *a && within(path, a)) {
+                return Err(format!(
+                    "every service reads {always} already, so its view cannot hold {path} \
+                     apart; name {always} with files.read-write to change what is in it"
+                ));
+            }
+        }
+        Ok(permissions)
+    }
 }
 
 /// The network group: `network.outbound` and `network.listen`.
@@ -241,6 +399,10 @@ order = 60
 enabled = false
 # When it is started again after it ends: always, on-failure or never.
 restart = "on-failure"
+# The secrets Spark hands it as read-only files, in the folder
+# SECRETS_DIRECTORY names, never in its environment; set each with
+# `service secret set NAME SECRET`.
+secrets = []
 
 # More of its environment, as NAME = "value".
 [environment]
@@ -259,6 +421,18 @@ oom = "service"
 [permissions]
 network.outbound = false
 network.listen = []
+# The places it may read, and read and change, beyond the system's
+# programs, libraries, resources and settings, which every service reads;
+# the places it mounts filesystems beneath; and folders of /shared, by
+# name. It sees nothing else of the tree.
+files.read = []
+files.read-write = []
+files.mount = []
+files.shared = []
+# The whole tree as Spark holds it, in place of files: only for a service
+# that starts other people's shells.
+runs-with-your-access = false
+# Whether it may set the machine's fans, LEDs and ARGB header.
 admin.hardware = false
 "#;
 
@@ -309,6 +483,8 @@ struct File {
     restart: Restart,
     #[serde(default)]
     limits: Limits,
+    #[serde(default, deserialize_with = "secret_names")]
+    secrets: Vec<String>,
     #[serde(default)]
     permissions: Permissions,
 }
@@ -337,6 +513,7 @@ impl TryFrom<File> for Service {
             enabled: file.enabled,
             restart: file.restart,
             limits: file.limits,
+            secrets: file.secrets,
             permissions: file.permissions,
         })
     }
@@ -534,6 +711,77 @@ fn memory<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
         }
     }
     d.deserialize_any(Memory)
+}
+
+/// `files.read`, `files.read-write` and `files.mount`: absolute paths of
+/// places beneath `/`, each written once, without `.`, `..` or an empty
+/// part.
+fn places<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let paths = Vec::<String>::deserialize(d)?;
+    for path in &paths {
+        let parts = path.strip_prefix('/').map(|p| p.split('/'));
+        let fits = parts.is_some_and(|mut parts| {
+            parts
+                .all(|part| !part.is_empty() && part != "." && part != ".." && !part.contains('\0'))
+        });
+        if path == "/" {
+            return Err(de::Error::custom(
+                "files holds places beneath /, not / itself: runs-with-your-access gives a \
+                 service the whole tree",
+            ));
+        }
+        if !fits {
+            return Err(de::Error::custom(format!(
+                "files takes absolute paths without `.`, `..` or `//`, such as /system/state/log, \
+                 not `{}`",
+                path.escape_debug()
+            )));
+        }
+    }
+    Ok(paths)
+}
+
+/// `files.shared`: names of folders of `/shared`.
+fn folders<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let names = Vec::<String>::deserialize(d)?;
+    for name in &names {
+        if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+            return Err(de::Error::custom(format!(
+                "files.shared takes names of folders in /shared, such as \"media\", not `{}`",
+                name.escape_debug()
+            )));
+        }
+    }
+    Ok(names)
+}
+
+/// `secrets`: names of secrets, each as a service's name is written,
+/// and each once.
+fn secret_names<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let names = Vec::<String>::deserialize(d)?;
+    for (i, name) in names.iter().enumerate() {
+        check_secret(name).map_err(de::Error::custom)?;
+        if names[..i].contains(name) {
+            return Err(de::Error::custom(format!("secrets names {name} twice")));
+        }
+    }
+    Ok(names)
+}
+
+/// Checks a secret's name, the name of its file in [`secrets_dir`].
+pub fn check_secret(name: &str) -> Result<(), String> {
+    let fits = (1..=NAME_MAX as usize).contains(&name.len())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        && !name.starts_with(['.', '-']);
+    if fits {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{}` is not a secret's name: it has 1 to {NAME_MAX} letters, digits, `-`, `_` and \
+             `.`, and starts with a letter, a digit or `_`",
+            name.escape_debug()
+        ))
+    }
 }
 
 /// The bytes a size such as `64M`, `512K`, `2G` or `4096` says.

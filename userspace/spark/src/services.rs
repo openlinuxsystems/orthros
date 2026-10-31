@@ -22,7 +22,8 @@
 //! `network.outbound = true` lets it connect out, and `network.listen`
 //! names the ports it may listen on. `admin.hardware = true` gives it the
 //! platform capability, which sets the fans, the LEDs and the ARGB header
-//! (ADR 0208).
+//! (ADR 0208). It reaches the tree only through the view Spark builds of
+//! what its file declares (`views`, ADR 0217).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -31,7 +32,7 @@ use alloc::vec::Vec;
 use libradix::abi::capability::Rights;
 use libradix::abi::errors::File as FileError;
 use libradix::abi::resource_domain::OomClass;
-use manifest::service::{self, Oom};
+use manifest::service::{self, Oom, Place};
 use radix_rt::fs::Dir;
 use radix_rt::println;
 
@@ -67,6 +68,16 @@ pub struct Spec {
     pub listen: Vec<(u32, u32)>,
     /// Whether it gets the platform capability: admin.hardware.
     pub hardware: bool,
+    /// The places its view holds beyond what every service's does.
+    pub places: Vec<Place>,
+    /// The places it mounts filesystems beneath, which it gets as
+    /// descriptors too.
+    pub mounts: Vec<String>,
+    /// Whether it runs with Spark's root, the whole tree, in place of a
+    /// view.
+    pub whole_tree: bool,
+    /// The names of its secrets.
+    pub secrets: Vec<String>,
 }
 
 impl Spec {
@@ -104,6 +115,10 @@ pub fn parse(name: &str, text: &str) -> Result<Spec, String> {
         outbound: network.outbound,
         listen: network.listen.iter().map(|p| (u32::from(p.first), p.count())).collect(),
         hardware: file.permissions.admin.hardware,
+        places: file.permissions.places(),
+        mounts: file.permissions.files.mount.clone(),
+        whole_tree: file.permissions.runs_with_your_access,
+        secrets: file.secrets,
     })
 }
 
@@ -184,7 +199,7 @@ pub fn keep_good(root: &Dir, name: &str, text: &str) {
 }
 
 /// Makes `path` beneath `root` and each directory on the way.
-fn make_dirs(root: &Dir, path: &str) -> Result<(), String> {
+pub fn make_dirs(root: &Dir, path: &str) -> Result<(), String> {
     let mut at = String::new();
     for part in path.split('/') {
         if !at.is_empty() {

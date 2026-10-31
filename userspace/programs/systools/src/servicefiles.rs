@@ -10,10 +10,11 @@
 //! otherwise it shows what is wrong and offers to edit it again.
 
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::io::{self, BufRead, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use manifest::service;
 
@@ -207,4 +208,159 @@ fn edit_copy(path: &Path, copy: &Path, original: &[u8], name: &str) -> Result<i3
             return Ok(1);
         }
     }
+}
+
+/// `service secret set NAME SECRET`, `service secret list NAME` and
+/// `service secret remove NAME SECRET` (ADR 0217): the secrets Spark
+/// hands service NAME as read-only files, which no command shows back.
+pub fn secret(operands: &[String]) -> Result<i32, Fail> {
+    const USAGE: &str = "Usage: service secret set NAME SECRET | list NAME | remove NAME SECRET";
+    let (verb, rest) = operands.split_first().ok_or_else(|| usage(USAGE.into()))?;
+    let (name, secret) = match (verb.as_str(), rest) {
+        ("list", [name]) => (name, None),
+        ("set" | "remove", [name, secret]) => (name, Some(secret.as_str())),
+        _ => return Err(usage(USAGE.into())),
+    };
+    service::check_name(name).map_err(fail)?;
+    if let Some(secret) = secret {
+        service::check_secret(secret).map_err(fail)?;
+    }
+    let dir = PathBuf::from(service::secrets_dir(name));
+    match (verb.as_str(), secret) {
+        ("set", Some(secret)) => {
+            let value = read_secret(name, secret)?;
+            // Only root reads them; Spark hands each service its own.
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&dir)
+                .map_err(|e| util::failed(&dir.display(), e))?;
+            let path = dir.join(secret);
+            let new = dir.join(format!(".{secret}.new"));
+            let _ = fs::remove_file(&new);
+            let written = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&new)
+                .and_then(|mut file| file.write_all(&value).and_then(|()| file.sync_all()))
+                .and_then(|()| fs::rename(&new, &path));
+            if let Err(e) = written {
+                let _ = fs::remove_file(&new);
+                return Err(util::failed(&path.display(), e));
+            }
+            println!(
+                "set {name}'s secret {secret}; {name} reads it when it next starts: `service \
+                 {name} restart`"
+            );
+        }
+        ("remove", Some(secret)) => {
+            let path = dir.join(secret);
+            fs::remove_file(&path).map_err(|e| match e.kind() {
+                io::ErrorKind::NotFound => fail(format!("{name} has no secret {secret}")),
+                _ => util::failed(&path.display(), e),
+            })?;
+        }
+        _ => {
+            let mut names: Vec<String> = match fs::read_dir(&dir) {
+                Ok(entries) => entries
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| !n.starts_with('.'))
+                    .collect(),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+                Err(e) => return Err(util::failed(&dir.display(), e)),
+            };
+            names.sort();
+            for secret in names {
+                println!("{secret}");
+            }
+        }
+    }
+    Ok(0)
+}
+
+/// Set by SIGINT, SIGTERM or SIGHUP while a secret is typed, so that the
+/// terminal's echo comes back before `service` ends.
+static STOPPED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    STOPPED.store(true, Ordering::Relaxed);
+}
+
+/// The value of `name`'s secret `secret`, from the standard input: a line
+/// typed at the terminal, which is not shown, or else everything there,
+/// with one newline at its end taken off, as `echo` adds one.
+fn read_secret(name: &str, secret: &str) -> Result<Vec<u8>, Fail> {
+    let mut value = Vec::new();
+    // SAFETY: isatty only looks at the descriptor.
+    if unsafe { libc::isatty(0) } == 1 {
+        eprint!("{name}'s secret {secret}: ");
+        let _ = io::stderr().flush();
+        // Ctrl+C stops the read, not `service`, which puts the echo back
+        // first; without SA_RESTART, read(2) ends with EINTR.
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            // SAFETY: all zeros is a valid sigaction: numbers, a signal
+            // set and a function address.
+            let mut action: libc::sigaction = unsafe { util::zeroed() };
+            action.sa_sigaction = on_signal as *const () as usize;
+            // SAFETY: the handler only stores to an atomic.
+            unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) };
+        }
+        // SAFETY: all zeros is a valid termios: numbers.
+        let mut saved: libc::termios = unsafe { util::zeroed() };
+        // SAFETY: tcgetattr fills `saved`.
+        let got = unsafe { libc::tcgetattr(0, &raw mut saved) } == 0;
+        if got {
+            let mut quiet = saved;
+            quiet.c_lflag &= !libc::ECHO;
+            // SAFETY: `quiet` is a valid termios.
+            unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw const quiet) };
+        }
+        let read = read_line(&mut value);
+        if got {
+            // SAFETY: `saved` is the termios read above.
+            unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw const saved) };
+        }
+        eprintln!();
+        if STOPPED.load(Ordering::Relaxed) {
+            return Err(fail(format!("stopped: {name}'s secret {secret} is as it was")));
+        }
+        read.map_err(|e| util::failed(&"the terminal", e))?;
+    } else {
+        io::stdin()
+            .lock()
+            .read_to_end(&mut value)
+            .map_err(|e| util::failed(&"standard input", e))?;
+    }
+    if value.ends_with(b"\n") {
+        value.pop();
+    }
+    if value.is_empty() {
+        return Err(fail(format!("{name}'s secret {secret} cannot be empty")));
+    }
+    Ok(value)
+}
+
+/// Reads the standard input a byte at a time into `line` up to its
+/// newline, which it keeps, or its end; stops early when a signal came.
+fn read_line(line: &mut Vec<u8>) -> io::Result<()> {
+    let mut byte = 0u8;
+    while !STOPPED.load(Ordering::Relaxed) {
+        // SAFETY: `byte` is one writable byte.
+        match unsafe { libc::read(0, (&raw mut byte).cast(), 1) } {
+            0 => break,
+            1 => {
+                line.push(byte);
+                if byte == b'\n' {
+                    break;
+                }
+            }
+            _ => match io::Error::last_os_error() {
+                err if err.kind() == io::ErrorKind::Interrupted => {}
+                err => return Err(err),
+            },
+        }
+    }
+    Ok(())
 }

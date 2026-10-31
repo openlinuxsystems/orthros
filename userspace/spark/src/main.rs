@@ -59,6 +59,7 @@ extern crate alloc;
 
 mod services;
 mod supervisor;
+mod views;
 
 use alloc::format;
 use alloc::string::String;
@@ -129,9 +130,14 @@ const LINKS: [(&str, &str); 10] = [
     ("system/state/run", "../live"),
 ];
 
-/// What is mounted where before the disks, in this order.
-const MOUNTS: [(&str, FilesystemKind, MountFlags); 4] = [
+/// What is mounted where before the disks, in this order. `/volumes` is
+/// memory, as Linux's `/run/media` is: what is mounted there is for this
+/// boot, and volumed's service file hands it the root of that tmpfs, the
+/// one place beneath which a capability can name the mounts it makes
+/// (ADR 0217).
+const MOUNTS: [(&str, FilesystemKind, MountFlags); 5] = [
     ("tmp", FilesystemKind::Tmpfs, MountFlags::NONE),
+    ("volumes", FilesystemKind::Tmpfs, MountFlags::NONE),
     ("devices", FilesystemKind::Dev, MountFlags::NONE),
     ("processes", FilesystemKind::Proc, MountFlags::NONE),
     ("kernel", FilesystemKind::Sys, MountFlags::NONE),
@@ -430,7 +436,12 @@ fn build(root: &Dir, volumes: bool, compress: &[&str]) -> bool {
         }
     }
     for (path, kind, flags) in MOUNTS {
-        if let Err(err) = root.mount(path, kind, None, flags) {
+        // Everyone writes in /tmp; only root makes the mount points of
+        // /volumes.
+        let mounted = root
+            .mount(path, kind, None, flags)
+            .and_then(|()| if path == "volumes" { narrow(root, path) } else { Ok(()) });
+        if let Err(err) = mounted {
             println!("spark: cannot mount {} on /{path}: {err}", kind.name());
             return false;
         }
@@ -756,9 +767,9 @@ fn mount_root(root: &Dir, disk: &str) -> bool {
     false
 }
 
-/// The mode of the root of each tmpfs Spark mounts in `/system`: only
-/// root changes what is there (ADR 0213). A tmpfs starts as `/tmp` is,
-/// 1777, as on Linux.
+/// The mode of the root of each tmpfs Spark mounts in `/system`, and of
+/// `/volumes`: only root changes what is there (ADR 0213). A tmpfs starts
+/// as `/tmp` is, 1777, as on Linux.
 const SYSTEM_MODE: u16 = 0o755;
 
 /// Gives the tmpfs just mounted on `path` [`SYSTEM_MODE`].
