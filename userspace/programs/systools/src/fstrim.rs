@@ -151,6 +151,7 @@ mod tests {
         assert_eq!(util::parse_size("2MiB"), Some(2 << 20));
         assert_eq!(util::parse_size("1MB"), Some(1_000_000));
         assert_eq!(util::parse_size("1X"), None);
+        assert_eq!(util::parse_size("1\u{e9}"), None);
         assert_eq!(human(0), "0 B");
         assert_eq!(human(27_841_662_976), "25.9 GiB");
         assert_eq!(human(1 << 20), "1 MiB");

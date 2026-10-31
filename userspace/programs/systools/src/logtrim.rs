@@ -275,6 +275,8 @@ mod tests {
         assert_eq!(limits, Limits::default());
         assert_eq!(wrong.len(), 4);
         assert!(wrong[2].contains("no setting is called loud"));
+        let (limits, wrong) = Limits::parse("max-size = 4\u{e9}\n");
+        assert_eq!((limits, wrong.len()), (Limits::default(), 1));
         assert_eq!(Limits::default().cap(100 << 30), 4 << 30);
         assert_eq!(Limits::default().cap(10 << 30), 1 << 30);
         assert_eq!(Limits::default().cap(0), 4 << 30);

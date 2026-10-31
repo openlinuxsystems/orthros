@@ -68,7 +68,9 @@ pub fn parse_size(text: &str) -> Option<u64> {
     let number: u64 = number.parse().ok()?;
     let suffix = suffix.to_ascii_uppercase();
     let power = |base: u64, n: u32| number.checked_mul(base.checked_pow(n)?);
-    let (letter, rest) = suffix.split_at(suffix.len().min(1));
+    // Not a size if a letter of it is not ASCII: logd reads one from its
+    // settings, and must not end over it.
+    let (letter, rest) = suffix.split_at_checked(suffix.len().min(1))?;
     let n = match letter {
         "" => return Some(number),
         "K" => 1,
