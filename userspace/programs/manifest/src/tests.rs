@@ -262,6 +262,16 @@ fn errors_name_their_line_in_plain_words() {
         "{}",
         error(&many)
     );
+    // Setting the interfaces up takes a capability of its own.
+    let eight = "[permissions]\nnetwork.outbound = true\nnetwork.listen = [1, 2, 3, 4, 5, 6]\n";
+    assert!(service::from_toml(&file(&format!("{eight}admin.network = true"))).is_ok());
+    let nine = "[permissions]\nnetwork.outbound = true\nnetwork.listen = [1, 2, 3, 4, 5, 6, 7]\n\
+                admin.network = true";
+    assert!(
+        error(&file(nine)).contains("asks for 9 network capabilities"),
+        "{}",
+        error(&file(nine))
+    );
 }
 
 #[test]
@@ -316,9 +326,13 @@ restart = on-failure
 # are busy.
 weight = 200
 memory = none
-# Root's shells may set the fans, the LEDs and the ARGB header with
-# ectool(8), as root may on Linux; from Phase 13 an administrator's do,
-# once elevated.
+# Root's shells may use the network, listen on any port and set the
+# interfaces up with ip(8), and set the fans, the LEDs and the ARGB
+# header with ectool(8), as root may on Linux; from Phase 13 an
+# administrator's do, once elevated.
+network.outbound = yes
+network.listen = 1-65535
+admin.network = yes
 admin.hardware = yes
 ";
 
@@ -351,9 +365,13 @@ cpu_weight = 200
 memory = \"none\"
 
 [permissions]
-# Root's shells may set the fans, the LEDs and the ARGB header with
-# ectool(8), as root may on Linux; from Phase 13 an administrator's do,
-# once elevated.
+# Root's shells may use the network, listen on any port and set the
+# interfaces up with ip(8), and set the fans, the LEDs and the ARGB
+# header with ectool(8), as root may on Linux; from Phase 13 an
+# administrator's do, once elevated.
+network.outbound = true
+network.listen = [\"1-65535\"]
+admin.network = true
 admin.hardware = true
 # Before Phase 13 a service held the whole tree, and this one still does;
 # narrow it to what it needs with files.* instead (service.toml(5)).
@@ -376,6 +394,7 @@ restart = never
 # Comments move with their settings.
 network.outbound = yes
 network.listen = 8000-8009, 9000
+admin.network = yes
 admin.hardware = yes
 memory = 512K
 oom = app
@@ -393,8 +412,8 @@ weight = 50
     let names: Vec<&str> = service.environment.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, ["GREETING", "LANG", "TZ"]);
     assert_eq!(service.environment[0].1, "hello there");
-    assert_eq!(service.network_grants(), 3);
-    assert!(service.permissions.admin.hardware);
+    assert_eq!(service.network_grants(), 4);
+    assert!(service.permissions.admin.network && service.permissions.admin.hardware);
     // It keeps the whole tree it held.
     assert!(service.permissions.runs_with_your_access);
     assert!(converted.contains(

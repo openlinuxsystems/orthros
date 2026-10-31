@@ -114,7 +114,8 @@ wrong in plain words:
 	*network.listen* = [_port_ | _"first-last"_, ...]
 		The ports it may bind to and listen on, as numbers and ranges,
 		such as *[22, "8000-8009"]*; none unless set. Ranges may not
-		overlap, and with *network.outbound* there are at most eight.
+		overlap, and with *network.outbound* and *admin.network* there
+		are at most eight.
 
 	*files.read* = [_"path"_, ...]
 		Places of the tree it may read, directories or files, each at
@@ -143,6 +144,12 @@ wrong in plain words:
 		and modes of files, in place of a view; *false* unless set, and
 		not with *files.\**. Only a service that starts other people's
 		shells needs it, as *consoled*(8) does until sign-in.
+
+	*admin.network* = *true* | *false*
+		Whether it may set the network interfaces up, their addresses
+		and routers, as *ip*(8) does, with a network capability of only
+		the control right (*radix-network*(2), ADR 0190); *false* unless
+		set. *consoled*(8)'s file sets it, so that root's shells may.
 
 	*admin.hardware* = *true* | *false*
 		Whether it may set the machine's fans, their curves, its LEDs
@@ -241,8 +248,8 @@ when its service is started: it writes _name_*.toml*, with every comment
 above the setting it was above, and keeps the old file as
 _name_*.service.old*. *weight* becomes *cpu_weight*, and with *memory*
 and *oom* goes in *[limits]*; *environment* becomes a table; and
-*network.outbound*, *network.listen* and *admin.hardware* go in
-*[permissions]*, with *runs-with-your-access = true* and a comment, since
+*network.outbound*, *network.listen*, *admin.network* and
+*admin.hardware* go in *[permissions]*, with *runs-with-your-access = true* and a comment, since
 a service of before Phase 13 held the whole tree: narrow it with
 *files.\** instead. A file with an error is not converted, and Spark
 logs why.

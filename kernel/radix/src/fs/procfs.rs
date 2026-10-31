@@ -27,7 +27,10 @@
 //! - `/processes/loadavg`: the load averages;
 //! - `/processes/uptime`: nanoseconds since boot;
 //! - `/processes/acpi/button/lid/<name>/state`, Linux's, for each lid of
-//!   the firmware's (ADR 0201): `state:      open`, or `closed`.
+//!   the firmware's (ADR 0201): `state:      open`, or `closed`;
+//! - `/processes/net/dev`, `route`, `tcp` and `udp`: the network
+//!   interfaces' counts, their routes and the sockets, in Linux's formats
+//!   (ADR 0190, `crate::net::proc`).
 //!
 //! A newline or a backslash in a name or a path is written the same way,
 //! so that it cannot end its line early.
@@ -45,6 +48,7 @@ use radix_vfs::{Access, Error, FsKind, FsRef, KArc, Kind, NodeRef, Result, Text,
 
 use super::FileRef;
 use crate::acpi::devices::{self, MAX_LIDS};
+use crate::net;
 use crate::sched::{self, Run, ThreadRef};
 use crate::user::UserRef;
 use crate::user::objects::{self, Object};
@@ -95,12 +99,27 @@ const PROCESS_FILES: [&str; 4] = ["cmdline", "files", "status", "threads"];
 /// Node numbers: fixed ones for the root and its files, and one per
 /// process and per file of its directory above them.
 const ROOT_ID: u64 = 1;
-const PROCESS_ID_BASE: u64 = 16;
+const PROCESS_ID_BASE: u64 = 32;
 const PER_PROCESS: u64 = 1 + PROCESS_FILES.len() as u64;
 /// `/processes/acpi`, its `button` and `lid`, then each lid's directory
 /// and its `state`, between the root's files and the processes.
 const ACPI_ID: u64 = 8;
-const _: () = assert!(ACPI_ID + 3 + 2 * MAX_LIDS as u64 <= PROCESS_ID_BASE);
+const _: () = assert!(ACPI_ID + 3 + 2 * MAX_LIDS as u64 <= NET_ID);
+
+/// `/processes/net`, then its files.
+const NET_ID: u64 = 16;
+const NET_FILES: [(&str, Generate); 4] = [
+    ("dev", net::proc::dev),
+    ("route", net::proc::route),
+    ("tcp", net::proc::tcp),
+    ("udp", net::proc::udp),
+];
+const _: () = assert!(NET_ID + 1 + NET_FILES.len() as u64 <= PROCESS_ID_BASE);
+
+static NET: Once<KArc<FixedDir>> = Once::new();
+
+/// What writes a generated file's text.
+type Generate = fn(&mut Text) -> fmt::Result;
 
 static ACPI: Once<KArc<FixedDir>> = Once::new();
 
@@ -131,6 +150,9 @@ impl Listing for Root {
         if devices::lids().next().is_some() && !f("acpi", Kind::Directory) {
             return;
         }
+        if !f("net", Kind::Directory) {
+            return;
+        }
         let mut numbers = objects::process_numbers();
         posix::zombie_numbers(&mut numbers);
         numbers.sort_unstable();
@@ -145,7 +167,7 @@ impl Listing for Root {
     }
 
     fn lookup(&self, name: &str) -> Result<NodeRef> {
-        let generate: fn(&mut Text) -> fmt::Result = match name {
+        let generate: Generate = match name {
             "loadavg" => loadavg,
             "meminfo" => meminfo,
             "mounts" => mounts,
@@ -153,6 +175,7 @@ impl Listing for Root {
             "swaps" => swaps,
             "uptime" => uptime,
             "acpi" if devices::lids().next().is_some() => return acpi(),
+            "net" => return net_dir(),
             _ => {
                 let number: u64 = name.parse().map_err(|_| Error::NotFound)?;
                 let process = (!name.starts_with('0'))
@@ -196,6 +219,24 @@ fn acpi() -> Result<NodeRef> {
     }
     // Another thread may have made it meanwhile; either will do.
     let dir: NodeRef = match ACPI.set(dir) {
+        Ok(dir) => dir.clone(),
+        Err(dir) => dir,
+    };
+    Ok(dir)
+}
+
+/// `/processes/net`, made the first time it is looked up.
+fn net_dir() -> Result<NodeRef> {
+    if let Some(dir) = NET.get() {
+        let dir: NodeRef = dir.clone();
+        return Ok(dir);
+    }
+    let dir = FixedDir::new(NET_ID)?;
+    for (at, (name, generate)) in (NET_ID + 1..).zip(NET_FILES) {
+        dir.add(name, Generated::from_fn(at, generate)?)?;
+    }
+    // Another thread may have made it meanwhile; either will do.
+    let dir: NodeRef = match NET.set(dir) {
         Ok(dir) => dir.clone(),
         Err(dir) => dir,
     };

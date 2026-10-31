@@ -18,8 +18,12 @@
 //! before the call that sent it returns, and `lo`'s thread only wakes for
 //! the stack's timers.
 //!
-//! Until `netd` configures interfaces (12a.4), the first card takes the
-//! IPv4 address and router of the `ip=` and `gateway=` flags.
+//! A card starts with no address, or for the first card the IPv4
+//! address and router of the `ip=` and `gateway=` flags; ip(8), and
+//! the DHCP client to come, set them through the network capability's control right
+//! ([`configure`], ADR 0190). Each interface is numbered as Linux numbers
+//! them, `lo` 1 and the cards from 2 ([`Interface::index`]);
+//! `/kernel/class/net` and `/processes/net` show them.
 //!
 //! When a poll may have changed what a socket can do, the thread bumps
 //! one count for all of networking and wakes those who wait on it, and
@@ -37,6 +41,7 @@
 
 pub mod memory;
 pub mod ports;
+pub mod proc;
 
 use alloc::vec::Vec;
 use core::fmt::{self, Write};
@@ -96,7 +101,7 @@ pub enum Card {
 
 impl Card {
     /// Whether the card stopped with an error.
-    fn failed(&self) -> bool {
+    pub fn failed(&self) -> bool {
         match self {
             Card::Virtio { net, .. } => net.failed(),
             Card::Loopback(_) => false,
@@ -262,6 +267,13 @@ impl Interface {
     /// Whether it is the loopback interface.
     pub fn is_loopback(&self) -> bool {
         self.number == 0
+    }
+
+    /// Its number as Linux numbers interfaces, its `ifindex`: 1 for `lo`,
+    /// then the cards from 2.
+    pub fn index(&self) -> u32 {
+        // At most MAX_INTERFACES.
+        self.number as u32 + 1
     }
 
     /// Adds `socket` to `stack`, its own, locked, making room for it if
@@ -433,6 +445,52 @@ pub fn interfaces() -> impl Iterator<Item = &'static Interface> {
     LO.get().into_iter().chain(INTERFACES[..cards].iter().filter_map(Once::get))
 }
 
+/// The interface numbered `index`, as Linux numbers them (`ifindex`).
+pub fn by_index(index: u32) -> Option<&'static Interface> {
+    index.checked_sub(1).and_then(|number| numbered(number as usize))
+}
+
+/// Why [`configure`] failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigureError {
+    /// No interface has that number.
+    NoInterface,
+    /// It is `lo`, whose addresses are its own and the cards'.
+    Loopback,
+}
+
+/// Gives the interface numbered `index` `addresses`, the first its own,
+/// and `router` as its default route, or none: radix-network(2)'s
+/// `configure`, through its control right. `lo` takes the addresses as
+/// its own, so that a packet to them comes back to the machine; the
+/// sockets that wait on networking look again.
+///
+/// # Errors
+///
+/// When there is no such interface, or it is `lo`.
+pub fn configure(
+    index: u32,
+    addresses: &[Ipv4Cidr],
+    router: Option<Ipv4Address>,
+) -> Result<(), ConfigureError> {
+    let interface = by_index(index).ok_or(ConfigureError::NoInterface)?;
+    if interface.is_loopback() {
+        return Err(ConfigureError::Loopback);
+    }
+    interface.stack.lock().configure(addresses, router);
+    addresses_changed();
+    info!(
+        "Net: {} is set to {} address{}{}",
+        interface.name,
+        addresses.len(),
+        if addresses.len() == 1 { "" } else { "es" },
+        if router.is_some() { ", with a router" } else { "" },
+    );
+    interface.kick();
+    changed();
+    Ok(())
+}
+
 /// The interface a packet to `to` goes out through: `lo` for the
 /// machine's own addresses, else the first card on `to`'s network, else
 /// the first with a router.
@@ -563,15 +621,26 @@ fn run_thread(interface: &'static Interface) -> Result<(), &'static str> {
     }
 }
 
-/// Gives `lo` the cards' addresses with its own, after a card's changed.
+/// The most addresses `lo` has: its own and the cards', as many as fit.
+const LOOPBACK_ADDRESSES: usize = 8;
+
+/// Gives `lo` the cards' addresses with its own, after a card's changed:
+/// each card's first, then their others, while there is room.
 fn addresses_changed() {
     let Some(lo) = LO.get() else { return };
-    let mut addresses = [Ipv4Cidr::new(LOOPBACK, 8); MAX_INTERFACES];
+    let mut addresses = [Ipv4Cidr::new(LOOPBACK, 8); LOOPBACK_ADDRESSES];
     let mut count = 1;
-    for interface in interfaces().filter(|interface| !interface.is_loopback()) {
-        if let Some(cidr) = interface.stack.lock().ipv4() {
-            addresses[count] = Ipv4Cidr::new(cidr.address(), 32);
-            count += 1;
+    for first in [true, false] {
+        for interface in interfaces().filter(|interface| !interface.is_loopback()) {
+            let stack = interface.stack.lock();
+            let (skip, take) = if first { (0, 1) } else { (1, usize::MAX) };
+            for cidr in stack.ipv4_addresses().skip(skip).take(take) {
+                if count == LOOPBACK_ADDRESSES {
+                    break;
+                }
+                addresses[count] = Ipv4Cidr::new(cidr.address(), 32);
+                count += 1;
+            }
         }
     }
     lo.stack.lock().set_ipv4_addresses(&addresses[..count]);

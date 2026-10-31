@@ -338,6 +338,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   sockets          a program connects and listens over TCP and UDP on lo and
                    a virtio card, only as far as its network capabilities
                    allow
+  interfaces       a virtio card with no address: a bound socket sends a
+                   DHCPDISCOVER and gets QEMU's offer, and ip sets it up
 
   --case <name>         Run only this boot test; repeat for more
   --timeout <seconds>   Limit for each boot test (default 300)"
