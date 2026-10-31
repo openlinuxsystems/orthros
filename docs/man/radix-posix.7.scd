@@ -507,7 +507,8 @@ foreground. The tests are:
 
 *hello*, *fork*, *exec*, *signal*, *pipe*, *socket*, *inet*, *poll*, *tty*, *job*, *time*, *files*, *locks*, *thread*, *cancel*, *spawn*, *limits*, *format*
 	C programs in _userspace/posix_, one per area. *inet* runs TCP and
-	UDP over the loopback interface, and checks that a child with no
+	UDP over the loopback interface, makes 300 connections in a row, more
+	than the interface has sockets, and checks that a child with no
 	network capability cannot make a network socket (EACCES), one that
 	may only connect out cannot bind or listen, and one that may only
 	listen on a range of ports cannot connect out. *format* holds

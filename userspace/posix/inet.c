@@ -91,6 +91,21 @@ static void bench_order(void) {
 	close(fd);
 }
 
+// More short connections in a row than the loopback interface has
+// sockets: each ends at once, in TIME-WAIT, and gives its socket back.
+static void short_connections(void) {
+	int server = listener();
+	unsigned short port = port_of(server);
+	for(int i = 0; i < 300; i++) {
+		int client = connected(port);
+		int accepted = accept(server, NULL, NULL);
+		CHECK(accepted >= 0);
+		CHECK(close(client) == 0);
+		CHECK(close(accepted) == 0);
+	}
+	CHECK(close(server) == 0);
+}
+
 static void tcp(void) {
 	int server = listener();
 	unsigned short port = port_of(server);
@@ -426,6 +441,7 @@ static void capabilities(void) {
 int main(void) {
 	check_start("inet");
 	RUN(bench_order);
+	RUN(short_connections);
 	RUN(tcp);
 	RUN(non_blocking);
 	RUN(unbound);

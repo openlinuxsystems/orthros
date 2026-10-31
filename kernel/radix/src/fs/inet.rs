@@ -1140,6 +1140,8 @@ fn receive_stream(state: &mut State, out: &mut dyn Out) -> Result<Option<Receive
         if out.is_empty() {
             return Ok(Some((0, peer)));
         }
+        // Whether the window it offers had shut to half its buffer or less.
+        let narrow = connection.recv_queue() * 2 >= connection.recv_capacity();
         let (mut copied, mut tried) = (Ok(true), 0);
         let read = connection.recv(|bytes| {
             tried = bytes.len().min(out.len());
@@ -1159,8 +1161,14 @@ fn receive_stream(state: &mut State, out: &mut dyn Out) -> Result<Option<Receive
         return match read {
             Ok(0) => Ok(None),
             Ok(n) => {
-                // The window it offers grew: the other end hears of it.
-                part.interface.kick();
+                // The window it offers grew. The other end hears of it at
+                // once only if it had shut to half the buffer or less, as on
+                // Linux, which sends a window by itself only when it opens
+                // that much: until then the other end has half the buffer
+                // to send into, and the next ACK carries the window.
+                if narrow {
+                    part.interface.kick();
+                }
                 Ok(Some((n, peer)))
             }
             // The other end sent its FIN, and all it sent has been read.

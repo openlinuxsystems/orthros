@@ -3,10 +3,9 @@
 
 //! `ob bench`: the cost of system calls, IPC round trips, context
 //! switches, fresh pages, TLB shootdowns, memory bandwidth, files and
-//! POSIX processes, pipes, signals, futexes, TCP and UDP on the loopback
-//! interface and raw disk transfers on
-//! Radix, with Linux as the baseline (docs/design/ipc.md, ADR 0035, ADR
-//! 0039, ADR 0106, ADR 0111).
+//! POSIX processes, pipes, signals, futexes, TCP and UDP over the loopback
+//! interface and raw disk transfers on Radix, with Linux as the baseline
+//! (docs/design/ipc.md, ADR 0035, ADR 0039, ADR 0106, ADR 0111, ADR 0185).
 //!
 //! It boots a test image with `selftest=bench` on 2 CPUs, where the
 //! benchmark programs of `userspace/usertests` print one `BENCH` line per
@@ -51,8 +50,8 @@ const CMDLINE: &str = "qemu-exit selftest=bench";
 
 /// The kernel command line of the POSIX benchmark boot: Spark runs the C
 /// program of [`POSIX_SOURCE`] from the boot archive, and nothing else,
-/// with its own network capability for the loopback benchmarks,
-/// with the benchmarks' disks ([`disk_args`]), the Btrfs one where Spark
+/// giving it a network capability for the loopback benchmarks, with the
+/// benchmarks' disks ([`disk_args`]), the Btrfs one where Spark
 /// mounts it, to compress what is written to it, as Linux mounts it.
 const POSIX_CMDLINE: &str = "-- --compress vdb --posix --network /system/tests/posix/bench --network \
                              --disk /devices/vda --nvme /devices/nvme0n1 --btrfs /volumes/vdb";
@@ -148,6 +147,10 @@ pub const BUDGETS: &[(&str, u64)] = &[
     ("posix_poll", 1_300),                     // 1,092
     ("posix_futex_same_cpu", 5_300),           // 4,787
     ("posix_futex_shared_same_cpu", 5_800),    // 5,248
+    ("posix_tcp_connect", 51_000),             // 46,050
+    ("posix_tcp_roundtrip_same_cpu", 20_000),  // 17,995
+    ("posix_udp_roundtrip_same_cpu", 17_000),  // 15,014
+    ("posix_tcp_mib", 2_000_000),              // 1,746,668
 ];
 
 /// One measurement: a `BENCH name=... ns=... iterations=...` line.

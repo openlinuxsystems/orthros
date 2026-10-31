@@ -47,7 +47,20 @@ sat in LAST-ACK for that long.
   bytes**, as Linux's loopback skips them and has an MTU of 65,536: its
   packets never leave memory, and a socket's whole window of 64 KiB goes
   as one packet. Every card's packets still have theirs made and
-  checked.
+  checked. A UDP socket holds 64 KiB of datagrams each way, so the
+  longest datagram `lo` carries, 65,507 bytes, fits, as on Linux.
+- **A read that opens a connection's window polls the stack only when
+  the window had shut to half the buffer or less**, as Linux sends a
+  window by itself only when it opens that much. Every byte read used to
+  poll it, which on `lo` is now a whole poll in the reader's thread; a
+  smaller change goes with the next ACK, and meanwhile the other end
+  still has half the buffer to send into.
+- **The buffers of sockets that closed are kept for new ones**, up to
+  eight of 64 KiB, four sockets' worth. A connection made and closed had
+  the heap make and zero 256 KiB, its two sockets' buffers each way,
+  which was two fifths of its instructions. A buffer is lent again as
+  it is: smoltcp reads only the bytes written to a buffer since it was
+  lent, so what the last socket left there stays out of reach.
 - **An orphan on the loopback interface goes once it reaches
   TIME-WAIT**, with its memory and slot. TIME-WAIT guards against a lost
   last ACK and against stray segments of the old connection, and the
@@ -79,7 +92,8 @@ sat in LAST-ACK for that long.
   connections are still bounded by 128 slots over TIME-WAIT's ten
   seconds; 12a.3b, which hardens the TCP for production, gives the
   stack more slots and TIME-WAIT a smaller form.
-- The inet test checks that a socket bound to port 0 has its port at
-  once and that `TCP_NODELAY` may be set before connecting, as the
-  benchmark does; radix-net's tests check that a loopback connection
-  ends without waiting for a timer.
+- The inet test makes 300 connections in a row, more than `lo` has
+  sockets, and checks that a socket bound to port 0 has its port at once
+  and that `TCP_NODELAY` may be set before connecting, as the benchmark
+  does; radix-net's tests check that a loopback connection ends without
+  waiting for a timer.
