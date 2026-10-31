@@ -324,8 +324,11 @@ sender, and no address for a stream.
 
 *getsockopt* and *setsockopt* take *SO_REUSEADDR* (kept, changing
 nothing), *SO_KEEPALIVE*, *SO_BROADCAST*, *SO_RCVBUF* and *SO_SNDBUF*
-(fixed sizes), *SO_RCVTIMEO*, *SO_SNDTIMEO*, *TCP_NODELAY* and *IP_TTL*;
-*getsockopt* also answers *SO_TYPE*, *SO_DOMAIN*, *SO_PROTOCOL*,
+(fixed sizes), *SO_RCVTIMEO*, *SO_SNDTIMEO*, *TCP_NODELAY*,
+*TCP_KEEPIDLE*, *TCP_KEEPINTVL*, *TCP_KEEPCNT* and *IP_TTL*. Keep-alive
+probes go as on Linux: after 7,200 seconds of quiet, then 75 seconds
+apart, and 9 unanswered reset the connection. TCP's congestion control
+is CUBIC. *getsockopt* also answers *SO_TYPE*, *SO_DOMAIN*, *SO_PROTOCOL*,
 *SO_ERROR* and *SO_ACCEPTCONN*. *SOCK_RAW* fails with EPERM, and control
 messages with EOPNOTSUPP.
 

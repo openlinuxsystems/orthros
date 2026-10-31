@@ -136,8 +136,9 @@ enum SocketOption: u32 {
     /// it is closed, so it changes nothing, but it is kept.
     reuse_address = 1;
     /// SO_KEEPALIVE, a boolean: a stream socket's connection is probed
-    /// after two hours without traffic, and reset if the other end has
-    /// gone.
+    /// after two hours without traffic (keep_idle), and reset if the
+    /// other end has gone: when 9 probes 75 seconds apart (keep_count,
+    /// keep_interval) go unanswered.
     keep_alive = 2;
     /// TCP_NODELAY, a boolean: a stream socket sends small writes at once
     /// rather than gathering them (Nagle's algorithm).
@@ -163,6 +164,16 @@ enum SocketOption: u32 {
     /// SO_SNDTIMEO: likewise for a send, and for a stream socket's
     /// connect, which then fails with in_progress.
     send_timeout = 11;
+    /// TCP_KEEPIDLE: the seconds a stream socket's connection with
+    /// keep_alive is quiet before its first probe, 1 to 32,767; 7,200 to
+    /// begin with.
+    keep_idle = 12;
+    /// TCP_KEEPINTVL: the seconds between probes that go unanswered, 1 to
+    /// 32,767; 75 to begin with.
+    keep_interval = 13;
+    /// TCP_KEEPCNT: the probes that may go unanswered before the
+    /// connection is reset, 1 to 127; 9 to begin with.
+    keep_count = 14;
 }
 
 /// The most files one `send_files` sends, as Linux's SCM_MAX_FD.

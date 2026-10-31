@@ -34,6 +34,15 @@ WireGuard. This page grows with each.
   does, so a byte is copied twice, as on Linux
   ([ADR 0186](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0186-a-loopback-connection-passes-its-bytes-straight-across.md)).
   `ob bench` holds TCP and UDP over `lo` to Linux's speed.
+- **TCP behaves as Linux's** where a program or the other end can tell
+  ([ADR 0187](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0187-tcp-keeps-quiet-connections-and-controls-congestion-as-linux-does.md)):
+  CUBIC congestion control from a window of ten segments, a 200 ms
+  floor on the retransmission timeout, timestamps from a random start
+  for each connection, and keep-alive probes after two hours of quiet,
+  nine of them 75 seconds apart, which TCP_KEEPIDLE, TCP_KEEPINTVL and
+  TCP_KEEPCNT change. A connection with nothing to send stays open
+  however long it is quiet; one whose data goes unacknowledged for 15
+  minutes is reset.
 - **Sockets for programs, through network capabilities**
   ([ADR 0183](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0183-programs-reach-the-network-through-capabilities-of-its-ports.md)).
   A program uses the network only if it was given a network

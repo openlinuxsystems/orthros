@@ -147,7 +147,7 @@ pub const BUDGETS: &[(&str, u64)] = &[
     ("posix_poll", 1_300),                     // 1,092
     ("posix_futex_same_cpu", 5_300),           // 4,787
     ("posix_futex_shared_same_cpu", 5_800),    // 5,248
-    ("posix_tcp_connect", 50_000),             // 45,071
+    ("posix_tcp_connect", 56_000),             // 50,028
     ("posix_tcp_roundtrip_same_cpu", 11_000),  // 9,274
     ("posix_udp_roundtrip_same_cpu", 17_000),  // 14,637
     ("posix_tcp_mib", 1_700_000),              // 1,515,375
