@@ -887,9 +887,10 @@ _target/userspace/_).
 		_/system/tests/services/dhcp_: *netd*(8), which must set the
 		card up by QEMU's DHCP server and say so. Spark starts
 		_/system/tests/posix/dhcp_ beside it with its network capability:
-		the card must have 10.0.2.15/24 and the router, _/etc/resolv.conf_
-		QEMU's DNS server under netd's mark, and netd a lease file, and a
-		connection through the card to QEMU's *cat* must echo; sockets
+		the card must have 10.0.2.15/24 and the router,
+		_/etc/resolv.conf_ must lead to netd's, which names QEMU's DNS
+		server, netd must have a lease file, and a connection through
+		the card to QEMU's *cat* must echo; sockets
 		bound to *lo* must share port 68 with netd's, one at a time, and
 		others be refused it; netd started again must go on with its
 		lease, and the connection through it; and with an address of the
