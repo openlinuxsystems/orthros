@@ -232,7 +232,7 @@ _target/userspace/_).
 		Pass everything after *--* to *qemu-system-x86_64*(1) unchanged,
 		for example *-- -d int* to log interrupts.
 
-*test* [*unit* | *boot* | *kani* | *tla* | *corpus*] [*--case* _name_]... [*--timeout* _seconds_] [*--debug* | *--release*]
+*test* [*unit* | *boot* | *kani* | *tla* | *corpus*] [*--case* _name_]... [*--shard* _part_/_parts_] [*--timeout* _seconds_] [*--debug* | *--release*] | *--list*
 	Run the unit tests of the build tool and the kernel libraries on this
 	machine, then the boot tests: build a test image and boot it in QEMU
 	once per case below. Each case follows the serial console, types
@@ -1119,8 +1119,31 @@ _target/userspace/_).
 		Boot an image with a generated microcode file on an emulated
 		Intel CPU, and check that the kernel finds the matching update.
 
+	The boot tests that Phases 11, 12 and 13 add from now on are
+	described below, each under its phase, which are built in parallel.
+
+	_Phase 11: hardware support_
+
+; Phase 11's boot tests go above this line.
+
+	_Phase 12: networking_
+
+; Phase 12's boot tests go above this line.
+
+	_Phase 13: security and accounts_
+
+; Phase 13's boot tests go above this line.
+
 	*--case* _name_
 		Run only this boot test; repeat the option for more.
+
+	*--shard* _part_/_parts_
+		Run every _parts_th boot test, from the _part_th: *--shard 2/3*
+		runs the second, fifth, eighth and so on. CI runs the boot tests
+		in three jobs this way. It needs *boot*.
+
+	*--list*
+		Name every boot test and what it checks, and run none.
 
 	*--timeout* _seconds_
 		Fail a boot test that has not finished after this long. The

@@ -851,7 +851,39 @@ const MICROCODE_CPU: &str = "qemu64,vendor=GenuineIntel,family=6,model=94,steppi
 const MICROCODE_SIGNATURE: u32 = 0x506e3;
 const MICROCODE_REVISION: u32 = 0x7f;
 
-/// The boot tests, in the order they run.
+// Each phase that is built in parallel with others adds its boot tests to
+// a file of its own, so that two pull requests do not add theirs at the
+// same place in CASES. They run after CASES, in the order of the phases.
+mod phase11;
+mod phase12;
+mod phase13;
+
+/// Every boot test, in the order they run: CASES, then each phase's.
+pub fn all_cases() -> impl Iterator<Item = &'static Case> {
+    CASES.iter().chain(phase11::CASES).chain(phase12::CASES).chain(phase13::CASES)
+}
+
+/// `--shard <part>/<parts>`, as CI gives it to run the boot tests on
+/// several machines at once.
+fn parse_shard(value: &str) -> Result<(usize, usize)> {
+    let parsed = value.split_once('/').and_then(|(part, parts)| {
+        Some((part.parse::<usize>().ok()?, parts.parse::<usize>().ok()?))
+    });
+    match parsed {
+        Some((part, parts)) if (1..=parts).contains(&part) => Ok((part, parts)),
+        _ => crate::bail!("--shard takes <part>/<parts> such as 1/3, not `{value}`"),
+    }
+}
+
+/// The cases of shard `part` of `parts`: every `parts`th, starting at the
+/// `part`th, so that each shard gets some of each kind and the slow ones
+/// (which sit together in CASES, such as the Btrfs tests) are spread out.
+fn in_shard(cases: Vec<&Case>, part: usize, parts: usize) -> Vec<&Case> {
+    cases.into_iter().enumerate().filter(|(i, _)| i % parts == part - 1).map(|(_, c)| c).collect()
+}
+
+/// The boot tests, in the order they run. New ones of a phase built in
+/// parallel go in that phase's file (test/phase11.rs and so on) instead.
 pub const CASES: &[Case] = &[
     Case {
         name: "uefi-usb",
@@ -2301,38 +2333,55 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     while let Some(name) = args.value("--case")? {
         selected.push(name);
     }
+    if args.flag("--list") {
+        args.finish()?;
+        for case in all_cases() {
+            println!("{:<24} {}", case.name, case.about);
+        }
+        return Ok(());
+    }
+    let shard = match args.value("--shard")? {
+        Some(value) => Some(parse_shard(&value)?),
+        None => None,
+    };
     let profile = args.profile(&ctx.config)?;
     let which = args.positional();
     args.finish()?;
     let (unit, boot) = match which.as_deref() {
         None if selected.is_empty() => (true, true),
         None | Some("boot") => (false, true),
-        Some("unit") if selected.is_empty() => (true, false),
+        Some("unit") if selected.is_empty() && shard.is_none() => (true, false),
         Some("kani") if selected.is_empty() => return kani(ctx),
         Some("tla") if selected.is_empty() => return tla::check(ctx),
         Some("corpus") => return corpus::test(ctx, &selected),
         Some(suite @ ("unit" | "kani" | "tla")) => {
-            crate::bail!("--case selects boot tests; it cannot be used with `{suite}`")
+            crate::bail!("--case and --shard select boot tests; they cannot be used with `{suite}`")
         }
         Some(other) => crate::bail!(
             "unknown test suite `{other}`; use `unit`, `boot`, `kani`, `tla` or `corpus`"
         ),
     };
-    let cases: Vec<&Case> = if selected.is_empty() {
-        CASES.iter().collect()
+    if shard.is_some() && which.as_deref() != Some("boot") {
+        crate::bail!("--shard splits the boot tests; give `boot` with it");
+    }
+    let mut cases: Vec<&Case> = if selected.is_empty() {
+        all_cases().collect()
     } else {
         let mut cases = Vec::new();
         for name in &selected {
-            match CASES.iter().find(|case| case.name == name) {
+            match all_cases().find(|case| case.name == name) {
                 Some(case) => cases.push(case),
                 None => {
-                    let names: Vec<_> = CASES.iter().map(|case| case.name).collect();
+                    let names: Vec<_> = all_cases().map(|case| case.name).collect();
                     crate::bail!("no boot test `{name}`; the tests are {}", names.join(", "));
                 }
             }
         }
         cases
     };
+    if let Some((part, parts)) = shard {
+        cases = in_shard(cases, part, parts);
+    }
 
     if unit {
         unit_tests(ctx)?;
@@ -7625,9 +7674,27 @@ mod tests {
     }
 
     #[test]
+    fn shards_split_the_cases_between_them() {
+        let cases: Vec<&Case> = all_cases().collect();
+        let mut seen: Vec<&str> = Vec::new();
+        for part in 1..=3 {
+            seen.extend(in_shard(cases.clone(), part, 3).iter().map(|case| case.name));
+        }
+        seen.sort_unstable();
+        let mut all: Vec<&str> = cases.iter().map(|case| case.name).collect();
+        all.sort_unstable();
+        assert_eq!(seen, all);
+        assert_eq!(parse_shard("2/3").unwrap(), (2, 3));
+        for bad in ["0/3", "4/3", "3", "a/b", "1/0"] {
+            assert!(parse_shard(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn case_names_are_unique_and_command_lines_fit() {
-        for (i, case) in CASES.iter().enumerate() {
-            assert!(CASES[..i].iter().all(|other| other.name != case.name), "{}", case.name);
+        let cases: Vec<&Case> = all_cases().collect();
+        for (i, case) in cases.iter().enumerate() {
+            assert!(cases[..i].iter().all(|other| other.name != case.name), "{}", case.name);
             assert!(case.cmdline.len() <= CMDLINE_SLOT);
             crate::config::validate_cmdline(case.cmdline).unwrap();
         }

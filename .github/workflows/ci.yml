@@ -30,7 +30,7 @@ env:
 
 jobs:
   build:
-    name: Lint, build, test, docs and image
+    name: Lint, build, docs and image
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -91,9 +91,6 @@ jobs:
       - name: ./ob lint
         run: ./ob lint
 
-      - name: ./ob test
-        run: ./ob test
-
       - name: ./ob docs --check
         run: ./ob docs --check
 
@@ -128,11 +125,121 @@ jobs:
             out/dukovo-*-x86_64.spdx
           retention-days: 14
 
+  # The host unit tests and the boot tests run beside the lint job, the
+  # boot tests split between three machines, so that a pull request's CI
+  # takes the time of its slowest job rather than of all of them in turn.
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Allow QEMU to use KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
+            xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs scdoc mandoc \
+            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # The ports main built last, as in the build job.
+      - name: Note the port toolchain's version
+        id: ports-key
+        run: echo "clang=$(clang-20 --version | head -n1 | tr -c 'A-Za-z0-9.\n' -)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the built ports
+        if: github.event_name != 'push'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            out/sysroot
+            out/toolchain
+            out/ports
+            target/ports/sources
+          key: ports-host-${{ steps.ports-key.outputs.clang }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
+          restore-keys: ports-host-${{ steps.ports-key.outputs.clang }}-
+
+      - name: ./ob setup
+        run: ./ob setup
+
+      - name: ./ob test unit
+        run: ./ob test unit
+
+  boot:
+    name: Boot tests (${{ matrix.shard }}/3)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Allow QEMU to use KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
+            xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs scdoc mandoc \
+            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: boot
+          save-if: ${{ matrix.shard == 1 }}
+
+      # The ports main built last, as in the build job.
+      - name: Note the port toolchain's version
+        id: ports-key
+        run: echo "clang=$(clang-20 --version | head -n1 | tr -c 'A-Za-z0-9.\n' -)" >> "$GITHUB_OUTPUT"
+
+      # On main too: this job saves nothing, so the build job's rule that
+      # main builds the ports from scratch does not need it to.
+      - name: Restore the built ports
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            out/sysroot
+            out/toolchain
+            out/ports
+            target/ports/sources
+          key: ports-host-${{ steps.ports-key.outputs.clang }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
+          restore-keys: ports-host-${{ steps.ports-key.outputs.clang }}-
+
+      - name: ./ob setup
+        run: ./ob setup
+
+      - name: ./ob test boot --shard ${{ matrix.shard }}/3
+        run: ./ob test boot --shard ${{ matrix.shard }}/3
+
       - name: Upload boot test logs and screenshots
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: boot-test-logs
+          name: boot-test-logs-${{ matrix.shard }}
           path: |
             out/test/*.log
             out/test/*.ppm
@@ -385,8 +492,28 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The container runs the same tests as the jobs above, with the
+      # container's toolchain. A pull request runs it only when it changes
+      # that toolchain or what builds with it; main runs it on every merge.
+      - name: Decide whether the container needs testing
+        id: scope
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ] \
+            || git diff --name-only "$BASE" HEAD \
+              | grep -qE '^(tools/container/|tools/xtask/src/(doctor|ports)\.rs|ports/|rust-toolchain\.toml|\.github/)'; then
+            echo run=true >> "$GITHUB_OUTPUT"
+          else
+            echo "No container files changed; main's run covers the container."
+            echo run=false >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Allow QEMU to use KVM
+        if: steps.scope.outputs.run == 'true'
         run: |
           if [ -e /dev/kvm ]; then
             echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -398,11 +525,12 @@ jobs:
       # The ports main built last, as in the build job, keyed by the
       # container's definition, which holds its Clang.
       - name: Note the build container's version
+        if: steps.scope.outputs.run == 'true'
         id: ports-key
         run: echo "toolchain=$(sha256sum tools/container/Containerfile | cut -c1-12)" >> "$GITHUB_OUTPUT"
 
       - name: Restore the built ports
-        if: github.event_name != 'push'
+        if: steps.scope.outputs.run == 'true' && github.event_name != 'push'
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -414,9 +542,11 @@ jobs:
           restore-keys: ports-container-${{ steps.ports-key.outputs.toolchain }}-
 
       - name: ./ob --container doctor
+        if: steps.scope.outputs.run == 'true'
         run: ./ob --container doctor
 
       - name: ./ob --container test
+        if: steps.scope.outputs.run == 'true'
         run: ./ob --container test
 
       - name: Save the built ports

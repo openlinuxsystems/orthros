@@ -183,7 +183,8 @@ press Ctrl-A then X to quit QEMU. KVM is used when /dev/kvm is accessible.
         }
         "test" => {
             "Usage: ./ob test [unit | boot | kani | tla | corpus] [--case <name>]...
-                 [--timeout <seconds>] [--debug | --release]
+                 [--shard <part>/<parts>] [--timeout <seconds>] [--debug | --release]
+       ./ob test --list
 
 Runs host unit tests, then the boot tests: QEMU boots a test image under
 UEFI and BIOS, from USB and CD-ROM, with 4 CPUs, and each test follows the
@@ -194,7 +195,10 @@ models with TLC, and `corpus` compares Nukesh with dash and bash on POSIX's
 shell tests and real projects' scripts, in a sandbox (minutes each, so plain
 `ob test` leaves them out; TLC needs Java, and ob downloads the pinned TLA+
 tools into .cache/tla). With `corpus`, --case names a source in
-userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
+userspace/programs/nukesh/tests/corpus.toml. `boot --shard 2/3` runs every
+third boot test from the second, as CI's parallel jobs do. --list names every
+boot test; those that Phases 11 to 13 add from now on are listed only there
+(ob(1) has them all). The boot tests are:
   uefi-usb, bios-usb, uefi-cdrom, bios-cdrom   normal boots (bios-usb with the
                    lock checker on, uefi-cdrom in xAPIC mode, bios-cdrom
                    without KASLR and PCIDs)
