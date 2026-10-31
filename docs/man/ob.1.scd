@@ -558,7 +558,10 @@ _target/userspace/_).
 		her shell. signintest makes bob through *authd*(8); the test
 		signs him in on tty2, where he cannot list alice's home,
 		*who*(1) lists both, and *signintest mount* finds that he
-		mounts and unmounts nothing; signintest checks that each session's
+		mounts and unmounts nothing; he writes a line with *logger*(1), and
+		*log*(1) shows him that line alone, with its hint, while
+		*dmesg*(1) and *log --audit* are refused him (ADR 0252);
+		signintest checks that each session's
 		leader acts for its user on a terminal of its own. Bob signs out
 		and the sign-in comes back; a wrong password is refused after a
 		wait and the right one signs him in again; alice, still signed
@@ -575,14 +578,16 @@ _target/userspace/_).
 		she typed there first, and none of it reaches her shell; then she
 		runs commands as root: *id*(1), *sudo*(8), *env*(1), which shows
 		root's environment with the fixed *PATH* and *SUDO_USER*, and the
-		hashes' file, which she cannot read herself. Ctrl+C stops an
+		hashes' file, which she cannot read herself, and the kernel log
+		and the audit log through *elevate dmesg* and
+		*elevate log --audit*. Ctrl+C stops an
 		elevated *sleep*(1) through its own terminal; *elevate -s* gives
 		root's shell on a terminal of its own; *elevate -k* locks the
 		pane again, *-n* then will not ask, a wrong password is asked
 		again, Esc closes the prompt, and *-S* reads the password from the
 		input. Ctrl+Alt+Delete with no prompt shows consoled's menu; Esc
 		closes it, and Enter shows the sign-in on tty3, where nobody is
-		signed in. The power button ends it (ADRs 0219 and 0251).
+		signed in. The power button ends it (ADRs 0219, 0251 and 0252).
 
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test

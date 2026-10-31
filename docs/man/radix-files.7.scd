@@ -165,7 +165,8 @@ changed, kept by tmpfs and Btrfs; FAT and exFAT give *modified*.
 
 *dev*
 	The devices: _null_, _zero_, _random_, _urandom_, _kmsg_ (the kernel
-	log, *radix-kernel-log*(2)), a block device per disk and partition,
+	log, *radix-kernel-log*(2): root's to read, anyone's to write, mode
+	0622), a block device per disk and partition,
 	the terminals: _ptmx_, _tty_ and _pts/_*N* (*radix-posix*(7)), and
 	from Phase 9 the screen and the keyboard: _fb0_, the framebuffer
 	the firmware set up (*radix-framebuffer*(2)), and _kbd_, the PS/2

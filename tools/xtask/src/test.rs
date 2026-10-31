@@ -1274,7 +1274,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "signin",
-        about: "sign-in on the consoles: a machine with no account asks for its owner's, an administrator's, and signs her in; a second account signs in on Alt+F2 beside her; each session acts for its user on its own terminal, who lists both, neither reads the other's home, bob mounts and unmounts nothing, a wrong password waits and fails, and signing out shows the sign-in again",
+        about: "sign-in on the consoles: a machine with no account asks for its owner's, an administrator's, and signs her in; a second account signs in on Alt+F2 beside her; each session acts for its user on its own terminal, who lists both, neither reads the other's home, bob mounts and unmounts nothing, a user reads only their own programs' records of the log and not the kernel log or the audit log, a wrong password waits and fails, and signing out shows the sign-in again",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // Spark starts the services, consoled among them with sign-in, and
@@ -1292,7 +1292,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "elevate",
-        about: "elevate and sudo run commands as an administrator: alice, an administrator, types her password once, at the console's own prompt that Ctrl+Alt+Delete clears and no program reads, and runs commands as root with a clean environment and the fixed path, Ctrl+C reaches an elevated command, an elevated shell runs on a terminal of its own, a wrong password is asked again, Esc closes the prompt, -S reads the password, -k locks the pane and -n will not ask; bob, who is not one, cannot, and each use is in the audit log; Ctrl+Alt+Delete's menu shows the sign-in on a free console",
+        about: "elevate and sudo run commands as an administrator: alice, an administrator, types her password once, at the console's own prompt that Ctrl+Alt+Delete clears and no program reads, and runs commands as root with a clean environment and the fixed path, reads the kernel log and the audit log, Ctrl+C reaches an elevated command, an elevated shell runs on a terminal of its own, a wrong password is asked again, Esc closes the prompt, -S reads the password, -k locks the pane and -n will not ask; bob, who is not one, cannot, and each use is in the audit log; Ctrl+Alt+Delete's menu shows the sign-in on a free console",
         firmware: Firmware::Bios,
         media: Media::Usb,
         // As signin: Spark starts the services and signintest, which makes
@@ -7440,6 +7440,27 @@ fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
     // unmounts /processes for no one.
     answer_prompt(vm, "$", "clear; /system/tests/posix/signintest mount")?;
     vm.expect_screen(&["signintest-mount: every check passed"])?;
+    // The log is for administrators (ADR 0252). Bob reads his own
+    // programs' records alone, with a hint unless -q, and the kernel log
+    // and the audit log are refused him.
+    answer_prompt(
+        vm,
+        "$",
+        "clear; logger -t mine 'a line of bob'; sleep 2; log; echo \"records $(log -q | wc -l)\"",
+    )?;
+    vm.expect_screen(&[
+        "Hint: you see only the records of your own programs.",
+        " mine[",
+        "]: a line of bob",
+        "records 1",
+    ])?;
+    answer_prompt(vm, "$", "clear; dmesg; echo \"dmesg $?\"; log --audit; echo \"audit $?\"")?;
+    vm.expect_screen(&[
+        "dmesg: the kernel log is for administrators: run elevate dmesg",
+        "dmesg 1",
+        "log: the audit log is for administrators: run it with elevate",
+        "audit 1",
+    ])?;
     // Bob signs out, and the sign-in comes back on a clear screen. A wrong
     // password then waits and fails, and the right one signs him in again.
     answer_prompt(vm, "$", "clear; exit")?;
@@ -7554,6 +7575,15 @@ fn elevate(vm: &mut Vm, case: &Case) -> Result<(), String> {
     ])?;
     vm.expect_anywhere("(unlocked): process ")?;
     vm.expect_anywhere("authd: alice's elevated process ")?;
+    // The kernel log and the audit log are hers through elevate (ADR
+    // 0252); the brackets keep the command line itself from matching.
+    answer_prompt(
+        vm,
+        "$",
+        "clear; elevate dmesg | grep -m1 -o 'authd: alice elevat[e]d on'; elevate log -q --audit \
+         | grep -c 'alice elevat[e]d' | sed 's/^[1-9][0-9]*$/audited/'",
+    )?;
+    vm.expect_screen(&["authd: alice elevated on", "audited"])?;
     // Ctrl+C reaches the elevated command through its own terminal.
     answer_prompt(vm, "$", "clear; elevate sleep 1000; echo \"status $?\"")?;
     vm.expect_anywhere("runs /system/commands/sleep 1000, for process ")?;

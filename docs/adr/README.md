@@ -218,3 +218,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0233](0233-gpio-controllers-and-the-firmwares-gpio-events.md) | GPIO controllers are driven from their ACPI devices, and run the firmware's GPIO events | Accepted |
 | [0250](0250-sign-in-at-the-consoles-and-sessions-started-by-authd.md) | Sign-in at the consoles, and sessions started by authd | Accepted |
 | [0251](0251-the-consoles-ask-for-elevate-s-password-and-ctrl-alt-delete-is-the-secure-attention-key.md) | The consoles ask for elevate's password, and Ctrl+Alt+Delete is the secure attention key | Accepted |
+| [0252](0252-the-logs-are-for-administrators-and-everyone-reads-their-own-programs-records.md) | The logs are for administrators, and everyone reads their own programs' records | Accepted |

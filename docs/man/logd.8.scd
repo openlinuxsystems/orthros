@@ -35,7 +35,7 @@ level, who wrote it and what:
 ```
 {"time":"2026-10-30T21:25:01.123456Z","boot":"6c1f...","seq":412,
  "level":"warning","from":"program","name":"nukesh","process":57,
- "text":"..."}
+ "user":1000,"text":"..."}
 ```
 
 (one line). *time* is RFC 3339 in UTC, to the microsecond; *boot* a
@@ -44,11 +44,12 @@ digits, kept in _/system/live/log/boot_; *level* is *error*,
 *warning*, *info* or *debug*; *from* is *kernel*, *service* or
 *program*, and *name* the service's name, the program's, or *kernel*.
 *process* is the number of the process that wrote a program's record,
-and *audit* is there, *true*, for a security event.
+*user* the number of the user that process acted for, and *audit* is
+there, *true*, for a security event.
 
 Who wrote a record is what the kernel says, not what the record says:
-the kernel puts the number of the writing process on each record a
-program writes, and a record of Spark's process, number 1, whose text
+the kernel puts the number of the writing process and its user on each
+record a program writes, and a record of Spark's process, number 1, whose text
 starts with a name and *:* is that service's line. A program that
 writes a line with a service's name in front of it is still that
 program. Spark's lines of the program it runs from the kernel command
@@ -83,8 +84,15 @@ _/system/live/log/query_, and logd answers with the records that match,
 a line of JSON each, then closes the connection, or keeps sending new
 ones to a follower. It answers 32 requests at a time and refuses more.
 
-Until Dukovo has users every program can read the log; once it has
-them, only administrators can.
+logd answers each request with what the user asking may read, as the
+kernel names the process at the other end of the socket (ADR 0252).
+Root reads every record, and so does an administrator through
+*elevate*(8): *elevate log*. Anyone else reads only the records of
+their own programs, the ones the kernel marked with their user, as
+*journalctl* shows a user of Linux outside its *adm* group their own
+journal: not the kernel's, not the services', not another user's.
+Only root reads the audit log, asks how much the log takes, or trims
+it. The socket is mode 0666, so everyone can ask.
 
 # OPTIONS
 
@@ -118,5 +126,5 @@ exits with 1 if it cannot start.
 
 # SEE ALSO
 
-*log*(1), *journalctl*(1), *logtrim*(8), *log*(5), *dmesg*(1),
+*log*(1), *journalctl*(1), *logger*(1), *logtrim*(8), *log*(5), *dmesg*(1),
 *spark*(8), *service*(8), *radix-kernel-log*(2), *systools*(1)

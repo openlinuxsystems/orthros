@@ -13,8 +13,9 @@
 //! a process's system calls (radix-trace(2)), and `dmesg` the kernel log
 //! through `/devices/kmsg`; `logd` keeps the system's log and its audit
 //! log, which `log` and `journalctl` read and `logtrim` trims (ADRs 0210
-//! and 0211); `notifyd` passes notifications from `notify-send` and other
-//! programs to the console, and `notifications` lists them (ADR 0212).
+//! and 0211), and `logger` writes a line to it; `notifyd` passes
+//! notifications from `notify-send` and other programs to the console,
+//! and `notifications` lists them (ADR 0212).
 //! `authd` keeps the accounts, which `user` and `passwd` change, `login`
 //! signs people in through it, and `elevate`, and `sudo` in front of it,
 //! run a command as an administrator (ADRs 0218, 0250 and 0219).
@@ -41,6 +42,7 @@ mod ip;
 mod keymaps;
 mod log;
 mod logd;
+mod logger;
 mod login;
 mod logtrim;
 mod lsblk;
@@ -125,6 +127,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("kill", signals::kill),
     ("log", log::main),
     ("logd", logd::main),
+    ("logger", logger::main),
     ("login", login::main),
     ("logtrim", logtrim::main),
     ("lsblk", lsblk::main),

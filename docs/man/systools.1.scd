@@ -32,7 +32,8 @@ capabilities each process holds; *rtrace*(1) reads a trace of a
 process's system calls (*radix-trace*(2)); *dmesg*(1) reads the kernel's
 log through _/devices/kmsg_ (*radix-files*(7)), and *logd*(8) keeps it
 as the system's log and its audit log, which *log*(1) and
-*journalctl*(1) read and *logtrim*(8) trims; *notifyd*(8) passes the
+*journalctl*(1) read, *logtrim*(8) trims and *logger*(1) writes a line
+to; *notifyd*(8) passes the
 notifications *notify-send*(1) sends to the console, and
 *notifications*(1) lists them; *ip*(8) and *ss*(8) read the network's
 interfaces and sockets from *radix-sysfs*(5) and *radix-proc*(5), and
@@ -104,6 +105,8 @@ error that starts with the tool's name.
 :  send a signal
 |  *logd*(8)
 :  keep the system's log
+|  *logger*(1)
+:  write a line to the system's log
 |  *login*(1)
 :  sign in at a console
 |  *logtrim*(8)
