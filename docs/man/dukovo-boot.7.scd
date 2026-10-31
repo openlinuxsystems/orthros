@@ -175,7 +175,7 @@ seconds since the kernel started; messages before timer calibration show
 [    0.254500] Time: TSC at 2807.603 MHz (measured against the HPET); APIC timer input 1004.640 MHz; tick 100 Hz
 [    0.383220] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX, PKRU; 2696-byte areas
 [    0.419834] Lock checker: off (the lockdep flag turns it on)
-[    0.445393] Capabilities: ready; 19 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
+[    0.445393] Capabilities: ready; 20 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
 [    0.469304] User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)
 [    0.494239] Files: the root is a tmpfs; Spark mounts the rest
 [    0.520196] User: the usertests image is 183 KiB
@@ -742,12 +742,18 @@ _/kernel/class/hwmon_, as on Linux (*radix-sysfs*(5)).
 Framework's machines have a Chromium embedded controller, which runs
 their fans and power LEDs (ADR 0207). Once uACPI has started, the kernel
 looks for the ACPI device that names it (*FRMWC004*, or Chromebooks'
-*GOOG0004*), checks that the EC answers, and logs its firmware, fans and
-sensors:
+*GOOG0004*), checks that the EC answers, and logs its firmware, fans,
+sensors and LEDs, and which of the controls programs set it takes
+(*radix-platform*(2), ADR 0208):
 
 ```
-EC: Framework's embedded controller (FRMWC004), firmware dogwood-0.0.11 (read-write image), with 3 fans and 5 temperature sensors
+EC: Framework's embedded controller (FRMWC004), firmware dogwood-0.0.11 (read-write image), with 3 fans, 5 temperature sensors and 2 LEDs; it takes fan duties, fan curves, LEDs and ARGB colors
 ```
+
+A program that takes a fan from the EC, with *ectool*(8), or gives it
+back, is logged once for each change:
+
+	EC: `ectool` took fan 0 from the EC, at 50%
 
 A device with no EC behind it is a warning:
 

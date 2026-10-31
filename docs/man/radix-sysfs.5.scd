@@ -130,6 +130,44 @@ _/kernel/bus/pci/devices/_*address*_/subsystem_vendor_, _subsystem_device_
 	found is listed, whether or not a driver uses it. *lspci*(8) reads
 	them.
 
+_/kernel/bus/usb/devices/_*name*_/idVendor_, _idProduct_, _bcdDevice_, _version_
+	A USB device's vendor and product IDs and its release, in
+	hexadecimal with four digits, and the USB version it speaks, as
+	Linux writes it, with a space in front: *046d*, *c52b*, *1211* and
+	*2.00*. Its device
+	descriptor's other fields are in _bDeviceClass_, _bDeviceSubClass_,
+	_bDeviceProtocol_ (two hexadecimal digits), _bMaxPacketSize0_ and
+	_bNumConfigurations_; its configuration's in _bConfigurationValue_,
+	_bNumInterfaces_, _bmAttributes_ and _bMaxPower_ (*100mA*).
+
+	A device's _name_ is its bus and its ports from the root hub down, as
+	Linux names it: _1-3.2_ for port 2 of the hub on root port 3 of bus 1.
+	Each controller is a bus, numbered from 1 as the kernel finds them.
+
+_/kernel/bus/usb/devices/_*name*_/busnum_, _devnum_, _devpath_, _speed_, _maxchild_
+	Its bus; its number on the bus, from 2, each device set up taking
+	the next one free, as on Linux; its ports, _3.2_; its speed in Mb/s,
+	*1.5*, *12*, *480*, *5000* or *10000*; and a hub's ports, else *0*.
+
+_/kernel/bus/usb/devices/_*name*_/manufacturer_, _product_, _serial_
+	Its strings, read when it was set up, for those it has.
+
+_/kernel/bus/usb/devices/_*name*:*c*.*i*_/bInterfaceNumber_, _bInterfaceClass_, _driver_
+	Interface _i_ of its configuration _c_: its descriptor's fields, as
+	Linux shows them (_bInterfaceNumber_, _bAlternateSetting_,
+	_bNumEndpoints_, _bInterfaceClass_, _bInterfaceSubClass_,
+	_bInterfaceProtocol_), and _driver_, a link to the driver that took
+	it in _/kernel/bus/usb/drivers_: *hub*, *usbhid*, *usb-storage* or
+	*uas*.
+
+_/kernel/bus/usb/devices/usb_*n*
+	Bus _n_'s root hub: _busnum_; _devnum_ *1*; _devpath_ *0*; _speed_ and
+	_version_, *5000* and *3.00* when some of its ports are USB 3's;
+	_maxchild_, the controller's root ports; _bDeviceClass_ *09*;
+	_product_, *xHCI Host Controller*; and _serial_, the controller's
+	PCI address. Linux gives a root hub the Linux Foundation's IDs;
+	Radix gives it none. *lsusb*(8) reads all of these (ADR 0230).
+
 _/kernel/bus/i2c/devices/i2c-0/name_
 	When the kernel drives the chipset's SMBus controller (ADR 0206),
 	its adapter's name, as Linux gives it: *SMBus I801 adapter at 0700*

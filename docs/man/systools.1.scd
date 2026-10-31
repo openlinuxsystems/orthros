@@ -64,6 +64,8 @@ error that starts with the tool's name.
 :  what each disk says of its health: SMART and the NVMe health log
 |  *dmesg*(1)
 :  the kernel's log
+|  *ectool*(8)
+:  set the embedded controller's fans, fan curves, LEDs and ARGB header
 |  *eject*(1)
 :  unmount a volume so that its disk can be pulled out
 |  *findmnt*(8)
@@ -100,6 +102,8 @@ error that starts with the tool's name.
 :  what each process holds open
 |  *lspci*(8)
 :  the PCI functions
+|  *lsusb*(8)
+:  the USB devices, or the tree of their buses and ports
 |  *mkswap*(8)
 :  make a swap area on a disk or partition
 |  *notifications*(1)
@@ -126,6 +130,8 @@ error that starts with the tool's name.
 :  trace a process's system calls
 |  *script*(1)
 :  record a terminal session
+|  *sensors*(1)
+:  the machine's temperatures and fan speeds
 |  *service*(8)
 :  start, stop and look at the services
 |  *shutdown*(8)

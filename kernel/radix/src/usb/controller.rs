@@ -53,6 +53,7 @@ use radix_xhci::{BUFFER_SIZE, Device, Event, Handoff, Host, MAX_ENDPOINTS, Place
 use super::STARTS;
 use super::hid::{self, Hid, HidPlan, MAX_HIDS};
 use super::hub::Hub;
+use super::shown::{self, Interface, MAX_INTERFACES, RootHub, Shown};
 use super::storage::{LinkRef, StoragePlan};
 use crate::Arch;
 use crate::sched;
@@ -107,7 +108,7 @@ pub(super) fn alloc(source: Address) -> impl FnMut(usize, bool) -> Option<Dma> {
 /// Where a device is: the root port it is on, or its hubs are on, and
 /// the route string of hub ports below that.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Path {
+pub struct Path {
     pub(super) root_port: u8,
     pub(super) route: u32,
 }
@@ -250,6 +251,9 @@ pub fn run(index: usize) {
             for link in controller.devices.iter().filter_map(|d| d.storage.as_ref()) {
                 link.gone();
             }
+            for device in &controller.devices {
+                shown::remove(controller.bus, device.path);
+            }
             error!(
                 "USB: bus {}: the controller stopped with an error; its devices are gone",
                 controller.bus
@@ -335,6 +339,9 @@ impl Controller {
             }
         };
         describe(bus, start, &xhci);
+        let usb3 = xhci.protocols().iter().any(|protocol| protocol.major == 3);
+        let ports = xhci.info().ports;
+        shown::add_root_hub(bus, RootHub { ports, usb3, address: start.address });
         let Ok(xhci) = Box::try_new_in(xhci, heap) else {
             error!("USB: out of memory for the controller at {}", start.address);
             return None;
@@ -486,6 +493,7 @@ impl Controller {
             // Said before its drivers hear: a stick's thread tells of its
             // disks going at once, from another CPU.
             info!("USB: {}: {} was unplugged", Name(bus, gone.path), gone.name);
+            shown::remove(bus, gone.path);
             hid::gone(&mut gone.hids);
             if let Some(link) = gone.storage.take() {
                 link.gone();
@@ -605,7 +613,9 @@ impl Controller {
             return Err(Why::Device("out of memory"));
         };
         let mut device = self.address(home, place)?;
-        let result = self.identify(&mut device, path, name).inspect_err(|_| name.clear());
+        let mut shown = None;
+        let result =
+            self.identify(&mut device, path, name, &mut shown).inspect_err(|_| name.clear());
         let result = result.and_then(|plan| {
             let endpoints = &plan.endpoints[..plan.count];
             let mut alloc = alloc(self.source);
@@ -629,18 +639,32 @@ impl Controller {
             storage: None,
         };
         let _ = self.devices.push_within_capacity(attached);
-        if let Some(status) = plan.hub
-            && let Err(why) = self.start_hub(slot, status)
+        if let Some(shown) = &shown
+            && !shown::add(shown)
         {
-            warn!("USB: {}: the hub could not be started: {why}", Name(self.bus, path));
+            warn!("USB: {}: too many devices to show in /kernel/bus/usb", Name(self.bus, path));
+        }
+        if let Some(status) = plan.hub {
+            match self.start_hub(slot, status) {
+                Ok(()) => {
+                    let hub = shown.iter().flat_map(Shown::interfaces);
+                    for i in hub.filter(|i| i.descriptor.class == class::HUB) {
+                        shown::set_driver(self.bus, path, i.descriptor.number, "hub");
+                    }
+                }
+                Err(why) => {
+                    warn!("USB: {}: the hub could not be started: {why}", Name(self.bus, path));
+                }
+            }
         }
         for &interface in &plan.hids[..plan.hid_count] {
-            if let Err(why) = self.start_hid(slot, interface) {
-                warn!(
+            match self.start_hid(slot, interface) {
+                Ok(()) => shown::set_driver(self.bus, path, interface.interface, "usbhid"),
+                Err(why) => warn!(
                     "USB: {}: interface {} could not be read: {why}",
                     Name(self.bus, path),
                     interface.interface
-                );
+                ),
             }
         }
         if let Some(storage) = plan.storage
@@ -670,14 +694,15 @@ impl Controller {
     }
 
     /// Reads what the device is, gives the controller its packet size, and
-    /// logs it; its name goes in `name`. Returns what its first
-    /// configuration holds.
+    /// logs it; its name goes in `name`, and what the sysfs shows of it in
+    /// `shown`. Returns what its first configuration holds.
     #[inline(never)]
     fn identify(
         &mut self,
         device: &mut Device,
         path: Path,
         name: &mut TextBuf<64>,
+        shown: &mut Option<Shown>,
     ) -> Result<Plan, Why> {
         let speed = device.place().speed;
         let Controller { xhci, host, buffer, bus, .. } = self;
@@ -709,9 +734,13 @@ impl Controller {
                 let _ = radix_usb::string(&buffer[..came], out);
             }
         };
-        string(found.product_string, name);
+        let mut product = TextBuf::<64>::new();
+        string(found.product_string, &mut product);
         let mut maker = TextBuf::<64>::new();
         string(found.manufacturer_string, &mut maker);
+        let mut serial = TextBuf::<64>::new();
+        string(found.serial_string, &mut serial);
+        let _ = name.write_str(product.as_str());
         if name.is_empty() {
             let _ = name.write_str("a USB device");
         }
@@ -742,8 +771,14 @@ impl Controller {
         let mut named: [&str; 4] = [""; 4];
         let mut count = 0;
         let mut endpoints = 0;
+        let mut listed = [Interface::NONE; MAX_INTERFACES];
+        let mut listed_count = 0;
         for interface in config.interfaces().filter(|i| i.descriptor.alternate == 0) {
             let d = interface.descriptor;
+            if let Some(slot) = listed.get_mut(listed_count) {
+                *slot = Interface { descriptor: d, driver: None };
+                listed_count += 1;
+            }
             let this = class_name(d.class, d.subclass, d.protocol);
             if count < named.len() && !named[..count].contains(&this) {
                 named[count] = this;
@@ -815,6 +850,25 @@ impl Controller {
                 plan.count
             );
         }
+        // bMaxPower counts 8 mA at a time at USB 3's speeds, else 2.
+        let unit = if speed.is_super() { 8 } else { 2 };
+        *shown = Some(Shown {
+            bus: *bus as u8,
+            number: 0,
+            path,
+            speed,
+            device: found,
+            configuration: config.value,
+            interface_count: config.interfaces,
+            attributes: config.attributes,
+            max_power_ma: u16::from(config.max_power) * unit,
+            interfaces: listed,
+            listed: listed_count as u8,
+            hub_ports: 0,
+            manufacturer: maker,
+            product,
+            serial,
+        });
         Ok(plan)
     }
 }

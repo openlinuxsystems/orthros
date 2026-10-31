@@ -55,7 +55,8 @@ use libradix::abi::process::{
 };
 use libradix::abi::resource_domain::{self, NO_LIMIT};
 use libradix::abi::startup::{
-    SLOT_FD_BASE, SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_NETWORK, SLOT_PROCESS, SLOT_RANDOM, SLOT_ROOT,
+    SLOT_FD_BASE, SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_NETWORK, SLOT_PLATFORM, SLOT_PROCESS,
+    SLOT_RANDOM, SLOT_ROOT,
 };
 use libradix::abi::{network, power, signal, syscalls};
 use radix_rt::fs::{Dir, File};
@@ -187,6 +188,19 @@ fn grant_network(network: Option<u32>, spec: &Spec, child: u32) -> Result<(), St
     Ok(())
 }
 
+/// Gives `child` the platform capability in SLOT_PLATFORM if `spec` asks
+/// for admin.hardware, with the read and control rights, and the copy and
+/// transfer rights so that it lasts through `fork` (ADR 0208).
+fn grant_platform(platform: Option<u32>, spec: &Spec, child: u32) -> Result<(), String> {
+    if !spec.hardware {
+        return Ok(());
+    }
+    let platform = platform.ok_or("Spark has no platform capability to give")?;
+    let rights = Rights::READ.union(Rights::CONTROL).union(Rights::COPY).union(Rights::TRANSFER);
+    process::share(&SYS, child, platform, SLOT_PLATFORM, rights, 0)
+        .map_err(|status| format!("giving it the platform failed: {:#x}", status.0))
+}
+
 /// Where a service is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
@@ -290,11 +304,12 @@ macro_rules! audit {
 /// Spark's supervision.
 pub struct Supervisor {
     root: Dir,
-    /// The `services` domain, the power capability and the network
-    /// capability, from the kernel.
+    /// The `services` domain, the power capability, the network
+    /// capability and the platform capability, from the kernel.
     services_domain: Option<u32>,
     power: Option<u32>,
     network: Option<u32>,
+    platform: Option<u32>,
     /// The notification the kernel signals when a child changes.
     children: Option<u32>,
     /// The notification the kernel signals when the power button is
@@ -323,6 +338,7 @@ impl Supervisor {
         let domain = SLOT_FIRST_EXTRA + 1;
         let power = SLOT_FIRST_EXTRA + 2;
         let network = SLOT_FIRST_EXTRA + 3;
+        let platform = SLOT_FIRST_EXTRA + 4;
         let children = slots::take().filter(|&slot| {
             process::create(&SYS, SLOT_PROCESS, ObjectKind::Notification, 0, slot).is_ok()
                 && process::notify_children(&SYS, SLOT_PROCESS, slot).is_ok()
@@ -344,6 +360,7 @@ impl Supervisor {
             services_domain: holds(domain, ObjectKind::ResourceDomain).then_some(domain),
             power,
             network: holds(network, ObjectKind::Network).then_some(network),
+            platform: holds(platform, ObjectKind::Platform).then_some(platform),
             children,
             button,
             listener: None,
@@ -618,6 +635,7 @@ impl Supervisor {
                     .map_err(|status| format!("sharing slot {to} failed: {:#x}", status.0))
             })
             .and_then(|()| grant_network(self.network, spec, child))
+            .and_then(|()| grant_platform(self.platform, spec, child))
             .and_then(|()| {
                 let block = exec_block(&spec.program, &args, &spec.environment);
                 process::exec(&SYS, child, program.slot(), &block)

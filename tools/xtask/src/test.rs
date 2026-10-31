@@ -995,7 +995,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "acpi-thermal",
-        about: "QEMU with an ACPI table of the test's: uACPI finds its thermal zone, Linux's /sys/class/thermal shows it at the console, and as it warms past its passive, hot and critical trip points the kernel says so and Spark powers the machine off",
+        about: "QEMU with an ACPI table of the test's: uACPI finds its thermal zone, Linux's /sys/class/thermal and sensors show it at the console, and as it warms past its passive, hot and critical trip points the kernel says so and Spark powers the machine off",
         firmware: Firmware::Bios,
         media: Media::Usb,
         cmdline: "",
@@ -1011,7 +1011,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "usb-devices",
-        about: "the xHCI controller under UEFI names the boot stick, a keyboard, two hubs and the devices behind them, follows devices plugged in and pulled out, and has no Debug Capability for dbc",
+        about: "the xHCI controller under UEFI names the boot stick, a keyboard, two hubs and the devices behind them, lsusb lists them and their tree, the controller follows devices plugged in and pulled out, and has no Debug Capability for dbc",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // No program: Spark starts the services, and the power button ends
@@ -1315,10 +1315,10 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "framework-ec",
-        about: "QEMU with an ACPI table of the test's that names a Framework EC: the kernel finds the device, sees no EC's memory map behind it and leaves it alone",
+        about: "QEMU with an ACPI table of the test's that names a Framework EC: the kernel finds the device, sees no EC's memory map behind it and leaves it alone; ectool at the console, whose shell holds the platform capability, says there is no EC",
         firmware: Firmware::Bios,
         media: Media::Usb,
-        cmdline: "qemu-exit",
+        cmdline: "",
         cpus: 1,
         memory: "1G",
         reboot: false,
@@ -3699,7 +3699,7 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     } else {
         vm.expect("Lock checker: ")?;
     }
-    vm.expect("Capabilities: ready; 19 object kinds, 12 rights")?;
+    vm.expect("Capabilities: ready; 20 object kinds, 12 rights")?;
     vm.expect("User mode: SYSCALL/SYSRET entry, user half ")?;
     vm.expect("Files: the root is a tmpfs; Spark mounts the rest")?;
     // Every test image carries the user test programs.
@@ -4008,7 +4008,7 @@ fn acpi_power(vm: &mut Vm, case: &Case) -> Result<(), String> {
 }
 
 /// QEMU with [`THERMAL_AML`] (ADR 0203): the kernel logs the zone, Linux's
-/// `/sys/class/thermal` shows it at the console, and once the console has
+/// `/sys/class/thermal` and sensors(1) show it at the console, and once the console has
 /// read its temperature twice it warms 5 °C a read: past its passive trip
 /// point, where QEMU's CPUs cannot be slowed, its hot one, and to its
 /// critical one, where Spark powers the machine off.
@@ -4041,12 +4041,15 @@ fn acpi_thermal(vm: &mut Vm, case: &Case) -> Result<(), String> {
         "trip_point_2_temp is 60000",
         "trip_point_2_hyst is 0",
     ])?;
-    // The zone as hwmon's `acpitz` shows it: its fourth read.
-    vm.type_text(
-        "clear; cd /sys/class/hwmon/hwmon0; for f in name temp1_input temp1_crit; do \
-         echo \"$f is $(cat $f)\"; done\n",
-    )?;
-    vm.expect_screen(&["name is acpitz", "temp1_input is 45000", "temp1_crit is 80000"])?;
+    // The zone as hwmon's `acpitz` shows it, through sensors(1): its
+    // fourth read. The console's font has no degree sign.
+    vm.type_text("clear; sensors\n")?;
+    vm.expect_screen(&[
+        "acpitz-acpi-0",
+        "Adapter: ACPI interface",
+        "temp1:        +45.0",
+        "(crit = +80.0",
+    ])?;
     // The zone's fifth read: it says it changed, and warms from there, so
     // fast that the machine may be off before a screenshot.
     vm.type_text("clear; cat /sys/class/thermal/thermal_zone0/temp\n")?;
@@ -4107,7 +4110,7 @@ fn power_button(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// and a second hub with a keyboard behind that. QEMU gives each of its
 /// four ports a USB 3 port (1-4) and a USB 2 one (5-8): the stick takes
 /// the USB 3 one, the rest the USB 2 ones; its hub is a full-speed one.
-/// A tablet is plugged in on the last root port, and another on the first
+/// lsusb(8) at the console lists them and their tree. A tablet is plugged in on the last root port, and another on the first
 /// hub, and pulled out again; pulling out the second hub takes its
 /// keyboard along. The power button, which halts the controller, ends the
 /// test. The controller's thread runs alongside the boot, so what it says
@@ -4129,6 +4132,29 @@ fn usb_devices(vm: &mut Vm, case: &Case) -> Result<(), String> {
         vm.expect_anywhere(line)?;
     }
     vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // lsusb(8), from /kernel/bus/usb: each device numbered as it was set
+    // up, named from usb.ids, else by its own strings; then the tree.
+    vm.type_text("lsusb\n")?;
+    vm.expect_screen(&[
+        "Bus 001 Device 002: ID 46f4:0001 QEMU QEMU USB HARDDRIVE",
+        "Bus 001 Device 003: ID 0627:0001 Adomax Technology Co., Ltd QEMU Tablet",
+        "Bus 001 Device 004: ID 0409:55aa NEC Corp. Hub",
+        "Bus 001 Device 005: ID 0627:0001 Adomax Technology Co., Ltd QEMU Tablet",
+        "Bus 001 Device 006: ID 0409:55aa NEC Corp. Hub",
+        "Bus 001 Device 007: ID 0627:0001 Adomax Technology Co., Ltd QEMU Tablet",
+    ])?;
+    vm.type_text("clear; lsusb -t\n")?;
+    vm.expect_screen(&[
+        "/:  Bus 001.Port 001: Dev 001, Class=root_hub, Driver=xhci_hcd/8p, 5000M",
+        "    |__ Port 001: Dev 002, If 0, Class=Mass Storage, Driver=usb-storage, 5000M",
+        "    |__ Port 006: Dev 003, If 0, Class=Human Interface Device, Driver=usbhid, 480M",
+        "    |__ Port 007: Dev 004, If 0, Class=Hub, Driver=hub/8p, 12M",
+        "        |__ Port 001: Dev 005, If 0, Class=Human Interface Device, Driver=usbhid, 12M",
+        "        |__ Port 008: Dev 006, If 0, Class=Hub, Driver=hub/8p, 12M",
+        "            |__ Port 004: Dev 007, If 0, Class=Human Interface Device, Driver=usbhid, \
+         12M",
+    ])?;
     vm.monitor("device_add usb-tablet,bus=xhci.0,port=4,id=tablet")?;
     vm.expect("USB: 1-8: QEMU USB Tablet (0627:0001, QEMU), HID, high speed")?;
     vm.monitor("device_del tablet")?;
@@ -4489,7 +4515,18 @@ fn framework_ec(vm: &mut Vm, case: &Case) -> Result<(), String> {
          it is not used",
     )?;
     vm.expect("Boot complete.")?;
-    vm.expect_exit(QEMU_EXIT_SUCCESS)
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // consoled's file asks for admin.hardware, so root's shell holds the
+    // platform capability: the kernel itself answers that there is no EC,
+    // where a shell without it would be told it needs admin.hardware.
+    vm.type_text("ectool fanduty 50\n")?;
+    vm.expect_screen(&["ectool: the kernel drives no embedded controller"])?;
+    vm.type_text("ectool pwmgetnumfans\n")?;
+    vm.expect_screen(&["Number of fans = 0"])?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: asked to power off the machine")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 
 fn smbus(vm: &mut Vm, case: &Case) -> Result<(), String> {

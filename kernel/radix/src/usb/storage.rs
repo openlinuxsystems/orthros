@@ -454,6 +454,11 @@ impl Controller {
         match sched::spawn("usb-storage", stick_main, index, options) {
             Ok(thread) => {
                 self.devices[at].storage = Some(link);
+                let driver = match protocol {
+                    Protocol::Bot { .. } => "usb-storage",
+                    Protocol::Uas { .. } => "uas",
+                };
+                super::shown::set_driver(self.bus, path, plan.interface, driver);
                 PROBING.fetch_add(1, Ordering::AcqRel);
                 sched::release(&thread);
                 Ok(())

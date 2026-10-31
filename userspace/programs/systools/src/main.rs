@@ -26,6 +26,7 @@ mod device;
 mod df;
 mod diskhealth;
 mod dmesg;
+mod ectool;
 mod eject;
 mod findmnt;
 mod fstrim;
@@ -40,6 +41,7 @@ mod lscpu;
 mod lsmem;
 mod lsof;
 mod lspci;
+mod lsusb;
 mod memory;
 mod modes;
 mod notifyd;
@@ -55,6 +57,7 @@ mod replace;
 mod rtrace;
 mod script;
 mod scrub;
+mod sensors;
 mod sessions;
 mod signals;
 mod subvolume;
@@ -92,6 +95,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("device", device::main),
     ("diskhealth", diskhealth::main),
     ("dmesg", dmesg::main),
+    ("ectool", ectool::main),
     ("eject", eject::main),
     ("findmnt", findmnt::main),
     ("fstrim", fstrim::main),
@@ -112,6 +116,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("lsmem", lsmem::main),
     ("lsof", lsof::main),
     ("lspci", lspci::main),
+    ("lsusb", lsusb::main),
     ("mkswap", swap::mkswap),
     ("notifications", notifyd::notifications),
     ("notify-send", notifyd::notify_send),
@@ -129,6 +134,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("rtrace", rtrace::main),
     ("script", script::main),
     ("scrub", scrub::main),
+    ("sensors", sensors::main),
     ("service", power::service),
     ("shutdown", power::shutdown),
     ("subvolume", subvolume::main),

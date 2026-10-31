@@ -65,6 +65,11 @@ const NETWORK_SLOTS: u32 = 8;
 const SLOT_WINDOW: u32 = 32;
 /// The number of slots in the receive window programs start with.
 const WINDOW_SLOTS: u32 = 16;
+/// The slot of the program's platform capability (radix-platform(2)), if
+/// it was given one: what the permission admin.hardware grants. It stays
+/// through `fork` and `exec`. The slots a program takes for its own use
+/// start after it.
+const SLOT_PLATFORM: u32 = 48;
 /// The number of slots of a program's capability space.
 const SLOTS: u32 = 256;
 /// The first slot of a POSIX program's file descriptors: descriptor `n`

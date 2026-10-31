@@ -3,17 +3,17 @@
 
 //! The program's free capability slots.
 //!
-//! The slots radix-startup(2) gives a meaning (up to the end of the
-//! receive window) are the program's; the rest of its capability space is
-//! handed out here, one slot at a time, for the capabilities the runtime
-//! and the program make.
+//! The slots radix-startup(2) gives a meaning (up to SLOT_PLATFORM) are
+//! the program's; the rest of its capability space is handed out here,
+//! one slot at a time, for the capabilities the runtime and the program
+//! make.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use radix_abi::startup;
 
-/// The first slot handed out: the one after the receive window.
-pub const FIRST: u32 = startup::SLOT_WINDOW + startup::WINDOW_SLOTS;
+/// The first slot handed out: the one after the platform capability's.
+pub const FIRST: u32 = startup::SLOT_PLATFORM + 1;
 
 const WORDS: usize = startup::SLOTS as usize / 64;
 

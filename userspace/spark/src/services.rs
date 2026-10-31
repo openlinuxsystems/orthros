@@ -12,7 +12,9 @@
 //!
 //! A service reaches the network only as its file says (ADR 0183):
 //! `network.outbound = yes` lets it connect out, and `network.listen`
-//! names the ports it may listen on.
+//! names the ports it may listen on. `admin.hardware = yes` gives it the
+//! platform capability, which sets the fans, the LEDs and the ARGB header
+//! (ADR 0208).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -67,6 +69,8 @@ pub struct Spec {
     pub outbound: bool,
     /// The ranges of ports it may listen on, as (first, count).
     pub listen: Vec<(u32, u32)>,
+    /// Whether it gets the platform capability: admin.hardware.
+    pub hardware: bool,
 }
 
 impl Spec {
@@ -188,6 +192,7 @@ pub fn parse(name: &str, text: &str) -> Result<Spec, String> {
         enabled: true,
         outbound: false,
         listen: Vec::new(),
+        hardware: false,
     };
     for (number, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -244,6 +249,7 @@ pub fn parse(name: &str, text: &str) -> Result<Spec, String> {
             "enabled" => spec.enabled = yes_no(value).map_err(at)?,
             "network.outbound" => spec.outbound = yes_no(value).map_err(at)?,
             "network.listen" => spec.listen = ports(value).map_err(at)?,
+            "admin.hardware" => spec.hardware = yes_no(value).map_err(at)?,
             _ => return Err(at(format!("unknown key `{key}`"))),
         }
     }

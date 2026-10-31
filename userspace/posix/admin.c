@@ -626,7 +626,11 @@ static void power(void) {
 }
 
 // lspci, lscpu and lsmem (ADR 0144): what they say of QEMU's q35 with 4
-// CPUs and 1 GiB, from /kernel and the PCI ID database.
+// CPUs and 1 GiB, from /kernel and the PCI ID database; ectool (ADR
+// 0208), with no embedded controller to ask and no platform capability
+// to ask with, which the framework-ec boot test gives it; and lsusb and
+// sensors (ADR 0230), of the boot stick, and of chips not there: the
+// usb-devices and acpi-thermal boot tests run them on more.
 static void hardware(void) {
 	CONTAINS("00:00.0 Host bridge: Intel Corporation 82G33/G31/P35/P31 Express DRAM Controller\n",
 	         "/bin/lspci");
@@ -645,6 +649,17 @@ static void hardware(void) {
 	           "Total offline memory:      0B\n",
 	       "/bin/lsmem", "--summary");
 	STATUS(1, "/bin/lsmem", "--summary=sometimes");
+	OUTPUT("", "Number of fans = 0\n", "/bin/ectool", "pwmgetnumfans");
+	STATUS(1, "/bin/ectool", "fanduty", "50");
+	STATUS(1, "/bin/ectool", "led", "power", "query");
+	RUN_WITH(1, "", "\n  fancurve <idx> [<key>=<value>...]\n", 1, "/bin/ectool", "help");
+	OUTPUT("", "Bus 001 Device 002: ID 46f4:0001 QEMU QEMU USB HARDDRIVE\n", "/bin/lsusb");
+	CONTAINS("\n    |__ Port 001: Dev 002, If 0, Class=Mass Storage, Driver=usb-storage, 5000M\n",
+	         "/bin/lsusb", "-t");
+	RUN_WITH(1, "", "", 0, "/bin/lsusb", "-d", "ffff:");
+	STATUS(1, "/bin/lsusb", "-s", "x:1");
+	RUN_WITH(1, "", "", 0, "/bin/sensors", "nosuch-*");
+	STATUS(1, "/bin/sensors", "-x");
 }
 
 // The storage tools on a disk and a mount that are not there, and on

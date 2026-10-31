@@ -3,13 +3,14 @@
 
 //! What a capability designates: kernel objects and hardware resources.
 //!
-//! Fifteen kinds are kernel objects with an entry in the store's object
+//! Sixteen kinds are kernel objects with an entry in the store's object
 //! table, named by an [`ObjectId`]: memory, frames, DMA buffers, address
 //! spaces, threads, processes, endpoints, notifications, resource domains
 //! (Phase 4: a CPU weight and a memory limit that threads and their memory
 //! are charged to, after Linux's cgroups), and from Phase 5 the kernel's
 //! random number generator, rings and the kernel log, files and
-//! directories, and from Phase 9 the machine's power. Four kinds are
+//! directories, from Phase 9 the machine's power, and from Phase 11 its
+//! platform controls (ADR 0208). Four kinds are
 //! ranges, named by the range itself: three of hardware resources,
 //! interrupt lines, I/O ports and device registers (MMIO), and from
 //! Phase 12 the network's ports, which programs connect and listen
@@ -65,10 +66,13 @@ pub enum ObjectKind {
     /// A range of the network's ports: connecting out through them, and
     /// listening on those in the range.
     Network = 18,
+    /// The machine's platform controls, which its embedded controller
+    /// keeps: its fans, their curves, its LEDs and its ARGB header.
+    Platform = 19,
 }
 
 /// How many kinds there are.
-pub const KINDS: usize = 19;
+pub const KINDS: usize = 20;
 
 impl ObjectKind {
     /// Every kind, in the order of their numbers.
@@ -92,6 +96,7 @@ impl ObjectKind {
         ObjectKind::Directory,
         ObjectKind::Power,
         ObjectKind::Network,
+        ObjectKind::Platform,
     ];
 
     /// The kind numbered `n`.
@@ -136,6 +141,9 @@ impl ObjectKind {
             // Sending is connecting out, to any port; receiving is taking
             // what comes to the ports in the range.
             ObjectKind::Network => Rights::SEND.union(Rights::RECEIVE),
+            // Reading asks what the controls are set to; control changes
+            // them.
+            ObjectKind::Platform => Rights::READ.union(Rights::CONTROL),
         };
         own.union(Rights::COPY).union(Rights::TRANSFER)
     }
@@ -195,6 +203,7 @@ impl ObjectKind {
             ObjectKind::Directory => "directory",
             ObjectKind::Power => "power",
             ObjectKind::Network => "network",
+            ObjectKind::Platform => "platform",
         }
     }
 }
@@ -307,6 +316,8 @@ mod tests {
         assert!(ObjectKind::Process.rights().contains(Rights::SIGNAL));
         assert!(ObjectKind::Network.rights().contains(Rights::SEND | Rights::RECEIVE));
         assert!(!ObjectKind::Network.rights().contains(Rights::CONTROL));
+        assert!(ObjectKind::Platform.rights().contains(Rights::READ | Rights::CONTROL));
+        assert!(!ObjectKind::Platform.rights().contains(Rights::WRITE));
     }
 
     #[test]

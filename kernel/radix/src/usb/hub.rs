@@ -87,6 +87,7 @@ impl Controller {
             device.control_out(xhci, host, power, &[])?;
         }
         info!("USB: {}: a hub of {} ports", Name(*bus, path), descriptor.ports);
+        super::shown::set_hub_ports(*bus, path, descriptor.ports);
         if descriptor.ports > ports {
             warn!("USB: {}: only its first {ports} ports are used", Name(*bus, path));
         }
