@@ -89,10 +89,13 @@ owners and modes, which Radix ignored.
   `lchown` and `fchownat`. radix-rt asks for 0666 for a file and 0777
   for a directory, less the mask, as Linux programs ask.
 - **The image.** `mkfs.btrfs --rootdir` copies each file's owner from
-  the staging copy, which is whoever runs `ob`. When that is not root,
-  `ob image` runs it under fakeroot, so the system's files are root's
-  on every builder; fakeroot joins the host packages `ob doctor` checks.
-  The staging directories get the archive's modes whatever the umask.
+  the staging copy, which is whoever runs `ob`, and reads it through
+  nftw(3), which fakeroot cannot reach. So `ob image` then sets the
+  owner and group of every inode item in the filesystem's trees to 0
+  itself, with each leaf's checksum, in every copy of the metadata, and
+  the system's files are root's on every builder without root or a
+  user namespace. The staging directories get the archive's modes
+  whatever the umask.
 - **Not yet.** Nothing checks the modes until 13b.2: `access` still says
   a file that is there may be read, written and run. Users, groups and
   their names come then too, and with them who may chown (root) and

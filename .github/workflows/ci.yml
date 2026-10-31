@@ -49,7 +49,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
-            xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs fakeroot e2fsprogs scdoc mandoc \
+            xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs scdoc mandoc \
             clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison
 
       - name: Install mdBook
@@ -163,7 +163,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
-            xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs fakeroot e2fsprogs scdoc mandoc \
+            xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs scdoc mandoc \
             clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison
 
       - name: Install the pinned Rust toolchain
@@ -229,7 +229,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
-            xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs fakeroot e2fsprogs scdoc mandoc \
+            xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs scdoc mandoc \
             clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison
 
       - name: Install the pinned Rust toolchain

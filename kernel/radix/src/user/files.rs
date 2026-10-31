@@ -741,70 +741,7 @@ pub fn directory_method(
             let results = directory::RealPathResults { len: len as u64 };
             answer(label, directory::RealPathResults::WORDS, results.encode())
         }
-        directory::MOUNT => {
-            let a = directory::MountArgs::decode(args)?;
-            let dir = directory_of(found, Rights::CONTROL)?;
-            let read_only = a.flags.contains(MountFlags::READ_ONLY);
-            let compress = a.flags.contains(MountFlags::COMPRESS);
-            let mut path = Path::Empty;
-            let path = path.copy(a.path)?;
-            let mut kind = Path::Empty;
-            let kind = kind.copy(a.filesystem)?;
-            let kind = kind.as_str()?;
-            let rw = if read_only { Rights::READ } else { Rights::READ.union(Rights::WRITE) };
-            // A bind mount: the directory in slot `source`, mounted again.
-            if kind == "bind" {
-                if compress {
-                    return Err(Kernel::InvalidArgument.status(3));
-                }
-                let (_, from) = objects::directory(cspace, a.source, rw)?;
-                let mount = vfs()?
-                    .bind(&dir.at, path.as_str()?, &from.at, read_only)
-                    .map_err(fs::status)?;
-                info!(
-                    "Files: mounted a directory of {} from {} on /{}{}",
-                    mount.fs.kind().name(),
-                    mount.source(),
-                    mount.path(),
-                    if mount.read_only() { ", read-only" } else { "" },
-                );
-                return answer(label, 0, [0; 8]);
-            }
-            let source = if matches!(kind, "fat" | "exfat" | "btrfs" | "ext4") {
-                Some(objects::file(cspace, a.source, rw)?.1)
-            } else if a.source != 0 {
-                return Err(Kernel::InvalidArgument.status(2));
-            } else {
-                None
-            };
-            if compress && kind != "btrfs" {
-                return Err(Kernel::InvalidArgument.status(3));
-            }
-            let flags = fs::Flags { read_only, compress };
-            let made =
-                fs::make(kind, source.as_ref().map(|s| &s.at.node), flags).map_err(fs::status)?;
-            let mount = vfs()?
-                .mount(&dir.at, path.as_str()?, made.fs, made.source.as_str(), read_only)
-                .map_err(fs::status)?;
-            let mut labelled = radix_klog::TextBuf::<40>::new();
-            {
-                use core::fmt::Write;
-                let mut name = radix_klog::TextBuf::<32>::new();
-                let _ = mount.fs.label(&mut name);
-                if !name.as_str().is_empty() {
-                    let _ = write!(labelled, ", labelled {}", name.as_str());
-                }
-            }
-            info!(
-                "Files: mounted {} from {} on /{}{}{}",
-                mount.fs.kind().name(),
-                mount.source(),
-                mount.path(),
-                if mount.read_only() { ", read-only" } else { "" },
-                labelled.as_str()
-            );
-            answer(label, 0, [0; 8])
-        }
+        directory::MOUNT => mount_method(user, found, label, args),
         directory::UNMOUNT => {
             let a = directory::UnmountArgs::decode(args)?;
             let dir = directory_of(found, Rights::CONTROL)?;
@@ -866,6 +803,74 @@ pub fn directory_method(
         }
         _ => Err(error(Kernel::NoSuchMethod)),
     }
+}
+
+/// `mount`, out of [`directory_method`]: Spark's mount of a Btrfs root is
+/// the deepest path of the kernel's stack, and it then has this frame
+/// instead of the one every directory method shares.
+#[inline(never)]
+fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> Result<Answer> {
+    let cspace = user.cspace;
+    let a = directory::MountArgs::decode(args)?;
+    let dir = directory_of(found, Rights::CONTROL)?;
+    let read_only = a.flags.contains(MountFlags::READ_ONLY);
+    let compress = a.flags.contains(MountFlags::COMPRESS);
+    let mut path = Path::Empty;
+    let path = path.copy(a.path)?;
+    let mut kind = Path::Empty;
+    let kind = kind.copy(a.filesystem)?;
+    let kind = kind.as_str()?;
+    let rw = if read_only { Rights::READ } else { Rights::READ.union(Rights::WRITE) };
+    // A bind mount: the directory in slot `source`, mounted again.
+    if kind == "bind" {
+        if compress {
+            return Err(Kernel::InvalidArgument.status(3));
+        }
+        let (_, from) = objects::directory(cspace, a.source, rw)?;
+        let mount =
+            vfs()?.bind(&dir.at, path.as_str()?, &from.at, read_only).map_err(fs::status)?;
+        info!(
+            "Files: mounted a directory of {} from {} on /{}{}",
+            mount.fs.kind().name(),
+            mount.source(),
+            mount.path(),
+            if mount.read_only() { ", read-only" } else { "" },
+        );
+        return answer(label, 0, [0; 8]);
+    }
+    let source = if matches!(kind, "fat" | "exfat" | "btrfs" | "ext4") {
+        Some(objects::file(cspace, a.source, rw)?.1)
+    } else if a.source != 0 {
+        return Err(Kernel::InvalidArgument.status(2));
+    } else {
+        None
+    };
+    if compress && kind != "btrfs" {
+        return Err(Kernel::InvalidArgument.status(3));
+    }
+    let flags = fs::Flags { read_only, compress };
+    let made = fs::make(kind, source.as_ref().map(|s| &s.at.node), flags).map_err(fs::status)?;
+    let mount = vfs()?
+        .mount(&dir.at, path.as_str()?, made.fs, made.source.as_str(), read_only)
+        .map_err(fs::status)?;
+    let mut labelled = radix_klog::TextBuf::<40>::new();
+    {
+        use core::fmt::Write;
+        let mut name = radix_klog::TextBuf::<32>::new();
+        let _ = mount.fs.label(&mut name);
+        if !name.as_str().is_empty() {
+            let _ = write!(labelled, ", labelled {}", name.as_str());
+        }
+    }
+    info!(
+        "Files: mounted {} from {} on /{}{}{}",
+        mount.fs.kind().name(),
+        mount.source(),
+        mount.path(),
+        if mount.read_only() { ", read-only" } else { "" },
+        labelled.as_str()
+    );
+    answer(label, 0, [0; 8])
 }
 
 /// Puts a capability with `rights` to `object`, a file or directory

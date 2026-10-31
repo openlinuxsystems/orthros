@@ -443,17 +443,7 @@ pub fn make_root(ctx: &Ctx, bootfs: &Path, staging: &Path, output: &Path) -> Res
     std::fs::File::create(output)
         .and_then(|file| file.set_len(ROOT_BYTES))
         .context(|| format!("making {}", output.display()))?;
-    // mkfs.btrfs gives each file the owner and group the staging copy
-    // has, which are whoever runs ob's: under fakeroot they are root's, as
-    // a system's files are (ADR 0213).
-    let mkfs = btrfs::mkfs(ctx)?;
-    let mut cmd = if owned_by_root(staging)? {
-        Command::new(mkfs)
-    } else {
-        let mut fakeroot = Command::new("fakeroot");
-        fakeroot.arg(mkfs);
-        fakeroot
-    };
+    let mut cmd = Command::new(btrfs::mkfs(ctx)?);
     cmd.args(["-q", "-f", "-L", ROOT_LABEL, "--compress", "zstd", "--rootdir"]).arg(staging);
     cmd.args(["--subvol", &format!("ro:{}", SUBVOLUMES[0])]);
     for name in &SUBVOLUMES[1..] {
@@ -461,14 +451,10 @@ pub fn make_root(ctx: &Ctx, bootfs: &Path, staging: &Path, output: &Path) -> Res
     }
     let made = process::run(ctx, cmd.arg(output).stdin(std::process::Stdio::null()));
     let _ = std::fs::remove_dir_all(staging);
-    made
-}
-
-/// Whether the files ob makes, as `dir` is, are root's.
-fn owned_by_root(dir: &Path) -> Result<bool> {
-    use std::os::unix::fs::MetadataExt as _;
-    let meta = std::fs::metadata(dir).context(|| format!("reading {}", dir.display()))?;
-    Ok(meta.uid() == 0 && meta.gid() == 0)
+    made?;
+    // mkfs.btrfs gave each file the owner of its staging copy, whoever
+    // runs ob; a system's files are root's (ADR 0213).
+    btrfs::give_to_root(output).map(drop)
 }
 
 /// Puts the Dukovo root partition, holding the filesystem in the file
