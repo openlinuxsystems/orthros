@@ -18,7 +18,9 @@
 //! Every process is root's until users come
 //! (Phase 13), so the user columns all say root.
 
+mod account;
 mod args;
+mod authd;
 mod balance;
 mod blkid;
 mod column;
@@ -33,9 +35,11 @@ mod fstrim;
 mod hexdump;
 mod hwinfo;
 mod iostat;
+mod ip;
 mod keymaps;
 mod log;
 mod logd;
+mod login;
 mod logtrim;
 mod lsblk;
 mod lscpu;
@@ -52,6 +56,7 @@ mod power;
 mod priority;
 mod probe;
 mod proc;
+mod prompt;
 mod ps;
 mod quota;
 mod replace;
@@ -62,6 +67,8 @@ mod sensors;
 mod servicefiles;
 mod sessions;
 mod signals;
+mod signin;
+mod ss;
 mod subvolume;
 mod swap;
 mod sys;
@@ -87,6 +94,7 @@ type Tool = fn(&mut Args) -> Result<i32, Fail>;
 
 /// The tools, by name, in order.
 const TOOLS: &[(&str, Tool)] = &[
+    ("authd", authd::main),
     ("balance", balance::main),
     ("blkid", blkid::main),
     ("chgrp", modes::chgrp),
@@ -108,11 +116,13 @@ const TOOLS: &[(&str, Tool)] = &[
     ("hwinfo", hwinfo::main),
     ("ionice", priority::ionice),
     ("iostat", iostat::main),
+    ("ip", ip::main),
     ("journalctl", log::journalctl),
     ("keymap", keymaps::main),
     ("kill", signals::kill),
     ("log", log::main),
     ("logd", logd::main),
+    ("login", login::main),
     ("logtrim", logtrim::main),
     ("lsblk", lsblk::main),
     ("lscpu", lscpu::main),
@@ -125,6 +135,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("notify-send", notifyd::notify_send),
     ("notifyd", notifyd::main),
     ("nvme", nvme::main),
+    ("passwd", account::passwd),
     ("pgrep", signals::pgrep),
     ("pidstat", pidstat::main),
     ("pkill", signals::pkill),
@@ -140,6 +151,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("sensors", sensors::main),
     ("service", power::service),
     ("shutdown", power::shutdown),
+    ("ss", ss::main),
     ("subvolume", subvolume::main),
     ("swapoff", swap::swapoff),
     ("swapon", swap::swapon),
@@ -147,6 +159,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("top", top::main),
     ("tree", tree::main),
     ("uptime", sessions::uptime),
+    ("user", account::user),
     ("users", sessions::users),
     ("vmstat", memory::vmstat),
     ("volumed", volumed::main),

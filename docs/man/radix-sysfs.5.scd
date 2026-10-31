@@ -333,6 +333,38 @@ _/kernel/class/hwmon/hwmon_*n*_/temp_*k*_crit_, _temp_*k*_max_, _temp_*k*_crit_a
 	control aims to keep below; and *1* once the critical temperature
 	was reached, else *0*.
 
+_/kernel/class/net/_*name*_/ifindex_, _iflink_
+	The network interfaces, *lo* and the cards (*net0*, *net1*...),
+	each a directory of its name, with its number as Linux numbers
+	interfaces: *lo* is 1 and the cards follow from 2, in the order the
+	kernel found them (ADR 0190). The C library's *if_nametoindex* and
+	*if_nameindex* read these, and *ip*(8) the rest.
+
+_/kernel/class/net/_*name*_/address_, _broadcast_, _addr_len_
+	Its MAC address, as _52:54:00:12:34:56_, and the one that reaches
+	every card on its network, all zeros for *lo*; and 6, their length.
+
+_/kernel/class/net/_*name*_/mtu_, _type_, _flags_
+	The longest packet it sends; *1* (ARPHRD_ETHER) for a card or *772*
+	(ARPHRD_LOOPBACK) for *lo*; and Linux's flags, in hexadecimal:
+	IFF_UP, with IFF_BROADCAST for a card or IFF_LOOPBACK for *lo*.
+
+_/kernel/class/net/_*name*_/operstate_, _carrier_
+	*up*, *down* for a card the kernel stopped after an error, or
+	*unknown* for *lo*, which has no link; and *1* while it is not
+	down, else *0*.
+
+_/kernel/class/net/_*name*_/ipv4_
+	Radix's own: its IPv4 addresses with their prefixes, a line each,
+	as _10.0.2.15/24_, the first the one it sends from; nothing for a
+	card not set up. *lo* shows 127.0.0.1/8, though it answers each
+	card's addresses too. Linux gives these only over netlink.
+
+_/kernel/class/net/_*name*_/statistics/rx_bytes_, _rx_packets_, _tx_bytes_, _tx_packets_, _tx_dropped_
+	What it received and sent since boot, and what it could not send
+	for want of room; _rx_errors_, _rx_dropped_ and _tx_errors_ are 0,
+	as the stack counts none.
+
 _/kernel/devices/system/cpu/possible_, _present_, _online_
 	The CPUs the machine has, and those that run threads, as Linux's
 	lists: *0-7*, which util-linux's lscpu reads.
@@ -410,4 +442,4 @@ virtio function for each of its four disks in _/kernel/bus/pci/devices_.
 # SEE ALSO
 
 *radix-proc*(5), *radix-block*(2), *radix-files*(7), *dukovo-boot*(7), *ob*(1),
-*spark*(8), *watchdog*(8), *lspci*(8), *lsmem*(1)
+*spark*(8), *watchdog*(8), *lspci*(8), *lsmem*(1), *ip*(8)

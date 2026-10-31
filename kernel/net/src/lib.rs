@@ -51,7 +51,9 @@ pub use across::{Across, OtherEnd};
 pub use loopback::Loopback;
 pub use smoltcp;
 pub use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};
-pub use sockets::{ConnectError, TcpMemory, UdpMemory};
+pub use sockets::{ConnectError, Shown, TcpMemory, UdpMemory};
+
+use core::cell::Cell;
 
 use managed::ManagedSlice;
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet, SocketStorage};
@@ -135,8 +137,68 @@ pub struct Stack<L: Link> {
     sockets: SocketSet<'static>,
     receive: &'static mut [u8],
     transmit: &'static mut [u8],
-    /// The default route, which [`Stack::set_ipv4`] set.
+    /// The default route, which [`Stack::configure`] set.
     gateway: Option<Ipv4Address>,
+    counted: Counted,
+}
+
+/// What an interface has sent and received since it started, as Linux
+/// counts it for `/proc/net/dev`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counters {
+    /// Frames received, whole or cut to the longest the stack takes.
+    pub received_packets: u64,
+    /// Their bytes.
+    pub received_bytes: u64,
+    /// Frames sent: handed to the card, or put in the loopback link's ring.
+    pub sent_packets: u64,
+    /// Their bytes.
+    pub sent_bytes: u64,
+    /// Frames lost on their way out: the card could not take them, or the
+    /// loopback link's ring had no room.
+    pub send_dropped: u64,
+}
+
+/// The counts of [`Counters`], which the tokens a poll hands smoltcp add
+/// to while both of a frame's are out.
+#[derive(Default)]
+struct Counted {
+    received_packets: Cell<u64>,
+    received_bytes: Cell<u64>,
+    sent_packets: Cell<u64>,
+    sent_bytes: Cell<u64>,
+    send_dropped: Cell<u64>,
+}
+
+/// Adds `by` to `count`.
+fn add(count: &Cell<u64>, by: usize) {
+    count.set(count.get().wrapping_add(by as u64));
+}
+
+impl Counted {
+    fn received(&self, len: usize) {
+        add(&self.received_packets, 1);
+        add(&self.received_bytes, len);
+    }
+
+    fn sent(&self, len: usize) {
+        add(&self.sent_packets, 1);
+        add(&self.sent_bytes, len);
+    }
+
+    fn dropped(&self) {
+        add(&self.send_dropped, 1);
+    }
+
+    fn get(&self) -> Counters {
+        Counters {
+            received_packets: self.received_packets.get(),
+            received_bytes: self.received_bytes.get(),
+            sent_packets: self.sent_packets.get(),
+            sent_bytes: self.sent_bytes.get(),
+            send_dropped: self.send_dropped.get(),
+        }
+    }
 }
 
 /// The card as smoltcp's device, while the stack polls.
@@ -147,43 +209,73 @@ struct Phy<'a, L: Link> {
     in_place: bool,
     receive: &'a mut [u8],
     transmit: &'a mut [u8],
+    counted: &'a Counted,
 }
 
 impl<'a, L: Link> Phy<'a, L> {
-    fn new(link: &'a mut L, receive: &'a mut [u8], transmit: &'a mut [u8]) -> Phy<'a, L> {
+    fn new(
+        link: &'a mut L,
+        receive: &'a mut [u8],
+        transmit: &'a mut [u8],
+        counted: &'a Counted,
+    ) -> Phy<'a, L> {
         let in_place = link.loopback().is_some();
-        Phy { link, in_place, receive, transmit }
+        Phy { link, in_place, receive, transmit, counted }
     }
 }
 
-/// A frame received: copied from the card, or a loopback packet in place.
+/// A frame received: copied from the card, or a loopback packet in place
+/// (counted as it is read).
 enum Received<'a> {
     Copied(&'a [u8]),
-    InPlace(loopback::Oldest<'a>),
+    InPlace(loopback::Oldest<'a>, &'a Counted),
 }
 
 /// A frame to send: written to the stack's buffer for the card to copy, or
 /// in place in the loopback link's ring, there or as the answer to the
-/// packet received. `spare` takes a loopback packet with no room.
+/// packet received. `spare` takes a loopback packet with no room, which
+/// is lost. Each is counted as it goes.
 enum Sending<'a, L: Link> {
-    Copied { link: &'a mut L, buffer: &'a mut [u8] },
-    InPlace { link: &'a mut Loopback, spare: &'a mut [u8] },
-    Answer { answer: loopback::Answer<'a>, spare: &'a mut [u8] },
+    Copied { link: &'a mut L, buffer: &'a mut [u8], counted: &'a Counted },
+    InPlace { link: &'a mut Loopback, spare: &'a mut [u8], counted: &'a Counted },
+    Answer { answer: loopback::Answer<'a>, spare: &'a mut [u8], counted: &'a Counted },
 }
 
 impl phy::RxToken for Received<'_> {
     fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
         match self {
             Received::Copied(frame) => f(frame),
-            Received::InPlace(packet) => packet.read(f),
+            Received::InPlace(packet, counted) => packet.read(|packet| {
+                counted.received(packet.len());
+                f(packet)
+            }),
         }
+    }
+}
+
+/// `write`, which writes a loopback packet of `len` bytes, counting it as
+/// sent, or as lost when it is written to the spare buffer at `spare_at`,
+/// out of the ring.
+fn counted_write<R>(
+    len: usize,
+    spare_at: usize,
+    counted: &Counted,
+    write: impl FnOnce(&mut [u8]) -> R,
+) -> impl FnOnce(&mut [u8]) -> R {
+    move |packet: &mut [u8]| {
+        if packet.as_ptr().addr() == spare_at {
+            counted.dropped();
+        } else {
+            counted.sent(len);
+        }
+        write(packet)
     }
 }
 
 impl<L: Link> phy::TxToken for Sending<'_, L> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
         match self {
-            Sending::Copied { link, buffer } => {
+            Sending::Copied { link, buffer, counted } => {
                 // smoltcp asks for no more than the capabilities' largest
                 // frame, which is no longer than the buffer. Were it to ask
                 // for more, a frame cut short would be wrong: it is
@@ -192,13 +284,21 @@ impl<L: Link> phy::TxToken for Sending<'_, L> {
                 let fits = len <= room;
                 let frame = &mut buffer[..len.min(room)];
                 let result = f(frame);
-                if fits {
-                    link.send(frame);
+                if fits && link.send(frame) {
+                    counted.sent(len);
+                } else {
+                    counted.dropped();
                 }
                 result
             }
-            Sending::InPlace { link, spare } => link.send_with(len, spare, f),
-            Sending::Answer { answer, spare } => answer.send_with(len, spare, f),
+            Sending::InPlace { link, spare, counted } => {
+                let write = counted_write(len, spare.as_ptr().addr(), counted, f);
+                link.send_with(len, spare, write)
+            }
+            Sending::Answer { answer, spare, counted } => {
+                let write = counted_write(len, spare.as_ptr().addr(), counted, f);
+                answer.send_with(len, spare, write)
+            }
         }
     }
 }
@@ -214,24 +314,31 @@ impl<L: Link> phy::Device for Phy<'_, L> {
         Self: 'b;
 
     fn receive(&mut self, _now: Instant) -> Option<(Received<'_>, Sending<'_, L>)> {
+        let counted = self.counted;
         if self.in_place {
             let (packet, answer) = self.link.loopback()?.oldest()?;
-            let answer = Sending::Answer { answer, spare: self.transmit };
-            return Some((Received::InPlace(packet), answer));
+            let answer = Sending::Answer { answer, spare: self.transmit, counted };
+            return Some((Received::InPlace(packet, counted), answer));
         }
         let len = self.link.receive(self.receive)?;
         let len = len.min(self.receive.len());
-        let sending = Sending::Copied { link: self.link, buffer: self.transmit };
+        counted.received(len);
+        let sending = Sending::Copied { link: self.link, buffer: self.transmit, counted };
         Some((Received::Copied(&self.receive[..len]), sending))
     }
 
     fn transmit(&mut self, _now: Instant) -> Option<Sending<'_, L>> {
+        let counted = self.counted;
         if self.in_place {
             let link = self.link.loopback()?;
-            return link.can_send().then_some(Sending::InPlace { link, spare: self.transmit });
+            return link.can_send().then_some(Sending::InPlace {
+                link,
+                spare: self.transmit,
+                counted,
+            });
         }
         if self.link.can_send() {
-            Some(Sending::Copied { link: self.link, buffer: self.transmit })
+            Some(Sending::Copied { link: self.link, buffer: self.transmit, counted })
         } else {
             None
         }
@@ -293,19 +400,33 @@ impl<L: Link> Stack<L> {
         };
         let mut config = Config::new(hardware);
         config.random_seed = seed;
-        let mut phy = Phy::new(&mut link, &mut *receive, &mut *transmit);
+        let counted = Counted::default();
+        let mut phy = Phy::new(&mut link, &mut *receive, &mut *transmit, &counted);
         let iface = Interface::new(config, &mut phy, instant(now_ns));
-        Stack { link, iface, sockets: SocketSet::new(sockets), receive, transmit, gateway: None }
+        let sockets = SocketSet::new(sockets);
+        Stack { link, iface, sockets, receive, transmit, gateway: None, counted }
     }
 
     /// Gives the interface `address` (with its prefix) as its only IPv4
     /// address, and `gateway` as its default route, or none.
     pub fn set_ipv4(&mut self, address: Ipv4Cidr, gateway: Option<Ipv4Address>) {
+        self.configure(&[address], gateway);
+    }
+
+    /// Gives the interface `addresses` as its IPv4 addresses, as many as
+    /// fit (8), the first its own for what it sends, and `gateway` as its
+    /// default route, or none (radix-network(2)'s `configure`). The
+    /// connections and sockets of addresses it no longer has stay, and
+    /// what they send goes nowhere, as on Linux.
+    pub fn configure(&mut self, addresses: &[Ipv4Cidr], gateway: Option<Ipv4Address>) {
         self.gateway = gateway;
         self.iface.update_ip_addrs(|addrs| {
             addrs.clear();
-            // One address fits: there is room for at least one.
-            let _ = addrs.push(IpCidr::Ipv4(address));
+            for &address in addresses {
+                if addrs.push(IpCidr::Ipv4(address)).is_err() {
+                    break;
+                }
+            }
         });
         let routes = self.iface.routes_mut();
         routes.remove_default_ipv4_route();
@@ -315,26 +436,55 @@ impl<L: Link> Stack<L> {
         }
     }
 
-    /// The interface's IPv4 address, with its prefix, if it has one.
+    /// The interface's IPv4 address, with its prefix, if it has one: the
+    /// first, which it sends from.
     pub fn ipv4(&self) -> Option<Ipv4Cidr> {
+        self.ipv4_addresses().next()
+    }
+
+    /// The interface's IPv4 addresses, with their prefixes, the first
+    /// first.
+    pub fn ipv4_addresses(&self) -> impl Iterator<Item = Ipv4Cidr> + '_ {
         // IPv4 is the stack's only protocol (until IPv6, in 12c).
-        self.iface.ip_addrs().first().map(|&IpCidr::Ipv4(cidr)| cidr)
+        self.iface.ip_addrs().iter().map(|&IpCidr::Ipv4(cidr)| cidr)
+    }
+
+    /// Whether `to` is the broadcast address of one of the interface's
+    /// networks, such as 10.0.2.255 on 10.0.2.0/24.
+    pub fn is_broadcast(&self, to: Ipv4Address) -> bool {
+        self.ipv4_addresses().any(|cidr| cidr.broadcast() == Some(to))
+    }
+
+    /// The interface's default route, if it has one.
+    pub fn router(&self) -> Option<Ipv4Address> {
+        self.gateway
     }
 
     /// Gives the interface `addresses` as its IPv4 addresses, as many as
     /// fit (8), the first first, and no default route: the loopback
     /// interface's, which has the cards' addresses too.
     pub fn set_ipv4_addresses(&mut self, addresses: &[Ipv4Cidr]) {
-        self.gateway = None;
-        self.iface.update_ip_addrs(|addrs| {
-            addrs.clear();
-            for &address in addresses {
-                if addrs.push(IpCidr::Ipv4(address)).is_err() {
-                    break;
-                }
-            }
-        });
-        self.iface.routes_mut().remove_default_ipv4_route();
+        self.configure(addresses, None);
+    }
+
+    /// The interface's MAC address: `None` on an IP link, which has none.
+    pub fn mac(&self) -> Option<EthernetAddress> {
+        // smoltcp asks for an IP link's hardware address no further.
+        match self.link.medium() {
+            Medium::Ethernet => Some(EthernetAddress(self.link.mac())),
+            Medium::Ip => None,
+        }
+    }
+
+    /// What the interface has sent and received since it started.
+    pub fn counters(&self) -> Counters {
+        self.counted.get()
+    }
+
+    /// Each of the stack's TCP and UDP sockets, as `/proc/net/tcp` and
+    /// `/proc/net/udp` list them, in the order of its slots.
+    pub fn sockets(&self) -> impl Iterator<Item = Shown> + '_ {
+        self.sockets.iter().filter_map(|(_, socket)| Shown::of(socket))
     }
 
     /// Whether `address` is one of the interface's own.
@@ -375,7 +525,8 @@ impl<L: Link> Stack<L> {
     pub fn poll(&mut self, now_ns: u64) -> bool {
         let mut changed = false;
         for _ in 0..POLL_ROUNDS {
-            let mut phy = Phy::new(&mut self.link, &mut *self.receive, &mut *self.transmit);
+            let mut phy =
+                Phy::new(&mut self.link, &mut *self.receive, &mut *self.transmit, &self.counted);
             let result = self.iface.poll(instant(now_ns), &mut phy, &mut self.sockets);
             self.link.flush();
             changed |= result == PollResult::SocketStateChanged;

@@ -21,6 +21,14 @@
 //! needs a socket bound with the receive right for its port. A program
 //! finds its network capabilities in radix-startup(2)'s NETWORK_SLOTS
 //! slots from SLOT_NETWORK.
+//!
+//! Its control right, whatever its ports, sets the interfaces up
+//! (`configure`): their addresses and their routers, which ip(8) does,
+//! and the DHCP client will (Phase 12a.4b; ADR 0190). Spark gives a service one with only that right
+//! when its file asks for admin.network. The interfaces are numbered as
+//! Linux numbers them: `lo` is 1, and the cards from 2 in the order they
+//! were found, `net0` first; `/kernel/class/net` has a directory for
+//! each, with its number in `ifindex`.
 
 module network;
 
@@ -61,9 +69,23 @@ struct Address {
     ip: [u8; 16];
 }
 
-/// A range of the network's ports, and the rights to connect out and to
-/// listen on them.
-interface network = 0x000f version 1 {
+/// The most IPv4 addresses `configure` gives an interface.
+const ADDRESSES_MAX: u64 = 4;
+
+/// An IPv4 address of an interface's, and its network: what `configure`
+/// takes, as `ip address add 10.0.2.15/24` writes it.
+struct InterfaceAddress {
+    /// The address, in network byte order.
+    ip: [u8; 4];
+    /// The length of its network's prefix, 0 to 32.
+    prefix: u8;
+    /// Zero.
+    reserved: [u8; 3];
+}
+
+/// A range of the network's ports, and the rights to connect out, to
+/// listen on them, and to set the interfaces up.
+interface network = 0x000f version 2 {
     kind = network;
     /// Makes a socket of `family` and `kind` in slot `to`, with `flags`:
     /// one that is neither bound nor connected (POSIX's `socket`). Fails
@@ -81,4 +103,17 @@ interface network = 0x000f version 1 {
     /// The capability's range of ports: the first, and how many.
     method ports = 3 () -> (first: u32, count: u32)
         raises [no_such_slot, empty_slot, wrong_kind];
+    /// Gives the interface numbered `interface` the IPv4 addresses in
+    /// `addresses`, InterfaceAddress structures, at most ADDRESSES_MAX
+    /// of them, in place of those it had, the first its own for the
+    /// packets it sends; and `router`, an address in network byte order,
+    /// as its default route, or none if `router` is empty. No addresses
+    /// and no router leave it with neither, as a DHCP client starts.
+    /// Each address is a unicast one; so is the router. Fails with
+    /// no_device for an interface that is not there, and not_supported
+    /// for `lo`, whose addresses are its own and the cards'. Needs the
+    /// control right. (Since version 2.)
+    method configure = 4 (interface: u32, addresses: in bytes, router: in bytes) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                bad_address, no_device, not_supported];
 }

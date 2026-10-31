@@ -5,8 +5,9 @@
 //!
 //! The kernel draws its log on the screen until consoled takes the screen
 //! (_/devices/fb0_, radix-framebuffer(2)). Then consoled draws six consoles on
-//! it, one at a time, each a terminal for TERM=linux (`term`) with a login
-//! shell on a pseudo-terminal (`session`), and turns the keys read from
+//! it, one at a time, each a terminal for TERM=linux (`term`) with
+//! login(1)'s sign-in on a pseudo-terminal (`session`, ADR 0250), or with
+//! `--shell`, root's shell and no sign-in, and turns the keys read from
 //! _/devices/kbd_ (radix-input(2)) into what the terminal sends (`keys`).
 //! Alt+F1 to Alt+F6 show a console, starting its session the first time;
 //! Shift+Page Up looks back; Scroll Lock holds the shown console's output;
@@ -52,6 +53,9 @@ const DEFAULT_ISSUE: &str = "\\s \\r (\\l)\n\n";
 
 /// What Ctrl+Alt+Delete runs.
 const REBOOT: &str = "/system/commands/reboot";
+
+/// What runs on each console: the sign-in.
+const LOGIN: &str = "/system/commands/login";
 
 /// The write end of the pipe the SIGCHLD handler wakes the loop with.
 static WAKE: AtomicI32 = AtomicI32::new(-1);
@@ -115,6 +119,19 @@ fn options() -> Result<Options, String> {
         }
     }
     Ok(options)
+}
+
+/// Whether the kernel's command line has `console-sign-in=off`
+/// (dukovo-boot(7)): root's shell on each console, with no sign-in.
+fn sign_in_off() -> bool {
+    let line = std::fs::read_to_string("/kernel/cmdline").unwrap_or_default();
+    sign_in_off_in(&line)
+}
+
+/// Whether the kernel flags of command line `line`, those before a lone
+/// `--`, have `console-sign-in=off`.
+fn sign_in_off_in(line: &str) -> bool {
+    line.split_whitespace().take_while(|w| *w != "--").any(|w| w == "console-sign-in=off")
 }
 
 /// Root's shell and home from the user database, as login(1) reads them.
@@ -396,10 +413,19 @@ fn main() -> ExitCode {
         .open("/devices/kbd")
         .map_err(|err| eprintln!("consoled: no keyboard (/devices/kbd: {err})"))
         .ok();
-    let (root_shell, home) = root_account();
-    let path = options.shell.unwrap_or(root_shell);
+    // Sign-in on each console, unless a shell was asked for, which then
+    // runs as root with no sign-in.
+    let (sign_in, path, home) = match options.shell {
+        Some(path) => (false, path, root_account().1),
+        None if sign_in_off() => {
+            eprintln!("consoled: console-sign-in=off: root's shell on each console, no sign-in");
+            let (shell, home) = root_account();
+            (false, shell, home)
+        }
+        None => (true, LOGIN.to_string(), "/".to_string()),
+    };
     let issue = std::fs::read_to_string(ISSUE).unwrap_or_else(|_| DEFAULT_ISSUE.into());
-    let shell = Shell { env: session_env(&path, &home), path, issue };
+    let shell = Shell { env: session_env(&path, &home), path, sign_in, issue };
     let mut wake = match watch_children() {
         Ok(wake) => wake,
         Err(err) => {
@@ -421,5 +447,19 @@ fn main() -> ExitCode {
             eprintln!("consoled: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sign_in_off_in;
+
+    #[test]
+    fn sign_in_is_off_only_by_a_kernel_flag() {
+        assert!(sign_in_off_in("lockdep console-sign-in=off qemu-exit"));
+        assert!(!sign_in_off_in("lockdep qemu-exit"));
+        assert!(!sign_in_off_in("console-sign-in=on"));
+        // After `--` the words are Spark's.
+        assert!(!sign_in_off_in("qemu-exit -- console-sign-in=off"));
     }
 }

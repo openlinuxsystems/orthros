@@ -154,7 +154,9 @@ enum SocketOption: u32 {
     error = 6;
     /// IP_TTL: how many routers its packets may pass, 1 to 255.
     time_to_live = 7;
-    /// SO_BROADCAST, a boolean, kept for datagram sockets.
+    /// SO_BROADCAST, a boolean: whether a datagram socket may send to a
+    /// broadcast address, 255.255.255.255 or its network's; without it,
+    /// such a send fails with broadcast.
     broadcast = 8;
     /// SO_TYPE, read only: the socket's SocketType (radix-network(2)).
     kind = 9;
@@ -174,6 +176,12 @@ enum SocketOption: u32 {
     /// TCP_KEEPCNT: the probes that may go unanswered before the
     /// connection is reset, 1 to 127; 9 to begin with.
     keep_count = 14;
+    /// SO_BINDTODEVICE: the interface, by its number (radix-network(2)),
+    /// that the socket's packets go out through and come in by, 0 for
+    /// any. A datagram socket bound to an interface with no IPv4 address
+    /// sends from 0.0.0.0, as a DHCP client does. Set before the socket
+    /// connects or listens.
+    bind_to_device = 15;
 }
 
 /// The most files one `send_files` sends, as Linux's SCM_MAX_FD.
@@ -188,7 +196,7 @@ const BACKLOG_MAX: u64 = 4096;
 const SOCKET_NAME_MAX: u64 = 107;
 
 /// A file.
-interface file = 0x000c version 7 {
+interface file = 0x000c version 8 {
     kind = file;
     /// Reads from byte `offset` into `buffer`; returns how many bytes it
     /// read, fewer than asked at the end of the file. Needs the read right.
@@ -273,7 +281,8 @@ interface file = 0x000c version 7 {
     /// the address it is connected to. Needs the write right.
     method send = 12 (data: in bytes, flags: SocketFlags) -> (count: u64)
         raises [no_such_slot, empty_slot, missing_rights, bad_address, not_socket, would_block,
-                gone, interrupted, not_connected, reset, message_too_long, unreachable];
+                gone, interrupted, not_connected, reset, message_too_long, unreachable,
+                broadcast];
     /// Receives what a socket's other end sent into `buffer`, as `read`
     /// does but with `flags`; returns how many bytes came, 0 once the
     /// other end is gone or shut for writing and all it sent has been
@@ -320,12 +329,15 @@ interface file = 0x000c version 7 {
     method socket_name = 17 (peer: bool, buffer: out bytes) -> (len: u64)
         raises [no_such_slot, empty_slot, bad_address, not_socket, not_connected];
     /// What a socket is: whether it listens (SO_ACCEPTCONN), whether it
-    /// is connected, and for a connected one the number of the process at
-    /// the other end (SO_PEERCRED's `pid`): the one that connected, or for
+    /// is connected, and for a connected one the process at the other end,
+    /// SO_PEERCRED: its number, the user it acted for and that user's
+    /// group (radix-names(2)). That is the process that connected, or for
     /// the connecting end, the one that listened, as each was when the
-    /// connection was made; for a pair's ends, the process that made the
-    /// pair; for a network socket, 0.
-    method socket_state = 18 () -> (listening: bool, connected: bool, peer: u64)
+    /// connection was made or the listening began; for a pair's ends, the
+    /// process that made the pair; for a network socket, 0 for all three.
+    /// A service such as authd tells who asks it so.
+    method socket_state = 18 () -> (listening: bool, connected: bool, peer: u64, user: u32,
+                                    group: u32)
         raises [no_such_slot, empty_slot, not_socket];
     /// Sends `data` as `send` does, with the files whose slots `slots`
     /// holds (u32 each, at most SEND_FILES_MAX): copies of their
@@ -393,7 +405,7 @@ interface file = 0x000c version 7 {
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
                 bad_address, not_socket, not_supported, address_in_use, no_buffers, no_memory,
                 unreachable, would_block, interrupted, message_too_long, not_connected, gone,
-                reset];
+                reset, broadcast];
     /// Receives as `receive` does, and writes where what came is from
     /// into `address`, as an Address, if it has room for one; returns how
     /// many bytes came. Needs the read right.

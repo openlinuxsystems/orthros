@@ -19,7 +19,10 @@
 //! few on each such interface, a pool of smoltcp sockets that listen,
 //! each of which becomes a connection when one comes, for `accept` to
 //! take and the pool to make again. Each part's memory is lent to smoltcp
-//! and comes back when it is taken out (`net::memory`).
+//! and comes back when it is taken out (`net::memory`). A socket bound
+//! to an interface (SO_BINDTODEVICE, ADR 0190) is on that one alone, and
+//! sends through it; on one with no IPv4 address, a datagram goes from
+//! 0.0.0.0, as a DHCP client's does.
 //!
 //! A call that cannot go on waits for networking's count of changes to
 //! move (`net::generation`), then looks again; the interfaces' threads
@@ -34,7 +37,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 
 use radix_abi::Status;
-use radix_abi::errors::Kernel;
+use radix_abi::errors::{File, Kernel};
 use radix_abi::file::SocketOption;
 use radix_abi::network::{Address, AddressFamily, SocketType};
 use radix_abi::process::PipeFlags;
@@ -199,6 +202,9 @@ struct Options {
     time_to_live: u8,
     receive_timeout_ns: u64,
     send_timeout_ns: u64,
+    /// The interface it is bound to, by its number (`ifindex`): 0 for
+    /// none.
+    device: u32,
 }
 
 impl Options {
@@ -213,6 +219,7 @@ impl Options {
         time_to_live: 64,
         receive_timeout_ns: 0,
         send_timeout_ns: 0,
+        device: 0,
     };
 
     /// Sets what they say on `socket`, a stream socket's connection.
@@ -272,7 +279,7 @@ impl State {
     /// it is on, as its parts.
     fn datagram_parts(&mut self, address: Option<Ipv4Address>, port: u16) -> Result<(), Status> {
         self.parts.try_reserve_exact(net::MAX_INTERFACES).map_err(|_| status(Kernel::NoMemory))?;
-        for interface in interfaces_for(address) {
+        for interface in interfaces_for(address, self.options.device) {
             match udp_part(interface, address, port) {
                 // Room was reserved for every interface.
                 Ok(part) => {
@@ -287,9 +294,21 @@ impl State {
         Ok(())
     }
 
+    /// The interface a packet to `to` goes out through: the one it is
+    /// bound to, if it can reach `to` (any interface reaches the
+    /// broadcast address), else the way the routes go.
+    fn route(&self, to: Ipv4Address) -> Result<&'static Interface, Status> {
+        let interface = match self.options.device {
+            0 => net::route(to),
+            device => net::by_index(device)
+                .filter(|interface| to.is_broadcast() || interface.stack.lock().routes_to(to)),
+        };
+        interface.ok_or(status(Kernel::Unreachable))
+    }
+
     /// Starts its connection to `to`, under its lock.
     fn start_connection(&mut self, to: Peer) -> Result<(), Status> {
-        let interface = net::route(to.0).ok_or(status(Kernel::Unreachable))?;
+        let interface = self.route(to.0)?;
         let bound = self.local;
         if let Some((Some(address), _)) = bound
             && !interface.stack.lock().has_address(address)
@@ -442,11 +461,16 @@ fn keep<T: TryFrom<u64>>(value: u64, max: u64) -> Result<T, Status> {
         .ok_or(status(Kernel::InvalidArgument))
 }
 
-/// The interfaces a socket bound to `address` is on: every one for any
-/// address, else those that have it.
-fn interfaces_for(address: Option<Ipv4Address>) -> impl Iterator<Item = &'static Interface> {
+/// The interfaces a socket bound to `address`, and to the interface
+/// numbered `device` if not 0, is on: every one for any address, else
+/// those that have it; only `device`, when it is bound to one.
+fn interfaces_for(
+    address: Option<Ipv4Address>,
+    device: u32,
+) -> impl Iterator<Item = &'static Interface> {
     net::interfaces().filter(move |interface| {
-        address.is_none_or(|address| interface.stack.lock().has_address(address))
+        (device == 0 || interface.index() == device)
+            && address.is_none_or(|address| interface.stack.lock().has_address(address))
     })
 }
 
@@ -548,7 +572,7 @@ impl InetSocket {
     ) -> Result<(), Status> {
         let (address, port) = endpoint;
         if let Some(address) = address
-            && interfaces_for(Some(address)).next().is_none()
+            && interfaces_for(Some(address), 0).next().is_none()
         {
             return Err(status(Kernel::AddressNotAvailable));
         }
@@ -600,7 +624,7 @@ impl InetSocket {
         let each = backlog.min(POOL);
         let mut pool = Vec::new_in(kmalloc());
         pool.try_reserve_exact(each * net::MAX_INTERFACES).map_err(|_| status(Kernel::NoMemory))?;
-        for interface in interfaces_for(address) {
+        for interface in interfaces_for(address, state.options.device) {
             for _ in 0..each {
                 match listening_part(interface, address, port, &state.options) {
                     // Room was reserved for every interface's.
@@ -820,8 +844,17 @@ impl InetSocket {
                 return Err(status(Kernel::InvalidArgument));
             }
             self.bind_if_not(&mut state)?;
-            let interface = net::route(to.0).ok_or(status(Kernel::Unreachable))?;
-            let room = interface.stack.lock().mtu().saturating_sub(UDP_HEADERS);
+            let interface = state.route(to.0)?;
+            let (room, broadcast) = {
+                let stack = interface.stack.lock();
+                let room = stack.mtu().saturating_sub(UDP_HEADERS);
+                (room, to.0.is_broadcast() || stack.is_broadcast(to.0))
+            };
+            if broadcast && !state.options.broadcast {
+                // As on Linux, a program sends to everyone only when it
+                // says it means to (SO_BROADCAST).
+                return Err(status(Kernel::Broadcast));
+            }
             if data.len() > room.min(memory::UDP_BUFFER) {
                 return Err(status(Kernel::MessageTooLong));
             }
@@ -847,11 +880,17 @@ impl InetSocket {
                 .find(|part| core::ptr::eq(part.interface, interface))
                 .ok_or(status(Kernel::Unreachable))?;
             let bounce = state.bounce.as_ref().map_or(&[][..], |bounce| &bounce[..len]);
+            let bound_to_any = state.local.is_some_and(|(address, _)| address.is_none());
             let mut stack = interface.stack.lock();
+            // An interface with no address of its own sends from 0.0.0.0,
+            // as smoltcp would otherwise drop the datagram.
+            let from = (bound_to_any && stack.ipv4().is_none())
+                .then_some(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED));
+            let meta = udp::UdpMetadata { local_address: from, ..endpoint.into() };
             let socket = stack
                 .socket_mut::<udp::Socket<'static>>(part.handle)
                 .ok_or(status(Kernel::Unreachable))?;
-            match socket.send_slice(bounce, endpoint) {
+            match socket.send_slice(bounce, meta) {
                 Ok(()) => {
                     drop(stack);
                     interface.kick();
@@ -939,6 +978,11 @@ impl InetSocket {
             SocketOption::TimeToLive => u64::from(options.time_to_live),
             SocketOption::ReceiveTimeout => options.receive_timeout_ns,
             SocketOption::SendTimeout => options.send_timeout_ns,
+            SocketOption::BindToDevice => {
+                let Some(value) = set else { return Ok(u64::from(options.device)) };
+                let old = u64::from(options.device);
+                return self.bind_to_device(&mut state, value).map(|()| old);
+            }
             SocketOption::ReceiveBuffer | SocketOption::SendBuffer => match self.kind {
                 Kind::Stream => memory::TCP_BUFFER as u64,
                 Kind::Datagram => memory::UDP_BUFFER as u64,
@@ -1004,6 +1048,36 @@ impl InetSocket {
             }
         }
         Ok(old)
+    }
+
+    /// Binds it, under its lock, to the interface numbered `device`, or
+    /// to none for 0 (SO_BINDTODEVICE): before a stream socket connects
+    /// or listens; a datagram socket already bound moves its parts to
+    /// that interface, the datagrams waiting in the others lost.
+    fn bind_to_device(&self, state: &mut State, device: u64) -> Result<(), Status> {
+        let no_device = File::NoDevice.status(0);
+        let device = u32::try_from(device).map_err(|_| no_device)?;
+        if device != 0 && net::by_index(device).is_none() {
+            return Err(no_device);
+        }
+        if self.kind == Kind::Stream && state.phase != Phase::Fresh {
+            return Err(status(Kernel::InvalidArgument));
+        }
+        if device == state.options.device {
+            return Ok(());
+        }
+        let was = core::mem::replace(&mut state.options.device, device);
+        if let (Kind::Datagram, Some((address, port))) = (self.kind, state.local) {
+            let mut old = core::mem::replace(&mut state.parts, Vec::new_in(kmalloc()));
+            if let Err(err) = state.datagram_parts(address, port) {
+                // Back as it was.
+                state.options.device = was;
+                state.parts = old;
+                return Err(err);
+            }
+            release_parts(&mut old, false, None);
+        }
+        Ok(())
     }
 
     /// How many bytes wait to be received: a stream socket's, or a

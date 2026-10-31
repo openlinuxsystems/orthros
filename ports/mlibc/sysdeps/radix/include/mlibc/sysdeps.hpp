@@ -80,6 +80,10 @@ struct RadixSysdepTags :
 	GetThreadaffinity,
 	GetTid,
 	GetUid,
+	IfFreeNameindex,
+	IfIndextoname,
+	IfNameindex,
+	IfNametoindex,
 	Ioctl,
 	Isatty,
 	Kill,
@@ -203,7 +207,7 @@ template<typename Tag>
 using Sysdeps = SysdepOf<RadixSysdepTags, Tag>;
 
 struct SysdepTraits {
-	// No rtnetlink: networking comes in Phase 12.
+	// No rtnetlink: interfaces are listed in /kernel/class/net (ADR 0190).
 	static constexpr bool usesRtNetlink = false;
 };
 

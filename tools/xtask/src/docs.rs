@@ -100,6 +100,12 @@ pub fn build(ctx: &Ctx, check: bool) -> Result<()> {
         problems.extend(check_coverage(ctx)?);
     }
 
+    let (index, adr_problems) = adr_index(&read_adrs(&ctx.root.join("docs/adr"))?);
+    problems.extend(adr_problems);
+    let index_path = ctx.out.join("docs/adr/index.md");
+    process::create_dir(&ctx.out.join("docs/adr"))?;
+    std::fs::write(&index_path, index).context(|| format!("writing {}", index_path.display()))?;
+
     step("Building the handbook");
     let handbook_out = ctx.out.join("docs/handbook");
     let mut cmd = Command::new("mdbook");
@@ -202,7 +208,7 @@ fn check_title(ctx: &Ctx, page: &Page) -> Result<Vec<String>> {
 /// command and self-test must be documented, in bold, in its man page.
 fn check_coverage(ctx: &Ctx) -> Result<Vec<String>> {
     let ob_commands: Vec<&str> = COMMANDS.iter().map(|&(name, _)| name).collect();
-    let boot_tests: Vec<&str> = test::CASES.iter().map(|case| case.name).collect();
+    let boot_tests: Vec<&str> = test::all_cases().map(|case| case.name).collect();
     let kernel_flags: Vec<&str> = radix_hal::cmdline::FLAGS.iter().map(|f| f.name).collect();
     let kdb_commands: Vec<&str> = radix_kdb::COMMANDS.iter().map(|c| c.name).collect();
     let lists: [(&str, &str, &[&str]); 7] = [
@@ -222,6 +228,64 @@ fn check_coverage(ctx: &Ctx) -> Result<Vec<String>> {
         }
     }
     Ok(problems)
+}
+
+/// Each decision record in `dir` (docs/adr): its file name and text, in
+/// the order of their names.
+fn read_adrs(dir: &Path) -> Result<Vec<(String, String)>> {
+    let mut adrs = Vec::new();
+    for entry in std::fs::read_dir(dir).context(|| format!("reading {}", dir.display()))? {
+        let path = entry.context(|| format!("reading {}", dir.display()))?.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let numbered = name.as_bytes().first().is_some_and(u8::is_ascii_digit);
+        if numbered && path.extension().is_some_and(|ext| ext == "md") {
+            let text = std::fs::read_to_string(&path).context(|| format!("reading {name}"))?;
+            adrs.push((name.to_string(), text));
+        }
+    }
+    adrs.sort();
+    Ok(adrs)
+}
+
+/// The index of the decision records, made from their files so that no
+/// pull request edits a shared table (threads that build phases in
+/// parallel added rows at the same place, and conflicted), and the
+/// problems with them: a number two records take, or a title that does
+/// not start with its file's number.
+fn adr_index(adrs: &[(String, String)]) -> (String, Vec<String>) {
+    let mut index = String::from(
+        "# Architecture decision records\n\n| Number | Decision | Status |\n| --- | --- | --- |\n",
+    );
+    let mut problems = Vec::new();
+    let mut previous = "";
+    for (name, text) in adrs {
+        let number = name.split('-').next().unwrap_or_default();
+        if number.len() != 4 || !number.bytes().all(|b| b.is_ascii_digit()) {
+            problems.push(format!("docs/adr/{name} is not named NNNN-title.md"));
+            continue;
+        }
+        if number == previous {
+            problems
+                .push(format!("docs/adr/{name} takes number {number}, which another record has"));
+        }
+        previous = number;
+        let heading = text.lines().find_map(|line| line.strip_prefix("# ")).unwrap_or_default();
+        let title = match heading.strip_prefix(&format!("{number}. ")) {
+            Some(title) => title,
+            None if number == "0000" => heading,
+            None => {
+                problems.push(format!("docs/adr/{name}'s title does not start with `{number}. `"));
+                heading
+            }
+        };
+        let status = text
+            .lines()
+            .find_map(|line| line.strip_prefix("- Status: "))
+            .and_then(|status| status.split(';').next())
+            .unwrap_or_default();
+        index.push_str(&format!("| [{number}]({name}) | {title} | {status} |\n"));
+    }
+    (index, problems)
 }
 
 /// The names that do not appear in bold (`*name*`) in `page`.
@@ -251,5 +315,33 @@ mod tests {
     fn finds_undocumented_names() {
         let page = "*kdb*\n\tstart the debugger\n*trace* [*on*|*off*]";
         assert_eq!(undocumented(page, &["kdb", "trace", "on", "regs"]), ["regs"]);
+    }
+
+    #[test]
+    fn indexes_decision_records_and_finds_clashes() {
+        let adr = |name: &str, text: &str| (name.to_string(), text.to_string());
+        let (index, problems) = adr_index(&[
+            adr("0001-a.md", "# 0001. A\n\n- Status: Accepted; changed by 0002\n"),
+            adr("0002-b.md", "# 0002. B\n\n- Status: Accepted\n"),
+            adr("0002-c.md", "# 0003. C\n"),
+        ]);
+        assert!(index.contains("| [0001](0001-a.md) | A | Accepted |\n"));
+        assert_eq!(
+            problems,
+            [
+                "docs/adr/0002-c.md takes number 0002, which another record has",
+                "docs/adr/0002-c.md's title does not start with `0002. `",
+            ]
+        );
+    }
+
+    /// The records in the tree, so that `cargo test` finds a clash of
+    /// numbers between pull requests before the docs job does.
+    #[test]
+    fn decision_records_have_numbers_of_their_own() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/adr");
+        let adrs = read_adrs(&dir).unwrap();
+        let (_, problems) = adr_index(&adrs);
+        assert!(problems.is_empty(), "{problems:#?}");
     }
 }

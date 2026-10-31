@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Networking
 
-This chapter describes networking in Dukovo as of Phase 12a.2 of the
+This chapter describes networking in Dukovo as of Phase 12a.4 of the
 roadmap. Phase 12 builds it up in steps: sockets for programs, TCP
 that matches Linux, `netd` with DHCP, DNS and `curl`, the time service,
 the Realtek, Intel and USB Ethernet cards, IPv6, the firewall and
@@ -90,9 +90,18 @@ WireGuard. This page grows with each.
   (service.toml(5)). A service that asks for
   neither cannot use the network.
 
+- **`ip` and `ss`**, with iproute2's words and output: `ip address`,
+  `ip link` and `ip route` show the interfaces, their addresses and
+  routes, `ip address add` and `ip route add default via` set a card
+  up, and `ss` lists the TCP and UDP sockets
+  ([ADR 0190](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0190-interfaces-are-shown-as-linux-shows-them-and-set-up-through-the-network-capability.md)).
+  The interfaces are in `/kernel/class/net` and the counts, routes and
+  sockets in `/processes/net`, in Linux's formats.
+
 Native programs use the sockets through radix-network(2) and
 radix-file(2). Nothing configures the network by itself yet: there is
-no DHCP until `netd` lands.
+no DHCP until `netd` lands, and a card gets an address from the boot
+flags or from `ip`.
 
 ## Giving a service the network
 
@@ -139,6 +148,33 @@ selftest net: passed; the router answered 4 pings, the fastest in 1.390 ms
 
 `ob test --case net` runs the same test behind QEMU's IOMMU, as CI
 does.
+
+## Setting a card up by hand
+
+At the console, root's shell may set a card up with ip(8), as on
+Linux; a service may when its file asks for `admin.network = yes`
+(spark(8)). With QEMU's user network:
+
+```
+# ip address add 10.0.2.15/24 dev net0
+# ip route add default via 10.0.2.2
+# ip -br address
+lo               UNKNOWN        127.0.0.1/8
+net0             UP             10.0.2.15/24
+# ip route
+default via 10.0.2.2 dev net0
+10.0.2.0/24 dev net0 proto kernel scope link src 10.0.2.15
+```
+
+Each card takes up to four addresses, the first the one it sends from,
+and a router. `ip address del`, `ip address flush` and `ip route del
+default` take them away again; `ss -tl` lists what listens. The
+`interfaces` boot test does the same with the address QEMU's DHCP
+server offers, which a socket bound to the bare card asks for:
+
+```
+./ob test --case interfaces
+```
 
 ## Trying the sockets
 

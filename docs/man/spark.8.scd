@@ -214,6 +214,10 @@ cpu_weight = 200
 memory = "none"
 
 [permissions]
+runs-with-your-access = true
+network.outbound = true
+network.listen = ["1-65535"]
+admin.network = true
 admin.hardware = true
 ```
 
@@ -404,8 +408,8 @@ program SIGTERM along with the first group of services.
 # THE NETWORK
 
 The kernel gives Spark a network capability for all of the network's
-65,536 ports, with the rights to connect out and to listen
-(*radix-network*(2), ADR 0183). With *--network* before the program,
+65,536 ports, with the rights to connect out, to listen and to set the
+interfaces up (*radix-network*(2), ADRs 0183 and 0190). With *--network* before the program,
 with or without *--posix*, Spark gives the program it starts that
 capability too, in _SLOT_NETWORK_ (*radix-startup*(2)); a program
 started without it cannot use the network at all. The *sockets* boot
@@ -413,12 +417,15 @@ test (*ob*(1)) boots with *-- --network /system/tests/sockets virtio*.
 
 A service gets only what its file asks for, derived from that
 capability: with *network.outbound*, one with the send right for every
-port, and for each range of *network.listen*, one with the receive
-right for those ports, in the slots from _SLOT_NETWORK_, in that order.
-Each keeps the copy and transfer rights, so the service's children get
-them through *fork* and *exec*. A service that asks for neither cannot
-use the network at all; the C library's calls fail with EACCES
-(*radix-posix*(7)).
+port, for each range of *network.listen*, one with the receive right
+for those ports, and with *admin.network* one with only the control
+right, which sets the interfaces' addresses and routers, in the slots
+from _SLOT_NETWORK_, in that order. Each keeps the copy and transfer
+rights, so the service's children get them through *fork* and *exec*.
+A service that asks for none cannot use the network at all; the C
+library's calls fail with EACCES (*radix-posix*(7)). *consoled*(8)'s
+file asks for all three, so that root's shells may connect, listen and
+run *ip*(8), as root may on Linux.
 
 # THE PLATFORM
 
@@ -429,7 +436,9 @@ header that the machine's embedded controller keeps
 *admin.hardware = true* gets a copy in _SLOT_PLATFORM_
 (*radix-startup*(2)), with the copy and transfer rights, so that its
 children get it through *fork* and *exec*: *consoled*(8)'s does, so that
-root's shells may run *ectool*(8). A service that does not ask cannot
+root's shells may run *ectool*(8) when the consoles have no sign-in. The
+sessions of people who sign in are *authd*(8)'s children, not
+consoled's, and do not get it. A service that does not ask cannot
 change them; the hardware monitor's files under _/kernel/class/hwmon_
 still show the fans and sensors to everyone (*radix-sysfs*(5)).
 
@@ -438,9 +447,13 @@ still show the fans and sensors to everyone (*radix-sysfs*(5)).
 Spark acts for root, and its root directory has the bypass right, which
 passes the owners and modes of files (*radix-names*(2), ADR 0214). The
 program it starts from its command line acts for root too, with that
-right on the root it gives it, until sign-in (Phase 13b.5). A service
-acts for root without it, in its view, unless its file sets
-*runs-with-your-access* (*service.toml*(5)). With *--names* before the
+right on the root it gives it. A service acts for root without it, in
+its view, unless its file sets *runs-with-your-access*
+(*service.toml*(5)). A service whose file sets *names = true* gets a
+copy of the names capability, as the descriptor after its mounts, with
+*NAMES_DESCRIPTOR* naming it: *authd*(8)'s does, to start the sessions
+of the people who sign in, acting for them (ADR 0250); no other
+service's should. With *--names* before the
 program, a POSIX program gets the names capability as its descriptor 3,
 as the *principals* boot test (*ob*(1)) needs to start processes for
 other users: *-- --posix --names /system/tests/posix/principals*.

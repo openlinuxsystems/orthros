@@ -167,8 +167,10 @@ fn non_blocking(slot: u32) {
 
 /// Gives `child` the network capabilities `spec` asks for, derived from
 /// Spark's `network`, in the slots from SLOT_NETWORK: one to connect out,
-/// and one to listen on each range of ports. They have the copy and
-/// transfer rights, so that they last through `fork` (ADR 0183).
+/// one to listen on each range of ports, and for admin.network one with
+/// only the control right, which sets the interfaces up (ADR 0190). They
+/// have the copy and transfer rights, so that they last through `fork`
+/// (ADR 0183).
 fn grant_network(network: Option<u32>, spec: &Spec, child: u32) -> Result<(), String> {
     if spec.network_grants() == 0 {
         return Ok(());
@@ -178,7 +180,9 @@ fn grant_network(network: Option<u32>, spec: &Spec, child: u32) -> Result<(), St
     let outbound = spec.outbound.then_some((0, 1 << 16, Rights::SEND.union(kept)));
     let listen =
         spec.listen.iter().map(|&(first, count)| (first, count, Rights::RECEIVE.union(kept)));
-    for (to, (first, count, rights)) in (SLOT_NETWORK..).zip(outbound.into_iter().chain(listen)) {
+    let configure = spec.configure.then_some((0, 1 << 16, Rights::CONTROL.union(kept)));
+    let grants = outbound.into_iter().chain(listen).chain(configure);
+    for (to, (first, count, rights)) in (SLOT_NETWORK..).zip(grants) {
         let slot = slots::take().ok_or("no free slot")?;
         let given = network::restrict(&SYS, network, slot, first, count, rights)
             .and_then(|()| process::share(&SYS, child, slot, to, Rights::ALL, 0));
@@ -339,11 +343,13 @@ macro_rules! audit {
 pub struct Supervisor {
     root: Dir,
     /// The `services` domain, the power capability, the network
-    /// capability and the platform capability, from the kernel.
+    /// capability, the platform capability and the names capability,
+    /// from the kernel.
     services_domain: Option<u32>,
     power: Option<u32>,
     network: Option<u32>,
     platform: Option<u32>,
+    names: Option<u32>,
     /// The notification the kernel signals when a child changes.
     children: Option<u32>,
     /// The notification the kernel signals when the power button is
@@ -375,6 +381,7 @@ impl Supervisor {
         let power = SLOT_FIRST_EXTRA + 2;
         let network = SLOT_FIRST_EXTRA + 3;
         let platform = SLOT_FIRST_EXTRA + 4;
+        let names = SLOT_FIRST_EXTRA + 5;
         let children = slots::take().filter(|&slot| {
             process::create(&SYS, SLOT_PROCESS, ObjectKind::Notification, 0, slot).is_ok()
                 && process::notify_children(&SYS, SLOT_PROCESS, slot).is_ok()
@@ -397,6 +404,7 @@ impl Supervisor {
             power,
             network: holds(network, ObjectKind::Network).then_some(network),
             platform: holds(platform, ObjectKind::Platform).then_some(platform),
+            names: holds(names, ObjectKind::Names).then_some(names),
             children,
             button,
             listener: None,
@@ -633,6 +641,11 @@ impl Supervisor {
         let services_domain = self.services_domain;
         let service = &mut self.services[index];
         let spec = &service.spec;
+        let names = match (spec.names, self.names) {
+            (false, _) => None,
+            (true, Some(slot)) => Some(slot),
+            (true, None) => return Err("the kernel gave Spark no names capability".into()),
+        };
         if service.domain.is_none()
             && let Some(parent) = services_domain
         {
@@ -719,10 +732,16 @@ impl Supervisor {
             (write, SLOT_FD_BASE + 1),
             (write, SLOT_FD_BASE + 2),
         ];
-        // The places it mounts beneath, as descriptors from 3.
+        // The places it mounts beneath, as descriptors from 3, then the
+        // names capability if its file asks for it.
         let mounts = view.mounts.iter().zip(3..).map(|(dir, fd)| (dir.slot(), SLOT_FD_BASE + fd));
+        let names_fd = 3 + view.mounts.len() as u32;
+        let names = names.map(|slot| (slot, SLOT_FD_BASE + names_fd));
         let args: Vec<&str> = spec.arguments.iter().map(String::as_str).collect();
         let mut environment = spec.environment.clone();
+        if names.is_some() {
+            environment.push(format!("NAMES_DESCRIPTOR={names_fd}"));
+        }
         if !spec.secrets.is_empty() {
             environment
                 .push(format!("SECRETS_DIRECTORY={}", manifest::service::secrets_dir(&spec.name)));
@@ -734,6 +753,7 @@ impl Supervisor {
             .iter()
             .copied()
             .chain(mounts)
+            .chain(names)
             .try_for_each(|(from, to)| {
                 process::share(&SYS, child, from, to, Rights::ALL, 0)
                     .map_err(|status| format!("sharing slot {to} failed: {:#x}", status.0))

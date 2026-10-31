@@ -87,26 +87,47 @@ pub struct End {
     /// `rx` or `tx` has gone.
     shut_read: AtomicBool,
     shut_write: AtomicBool,
-    /// The name of the socket at the other end, and the number of its
-    /// process, as they were when the connection was made.
+    /// The name of the socket at the other end, and its process, as they
+    /// were when the connection was made.
     peer_name: Name,
-    peer_process: u64,
+    peer: Peer,
+}
+
+/// The process at one end of a connection, as it was when the connection
+/// was made, or when its socket began to listen: what `socket_state`
+/// gives, and POSIX's SO_PEERCRED.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Peer {
+    /// Its number.
+    pub process: u64,
+    /// The user it acted for (ADR 0214).
+    pub user: u32,
+    /// That user's group.
+    pub group: u32,
+}
+
+impl Peer {
+    /// `process` as it is now.
+    pub fn of(process: &crate::user::process::ProcessObject) -> Peer {
+        let identity = process.identity();
+        Peer { process: process.number(), user: identity.user, group: identity.group }
+    }
 }
 
 impl End {
     /// The ends of a new connection: the first's peer is `first_peer`,
-    /// a name and a process's number, and the second's `second_peer`.
-    fn pair(first_peer: (Name, u64), second_peer: (Name, u64)) -> Result<(End, End), Status> {
+    /// a name and a process, and the second's `second_peer`.
+    fn pair(first_peer: (Name, Peer), second_peer: (Name, Peer)) -> Result<(End, End), Status> {
         // Each pipe starts with one reader and one writer, which the ends
         // are from here.
         let (one, other) = (Pipe::new()?, Pipe::new()?);
-        let end = |rx: &KArc<Pipe>, tx: &KArc<Pipe>, (peer_name, peer_process)| End {
+        let end = |rx: &KArc<Pipe>, tx: &KArc<Pipe>, (peer_name, peer)| End {
             rx: rx.clone(),
             tx: tx.clone(),
             shut_read: AtomicBool::new(false),
             shut_write: AtomicBool::new(false),
             peer_name,
-            peer_process,
+            peer,
         };
         Ok((end(&one, &other, first_peer), end(&other, &one, second_peer)))
     }
@@ -158,9 +179,9 @@ impl End {
         self.rx.len()
     }
 
-    /// The number of the process at the other end.
-    pub fn peer_process(&self) -> u64 {
-        self.peer_process
+    /// The process at the other end.
+    pub fn peer(&self) -> Peer {
+        self.peer
     }
 
     /// The events `poll` finds on it, as Linux's for a stream socket: it
@@ -200,10 +221,10 @@ pub struct Listener {
     backlog: AtomicUsize,
     /// Whether the socket has gone.
     closed: AtomicBool,
-    /// The socket's name, and the number of its process, as they were
-    /// when it began to listen.
+    /// The socket's name, and its process, as they were when it began to
+    /// listen.
     name: Name,
-    process: u64,
+    process: Peer,
     /// Its pollers.
     polled: Polled,
 }
@@ -525,7 +546,7 @@ pub fn make_pair(
         return Err(Kernel::InvalidArgument.status(1));
     }
     // Each end's peer is the process that made the pair.
-    let process = user.process.number();
+    let process = Peer::of(&user.process);
     let (one, other) = End::pair((Name::NONE, process), (Name::NONE, process))?;
     // If a step fails, the sockets made go, and with them their ends.
     let one = file(user, Socket::connected_with(one, Name::NONE), flags)?;
@@ -584,9 +605,9 @@ pub fn bind(
 
 /// Has `socket`, which has a name and is not connected, take connections,
 /// at most `backlog` waiting at once (radix-file(2)'s `listen`), for the
-/// process numbered `process`. A socket that listens already takes the
-/// new backlog.
-pub fn listen(socket: &Socket, backlog: u32, process: u64) -> Result<(), Status> {
+/// process `process`. A socket that listens already takes the new
+/// backlog.
+pub fn listen(socket: &Socket, backlog: u32, process: Peer) -> Result<(), Status> {
     let backlog = u64::from(backlog).clamp(1, BACKLOG_MAX) as usize;
     if let Some(listener) = socket.listener.get() {
         listener.backlog.store(backlog, Ordering::Release);
@@ -622,13 +643,13 @@ pub fn listen(socket: &Socket, backlog: u32, process: u64) -> Result<(), Status>
 }
 
 /// Connects `socket` to the socket listening at `named`, a node of the
-/// tree (radix-directory(2)'s `connect_socket`), for the process numbered
+/// tree (radix-directory(2)'s `connect_socket`), for the process
 /// `process`; waits for room in the listener's queue unless
 /// `non_blocking`.
 pub fn connect(
     socket: &Socket,
     named: &NodeRef,
-    process: u64,
+    process: Peer,
     non_blocking: bool,
 ) -> Result<(), Status> {
     let name = {
@@ -650,11 +671,11 @@ pub fn connect(
 }
 
 /// The end of a new connection to the socket listening at `named`, from
-/// a socket named `name` of the process numbered `process`.
+/// a socket named `name` of the process `process`.
 fn connect_to(
     named: &NodeRef,
     name: Name,
-    process: u64,
+    process: Peer,
     non_blocking: bool,
 ) -> Result<End, Status> {
     let refused = || Kernel::Refused.status(0);

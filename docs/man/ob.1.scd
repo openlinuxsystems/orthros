@@ -232,7 +232,7 @@ _target/userspace/_).
 		Pass everything after *--* to *qemu-system-x86_64*(1) unchanged,
 		for example *-- -d int* to log interrupts.
 
-*test* [*unit* | *boot* | *kani* | *tla* | *corpus*] [*--case* _name_]... [*--timeout* _seconds_] [*--debug* | *--release*]
+*test* [*unit* | *boot* | *kani* | *tla* | *corpus*] [*--case* _name_]... [*--shard* _part_/_parts_] [*--timeout* _seconds_] [*--debug* | *--release*] | *--list*
 	Run the unit tests of the build tool and the kernel libraries on this
 	machine, then the boot tests: build a test image and boot it in QEMU
 	once per case below. Each case follows the serial console, types
@@ -532,6 +532,38 @@ _target/userspace/_).
 		no variable, what every service reads, _/bin/sh_ and
 		_/usr/bin/env_, its own folder and _/tmp_, nothing past them,
 		and a file of mode 000 closed to it.
+
+	*accounts*
+		Boot 2 CPUs with the shipped services, *authd*(8) among them,
+		and _/system/tests/posix/accounttest_ as a program that holds
+		the names capability, which makes alice, an administrator, and
+		bob, with an empty password, with *user*(8); checks the account
+		files and the hashes' file, their modes and the homes, and what
+		*getpwnam*(3), *getgrnam*(3), *id*(1) and *user list* read;
+		asks authd over its socket as sign-in will, where a right
+		password passes and a wrong one, or a name there is not, is
+		answered alike after two seconds, a second try at once after
+		four; changes alice's password as root with *passwd*(1); then
+		starts itself as alice, who changes her own password given hers
+		but not bob's, makes no account, checks no password but hers,
+		and can neither read the hashes nor change the account files
+		(ADR 0218).
+
+	*signin*
+		Boot 2 CPUs under UEFI from USB with the shipped services and
+		_/system/tests/posix/signintest_ as root. The machine has no
+		account, so *login*(1) on tty1 asks for the owner's: the test
+		types alice, an administrator, and her password twice, and she
+		is signed in, with her ids, home, shell and terminal checked at
+		her shell. signintest makes bob through *authd*(8); the test
+		signs him in on tty2, where he cannot list alice's home,
+		*who*(1) lists both, and *signintest mount* finds that he
+		mounts and unmounts nothing; signintest checks that each session's
+		leader acts for its user on a terminal of its own. Bob signs out
+		and the sign-in comes back; a wrong password is refused after a
+		wait and the right one signs him in again; alice, still signed
+		in on tty1, cannot list bob's home. The power button ends it
+		(ADR 0250).
 
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test
@@ -881,6 +913,20 @@ _target/userspace/_).
 		socket's memory must come back to the kernel (*radix-network*(2),
 		ADR 0183).
 
+	*interfaces*
+		Boot 2 CPUs under UEFI from the USB stick with a virtio network
+		card on QEMU's user network, as for *sockets*, but with no
+		address. Spark starts _/system/tests/posix/interfaces_ with its
+		network capability: the program finds the card as *net0*,
+		number 2, through the C library and _/kernel/class/net_; sends a
+		DHCPDISCOVER from 0.0.0.0 through a socket bound to the card
+		with SO_BINDTODEVICE, which QEMU's DHCP server must answer with
+		an offer of 10.0.2.15 that the socket receives; gives the card
+		that address and the router with *ip*(8), which must show them;
+		connects through the card to QEMU's *cat*, which *ss*(8) must
+		list; and takes the address and router away again with *ip*(8),
+		each change logged by the kernel (ADR 0190).
+
 	*disk-check*
 		Boot 2 CPUs under UEFI with a 128 MiB NVMe disk whose serial
 		number is _dukovo-test-0_, and run the disk check of a real
@@ -1118,8 +1164,31 @@ _target/userspace/_).
 		Boot an image with a generated microcode file on an emulated
 		Intel CPU, and check that the kernel finds the matching update.
 
+	The boot tests that Phases 11, 12 and 13 add from now on are
+	described below, each under its phase, which are built in parallel.
+
+	_Phase 11: hardware support_
+
+; Phase 11's boot tests go above this line.
+
+	_Phase 12: networking_
+
+; Phase 12's boot tests go above this line.
+
+	_Phase 13: security and accounts_
+
+; Phase 13's boot tests go above this line.
+
 	*--case* _name_
 		Run only this boot test; repeat the option for more.
+
+	*--shard* _part_/_parts_
+		Run every _parts_th boot test, from the _part_th: *--shard 2/3*
+		runs the second, fifth, eighth and so on. CI runs the boot tests
+		in three jobs this way. It needs *boot*.
+
+	*--list*
+		Name every boot test and what it checks, and run none.
 
 	*--timeout* _seconds_
 		Fail a boot test that has not finished after this long. The

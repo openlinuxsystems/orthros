@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <mlibc/all-sysdeps.hpp>
+#include <net/if.h>
 #include <mlibc/threads.hpp>
 #include <stddef.h>
 #include <stdint.h>
@@ -570,6 +571,40 @@ int set_option(uint32_t slot, enum radix_socket_option option, uint64_t value) {
 	return status ? inet_errno(status) : 0;
 }
 
+// SO_BINDTODEVICE of `slot`, as Linux gives it: the interface's name and
+// its NUL, or nothing for a socket bound to none.
+int get_device(uint32_t slot, void *buffer, socklen_t *size) {
+	if(*size < IFNAMSIZ)
+		return EINVAL;
+	uint64_t index;
+	if(int e = get_option(slot, RADIX_SOCKET_OPTION_BIND_TO_DEVICE, &index); e)
+		return e;
+	if(!index) {
+		*size = 0;
+		return 0;
+	}
+	char name[IFNAMSIZ];
+	if(int e = mlibc::sysdep<IfIndextoname>(static_cast<unsigned int>(index), name); e)
+		return e;
+	size_t len = strlen(name) + 1;
+	memcpy(buffer, name, len);
+	*size = static_cast<socklen_t>(len);
+	return 0;
+}
+
+// Binds `slot` with SO_BINDTODEVICE to the interface the `size` bytes of
+// `buffer` name, or to none for an empty name, as Linux takes it: a name
+// without its NUL, cut at IFNAMSIZ - 1 bytes.
+int set_device(uint32_t slot, const void *buffer, socklen_t size) {
+	char name[IFNAMSIZ] = {};
+	memcpy(name, buffer, size < IFNAMSIZ - 1 ? size : IFNAMSIZ - 1);
+	unsigned int index = 0;
+	if(name[0])
+		if(int e = mlibc::sysdep<IfNametoindex>(name, &index); e)
+			return e;
+	return set_option(slot, RADIX_SOCKET_OPTION_BIND_TO_DEVICE, index);
+}
+
 // The kernel's option for `layer` and `number`, and whether it is a time
 // (a struct timeval, in nanoseconds to the kernel): false for one it does
 // not have.
@@ -616,6 +651,8 @@ int inet_getsockopt(uint32_t slot, int type, int layer, int number, void *buffer
 	uint64_t value;
 	enum radix_socket_option option;
 	bool time = false;
+	if(layer == SOL_SOCKET && number == SO_BINDTODEVICE)
+		return get_device(slot, buffer, size);
 	if(layer == SOL_SOCKET && (number == SO_TYPE || number == SO_DOMAIN
 			|| number == SO_PROTOCOL || number == SO_ACCEPTCONN)) {
 		struct radix_file_socket_state_results state;
@@ -655,6 +692,8 @@ int inet_getsockopt(uint32_t slot, int type, int layer, int number, void *buffer
 
 // setsockopt(2) on network socket `slot`.
 int inet_setsockopt(uint32_t slot, int layer, int number, const void *buffer, socklen_t size) {
+	if(layer == SOL_SOCKET && number == SO_BINDTODEVICE)
+		return set_device(slot, buffer, size);
 	enum radix_socket_option option;
 	bool time;
 	if(!inet_option(layer, number, &option, &time))
@@ -1115,11 +1154,12 @@ int Sysdeps<GetSockopt>::operator()(int fd, int layer, int number, void *__restr
 	if(layer != SOL_SOCKET)
 		return ENOPROTOOPT;
 	if(number == SO_PEERCRED) {
-		// Every process runs as root until Phase 13 brings users.
+		// The process at the other end, and the user and group it acted
+		// for, as they were when the connection was made (ADR 0218).
 		struct ucred cred;
 		cred.pid = state.connected ? static_cast<pid_t>(state.peer) : 0;
-		cred.uid = state.connected ? 0 : static_cast<uid_t>(-1);
-		cred.gid = state.connected ? 0 : static_cast<gid_t>(-1);
+		cred.uid = state.connected ? static_cast<uid_t>(state.user) : static_cast<uid_t>(-1);
+		cred.gid = state.connected ? static_cast<gid_t>(state.group) : static_cast<gid_t>(-1);
 		socklen_t len = *size < sizeof(cred) ? *size : sizeof(cred);
 		memcpy(buffer, &cred, len);
 		*size = len;

@@ -84,6 +84,10 @@
 //!   `temp<k>_input`, `temp<k>_fault` and `temp<k>_label`.
 //!   Each `name` says which, and a sensor that gives no reading fails to
 //!   read (EIO);
+//! - `/kernel/class/net/<name>`, for each network interface (ADR 0190,
+//!   [`net`]): its `ifindex`, `address`, `mtu`, `flags`, `operstate`,
+//!   `statistics` and the rest of Linux's files, and Radix's `ipv4`, its
+//!   addresses;
 //! - `/kernel/devices/system/cpu`: `possible`, `present` and `online`, the
 //!   CPUs as Linux's lists (`0-7`), and where the CPUs pick their own
 //!   speed (ADR 0202), each CPU's `cpufreq/policy<n>`, as Linux's
@@ -112,6 +116,7 @@ use radix_uacpi::thermal::STEPS;
 use super::disk;
 use crate::acpi::{devices, thermal};
 
+mod net;
 mod usb;
 use crate::{Arch, hwmon, i2c, pstate};
 
@@ -154,14 +159,10 @@ pub fn make() -> Result<FsRef> {
     let mut monitors = false;
     hwmon::devices(&mut |_| monitors = true);
     let dmi = crate::dmi::found();
-    let class = if crate::watchdog::found().is_some() || power || thermal || monitors || dmi {
-        Some(root.add_dir("class", next_id())?)
-    } else {
-        None
-    };
-    if let Some(found) = crate::watchdog::found()
-        && let Some(class) = &class
-    {
+    // Every machine has `lo`, so `class` has `net` at least.
+    let class = root.add_dir("class", next_id())?;
+    net::add(&class)?;
+    if let Some(found) = crate::watchdog::found() {
         let dir = class.add_dir("watchdog", next_id())?.add_dir("watchdog0", next_id())?;
         let Watchdog { name, min_seconds, max_seconds, restarted } = *found;
         dir.add("identity", value(move |text| writeln!(text, "{name}"))?)?;
@@ -178,17 +179,17 @@ pub fn make() -> Result<FsRef> {
         let status = if restarted { 32 } else { 0 };
         dir.add("bootstatus", value(move |text| writeln!(text, "{status}"))?)?;
     }
-    if dmi && let Some(class) = &class {
-        dmi_class(class)?;
+    if dmi {
+        dmi_class(&class)?;
     }
-    if power && let Some(class) = &class {
-        power_supply(class)?;
+    if power {
+        power_supply(&class)?;
     }
-    if thermal && let Some(class) = &class {
-        thermal_class(class)?;
+    if thermal {
+        thermal_class(&class)?;
     }
-    if monitors && let Some(class) = &class {
-        hwmon_class(class)?;
+    if monitors {
+        hwmon_class(&class)?;
     }
     let system = root.add_dir("devices", next_id())?.add_dir("system", next_id())?;
     cpu(&system)?;
