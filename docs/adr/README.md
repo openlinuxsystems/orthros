@@ -189,6 +189,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0184](0184-services-and-the-c-library-use-the-network-capabilities-they-were-given.md) | Services and the C library use the network capabilities they were given | Accepted |
 | [0185](0185-loopback-runs-in-the-senders-thread-and-the-network-joins-the-gate.md) | Loopback runs in the sender's thread, and the network joins the gate | Accepted |
 | [0186](0186-a-loopback-connection-passes-its-bytes-straight-across.md) | A loopback connection passes its bytes straight across | Accepted |
+| [0187](0187-tcp-keeps-quiet-connections-and-controls-congestion-as-linux-does.md) | TCP keeps quiet connections, and controls congestion, as Linux does | Accepted |
 | [0200](0200-uacpi-runs-the-firmwares-aml-in-the-kernel.md) | uACPI runs the firmware's AML in the kernel | Accepted |
 | [0201](0201-batteries-adapters-and-lids-through-uacpi.md) | Batteries, AC adapters and lids through uACPI, and the embedded controller | Accepted |
 | [0202](0202-cpu-frequency-through-hwp-and-cppc.md) | CPU frequency through Intel's HWP and AMD's CPPC | Accepted |

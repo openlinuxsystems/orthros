@@ -22,7 +22,8 @@ use crate::caps;
 use crate::fs::inet;
 
 /// Calls the method `label` on `cap`, a network capability in `user`'s
-/// slot `slot`.
+/// slot `slot`, kept out of line, as [`super::methods::call`] says.
+#[inline(never)]
 pub fn method(
     user: &UserRef,
     slot: u32,
