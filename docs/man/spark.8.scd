@@ -95,16 +95,18 @@ Init: /system/commands/spark is process 1
   and for this boot's volumes, as Linux's _/run/media_ is, and the *dev*,
   *proc* and *sys* trees on _/devices_, _/processes_ and _/kernel_
   (*radix-proc*(5), *radix-sysfs*(5)).
-. It looks for disks in _/devices_ and mounts the FAT, exFAT, Btrfs or
-  ext4 filesystem of each partition, or of each disk with no partition
-  table, at _/volumes/_*name*, read-write, or read-only when the device
-  is or when the kernel refuses to write it (*read_only* from the disk,
-  or *invalid_argument* for what Radix does not write yet: an exFAT with
-  two tables, or a Btrfs or ext4 feature). A Btrfs named with
-  *--compress* compresses what is written to it. FAT and exFAT are tried
-  first, in that order, as *mkfs.btrfs* and *mkfs.ext4* clear the
-  sectors they start in while *mkfs.fat* and *mkfs.exfat* may leave an
-  older Btrfs or ext4 superblock. A Btrfs of several disks is mounted
+. It looks for disks in _/devices_ and mounts the FAT, exFAT, NTFS,
+  Btrfs or ext4 filesystem of each partition, or of each disk with no
+  partition table, at _/volumes/_*name*, read-write, or read-only when
+  the device is or when the kernel refuses to write it (*read_only* from
+  the disk, or *invalid_argument* for what Radix does not write: an
+  NTFS that Windows left dirty, hibernated or with a log to replay, an
+  exFAT with two tables, or a Btrfs or ext4 feature). A Btrfs
+  named with *--compress* compresses what is written to it. FAT, exFAT
+  and NTFS are tried first, in that order, as *mkfs.btrfs* and
+  *mkfs.ext4* clear the sectors they start in while *mkfs.fat*,
+  *mkfs.exfat* and *mkntfs* may leave an older Btrfs or ext4
+  superblock. A Btrfs of several disks is mounted
   once, from the first of them found; the kernel refuses the others with
   *in_use*, and they are left alone (ADR 0153). A
   device that holds none of them is left alone, and so is every device
@@ -564,17 +566,18 @@ _/volumes/_*name*
 *spark: cannot make /*_name_*:* _error_, *spark: cannot mount* _kind_ *on /*_path_*:* _error_, *spark: cannot link /*_name_ *to /*_target_*:* _error_
 	Building the hierarchy failed; Spark starts nothing.
 
-_name_ *holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone*
+_name_ *holds no FAT, exFAT, NTFS, Btrfs or ext4 filesystem; left alone*
 	A disk or partition that holds none of them is not mounted.
 
 *spark: cannot mount* _name_*:* _error_
-	A FAT, exFAT, Btrfs or ext4 filesystem that could not be mounted:
+	A FAT, exFAT, NTFS, Btrfs or ext4 filesystem that could not be mounted:
 	*corrupt* when its boot sector, tables, superblock, trees or journal
 	are damaged, and
 	*invalid_argument* for a Btrfs filesystem Radix cannot read yet (on
 	more than one device, or with sectors other than 4 KiB) or an ext4
 	one (with clusters of several blocks, *bigalloc*, blocks larger than
-	4 KiB or inodes larger than 1 KiB), and
+	4 KiB or inodes larger than 1 KiB) or an NTFS one (with sectors
+	larger than 4 KiB, or smaller than the disk's), and
 	*read_only* for a Btrfs filesystem with a log of fsyncs to replay on
 	a disk that cannot be written.
 
