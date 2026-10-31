@@ -786,9 +786,21 @@ I/O base, or the FCH's switched off. Otherwise:
 
 	SMBus: none the kernel drives
 
+Then the kernel looks for the memory modules' SPD EEPROMs on it, as the
+SMBIOS tables say how many slots are filled and with which kind of
+memory (ADR 0232), and says which answered and what kind they are; or
+that the memory's kind has none it reads:
+
+```
+SMBus: the DDR4 memory modules' SPD EEPROMs (ee1004) at 0x50, 0x51
+SMBus: RAM memory (kind 0x07) has no SPD EEPROM the kernel reads
+```
+
 Once the firmware's AML reads or writes the controller's ports, the
 kernel leaves it to the firmware, as Linux does. The adapter is named in
-_/kernel/bus/i2c/devices/i2c-0/name_ (*radix-sysfs*(5)).
+_/kernel/bus/i2c/devices/i2c-0/name_ (*radix-sysfs*(5)), and each EEPROM
+found is _/kernel/bus/i2c/devices/0-00<address>_; *hwinfo*(8) decodes
+them.
 
 # IOMMU
 

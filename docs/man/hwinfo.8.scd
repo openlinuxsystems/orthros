@@ -41,6 +41,19 @@ part number; *empty* for a slot without a module. A processor socket's
 gives the processor's name, its cores and threads, and its speeds in
 MHz.
 
+The memory section ends with a line for each memory module's SPD
+EEPROM, which the kernel reads over the SMBus (_/kernel/bus/i2c/devices_,
+*radix-sysfs*(5)), by its address, as the slot a module is in is not
+known: what the module says of itself, from JEDEC's layouts for DDR3,
+DDR4 and DDR5, its size, kind and form, its speed grade, its maker and
+part number and the week it was made, and whether its checksum is wrong;
+*blank* for an EEPROM never written, or *unreadable*. Reading an EEPROM
+the first time takes up to a second. For example:
+
+```
+  SPD at 0x50:      8 GiB DDR4 SO-DIMM, 2666 MT/s, Samsung M471A1K43CB1-CTD, made in week 12 of 2019
+```
+
 The tables come whole from the kernel through the platform capability
 (*radix-platform*(2)), which a program holds when Spark gave it
 admin.hardware (*spark*(8)), as the console's shell has it. Without the
@@ -48,8 +61,8 @@ capability, hwinfo shows what anyone may read in _/kernel/class/dmi/id_
 (*radix-sysfs*(5)): the system, board, chassis and firmware, without
 the processors and memory, and says so.
 
-The serial numbers of the machine, its board, chassis and memory
-devices, and the machine's UUID, are left out unless *-s* asks for
+The serial numbers of the machine, its board, chassis, memory devices
+and modules, and the machine's UUID, are left out unless *-s* asks for
 them, so that what hwinfo prints can be shared as it is.
 
 # OPTIONS
@@ -58,8 +71,8 @@ them, so that what hwinfo prints can be shared as it is.
 	Show the serial numbers and the UUID too. They need the platform
 	capability.
 
-Not yet: the memory modules' own SPD data, which the SMBus has, and
-dmidecode's dump of every structure.
+Not yet: dmidecode's dump of every structure, and the decoding of LPDDR
+modules' SPD data.
 
 # EXIT STATUS
 

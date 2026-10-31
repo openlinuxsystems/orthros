@@ -24,6 +24,19 @@ use radix_sync::Once;
 use crate::Arch;
 
 static IDS: Once<Ids<'static>> = Once::new();
+static MEMORY: Once<Memory> = Once::new();
+
+/// The memory devices the tables list, as the SMBus's SPD EEPROMs are
+/// found by them (ADR 0232).
+#[derive(Clone, Copy, Debug)]
+pub struct Memory {
+    /// The devices listed: the slots, filled or not, or soldered chips.
+    pub slots: usize,
+    /// The filled ones whose kind the tables say.
+    pub modules: usize,
+    /// Their kind (DSP0134's 7.18.2), if they are all of one.
+    pub kind: Option<u8>,
+}
 
 /// Reads the tables the platform found, and logs what they say.
 pub fn init() {
@@ -37,14 +50,32 @@ pub fn init() {
     let ids = Ids::read(&table, entry.version());
     info!("DMI: {}", Machine(&ids));
     let (mut slots, mut filled) = (0, 0);
+    let mut memory = Memory { slots: 0, modules: 0, kind: None };
+    let mut mixed = false;
     for device in table.of(kind::MEMORY_DEVICE).filter_map(|s| MemoryDevice::parse(&s)) {
         slots += 1;
         filled += usize::from(device.is_present());
+        // Kinds 1 and 2 are "Other" and "Unknown".
+        if device.is_present() && device.kind > 2 {
+            memory.modules += 1;
+            mixed |= memory.kind.is_some_and(|kind| kind != device.kind);
+            memory.kind = Some(device.kind);
+        }
     }
     if slots > 0 {
         info!("DMI: Memory slots populated: {filled}/{slots}");
     }
+    memory.slots = slots;
+    if mixed {
+        memory.kind = None;
+    }
     let _ = IDS.set(ids);
+    let _ = MEMORY.set(memory);
+}
+
+/// The memory devices the tables list, if there are tables.
+pub fn memory() -> Option<Memory> {
+    MEMORY.get().copied()
 }
 
 /// Whether there are tables, so `/kernel/class/dmi` has files.

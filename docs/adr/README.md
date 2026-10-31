@@ -212,4 +212,5 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0218](0218-authd-keeps-the-accounts-and-passwords-are-argon2id-hashes.md) | authd keeps the accounts, and passwords are Argon2id hashes only it reads | Accepted |
 | [0230](0230-sensors-and-lsusb-with-the-usb-id-database.md) | sensors and lsusb are systools, with the USB ID database as a port | Accepted |
 | [0231](0231-the-firmwares-smbios-tables-and-hwinfo.md) | The firmware's SMBIOS tables show what the machine is, and hwinfo shows them | Accepted |
+| [0232](0232-memory-modules-spd-eeproms-over-the-smbus.md) | Memory modules' SPD EEPROMs are read over the SMBus, when first opened | Accepted |
 | [0250](0250-sign-in-at-the-consoles-and-sessions-started-by-authd.md) | Sign-in at the consoles, and sessions started by authd | Accepted |

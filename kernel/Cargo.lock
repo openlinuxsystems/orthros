@@ -170,6 +170,7 @@ dependencies = [
  "radix-scsi",
  "radix-sensors",
  "radix-smbios",
+ "radix-spd",
  "radix-sync",
  "radix-tty",
  "radix-uacpi",
@@ -482,6 +483,10 @@ version = "0.10.4"
 dependencies = [
  "radix-hw",
 ]
+
+[[package]]
+name = "radix-spd"
+version = "0.10.4"
 
 [[package]]
 name = "radix-sync"
