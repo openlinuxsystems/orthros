@@ -34,8 +34,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use radix_ahci::ata::trimmed;
 use radix_block::{DeviceRef, Error, Info};
 use radix_hal::{Devices, UserMode};
-use radix_hw::pci::{Bar, Function, command};
 use radix_hw::Dma;
+use radix_hw::pci::{Bar, Function, command};
 use radix_ide::{Channel, Device, Op as IdeOp, interface};
 use radix_klog::{TextBuf, info, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
@@ -283,7 +283,7 @@ pub fn bind(function: &Function, next: &mut usize) -> Result<(), &'static str> {
             IoWindow::new(control, 1),
             IoWindow::new(bus_master + u16::from(number) * 8, radix_ide::BUS_MASTER_PORTS),
         );
-        match add_channel(function, windows, place.clone(), next) {
+        match add_channel(function, windows, &place, next) {
             Ok(found) => serial |= found,
             Err(why) => warn!("Disk: IDE {place}: {why}"),
         }
@@ -310,7 +310,7 @@ struct Found {
 fn add_channel(
     function: &Function,
     (command, control, bus_master): (IoWindow, IoWindow, IoWindow),
-    place: TextBuf<40>,
+    place: &TextBuf<40>,
     next: &mut usize,
 ) -> Result<bool, &'static str> {
     let source = function.address();
@@ -341,7 +341,8 @@ fn add_channel(
                 info!("Disk: IDE {place}, {which}: {why}; not used");
             }
             Device::Ata { identity, serial: sata } => {
-                drives[end] = Drive { present: true, flush: identity.write_cache && identity.flush };
+                drives[end] =
+                    Drive { present: true, flush: identity.write_cache && identity.flush };
                 serial |= sata;
             }
         }
@@ -367,7 +368,7 @@ fn add_channel(
         give_back(&names);
         return Err("too many SATA and USB disks");
     }
-    let first = names.iter().flatten().next().map(|(_, name)| name.clone()).unwrap_or_default();
+    let first = names.iter().flatten().next().map_or_else(Name::new, |(_, name)| name.clone());
     let cache = drives.iter().any(|drive| drive.flush);
     let template = Info {
         sectors: 0,
@@ -378,8 +379,8 @@ fn add_channel(
         discard_sectors: 0,
         rotational: true,
     };
-    let disk = new_disk(controller, template, cache, first, source)
-        .inspect_err(|_| give_back(&names))?;
+    let disk =
+        new_disk(controller, template, cache, first, source).inspect_err(|_| give_back(&names))?;
     for (end, device) in found.devices.iter().enumerate() {
         let (Device::Ata { identity, serial }, Some((letter, name))) = (device, &names[end]) else {
             continue;
@@ -438,7 +439,8 @@ fn new_disk(
     source: radix_hw::pci::Address,
 ) -> Result<Arc<Disk<IdeChannel>, Kmalloc>, &'static str> {
     let once = core::iter::once(controller);
-    let disk = Disk::new(once, template, cache, false, false, name, source).ok_or("out of memory")?;
+    let disk =
+        Disk::new(once, template, cache, false, false, name, source).ok_or("out of memory")?;
     Arc::try_new_in(disk, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")
 }
 
@@ -466,7 +468,8 @@ fn add_disk(
         rotational: identity.rotational.unwrap_or(true),
     };
     let volume = Volume::new(disk.clone(), target, info).ok_or("out of memory")?;
-    let volume = Arc::try_new_in(volume, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
+    let volume =
+        Arc::try_new_in(volume, HEAP.with(Flags::MAY_SLEEP)).map_err(|_| "out of memory")?;
     info!(
         "Disk: {name} is {} of {} on the IDE {place}, {which}: {}, {} bytes a block{}{}{}",
         if serial { "a SATA disk" } else { "an ATA disk" },

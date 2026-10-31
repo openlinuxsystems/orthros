@@ -51,7 +51,13 @@ struct SimDisk {
 
 impl SimDisk {
     fn new(sectors: usize) -> SimDisk {
-        SimDisk { sectors: vec![0; sectors * 512], atapi: false, serial: false, fails: false, flushes: 0 }
+        SimDisk {
+            sectors: vec![0; sectors * 512],
+            atapi: false,
+            serial: false,
+            fails: false,
+            flushes: 0,
+        }
     }
 
     fn optical() -> SimDisk {
