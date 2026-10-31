@@ -38,7 +38,9 @@ fuzzed.
 
 - **Compressed files** are written a compression unit at a time:
   - each unit compressed when that takes fewer clusters, else as it
-    is, and left a hole when it is all zeros, as Windows does;
+    is, and left a hole when it is all zeros, as Windows does. A
+    compressed unit keeps room for the zero header that ends its data:
+    The Sleuth Kit reads a unit only to one, or to the unit's end;
   - a change rewrites the units it touches, reading only those it does
     not cover whole, and takes the unit's new clusters before giving
     back its old ones;
@@ -83,8 +85,15 @@ fuzzed.
     of each path and the SHA-256 of each file.
   - A Windows job mounts each with `Mount-DiskImage`, runs `chkdsk` on
     it, which must find nothing wrong, and reads every file back, which
-    must match; nothing else may be on it.
+    must match; nothing else may be on it, but on a volume others
+    filled, whose list names only what a test changed.
   - Volumes of 4 KiB sectors are left out, as a VHD has none.
+  - What it found first: `chkdsk` takes a long name in the Win32
+    namespace without a short name beside it, as [ADR 0237] made them,
+    for an error ("minor file name errors", and each index entry of it
+    "incorrect"). A new name that is not a valid 8.3 name now goes in
+    the POSIX namespace, as ntfs-3g puts every name; Windows lists and
+    opens it as any other.
 - **Power cuts:**
   - A host test cuts a sync at a dozen points and at each of its last
     six requests: the disk takes the first requests and fails the rest.

@@ -12,8 +12,9 @@
 # A volume a power cut left (its name ends in -cut) is mended with
 # `chkdsk /f` first. Then `chkdsk` must find nothing wrong, each path its
 # .txt lists must be there, a directory, a link or a file of the bytes
-# it gives, and, but for a cut volume, nothing else may be there but what
-# Windows makes itself.
+# it gives, and, but for a cut volume and one whose list names only what
+# a test changed (-some), nothing else may be there but what Windows
+# makes itself.
 
 param([Parameter(Mandatory)] [string] $Images)
 
@@ -28,6 +29,7 @@ $failed = 0
 foreach ($vhd in $vhds) {
     $name = $vhd.BaseName
     $cut = $name.EndsWith('-cut')
+    $some = $name.EndsWith('-some')
     $problems = [System.Collections.Generic.List[string]]::new()
     $lines = @()
     $image = Mount-DiskImage -ImagePath $vhd.FullName -PassThru
@@ -87,7 +89,7 @@ foreach ($vhd in $vhds) {
                 }
             }
         }
-        if (-not $cut) {
+        if (-not $cut -and -not $some) {
             # Links are listed, not followed.
             $found = Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
             foreach ($item in $found) {

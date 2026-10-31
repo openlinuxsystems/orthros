@@ -284,6 +284,79 @@ pub struct NtfsNode {
     pinned: AtomicBool,
 }
 
+/// A file's data as it was read, and its size.
+struct FileData {
+    data: Data,
+    size: u64,
+}
+
+/// The data `data` of a file whose `$STANDARD_INFORMATION` is `info` and
+/// reparse tag `tag`, on a volume of clusters of `cs` bytes: as it is
+/// read, its bytes on the disk, and why it is not written, if it is not.
+/// A function of its own, so that [`NtfsNode::new`]'s frame stays small.
+#[inline(never)]
+fn file_data_of(
+    info: &Info,
+    tag: u32,
+    data: Option<Value>,
+    cs: u64,
+) -> Result<(FileData, u64, Option<Error>)> {
+    let mut allocated = 0;
+    let mut fixed = None;
+    let size = data.as_ref().map_or(0, Value::size);
+    let unreadable = if info.attributes & attributes::ENCRYPTED != 0 {
+        Some(Error::Denied)
+    } else if info.attributes
+        & (attributes::OFFLINE | attributes::RECALL_ON_OPEN | attributes::RECALL_ON_DATA_ACCESS)
+        != 0
+        || tag == reparse::tag::DEDUP
+    {
+        Some(Error::NotSupported)
+    } else {
+        None
+    };
+    let data = match data {
+        None => Data::Resident(mem::vec()),
+        Some(Value::Resident(bytes)) => Data::Resident(bytes),
+        Some(Value::Clusters(stream)) => {
+            if stream.runs.clusters() * cs < stream.size {
+                return Err(Error::Corrupt);
+            }
+            let compressed = stream.flags & attr_flags::COMPRESSED != 0;
+            if compressed && stream.unit == 0 {
+                return Err(Error::Corrupt);
+            }
+            allocated = stream.runs.allocated_in(0, stream.runs.clusters()) * cs;
+            // Compressed and sparse data are written a unit
+            // at a time; encrypted data is not.
+            let known = attr_flags::COMPRESSED | attr_flags::SPARSE;
+            let unit = cs.checked_shl(stream.unit.into());
+            if stream.flags & !known != 0
+                || (compressed && cs > MAX_COMPRESS_CLUSTER)
+                || (stream.packed() && unit.is_none_or(|u| u > MAX_UNIT))
+            {
+                fixed = Some(Error::NotSupported);
+            }
+            if stream.flags & attr_flags::ENCRYPTED != 0 {
+                Data::Unreadable(Error::Denied)
+            } else if compressed && cs.checked_shl(stream.unit.into()).is_none_or(|u| u > MAX_UNIT)
+            {
+                Data::Unreadable(Error::NotSupported)
+            } else {
+                Data::Clusters(stream)
+            }
+        }
+    };
+    let data = match unreadable {
+        Some(err) => Data::Unreadable(err),
+        None => data,
+    };
+    if let Data::Unreadable(err) = data {
+        fixed = Some(err);
+    }
+    Ok((FileData { data, size }, allocated, fixed))
+}
+
 /// The time now, as finely as NTFS keeps it.
 fn now_coarse() -> u64 {
     names::coarse(now())
@@ -356,61 +429,13 @@ impl NtfsNode {
         let mut fixed = listed.then_some(Error::NotSupported);
         match kind {
             Kind::File => {
-                size = data.as_ref().map_or(0, Value::size);
-                let unreadable = if info.attributes & attributes::ENCRYPTED != 0 {
-                    Some(Error::Denied)
-                } else if info.attributes
-                    & (attributes::OFFLINE
-                        | attributes::RECALL_ON_OPEN
-                        | attributes::RECALL_ON_DATA_ACCESS)
-                    != 0
-                    || tag == reparse::tag::DEDUP
-                {
-                    Some(Error::NotSupported)
-                } else {
-                    None
-                };
-                let data = match data {
-                    None => Data::Resident(mem::vec()),
-                    Some(Value::Resident(bytes)) => Data::Resident(bytes),
-                    Some(Value::Clusters(stream)) => {
-                        if stream.runs.clusters() * cs < stream.size {
-                            return Err(Error::Corrupt);
-                        }
-                        let compressed = stream.flags & attr_flags::COMPRESSED != 0;
-                        if compressed && stream.unit == 0 {
-                            return Err(Error::Corrupt);
-                        }
-                        allocated = stream.runs.allocated_in(0, stream.runs.clusters()) * cs;
-                        // Compressed and sparse data are written a unit
-                        // at a time; encrypted data is not.
-                        let known = attr_flags::COMPRESSED | attr_flags::SPARSE;
-                        let unit = cs.checked_shl(stream.unit.into());
-                        if stream.flags & !known != 0
-                            || (compressed && cs > MAX_COMPRESS_CLUSTER)
-                            || (stream.packed() && unit.is_none_or(|u| u > MAX_UNIT))
-                        {
-                            fixed = Some(Error::NotSupported);
-                        }
-                        if stream.flags & attr_flags::ENCRYPTED != 0 {
-                            Data::Unreadable(Error::Denied)
-                        } else if compressed
-                            && cs.checked_shl(stream.unit.into()).is_none_or(|u| u > MAX_UNIT)
-                        {
-                            Data::Unreadable(Error::NotSupported)
-                        } else {
-                            Data::Clusters(stream)
-                        }
-                    }
-                };
-                let data = match unreadable {
-                    Some(err) => Data::Unreadable(err),
-                    None => data,
-                };
-                if let Data::Unreadable(err) = data {
+                let (loaded, held, unfixed) = file_data_of(&info, tag, data, cs)?;
+                size = loaded.size;
+                allocated = held;
+                if let Some(err) = unfixed {
                     fixed = Some(err);
                 }
-                file_data = Some(data);
+                file_data = Some(loaded.data);
             }
             Kind::Directory => {
                 let root = root.ok_or(Error::Corrupt)?;
@@ -448,6 +473,24 @@ impl NtfsNode {
             changes: 0,
             removed: false,
         };
+        let indexed = flags & record::flags::DIRECTORY != 0;
+        NtfsNode::assemble(fs, record, kind, state, cache, link, tag, indexed)
+    }
+
+    /// The node of `record`, of its parts: made apart from
+    /// [`NtfsNode::new`], so that its frame stays small.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        fs: KArc<Inner>,
+        record: u64,
+        kind: Kind,
+        state: State,
+        cache: Option<FileCache>,
+        link: Option<Target>,
+        tag: u32,
+        indexed: bool,
+    ) -> Result<KArc<NtfsNode>> {
         let node = mem::arc(NtfsNode {
             fs,
             record,
@@ -456,7 +499,7 @@ impl NtfsNode {
             cache,
             link,
             tag,
-            indexed: flags & record::flags::DIRECTORY != 0,
+            indexed,
             path: Once::new(),
             me: Once::new(),
             pinned: AtomicBool::new(false),
@@ -2543,9 +2586,9 @@ impl FileBacking<'_> {
 
     /// Writes compression unit `unit` of the compressed `stream` as
     /// `plain` holds it: holes if it is all zeros, compressed in fewer
-    /// clusters if it compresses into them and the record has room for
-    /// where they are, else as it is. It goes to clusters taken for it,
-    /// before those it had are given back.
+    /// clusters if it compresses into them with a zero header after it and
+    /// the record has room for where they are, else as it is. It goes to
+    /// clusters taken for it, before those it had are given back.
     fn store_unit(
         &self,
         stream: &mut Stream,
@@ -2580,7 +2623,13 @@ impl FileBacking<'_> {
         for try_packed in [true, false] {
             let (bytes, k): (&[u8], u64) = match compressed {
                 Some(n) if try_packed => {
-                    let k = (n as u64).div_ceil(cs);
+                    // With room for the zero header that ends the data:
+                    // The Sleuth Kit reads a unit only to one, or to the
+                    // unit's end.
+                    let k = if n == 0 { 0 } else { (n as u64 + 2).div_ceil(cs) };
+                    if k >= per_unit {
+                        continue;
+                    }
                     packed[n..(k * cs) as usize].fill(0);
                     (&packed[..(k * cs) as usize], k)
                 }

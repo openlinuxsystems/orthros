@@ -17,8 +17,9 @@
 //!
 //! A name ending in `-cut` is of a volume a power cut left: `chkdsk /f`
 //! must mend it, and only what was synced before the cut is listed, as
-//! more may be on it. A volume of sectors other than 512 bytes is not
-//! kept, as a VHD has none other.
+//! more may be on it. One ending in `-some` lists only what a test
+//! changed on a volume others filled. A volume of sectors other than 512
+//! bytes is not kept, as a VHD has none other.
 
 use std::fmt::Write as _;
 use std::os::unix::fs::FileExt;
@@ -36,9 +37,20 @@ pub(crate) enum Found<'a> {
     Link,
 }
 
+/// What a kept volume's list names.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Listed {
+    /// Everything on it.
+    All,
+    /// Only some of what is on it: what a test changed.
+    Some,
+    /// What was synced before a power cut left it.
+    Cut,
+}
+
 /// Keeps `image` and what Windows must `find` on it, if `NTFS_IMAGES`
-/// asks; `cut` if a power cut left it.
-pub(crate) fn keep(image: &[u8], find: &[(&str, Found<'_>)], cut: bool) {
+/// asks; `listed` says what `find` names.
+pub(crate) fn keep(image: &[u8], find: &[(&str, Found<'_>)], listed: Listed) {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let Ok(dir) = std::env::var("NTFS_IMAGES") else { return };
     if u16::from_le_bytes([image[11], image[12]]) != 512 {
@@ -47,7 +59,12 @@ pub(crate) fn keep(image: &[u8], find: &[(&str, Found<'_>)], cut: bool) {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let thread = std::thread::current();
     let test = thread.name().unwrap_or("test").rsplit("::").next().unwrap_or("test");
-    let name = format!("{}-{n}{}", test.replace('_', "-"), if cut { "-cut" } else { "" });
+    let end = match listed {
+        Listed::All => "",
+        Listed::Some => "-some",
+        Listed::Cut => "-cut",
+    };
+    let name = format!("{}-{n}{end}", test.replace('_', "-"));
     let dir = std::path::Path::new(&dir);
     std::fs::create_dir_all(dir).unwrap();
     let mut list = String::new();

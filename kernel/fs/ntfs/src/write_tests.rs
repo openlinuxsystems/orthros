@@ -29,7 +29,7 @@ use crate::tests::{
     Image, SIZES, VOLUMES, names, pattern, read_all, read_link, run, scratch, test_names, tool,
     walk,
 };
-use crate::windows_tests::{self, Found};
+use crate::windows_tests::{self, Found, Listed};
 
 const DIR: Access = Access::default_for(Kind::Directory);
 const FILE: Access = Access::default_for(Kind::File);
@@ -215,7 +215,7 @@ fn check(image: &[u8], block: u32, expected: &BTreeMap<String, Vec<u8>>) {
             find.push((path.as_str(), Found::Dir));
         }
     }
-    windows_tests::keep(image, &find, false);
+    windows_tests::keep(image, &find, Listed::All);
 }
 
 #[test]
@@ -639,7 +639,7 @@ fn what_ntfs_3g_wrote_is_written_to() {
     }
     let find: Vec<_> =
         expected.iter().map(|(path, data)| (path.as_str(), Found::File(data))).collect();
-    windows_tests::keep(&written, &find, false);
+    windows_tests::keep(&written, &find, Listed::Some);
 }
 
 /// What `$Extend\$Reparse` lists in `volume`: each reparse point's tag
@@ -729,7 +729,7 @@ fn links_are_made_as_windows_and_wsl_make_them() {
         }
         let mut find = vec![("docs", Found::Dir), ("docs/a.txt", Found::File(b"a\n"))];
         find.extend(left.iter().map(|&(path, _)| (path, Found::Link)));
-        windows_tests::keep(&written, &find, false);
+        windows_tests::keep(&written, &find, Listed::All);
     }
 }
 
@@ -998,6 +998,42 @@ fn compressed_files_spread_on_their_units_edges() {
     }
 }
 
+/// A unit that packs to the end of a cluster, or a byte short of it,
+/// takes one more, for the zero header that ends its data: The Sleuth Kit
+/// reads a unit's chunks only to such a header, or to the unit's end, and
+/// else fails on a file that goes on past them.
+#[test]
+fn packed_units_end_in_a_zero_header() {
+    let cluster = 1024;
+    let image = Image::mkntfs(16, 512, cluster as u32);
+    let volume = Volume::new_in(512, &image.bytes());
+    let root = volume.root();
+    radix_vfs::downcast::<NtfsNode>(&*root).unwrap().mark_compressed().unwrap();
+    // The lengths whose bytes pack so, a unit being 16 clusters.
+    let mut matcher = crate::lznt1::Matcher::new().unwrap();
+    let mut packed = vec![0; 16 * cluster];
+    let lengths: Vec<usize> = (7000..8000)
+        .filter(|&len| {
+            let mut plain = pattern(3, len);
+            plain.resize(16 * cluster, 0);
+            let n = crate::lznt1::compress(&plain, &mut packed, &mut matcher).unwrap();
+            n.is_multiple_of(cluster) || n % cluster == cluster - 1
+        })
+        .collect();
+    assert!(!lengths.is_empty());
+    // Each file goes on in zeros, past what its unit's data unpacks to.
+    let mut expected = BTreeMap::new();
+    for len in lengths {
+        let name = format!("{len}.dat");
+        let mut data = pattern(3, len);
+        data.resize(12_000, 0);
+        make_file(&root, &name, &data, 4096);
+        expected.insert(name, data);
+    }
+    drop(root);
+    check(&volume.image(), 512, &expected);
+}
+
 #[test]
 fn a_power_cut_leaves_what_was_synced() {
     let image = Image::mkntfs(16, 512, 4096);
@@ -1072,7 +1108,7 @@ fn a_power_cut_leaves_what_was_synced() {
                 .arg(record.to_string()));
             assert!(found == *data, "cut after {n} of {whole} requests: record {record} changed");
         }
-        windows_tests::keep(&cut, &find, true);
+        windows_tests::keep(&cut, &find, Listed::Cut);
     }
 }
 

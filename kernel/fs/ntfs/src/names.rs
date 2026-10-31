@@ -5,10 +5,12 @@
 //! `$FILE_NAME`, which a directory's index keeps a copy of, and
 //! `$STANDARD_INFORMATION`.
 //!
-//! A name is kept as Windows keeps a long name (the Win32 namespace),
-//! and as a short one too (Win32 and DOS) when it is a valid 8.3 name
-//! already, as Windows does; Radix makes no other short names, as
-//! Windows does not on a volume that is not its system's. Names Windows
+//! A name that is a valid 8.3 name already is kept as Windows keeps one,
+//! as a long name and a short one (Win32 and DOS); any other in the POSIX
+//! namespace, as ntfs-3g keeps every name. Radix makes no short names,
+//! as Windows does not on a volume that is not its system's, and Windows'
+//! `chkdsk` takes a long name in the Win32 namespace without a short one
+//! for an error (ADR 0238). Names Windows
 //! could not open are refused, as ntfs-3g's `windows_names` refuses them:
 //! with `\ / : * ? " < > |` or a control character in them, ending in a
 //! space or a dot, or a device's (`CON`, `NUL`, `COM1`...).
@@ -65,7 +67,7 @@ pub fn check_windows(name: &str) -> Result<()> {
 
 /// The namespace a new name goes in: Win32 and DOS for a valid 8.3 name
 /// (upper case, at most eight characters and three after one dot, of
-/// those DOS allows), Win32 for any other.
+/// those DOS allows), POSIX for any other.
 pub fn namespace_of(name: &str) -> u8 {
     let dos_char =
         |c: char| c.is_ascii_uppercase() || c.is_ascii_digit() || "!#$%&'()-@^_`{}~".contains(c);
@@ -77,7 +79,7 @@ pub fn namespace_of(name: &str) -> u8 {
         && stem.len() <= 8
         && stem.chars().all(dos_char)
         && ext.is_none_or(|e| !e.is_empty() && e.len() <= 3 && e.chars().all(dos_char));
-    if fits { namespace::WIN32_AND_DOS } else { namespace::WIN32 }
+    if fits { namespace::WIN32_AND_DOS } else { namespace::POSIX }
 }
 
 /// What a `$FILE_NAME` says of its file besides the name, as a
@@ -196,7 +198,7 @@ mod tests {
         assert_eq!(namespace_of("A"), namespace::WIN32_AND_DOS);
         assert_eq!(namespace_of("FILE~1"), namespace::WIN32_AND_DOS);
         for long in ["readme.txt", "README.TEXT", "NINECHARS", "A.B.C", "A B", ".PROFILE", "X."] {
-            assert_eq!(namespace_of(long), namespace::WIN32, "{long}");
+            assert_eq!(namespace_of(long), namespace::POSIX, "{long}");
         }
     }
 
