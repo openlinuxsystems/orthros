@@ -251,6 +251,8 @@ pub fn init() {
                 }
             } else if function.class() == radix_nvme::PCI_CLASS {
                 nvme::bind(&function, &mut controllers);
+            } else if crate::i2c::designware::is_lpss(&function) {
+                crate::i2c::designware::bind_lpss(&function);
             } else {
                 crate::usb::found(&function);
             }

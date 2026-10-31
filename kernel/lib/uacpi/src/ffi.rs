@@ -61,8 +61,12 @@ const LOG_WARN: u32 = 2;
 const LOG_INFO: u32 = 3;
 /// `uacpi_iteration_decision`: go on.
 const ITERATION_CONTINUE: u32 = 0;
-/// `uacpi_object_type_bits`: thermal zones.
+/// `uacpi_object_type_bits`: devices, and thermal zones.
+const DEVICE_BIT: u32 = 1 << 6;
 const THERMAL_ZONE_BIT: u32 = 1 << 13;
+/// `_STA`'s bits: present, and functioning.
+const STA_PRESENT: u32 = 1 << 0;
+const STA_FUNCTIONING: u32 = 1 << 3;
 /// `UACPI_MAX_DEPTH_ANY`.
 const MAX_DEPTH_ANY: u32 = u32::MAX;
 /// `uacpi_address_space`: the embedded controller's.
@@ -136,6 +140,8 @@ unsafe extern "C" {
         out: *mut Handle,
     ) -> Status;
     fn uacpi_object_create_integer(value: u64) -> Handle;
+    fn uacpi_object_create_buffer(view: DataView) -> Handle;
+    fn uacpi_object_create_package(objects: ObjectArray) -> Handle;
     fn uacpi_object_unref(object: Handle);
     fn uacpi_object_get_integer(object: Handle, out: *mut u64) -> Status;
     fn uacpi_object_get_string_or_buffer(object: Handle, out: *mut DataView) -> Status;
@@ -153,6 +159,11 @@ unsafe extern "C" {
     ) -> Status;
     fn uacpi_namespace_node_name(node: Handle) -> u32;
     fn uacpi_namespace_node_find(parent: Handle, path: *const c_char, out: *mut Handle) -> Status;
+    fn uacpi_namespace_node_parent(node: Handle) -> Handle;
+    fn uacpi_eval_hid(node: Handle, out: *mut *mut IdString) -> Status;
+    fn uacpi_free_id_string(id: *mut IdString);
+    fn uacpi_eval_sta(node: Handle, flags: *mut u32) -> Status;
+    fn uacpi_eval_adr(node: Handle, out: *mut u64) -> Status;
     fn uacpi_namespace_node_generate_absolute_path(node: Handle) -> *const c_char;
     fn uacpi_free_absolute_path(path: *const c_char);
     fn uacpi_install_notify_handler(node: Handle, handler: NotifyHandler, ctx: Handle) -> Status;
@@ -180,6 +191,14 @@ unsafe extern "C" {
 struct DataView {
     bytes: *const u8,
     len: usize,
+}
+
+/// `uacpi_id_string`: a `_HID`, NUL-terminated, its size counting the
+/// NUL.
+#[repr(C)]
+struct IdString {
+    size: u32,
+    value: *const c_char,
 }
 
 /// `uacpi_object_array`: a package's elements.
@@ -378,6 +397,18 @@ pub fn find_devices(hid: &CStr, found: &mut dyn FnMut(Node)) {
 /// Calls `found` with each thermal zone of the namespace, in the order
 /// uACPI walks it.
 pub fn find_thermal_zones(found: &mut dyn FnMut(Node)) {
+    for_each_of_type(THERMAL_ZONE_BIT, "thermal zones", found);
+}
+
+/// Calls `found` with each device of the namespace, present or not, in
+/// the order uACPI walks it. From a thread that may sleep.
+pub fn find_all_devices(found: &mut dyn FnMut(Node)) {
+    for_each_of_type(DEVICE_BIT, "devices", found);
+}
+
+/// Calls `found` with each node of the `types` (`uacpi_object_type_bits`)
+/// in the namespace; `what` names them for the log.
+fn for_each_of_type(types: u32, what: &str, found: &mut dyn FnMut(Node)) {
     extern "C" fn each(user: Handle, node: Handle, _: u32) -> u32 {
         // SAFETY: `user` is the `&mut dyn FnMut` below, alive while
         // `uacpi_namespace_for_each_child` runs.
@@ -394,14 +425,13 @@ pub fn find_thermal_zones(found: &mut dyn FnMut(Node)) {
             uacpi_namespace_root(),
             Some(each),
             None,
-            THERMAL_ZONE_BIT,
+            types,
             MAX_DEPTH_ANY,
             (&raw mut found).cast(),
         )
     };
     if status != OK {
-        host()
-            .log(Level::Warn, format_args!("could not look for thermal zones: {}", Error(status)));
+        host().log(Level::Warn, format_args!("could not look for {what}: {}", Error(status)));
     }
 }
 
@@ -491,6 +521,41 @@ impl Node {
         Ok(())
     }
 
+    /// Evaluates the device's `_DSM` (ACPI 6.5, 9.1.1) for the function
+    /// `function` of revision `revision` of the interface `uuid`, given
+    /// as the 16 bytes of its buffer, with no arguments, as an integer.
+    /// From a thread that may sleep.
+    pub fn dsm(self, uuid: &[u8; 16], revision: u64, function: u64) -> Result<u64, Error> {
+        let created = |object: Handle| NonNull::new(object).map(Object).ok_or(Error(OUT_OF_MEMORY));
+        // SAFETY: uACPI copies the bytes into a new buffer, and hands
+        // over new objects, or null.
+        let uuid = created(unsafe {
+            uacpi_object_create_buffer(DataView { bytes: uuid.as_ptr(), len: uuid.len() })
+        })?;
+        // SAFETY: as above.
+        let revision = created(unsafe { uacpi_object_create_integer(revision) })?;
+        // SAFETY: as above.
+        let function = created(unsafe { uacpi_object_create_integer(function) })?;
+        // SAFETY: as above; an empty package.
+        let arguments = created(unsafe {
+            uacpi_object_create_package(ObjectArray { objects: ptr::null(), count: 0 })
+        })?;
+        let objects =
+            [uuid.0.as_ptr(), revision.0.as_ptr(), function.0.as_ptr(), arguments.0.as_ptr()];
+        let args = ObjectArray { objects: objects.as_ptr(), count: objects.len() };
+        let mut object = ptr::null_mut();
+        // SAFETY: `args` holds live objects; uACPI writes `object` only on
+        // success, with a reference we then own.
+        check(unsafe {
+            uacpi_eval(self.0.as_ptr(), c"_DSM".as_ptr(), &raw const args, &raw mut object)
+        })?;
+        let object = NonNull::new(object).map(Object).ok_or(Error(INVALID_ARGUMENT))?;
+        let mut value = 0;
+        // SAFETY: `object` is alive; `value` is written on success.
+        check(unsafe { uacpi_object_get_integer(object.0.as_ptr(), &raw mut value) })?;
+        Ok(value)
+    }
+
     /// The node at `path`, absolute (as `\_SB.PCI0.GPI0`) or from this
     /// node (as `^I2C0`, or a child's name), as a resource source or a
     /// method's name is given; `None` if there is none.
@@ -510,6 +575,50 @@ impl Node {
             return None;
         }
         NonNull::new(found).map(Node)
+    }
+
+    /// The node it is in; `None` for the root.
+    pub fn parent(self) -> Option<Node> {
+        // SAFETY: a node uACPI gave.
+        NonNull::new(unsafe { uacpi_namespace_node_parent(self.0.as_ptr()) }).map(Node)
+    }
+
+    /// Whether the device is present or functioning, as its `_STA` says
+    /// (one without is). From a thread that may sleep.
+    pub fn present(self) -> bool {
+        let mut flags = 0;
+        // SAFETY: a node uACPI gave; `flags` is written on success.
+        let status = unsafe { uacpi_eval_sta(self.0.as_ptr(), &raw mut flags) };
+        status == OK && flags & (STA_PRESENT | STA_FUNCTIONING) != 0
+    }
+
+    /// The device's `_ADR`: on a PCI bus, its device number in bits 31:16
+    /// and its function's in 15:0. From a thread that may sleep.
+    pub fn address(self) -> Result<u64, Error> {
+        let mut value = 0;
+        // SAFETY: a node uACPI gave; `value` is written on success.
+        check(unsafe { uacpi_eval_adr(self.0.as_ptr(), &raw mut value) })?;
+        Ok(value)
+    }
+
+    /// The device's `_HID` as text, as `PNP0C50`: a string's, or an EISA
+    /// ID's. From a thread that may sleep.
+    pub fn hid(self) -> Option<Hid> {
+        let mut id = ptr::null_mut();
+        // SAFETY: a node uACPI gave; on success `id` is a string uACPI
+        // made, freed below.
+        if unsafe { uacpi_eval_hid(self.0.as_ptr(), &raw mut id) } != OK || id.is_null() {
+            return None;
+        }
+        // SAFETY: as above; its value is NUL-terminated.
+        let text = unsafe { CStr::from_ptr((*id).value) }.to_bytes();
+        let mut hid = Hid([0; 16], 0);
+        let len = text.len().min(hid.0.len());
+        hid.0[..len].copy_from_slice(&text[..len]);
+        hid.1 = len as u8;
+        // SAFETY: made by `uacpi_eval_hid`.
+        unsafe { uacpi_free_id_string(id) };
+        Some(hid)
     }
 
     /// Calls `handler` in the notify thread with each value AML's
@@ -567,6 +676,23 @@ impl NodeName {
 }
 
 impl fmt::Display for NodeName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A device's `_HID`, up to 16 bytes of it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Hid([u8; 16], u8);
+
+impl Hid {
+    /// The ID, `?` if it is not text.
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.0[..usize::from(self.1)]).unwrap_or("?")
+    }
+}
+
+impl fmt::Display for Hid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }

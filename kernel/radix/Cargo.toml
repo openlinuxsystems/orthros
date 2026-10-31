@@ -31,6 +31,7 @@ radix-ext4 = { path = "../fs/ext4" }
 radix-fat = { path = "../fs/fat" }
 radix-fbcon = { path = "../lib/fbcon" }
 radix-gpio = { path = "../drivers/gpio" }
+radix-i2c = { path = "../drivers/i2c" }
 radix-hal = { path = "../hal" }
 radix-hw = { path = "../lib/hw" }
 radix-hid = { path = "../lib/hid" }

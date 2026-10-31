@@ -675,6 +675,19 @@ _target/userspace/_).
 		events on their pins that the controllers' _\_AEI_ list, then run
 		*selftest=gpio*, whose events must each run their method once.
 
+	*i2c*
+		Boot with QEMU's _pc-testdev_ and an SSDT of the test's whose
+		Intel LPSS (in ACPI mode) and AMD DesignWare I2C controllers
+		have their registers in the test device's memory, with a device
+		on each bus and one that is not there: the kernel must log both
+		buses, at fast and standard mode, and their two devices; then
+		*selftest=i2c* reads back how LPSS and each controller were set
+		up and runs a transfer on each. The device on the Intel bus is a
+		HID over I2C touchpad by its _\_CID_: the kernel must read its
+		_\_DSM_ and say that its HID descriptor at 20h could not be
+		read. At the console, the buses' and devices' names must be in
+		_/sys/bus/i2c/devices_.
+
 	*msr*
 		Boot with *selftest=msr*: EFER must read, and with KVM a read
 		of an MSR no processor has must fault and go on, as the
@@ -948,6 +961,22 @@ _target/userspace/_).
 		connects through the card to QEMU's *cat*, which *ss*(8) must
 		list; and takes the address and router away again with *ip*(8),
 		each change logged by the kernel (ADR 0190).
+
+	*dhcp*
+		Boot as for *interfaces*, with Spark's services in
+		_/system/tests/services/dhcp_: *netd*(8), which must set the
+		card up by QEMU's DHCP server and say so. Spark starts
+		_/system/tests/posix/dhcp_ beside it with its network capability:
+		the card must have 10.0.2.15/24 and the router,
+		_/etc/resolv.conf_ must lead to netd's, which names QEMU's DNS
+		server, netd must have a lease file, and a connection through
+		the card to QEMU's *cat* must echo; sockets
+		bound to *lo* must share port 68 with netd's, one at a time, and
+		others be refused it; netd started again must go on with its
+		lease, and the connection through it; and with an address of the
+		program's own added, settings that give the card an address must
+		replace the lease, and settings that say nothing bring DHCP's
+		back, the program's address staying through both (ADR 0191).
 
 	*disk-check*
 		Boot 2 CPUs under UEFI with a 128 MiB NVMe disk whose serial

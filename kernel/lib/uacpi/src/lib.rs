@@ -59,9 +59,9 @@ use radix_sync::Once;
 
 pub use ec::{Found as EmbeddedController, found as embedded_controller};
 pub use ffi::{
-    Error, Node, NodeName, NodePath, Package, StartError, eval_integer, find_devices,
-    find_thermal_zones, finish_events, interrupt, on_power_button, prepare_sleep, run_work, sleep,
-    start,
+    Error, Hid, Node, NodeName, NodePath, Package, StartError, eval_integer, find_all_devices,
+    find_devices, find_thermal_zones, finish_events, interrupt, on_power_button, prepare_sleep,
+    run_work, sleep, start,
 };
 
 /// The version of uACPI in `vendor/`.

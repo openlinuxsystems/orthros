@@ -12,16 +12,17 @@
 //! read or laid out is put in the boot protocol, whose reports are fixed.
 //!
 //! Each report that comes ([`Controller::hid_report`]) is decoded
-//! (`radix_hid::Decoder`): keys go to `/devices/kbd`
-//! (`fs::keyboard::usb_key`), which repeats them, and the pointer's
-//! motion to `/devices/mouse` (`fs::mouse::motion`); then the transfer
-//! starts again. When consoled changes the lights, the thread is woken
-//! and sends each keyboard its Output report ([`Controller::hid_lights`]).
+//! (`radix_hid::Decoder`) and told (`crate::hid::tell`): keys go to
+//! `/devices/kbd` (`fs::keyboard::usb_key`), which repeats them, and the
+//! pointer's motion to `/devices/mouse` (`fs::mouse::motion`); then the
+//! transfer starts again. When consoled changes the lights, the thread is
+//! woken and sends each keyboard its Output report
+//! ([`Controller::hid_lights`]).
 //! A device unplugged lets go of every key and button it held.
 
 use alloc::vec::Vec;
 
-use radix_hid::{BOOT_KEYBOARD, BOOT_MOUSE, Decoder, Input, Layout};
+use radix_hid::{BOOT_KEYBOARD, BOOT_MOUSE, Decoder, Layout};
 use radix_klog::{info, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_usb::Setup;
@@ -29,7 +30,7 @@ use radix_usb::hid::{self, HidDescriptor};
 use radix_xhci::{BUFFER_SIZE, code, endpoint_index};
 
 use super::controller::{Controller, Name, Why};
-use crate::fs::{keyboard, mouse};
+use crate::fs::keyboard;
 
 /// Errors in a row on an interface's reports before it is given up.
 const REPORT_ERRORS: u8 = 3;
@@ -139,19 +140,9 @@ impl Controller {
         // Reports only when something changes; a device that wants to
         // send them anyway may refuse.
         let _ = device.control_out(xhci, host, Setup::set_idle(interface), &[]);
-        let what = if layout.is_keyboard() {
-            "a keyboard, read into /devices/kbd"
-        } else if layout.is_pointer() && layout.is_absolute() {
-            "a tablet, read into /devices/mouse"
-        } else if layout.is_pointer() {
-            "a mouse, read into /devices/mouse"
-        } else if layout.has_keys() {
-            "media keys, read into /devices/kbd"
-        } else {
-            "nothing it reports is read"
-        };
+        let (what, read) = crate::hid::what(&layout);
         info!("USB: {}: interface {interface}: {what}", Name(*bus, path));
-        if !layout.has_keys() && !layout.is_pointer() {
+        if !read {
             return Ok(());
         }
         let hid = Hid {
@@ -195,7 +186,7 @@ impl Controller {
                 if attached.device.received(hid.endpoint, &mut buffer[..came]).is_err() {
                     return;
                 }
-                hid.decoder.report(&hid.layout, &buffer[..came], &mut tell);
+                hid.decoder.report(&hid.layout, &buffer[..came], &mut crate::hid::tell);
             }
             // Stopped by the driver.
             code::STOPPED => return,
@@ -243,23 +234,7 @@ impl Controller {
 /// interfaces, held: the device is gone.
 pub(super) fn gone(hids: &mut [Hid]) {
     for hid in hids {
-        hid.decoder.release_all(&mut tell);
-    }
-}
-
-/// Tells what a report changed: keys to `/devices/kbd`, the pointer to
-/// `/devices/mouse`.
-pub(super) fn tell(input: Input) {
-    match input {
-        Input::Key { code, down } => keyboard::usb_key(code, down),
-        Input::Pointer(p) => mouse::motion(mouse::Motion {
-            dx: p.dx,
-            dy: p.dy,
-            wheel: p.wheel,
-            pan: p.pan,
-            position: p.absolute.then_some((p.x, p.y)),
-            buttons: p.buttons,
-        }),
+        hid.decoder.release_all(&mut crate::hid::tell);
     }
 }
 

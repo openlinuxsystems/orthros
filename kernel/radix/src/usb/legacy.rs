@@ -44,10 +44,11 @@ use radix_usb::{
 use radix_usbhc::Handoff;
 
 use super::controller::{Name, Path, RECOVERY_NS, RESET_US, Why, alloc, read_device, translated};
-use super::hid::{HidPlan, MAX_HIDS, tell};
+use super::hid::{HidPlan, MAX_HIDS};
 use super::shown::{self, RootHub, Shown};
 use super::{Kind, STARTS, Start};
 use crate::fs::keyboard;
+use crate::hid::tell;
 use crate::sched;
 
 /// How often the thread looks at the controller.

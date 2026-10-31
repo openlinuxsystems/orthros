@@ -62,6 +62,13 @@ pub const ARCHIVE_DIRS: &[&str] =
 pub const ARCHIVE_LINKS: &[(&str, &str)] =
     &[("system/bin", "commands"), ("system/lib", "libraries"), ("system/share", "resources")];
 
+/// Symbolic links among the default settings, which Spark copies as
+/// links: `/etc/resolv.conf` leads to the one netd(8) writes (ADR 0191),
+/// as Linux's leads to systemd-resolved's, until an administrator makes
+/// it a file of their own.
+pub const DEFAULT_LINKS: &[(&str, &str)] =
+    &[("system/resources/default-settings/resolv.conf", "/system/live/netd/resolv.conf")];
+
 /// The `.hidden` file of `/system`: the names of its links, which
 /// listings leave out (ADR 0113).
 pub const ARCHIVE_HIDDEN: (&str, &str) = ("system/.hidden", "bin\nlib\nshare\n");
@@ -123,6 +130,7 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/commands/lspci", "systools"),
     ("system/commands/lsusb", "systools"),
     ("system/commands/mkswap", "systools"),
+    ("system/commands/netd", "systools"),
     ("system/commands/notifications", "systools"),
     ("system/commands/notify-send", "systools"),
     ("system/commands/notifyd", "systools"),
@@ -560,7 +568,7 @@ enum Entry<'a> {
 /// The boot archive: `files`, each a path in the archive and the file
 /// it holds (a symbolic link stays one, with its target), the
 /// directories above them, those of [`ARCHIVE_DIRS`], the links of
-/// [`ARCHIVE_LINKS`] and [`ARCHIVE_HIDDEN`], owned by root and dated
+/// [`ARCHIVE_LINKS`] and [`DEFAULT_LINKS`] and [`ARCHIVE_HIDDEN`], owned by root and dated
 /// `epoch` (the commit's time), so the same programs make the same
 /// bytes. A file is 0755 if its source may be run by anyone (a program
 /// or a script), and 0644 otherwise (settings, manual pages, a test's
@@ -573,7 +581,7 @@ fn write_archive(files: &[(String, PathBuf)], epoch: Option<String>) -> Result<V
         entries.push((dir.to_string(), Entry::Directory));
     }
     let mut leaves: Vec<(String, Entry<'_>)> = Vec::new();
-    for (link, target) in ARCHIVE_LINKS {
+    for (link, target) in ARCHIVE_LINKS.iter().chain(DEFAULT_LINKS) {
         leaves.push((link.to_string(), Entry::Link(target)));
     }
     leaves.push((ARCHIVE_HIDDEN.0.to_string(), Entry::Text(ARCHIVE_HIDDEN.1)));
@@ -670,6 +678,9 @@ mod tests {
                 "system/commands/spark",
                 "system/lib",
                 "system/live",
+                "system/resources",
+                "system/resources/default-settings",
+                "system/resources/default-settings/resolv.conf",
                 "system/settings",
                 "system/settings/hosts",
                 "system/share",
@@ -688,6 +699,9 @@ mod tests {
         assert_eq!((init.kind, init.data), (radix_bootfs::Kind::Symlink, &b"spark"[..]));
         let bin = archive.find("/system/bin").unwrap();
         assert_eq!((bin.kind, bin.data), (radix_bootfs::Kind::Symlink, &b"commands"[..]));
+        let resolv = archive.find("/system/resources/default-settings/resolv.conf").unwrap();
+        let netd = &b"/system/live/netd/resolv.conf"[..];
+        assert_eq!((resolv.kind, resolv.data), (radix_bootfs::Kind::Symlink, netd));
         let hidden = archive.find("/system/.hidden").unwrap();
         assert_eq!((hidden.mode, hidden.data), (0o644, &b"bin\nlib\nshare\n"[..]));
         assert_eq!(write_archive(&files, None).ok(), None, "the programs are gone");

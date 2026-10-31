@@ -28,6 +28,7 @@ mod blkid;
 mod column;
 mod device;
 mod df;
+mod dhcp;
 mod diskhealth;
 mod dmesg;
 mod ectool;
@@ -53,6 +54,7 @@ mod lspci;
 mod lsusb;
 mod memory;
 mod modes;
+mod netd;
 mod notifyd;
 mod nvme;
 mod pidstat;
@@ -137,6 +139,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("lspci", lspci::main),
     ("lsusb", lsusb::main),
     ("mkswap", swap::mkswap),
+    ("netd", netd::main),
     ("notifications", notifyd::notifications),
     ("notify-send", notifyd::notify_send),
     ("notifyd", notifyd::main),
