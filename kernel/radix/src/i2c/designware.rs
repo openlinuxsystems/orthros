@@ -560,6 +560,15 @@ fn check() -> Result<(), &'static str> {
     if intel.integer(c"PWR0") != Ok(1) {
         return Err("the Intel controller's _PS0 did not run");
     }
+    // The touchpad's descriptor is read first, which the memory never
+    // answers, so that the registers read back are this test's.
+    let deadline = sched::now_ns().saturating_add(2_000_000_000);
+    while !super::hid::settled() {
+        if sched::now_ns() >= deadline {
+            return Err("the HID over I2C thread did not finish with the touchpad");
+        }
+        sched::sleep_ns(10_000_000);
+    }
     let mut seen = 0;
     let mut wrong = false;
     devices(&mut |d| {

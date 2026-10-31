@@ -7,7 +7,7 @@
 //! other small devices sit.
 //!
 //! Intel's controllers sit in LPSS functions, which [`lpss`] takes out
-//! of reset first.
+//! of reset first. [`hid`] speaks HID over I2C to a touchpad on a bus.
 //!
 //! A transfer is a list of messages to one device, each a write or a read
 //! of some bytes, joined by repeated starts and ended by a stop, as an
@@ -24,6 +24,7 @@
 #![forbid(unsafe_code)]
 
 pub mod designware;
+pub mod hid;
 pub mod lpss;
 #[cfg(test)]
 mod tests;

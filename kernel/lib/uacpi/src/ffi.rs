@@ -140,6 +140,8 @@ unsafe extern "C" {
         out: *mut Handle,
     ) -> Status;
     fn uacpi_object_create_integer(value: u64) -> Handle;
+    fn uacpi_object_create_buffer(view: DataView) -> Handle;
+    fn uacpi_object_create_package(objects: ObjectArray) -> Handle;
     fn uacpi_object_unref(object: Handle);
     fn uacpi_object_get_integer(object: Handle, out: *mut u64) -> Status;
     fn uacpi_object_get_string_or_buffer(object: Handle, out: *mut DataView) -> Status;
@@ -517,6 +519,41 @@ impl Node {
         })?;
         drop(NonNull::new(object).map(Object));
         Ok(())
+    }
+
+    /// Evaluates the device's `_DSM` (ACPI 6.5, 9.1.1) for the function
+    /// `function` of revision `revision` of the interface `uuid`, given
+    /// as the 16 bytes of its buffer, with no arguments, as an integer.
+    /// From a thread that may sleep.
+    pub fn dsm(self, uuid: &[u8; 16], revision: u64, function: u64) -> Result<u64, Error> {
+        let created = |object: Handle| NonNull::new(object).map(Object).ok_or(Error(OUT_OF_MEMORY));
+        // SAFETY: uACPI copies the bytes into a new buffer, and hands
+        // over new objects, or null.
+        let uuid = created(unsafe {
+            uacpi_object_create_buffer(DataView { bytes: uuid.as_ptr(), len: uuid.len() })
+        })?;
+        // SAFETY: as above.
+        let revision = created(unsafe { uacpi_object_create_integer(revision) })?;
+        // SAFETY: as above.
+        let function = created(unsafe { uacpi_object_create_integer(function) })?;
+        // SAFETY: as above; an empty package.
+        let arguments = created(unsafe {
+            uacpi_object_create_package(ObjectArray { objects: ptr::null(), count: 0 })
+        })?;
+        let objects =
+            [uuid.0.as_ptr(), revision.0.as_ptr(), function.0.as_ptr(), arguments.0.as_ptr()];
+        let args = ObjectArray { objects: objects.as_ptr(), count: objects.len() };
+        let mut object = ptr::null_mut();
+        // SAFETY: `args` holds live objects; uACPI writes `object` only on
+        // success, with a reference we then own.
+        check(unsafe {
+            uacpi_eval(self.0.as_ptr(), c"_DSM".as_ptr(), &raw const args, &raw mut object)
+        })?;
+        let object = NonNull::new(object).map(Object).ok_or(Error(INVALID_ARGUMENT))?;
+        let mut value = 0;
+        // SAFETY: `object` is alive; `value` is written on success.
+        check(unsafe { uacpi_object_get_integer(object.0.as_ptr(), &raw mut value) })?;
+        Ok(value)
     }
 
     /// The node at `path`, absolute (as `\_SB.PCI0.GPI0`) or from this

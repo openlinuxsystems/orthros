@@ -4742,6 +4742,12 @@ fn i2c(vm: &mut Vm, case: &Case) -> Result<(), String> {
     )?;
     vm.expect_anywhere("I2C: i2c-1 has \\_SB_.I2C1.TPD0 (DUKV0001) at 0x2c, up to 400 kHz")?;
     vm.expect_anywhere("I2C: i2c-2 has \\_SB_.SNSR (DUKV0002) at 0x48, up to 100 kHz")?;
+    // The touchpad is found by its _CID and its _DSM read; the memory
+    // never answers the read of its HID descriptor (ADR 0235).
+    vm.expect_anywhere(
+        "I2C-HID: \\_SB_.I2C1.TPD0 on i2c-1 at 0x2c: its HID descriptor at 0x0020 could not \
+         be read (the transfer did not end in time); it is not used",
+    )?;
     selftest_passed(vm, "i2c")?;
     if vm.log().contains("DUKV0003") {
         return Err("a device that is not there was found on a bus".to_string());

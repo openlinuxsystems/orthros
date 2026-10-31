@@ -615,8 +615,11 @@ _target/userspace/_).
 		on each bus and one that is not there: the kernel must log both
 		buses, at fast and standard mode, and their two devices; then
 		*selftest=i2c* reads back how LPSS and each controller were set
-		up and runs a transfer on each; at the console, the buses' and
-		devices' names must be in _/sys/bus/i2c/devices_.
+		up and runs a transfer on each. The device on the Intel bus is a
+		HID over I2C touchpad by its _\_CID_: the kernel must read its
+		_\_DSM_ and say that its HID descriptor at 20h could not be
+		read. At the console, the buses' and devices' names must be in
+		_/sys/bus/i2c/devices_.
 
 	*msr*
 		Boot with *selftest=msr*: EFER must read, and with KVM a read

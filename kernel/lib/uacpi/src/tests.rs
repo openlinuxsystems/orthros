@@ -532,9 +532,18 @@ fn a_machine_runs_its_firmwares_aml_from_start_to_power_off() {
     // The I2cSerialBusV2's 18 bytes and its controller's path, and the
     // End Tag.
     assert_eq!(touchpad.bytes(c"_CRS", <[u8]>::len), Ok(18 + 15 + 2));
+    // Its _DSM, by HID over I2C's UUID; another UUID's gives no integer.
+    let hid_over_i2c = [
+        0xf7, 0xf6, 0xdf, 0x3c, 0x67, 0x42, 0x55, 0x45, 0xad, 0x05, 0xb3, 0x0a, 0x3d, 0x89, 0x38,
+        0xde,
+    ];
+    assert_eq!(touchpad.dsm(&hid_over_i2c, 1, 1), Ok(0x20));
+    assert!(touchpad.dsm(&hid_over_i2c, 1, 2).is_err());
+    assert!(touchpad.dsm(&[0; 16], 1, 1).is_err());
     let absent = i2c.find("TPD1").unwrap();
     assert!(!absent.present() && all.contains(&absent));
     assert_eq!(absent.hid().unwrap().as_str(), "SYNA0000");
+    assert!(absent.dsm(&hid_over_i2c, 1, 1).is_err_and(Error::is_not_found));
     assert!(i2c.hid().is_none() && gpio.parent().unwrap().parent().is_some());
     assert_eq!(gpio.address().map_err(Error::is_not_found), Err(true));
 

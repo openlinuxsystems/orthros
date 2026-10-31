@@ -13,13 +13,14 @@
  * engine).
  *
  * The Intel controller has the firmware's counts for fast mode (FMCN) and
- * a _PS0, and a touchpad on its bus at 2Ch that allows 400 kHz; a device
+ * a _PS0, and a touchpad on its bus at 2Ch that allows 400 kHz, a HID over
+ * I2C device (PNP0C50) whose _DSM puts its HID descriptor at 20h; a device
  * that is not there, which allows only 100 kHz, must not slow the bus.
  * The AMD controller's bus has a sensor at 48h that allows 100 kHz, from
  * outside its scope. As memory does not answer as a controller, the
  * Intel one's says a stop was seen, so that a transfer that only writes
- * ends at once, and the AMD one's that a transfer was aborted because no
- * device acknowledged its address. Each controller's REGS method reads
+ * ends at once and one that reads never does, and the AMD one's that a
+ * transfer was aborted because no device acknowledged its address. Each controller's REGS method reads
  * back the registers `selftest=i2c` checks. i2c.aml is made from it by
  * ACPICA's compiler:
  *
@@ -120,6 +121,24 @@ DefinitionBlock ("i2c.aml", "SSDT", 2, "DUKOVO", "I2C", 1)
                         AddressingMode7Bit, "\\_SB.I2C1", 0x00,
                         ResourceConsumer, , Exclusive, )
                 })
+
+                // HID over I2C's: its HID descriptor is at register 20h.
+                Method (_DSM, 4, Serialized)
+                {
+                    If ((Arg0 == ToUUID ("3cdff6f7-4267-4555-ad05-b30a3d8938de")) &&
+                        (Arg1 == One))
+                    {
+                        If (Arg2 == Zero)
+                        {
+                            Return (Buffer (One) { 0x03 })
+                        }
+                        If (Arg2 == One)
+                        {
+                            Return (0x20)
+                        }
+                    }
+                    Return (Buffer (One) { 0x00 })
+                }
             }
 
             Device (GONE)

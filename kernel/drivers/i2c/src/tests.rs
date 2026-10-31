@@ -19,6 +19,7 @@ use radix_hw::{Mmio, Registers};
 
 use super::*;
 use crate::designware::{DesignWare, SIZE, Timing, Unusable};
+use crate::hid;
 use crate::lpss::{self, NotI2c};
 
 const CMD_READ: u32 = 1 << 8;
@@ -653,4 +654,172 @@ fn lpss_reset() {
     assert_eq!(set_up(0x10), (Err(NotI2c(1)), vec![]));
     assert_eq!(set_up(0x20), (Err(NotI2c(2)), vec![]));
     assert_eq!(set_up(u32::MAX).0, Err(NotI2c(0xf)));
+}
+
+/// A HID over I2C device: its registers as a touchpad's firmware lays
+/// them out, and the reports it has queued. It interrupts while it has a
+/// report, or has reset and not been read since.
+struct HidDevice {
+    descriptor: [u8; hid::DESCRIPTOR_LENGTH],
+    report_descriptor: Vec<u8>,
+    reports: VecDeque<Vec<u8>>,
+    powered: bool,
+    reset: bool,
+    commands: Vec<Vec<u8>>,
+}
+
+const HID_DESCRIPTOR: u16 = 0x0020;
+
+impl HidDevice {
+    fn new(report_descriptor: &[u8]) -> HidDevice {
+        let words: [u16; 13] = [
+            30,
+            0x0100,
+            report_descriptor.len() as u16,
+            0x0021,
+            0x0022,
+            12,
+            0x0023,
+            0,
+            0x0024,
+            0x0025,
+            0x06cb,
+            0x7e7e,
+            0x0105,
+        ];
+        let mut descriptor = [0; hid::DESCRIPTOR_LENGTH];
+        for (at, word) in words.iter().enumerate() {
+            descriptor[2 * at..2 * at + 2].copy_from_slice(&word.to_le_bytes());
+        }
+        HidDevice {
+            descriptor,
+            report_descriptor: report_descriptor.to_vec(),
+            reports: VecDeque::new(),
+            powered: false,
+            reset: false,
+            commands: Vec::new(),
+        }
+    }
+
+    fn interrupting(&self) -> bool {
+        self.reset || !self.reports.is_empty()
+    }
+}
+
+impl hid::Device for HidDevice {
+    fn transfer(&mut self, messages: &mut [Message<'_>]) -> Result<(), Error> {
+        match messages {
+            [Message::Write(register), Message::Read(out)] => {
+                let from: &[u8] = match u16::from_le_bytes([register[0], register[1]]) {
+                    HID_DESCRIPTOR => &self.descriptor,
+                    0x0021 => &self.report_descriptor,
+                    _ => return Err(Error::Nack),
+                };
+                // Past what it has, a device reads zeros.
+                for (at, byte) in out.iter_mut().enumerate() {
+                    *byte = from.get(at).copied().unwrap_or(0);
+                }
+                Ok(())
+            }
+            [Message::Write(bytes)] if bytes.len() >= 4 && bytes[..2] == [0x24, 0x00] => {
+                self.commands.push(bytes.to_vec());
+                match (bytes[2], bytes[3]) {
+                    (0, 0x01) => {
+                        self.reset = true;
+                        self.reports.clear();
+                    }
+                    (state, 0x08) => self.powered = state == 0,
+                    _ => return Err(Error::Nack),
+                }
+                Ok(())
+            }
+            [Message::Read(out)] => {
+                out.fill(0);
+                if self.reset {
+                    self.reset = false;
+                } else if let Some(report) = self.reports.pop_front() {
+                    // As much as is read of it.
+                    let length = (report.len() + 2) as u16;
+                    out[..2].copy_from_slice(&length.to_le_bytes());
+                    let room = report.len().min(out.len() - 2);
+                    out[2..2 + room].copy_from_slice(&report[..room]);
+                }
+                Ok(())
+            }
+            _ => Err(Error::Nack),
+        }
+    }
+}
+
+#[test]
+fn hid_over_i2c() {
+    let report_descriptor = [0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0xc0];
+    let mut device = HidDevice::new(&report_descriptor);
+    let descriptor = hid::Descriptor::read(&mut device, HID_DESCRIPTOR).unwrap();
+    assert_eq!(
+        descriptor,
+        hid::Descriptor {
+            report_length: 7,
+            report_register: 0x21,
+            input_register: 0x22,
+            max_input: 12,
+            output_register: 0x23,
+            max_output: 0,
+            command_register: 0x24,
+            data_register: 0x25,
+            vendor: 0x06cb,
+            product: 0x7e7e,
+            version: 0x0105,
+        }
+    );
+    // On, then reset: the device interrupts until its input is read,
+    // which says it has reset.
+    descriptor.set_power(&mut device, true).unwrap();
+    descriptor.reset(&mut device).unwrap();
+    assert_eq!(device.commands, [vec![0x24, 0, 0, 0x08], vec![0x24, 0, 0, 0x01]]);
+    assert!(device.powered && device.interrupting());
+    let mut buffer = [0xff; hid::MAX_INPUT];
+    assert_eq!(descriptor.read_input(&mut device, &mut buffer), Ok(hid::Input::Reset));
+    assert!(!device.interrupting());
+    let mut out = [0; hid::MAX_REPORT_DESCRIPTOR];
+    assert_eq!(
+        descriptor.read_report_descriptor(&mut device, &mut out),
+        Ok(&report_descriptor[..])
+    );
+    // A mouse report, ID 1: a button, 3 right, 2 up.
+    device.reports.push_back(vec![1, 0x01, 3, 0xfe]);
+    assert_eq!(
+        descriptor.read_input(&mut device, &mut buffer),
+        Ok(hid::Input::Report(&[1, 0x01, 3, 0xfe]))
+    );
+    // A length longer than the descriptor allows is not a report.
+    device.reports.push_back(vec![0; 11]);
+    assert_eq!(descriptor.read_input(&mut device, &mut buffer), Ok(hid::Input::Bad(13)));
+    // Too small a buffer for the longest report.
+    assert_eq!(descriptor.read_input(&mut device, &mut [0; 4]), Err(Error::Invalid));
+    descriptor.set_power(&mut device, false).unwrap();
+    assert!(!device.powered);
+}
+
+#[test]
+fn hid_descriptors_refused() {
+    let mut device = HidDevice::new(&[0x05, 0x01]);
+    let parse = |device: &HidDevice| hid::Descriptor::parse(&device.descriptor);
+    device.descriptor[2] = 0x00;
+    device.descriptor[3] = 0x02;
+    assert_eq!(parse(&device), Err(hid::Failed::Descriptor(30, 0x0200)));
+    device.descriptor[3] = 0x01;
+    device.descriptor[4..6].copy_from_slice(&0u16.to_le_bytes());
+    assert_eq!(parse(&device), Err(hid::Failed::ReportLength(0)));
+    device.descriptor[4..6].copy_from_slice(&5000u16.to_le_bytes());
+    assert_eq!(parse(&device), Err(hid::Failed::ReportLength(5000)));
+    device.descriptor[4..6].copy_from_slice(&2u16.to_le_bytes());
+    device.descriptor[10..12].copy_from_slice(&2u16.to_le_bytes());
+    assert_eq!(parse(&device), Err(hid::Failed::InputLength(2)));
+    // A register that is not there.
+    assert_eq!(hid::Descriptor::read(&mut device, 0x30), Err(hid::Failed::Bus(Error::Nack)));
+    assert_eq!(
+        hid::Failed::InputLength(2).to_string(),
+        "its longest input report (2 bytes) is not one that is read"
+    );
 }

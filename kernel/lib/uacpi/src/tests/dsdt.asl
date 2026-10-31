@@ -232,6 +232,20 @@ DefinitionBlock ("dsdt.aml", "DSDT", 2, "DUKOVO", "TESTDSDT", 1)
                             AddressingMode7Bit, "\\_SB.PCI0.I2C1", 0x00,
                             ResourceConsumer, , Exclusive, )
                     })
+
+                    // HID over I2C's: its HID descriptor's register.
+                    Method (_DSM, 4, Serialized)
+                    {
+                        If (Arg0 == ToUUID ("3cdff6f7-4267-4555-ad05-b30a3d8938de"))
+                        {
+                            If ((Arg1 == 1) && (Arg2 == 1))
+                            {
+                                Return (0x20)
+                            }
+                        }
+
+                        Return (Buffer (1) { 0 })
+                    }
                 }
                 Device (TPD1)
                 {

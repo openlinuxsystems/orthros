@@ -844,6 +844,23 @@ controller. An LPSS function that is a UART or an SPI controller is left
 alone. The buses and devices are named in _/kernel/bus/i2c/devices_
 (*radix-sysfs*(5)).
 
+A device whose _\_HID_ or _\_CID_ is _PNP0C50_ is HID over I2C: a
+touchpad, a keyboard or a touchscreen (ADR 0235). The thread _i2c-hid_
+reads its HID descriptor from the register its _\_DSM_ gives, asks for
+the GPIO pin its resources name as its interrupt, resets it and reads
+its report descriptor; then each report it interrupts for goes where a
+USB device's go, keys to _/devices/kbd_ and the pointer to
+_/devices/mouse_. A touchpad is read as the mouse it is until told to
+report its fingers, which the kernel does not yet tell it:
+
+```
+I2C-HID: \_SB_.PCI0.I2C1.TPD0 (06cb:7e7e) on i2c-2 at 0x2c: a touchpad, read as a mouse into /devices/mouse
+```
+
+A device that cannot be used is a warning that says why, such as a HID
+descriptor that could not be read or no interrupt pin; one whose reads
+keep failing says it stopped reporting.
+
 # IOMMU
 
 An Intel VT-d unit sits between a group of PCI devices and memory and

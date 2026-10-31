@@ -627,7 +627,9 @@ boots.
 	clock. The devices found must be the SSDT's two. A write on _i2c-1_,
 	whose memory says a stop was seen, must reach the controller and
 	end; a read on _i2c-2_, whose memory says no device answered, must
-	fail so; a bus that does not exist must be refused. Reports
+	fail so; a bus that does not exist must be refused. First it waits
+	for the thread _i2c-hid_ to give up the SSDT's touchpad, whose HID
+	descriptor the memory never answers (ADR 0235). Reports
 	*selftest i2c: passed*.
 
 # TRACE POINTS
