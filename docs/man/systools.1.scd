@@ -32,7 +32,9 @@ capabilities each process holds; *rtrace*(1) reads a trace of a
 process's system calls (*radix-trace*(2)); *dmesg*(1) reads the kernel's
 log through _/devices/kmsg_ (*radix-files*(7)), and *logd*(8) keeps it
 as the system's log and its audit log, which *log*(1) and
-*journalctl*(1) read and *logtrim*(8) trims;
+*journalctl*(1) read and *logtrim*(8) trims; *notifyd*(8) passes the
+notifications *notify-send*(1) sends to the console, and
+*notifications*(1) lists them;
 *shutdown*(8), *reboot*(8), *poweroff*(8), *halt*(8) and *service*(8)
 ask Spark over its control socket (*spark*(8)). Until users come, in Phase 13 of the roadmap,
 every process is root's, so the user columns all say root and the
@@ -100,6 +102,12 @@ error that starts with the tool's name.
 :  the PCI functions
 |  *mkswap*(8)
 :  make a swap area on a disk or partition
+|  *notifications*(1)
+:  the notifications notifyd keeps
+|  *notify-send*(1)
+:  send a notification
+|  *notifyd*(8)
+:  pass notifications to the screen
 |  *nvme*(8)
 :  the NVMe namespaces, and a drive's SMART / Health Information log
 |  *pgrep*(1), *pkill*(1)

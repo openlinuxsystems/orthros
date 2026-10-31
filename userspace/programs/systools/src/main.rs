@@ -13,7 +13,9 @@
 //! a process's system calls (radix-trace(2)), and `dmesg` the kernel log
 //! through `/devices/kmsg`; `logd` keeps the system's log and its audit
 //! log, which `log` and `journalctl` read and `logtrim` trims (ADRs 0210
-//! and 0211). Every process is root's until users come
+//! and 0211); `notifyd` passes notifications from `notify-send` and other
+//! programs to the console, and `notifications` lists them (ADR 0212).
+//! Every process is root's until users come
 //! (Phase 13), so the user columns all say root.
 
 mod args;
@@ -40,6 +42,7 @@ mod lsof;
 mod lspci;
 mod memory;
 mod modes;
+mod notifyd;
 mod nvme;
 mod pidstat;
 mod power;
@@ -110,6 +113,9 @@ const TOOLS: &[(&str, Tool)] = &[
     ("lsof", lsof::main),
     ("lspci", lspci::main),
     ("mkswap", swap::mkswap),
+    ("notifications", notifyd::notifications),
+    ("notify-send", notifyd::notify_send),
+    ("notifyd", notifyd::main),
     ("nvme", nvme::main),
     ("pgrep", signals::pgrep),
     ("pidstat", pidstat::main),

@@ -5,9 +5,10 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Logs, monitoring and troubleshooting
 
-This chapter describes the system's log as of Phase 13 of the roadmap.
-The full references are logd(8), log(1), journalctl(1), logtrim(8),
-log(5) and dmesg(1).
+This chapter describes the system's log and its notifications as of
+Phase 13 of the roadmap. The full references are logd(8), log(1),
+journalctl(1), logtrim(8), log(5), dmesg(1), notifyd(8),
+notify-send(1) and notifications(1).
 
 ## What the log holds
 
@@ -95,6 +96,28 @@ max-size = 1G
 `logtrim --size 500M` or `logtrim --days 30` once to a limit of your
 own, as `journalctl --vacuum-size=500M` and `--vacuum-time=30d` do. The
 audit log keeps to its own setting.
+
+## Notifications
+
+A program or a script can tell whoever is at the screen something with
+`notify-send`, as on Linux; the console shows it on its bottom line for
+8 seconds, after the name of the program that sent it:
+
+```
+$ notify-send -a backup 'Backup done' 'All 3 disks are copied.'
+```
+
+```
+ notify-send (backup): Backup done - All 3 disks are copied.
+```
+
+`-t` sets the time in milliseconds, and `-u critical` keeps it, in
+red, until you press a key. The name in front is the one the kernel
+gives, so a program cannot pass a notification off as another's; a
+name it gives itself with `-a` comes after it. `notifications` lists
+the last 64, and `notifications -f` follows them. The notifyd service
+keeps them in memory only, never on the disk or in the log, and
+refuses more than 10 in 10 seconds from one program.
 
 ## When logd is not running
 

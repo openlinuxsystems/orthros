@@ -68,6 +68,8 @@ dependencies = [
  "libc",
  "radix-abi",
  "radix-fbcon",
+ "serde",
+ "serde_json",
  "vte",
 ]
 

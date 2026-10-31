@@ -8,14 +8,18 @@
 // its lines off as a service's; that `log -f` shows a line written after
 // it started; that logd started again keeps no record twice; that the
 // audit log holds Spark's and the kernel's security events and no
-// program's; and that logtrim(8) and journalctl's --vacuum-time trim the
-// log.
+// program's; that logtrim(8) and journalctl's --vacuum-time trim the
+// log; and that notifyd(8) takes notifications with the sender's process
+// and name as the kernel gives them, refuses a flood, and keeps none of
+// them in the log (ADR 0212).
 
 #include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 
 #include "check.h"
 #include "programs.h"
@@ -25,6 +29,9 @@
 #define DMESG "/system/commands/dmesg"
 #define LOGTRIM "/system/commands/logtrim"
 #define SERVICE "/system/commands/service"
+#define NOTIFY_SEND "/system/commands/notify-send"
+#define NOTIFICATIONS "/system/commands/notifications"
+#define NOTIFY_SOCKET "/system/live/notify/socket"
 
 // Writes `line` to the kernel log, as a program's.
 static void kmsg(const char *line) {
@@ -300,6 +307,75 @@ static void trimmed(void) {
 	STATUS(1, LOGTRIM, "--size", "lots");
 }
 
+// Sends request `line` to notifyd from this process, and puts its answer
+// in `answer`.
+static void notifyd_ask(const char *line, char *answer, size_t size) {
+	answer[0] = 0;
+	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	CHECK(fd >= 0);
+	if(fd < 0)
+		return;
+	struct sockaddr_un addr = {.sun_family = AF_UNIX};
+	strcpy(addr.sun_path, NOTIFY_SOCKET);
+	int connected = connect(fd, (struct sockaddr *)&addr, sizeof addr) == 0;
+	CHECK(connected);
+	if(connected) {
+		CHECK(write(fd, line, strlen(line)) == (ssize_t)strlen(line));
+		size_t len = 0;
+		ssize_t got;
+		while(len + 1 < size && (got = read(fd, answer + len, size - 1 - len)) > 0)
+			len += got;
+		answer[len] = 0;
+	}
+	close(fd);
+}
+
+// notifyd(8): notify-send's notifications and `notifications`' list of
+// them; the sender is the process the kernel names, whatever name it
+// claims; a flood is refused; and the log holds none of them.
+static void notices(void) {
+	struct stat st;
+	long long deadline = check_now_ns() + 60 * 1000000000LL;
+	while(stat(NOTIFY_SOCKET, &st) != 0 && check_now_ns() < deadline)
+		check_sleep_ms(100);
+	OUTPUT("", "1\n", NOTIFY_SEND, "-p", "-a", "backup", "Backup done", "All 3 disks\nare copied.");
+	OUTPUT("", "", NOTIFY_SEND, "-u", "critical", "-t", "5000", "-i", "dialog-warning", "Disk full");
+	run_program((const char *const[]){NOTIFICATIONS, NULL}, "", 0);
+	CHECK(strstr(output, "  notify-send (backup): Backup done\n    All 3 disks\n    are copied.\n"));
+	CHECK(strstr(output, "  notify-send [critical]: Disk full\n"));
+	run_program((const char *const[]){NOTIFICATIONS, "-n", "1", "--json", NULL}, "", 0);
+	CHECK(strstr(output, "\"name\":\"notify-send\",\"urgency\":\"critical\",\"title\":\"Disk full\""));
+	CHECK(strstr(output, "\"seconds\":0}") && !strstr(output, "Backup"));
+	STATUS(1, NOTIFY_SEND);
+	STATUS(1, NOTIFY_SEND, "-u", "loud", "x");
+	char answer[4096];
+	notifyd_ask("nonsense\n", answer, sizeof answer);
+	CHECK(strstr(answer, "\"error\":\"not a request"));
+	notifyd_ask("{\"ask\":\"send\",\"title\":\" \"}\n", answer, sizeof answer);
+	CHECK(strstr(answer, "a notification needs a title"));
+	// The kernel names the sender: this process, not the name it claims.
+	notifyd_ask("{\"ask\":\"send\",\"title\":\"from logtest\",\"app\":\"authd\"}\n", answer,
+			sizeof answer);
+	CHECK(strstr(answer, "{\"id\":3}"));
+	char sender[96];
+	snprintf(sender, sizeof sender, "\"process\":%d,\"name\":\"logtest\",\"app\":\"authd\"",
+			(int)getpid());
+	CONTAINS(sender, NOTIFICATIONS, "-n", "1", "--json");
+	CONTAINS("  logtest (authd): from logtest\n", NOTIFICATIONS);
+	// At most 10 in 10 seconds from one process.
+	int taken = 1, refused = 0;
+	for(int i = 0; i < 11; i++) {
+		notifyd_ask("{\"ask\":\"send\",\"title\":\"flood\"}\n", answer, sizeof answer);
+		taken += strstr(answer, "\"id\":") != NULL;
+		refused += strstr(answer, "too many notifications") != NULL;
+	}
+	CHECK(taken <= 10 && refused >= 1 && taken + refused == 12);
+	const char *const notifyd[] = {LOG, "-s", "notifyd", "-o", "cat", NULL};
+	CHECK(wait_for("refusing notifications from logtest (process ", notifyd, 30));
+	// Nothing of a notification goes to the log.
+	OUTPUT("", "-- No entries --\n", LOG, "-g", "Backup done|Disk full", "-o", "cat");
+}
+
 int main(void) {
 	check_start("logtest");
 	RUN(logd_answers);
@@ -310,5 +386,6 @@ int main(void) {
 	RUN(kept);
 	RUN(audit);
 	RUN(trimmed);
+	RUN(notices);
 	return check_end();
 }
