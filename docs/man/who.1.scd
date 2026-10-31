@@ -52,4 +52,4 @@ nothing.
 
 # SEE ALSO
 
-*w*(1), *uptime*(1), *systools*(1)
+*w*(1), *uptime*(1), *last*(1), *systools*(1)

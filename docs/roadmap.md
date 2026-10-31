@@ -176,7 +176,7 @@ A server is run from the shell, so Dukovo ships the commands an administrator ex
 | Hardware | lspci, lsusb, lscpu, lsmem, sensors, hwinfo (DMI and firmware details), watchdog | New, Rust; PCI and USB ID databases (BSD-3-Clause or GPL-2.0, data files) | 11 |
 | Network | dig and host, traceroute, mtr, nc, tcpdump, openssl, nic (link speed, offloads and statistics, as ethtool), whois, iperf3 | hickory-dns MIT/Apache; mtr GPL-2.0 as a separate program; OpenBSD netcat BSD; tcpdump and libpcap BSD-3-Clause; OpenSSL Apache-2.0; iperf3 BSD-3-Clause; the rest new Rust | 12 |
 | Remote access and transfer | ssh, scp, sftp, ssh-keygen, ssh-agent, ssh-copy-id, rsync, curl, wget | russh Apache-2.0; rsync and wget GPL-3.0 as separate programs; curl MIT-style | 12, 13 |
-| Users and access | passwd, id, groups, who, w, last, lastlog, elevate, and `sudo` as a front end to elevate | New, Rust | 13 |
+| Users and access | passwd, id, groups, who, w, last, lastb, lastlog, elevate, and `sudo` as a front end to elevate | New, Rust | 13 |
 | Services, logs and scheduling | service, log (query, follow and filter logd, as journalctl does), logger (landed early, in Phase 13: ADR 0252), crontab and at (both write Spark timers), sendmail (a small relay so jobs can mail alerts, built on lettre, MIT), and the systemctl, journalctl, hostnamectl and timedatectl front ends | New, Rust | 16 |
 | Health and automation | dukovo-check (security and health report), admin (command-line client for the admind API) | New, Rust | 16 |
 

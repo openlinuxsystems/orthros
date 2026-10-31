@@ -50,13 +50,14 @@ use std::time::{Duration, Instant};
 
 use accounts::hash::{self, Cost};
 use accounts::request::{self, Answer, Mode, Prompt, Prompted, REQUEST_MAX, Relay, Request};
+use accounts::signins::{self, Event, Latest, Place, Record, Seat};
 use accounts::{DISABLED, Group, Password, Table, User};
 use radix_abi::names;
 
 use crate::args::Args;
 use crate::elevate::{self, Plan};
 use crate::util::{self, Fail};
-use crate::{proc, signin, sys};
+use crate::{proc, sessions, signin, sys};
 
 /// How long a connection has to send its request.
 const REQUEST_TIME: Duration = Duration::from_secs(10);
@@ -235,10 +236,14 @@ extern "C" fn on_child(_: libc::c_int) {
 }
 
 /// A session authd started, or an elevated command: whose it is, and on
-/// what terminal, for the audit log.
+/// what terminal, for the audit log and the sign-in records.
 struct Session {
     name: String,
     terminal: String,
+    /// The account's number and its own group, whose sign-in records
+    /// the session's go in.
+    number: u32,
+    group: u32,
     /// Whether it is an elevated command.
     elevated: bool,
 }
@@ -800,7 +805,19 @@ impl Authd {
                        needs `names = true`";
             return (Answer::Refused(why.into()), now);
         };
+        let tty = signin::terminal_name(&terminal);
         if let Err(refused) = self.check_password(files, name, password, peer, now) {
+            // A wrong password at a sign-in is recorded for lastb(1), and
+            // for the person whose account it was, who is told at their
+            // next sign-in (ADR 0254).
+            if matches!(&refused.0, Answer::Refused(why) if why == request::WRONG_PASSWORD) {
+                let failed =
+                    Event::Failed { name: shown(name), terminal: tty.clone(), from: String::new() };
+                match files.user(name) {
+                    Some(user) => record(&signins::of(user.uid), user.gid, 0o640, failed),
+                    None => record(signins::UNKNOWN, 0, 0o600, failed),
+                }
+            }
             return refused;
         }
         // A right password is an account's.
@@ -809,15 +826,20 @@ impl Authd {
         };
         let groups =
             accounts::other_groups(user, &files.groups, radix_abi::names::GROUPS_MAX as usize);
-        let tty = signin::terminal_name(&terminal);
-        // What happened while they were away comes first, on the
-        // terminal, before the session's programs write to it.
+        // Their last sign-in and the wrong passwords typed for them
+        // since, then what happened while they were away, come first, on
+        // the terminal, before the session's programs write to it.
+        let records = read_text(&signins::of(user.uid)).unwrap_or_default();
+        let mut lines = latest_lines(&signins::latest(&signins::parse(&records)), name, |time| {
+            util::local_time(time, WHEN)
+        });
         let notices = Notices::read();
         let theirs = notices.of(name);
-        if !theirs.is_empty()
+        lines.extend(theirs.iter().cloned());
+        if !lines.is_empty()
             && let Ok(copy) = terminal.try_clone()
         {
-            let text = format!("\n{}\n\n", theirs.join("\n"));
+            let text = format!("\n{}\n\n", lines.join("\n"));
             let _ = File::from(copy).write_all(text.as_bytes());
         }
         match signin::start(names, user, &groups, &terminal, term) {
@@ -833,7 +855,20 @@ impl Authd {
                     eprintln!("authd: {why}");
                 }
                 let process = process as i32;
-                let session = Session { name: name.into(), terminal: tty, elevated: false };
+                let seat = Seat {
+                    name: name.into(),
+                    terminal: tty.clone(),
+                    from: String::new(),
+                    session: process as u32,
+                };
+                record(&signins::of(user.uid), user.gid, 0o640, Event::In(seat));
+                let session = Session {
+                    name: name.into(),
+                    terminal: tty,
+                    number: user.uid,
+                    group: user.gid,
+                    elevated: false,
+                };
                 self.sessions.insert(process, session);
                 self.clients[i].session = Some(process);
                 (Answer::Done(process.to_string()), now)
@@ -880,6 +915,13 @@ impl Authd {
                         session.name,
                         session.terminal
                     );
+                    let seat = Seat {
+                        name: session.name.clone(),
+                        terminal: session.terminal.clone(),
+                        from: String::new(),
+                        session: process as u32,
+                    };
+                    record(&signins::of(session.number), session.group, 0o640, Event::Out(seat));
                 }
             }
             for client in &mut self.clients {
@@ -999,7 +1041,13 @@ impl Authd {
             plan.shown,
             peer.process
         );
-        let session = Session { name: user.name, terminal, elevated: true };
+        let session = Session {
+            name: user.name,
+            terminal,
+            number: user.uid,
+            group: user.gid,
+            elevated: true,
+        };
         self.sessions.insert(process, session);
         let client = &mut self.clients[i];
         client.session = Some(process);
@@ -1611,6 +1659,83 @@ impl Notices {
     }
 }
 
+/// How a sign-in record's time reads on a terminal: `Sat Oct 31 12:40
+/// 2026`.
+const WHEN: &str = "%a %b %e %H:%M %Y";
+
+/// Adds a record of `event`, now, to the sign-in records' file at `path`
+/// (ADR 0254): root's and `group`'s, with `mode`, made if it is not
+/// there, and trimmed once it grew past [`signins::FILE_MAX`]. A record
+/// that cannot be written is said on authd's standard error, and the
+/// sign-in goes on.
+fn record(path: &str, group: u32, mode: u32, event: Event) {
+    let record = Record { time: (util::now_ns() / 1_000_000_000) as i64, event };
+    if let Err(err) = append(path, group, mode, &record.line()) {
+        eprintln!("authd: cannot write {path}: {}", util::strip_os_error(&err));
+    }
+}
+
+fn append(path: &str, group: u32, mode: u32, line: &str) -> io::Result<()> {
+    let own = |file: &File| -> io::Result<()> {
+        let meta = file.metadata()?;
+        if meta.uid() != 0 || meta.gid() != group {
+            std::os::unix::fs::fchown(file, Some(0), Some(group))?;
+        }
+        if meta.mode() & 0o7777 != mode {
+            file.set_permissions(fs::Permissions::from_mode(mode))?;
+        }
+        Ok(())
+    };
+    let mut file = OpenOptions::new().append(true).create(true).mode(mode).open(path)?;
+    own(&file)?;
+    file.write_all(line.as_bytes())?;
+    if file.metadata()?.len() <= signins::FILE_MAX {
+        return Ok(());
+    }
+    let kept = signins::trimmed(&read_text(path)?);
+    let new = format!("{path}.new");
+    let written = (|| {
+        let mut file =
+            OpenOptions::new().write(true).create(true).truncate(true).mode(mode).open(&new)?;
+        own(&file)?;
+        file.write_all(kept.as_bytes())?;
+        fs::rename(&new, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&new);
+    }
+    written
+}
+
+/// `terminal`, and where from if not at the computer itself.
+fn place_text(place: &Place, when: &impl Fn(i64) -> String) -> String {
+    let from = if place.from.is_empty() { String::new() } else { format!(" from {}", place.from) };
+    format!("{} on {}{from}", when(place.time), place.terminal)
+}
+
+/// What `name` reads as they sign in, from their `latest` records: their
+/// last sign-in, and the wrong passwords typed for them since, as Linux's
+/// login says them; nothing at the first, unless wrong ones came before.
+fn latest_lines(latest: &Latest, name: &str, when: impl Fn(i64) -> String) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(sign_in) = &latest.sign_in {
+        lines.push(format!("Last sign-in: {}", place_text(sign_in, &when)));
+    }
+    if let Some(last) = &latest.last_failed {
+        let count = match latest.failed {
+            1 => "1 wrong password was".to_string(),
+            n => format!("{n} wrong passwords were"),
+        };
+        let since = if latest.sign_in.is_some() { "Since then" } else { "Before this sign-in" };
+        lines.push(format!(
+            "{since}, {count} typed for {}, the last on {}.",
+            shown(name),
+            place_text(last, &when)
+        ));
+    }
+    lines
+}
+
 /// What an `elevate` request asks to run.
 struct Elevation<'a> {
     mode: Mode,
@@ -1922,6 +2047,18 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     // Its own files, which only it reads; the hashes are root's 0600 in
     // there too.
     own_dir(accounts::STATE, 0o700)?;
+    // The sign-in records (ADR 0254), which no one but root lists.
+    own_dir(signins::DIR, 0o711)?;
+    let boot = sessions::boot_seconds();
+    let system = signins::parse(&read_text(signins::SYSTEM).unwrap_or_default());
+    // Started again since the computer started, it records no start.
+    if signins::last_boot(&system).is_none_or(|last| (last - boot).abs() > 1) {
+        let release = util::uname().1;
+        let started = Record { time: boot, event: Event::Boot { release } };
+        if let Err(err) = append(signins::SYSTEM, 0, 0o644, &started.line()) {
+            eprintln!("authd: cannot write {}: {}", signins::SYSTEM, util::strip_os_error(&err));
+        }
+    }
     let dir = Path::new(accounts::SOCKET).parent().unwrap_or(Path::new("/"));
     own_dir(&dir.to_string_lossy(), 0o755)?;
     let _ = fs::remove_file(accounts::SOCKET);
@@ -1960,12 +2097,46 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     };
     authd.run_loop().map_err(|e| util::failed(&"authd", e))?;
     let _ = fs::remove_file(accounts::SOCKET);
+    // Asked to end: the computer is stopping, as Spark asks each service
+    // to end then. The sessions that run end with it.
+    record(signins::SYSTEM, 0, 0o644, Event::Down);
     Ok(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_last_sign_in_is_told_with_the_wrong_passwords_since() {
+        let when = |time: i64| format!("<{time}>");
+        let place = |time, terminal: &str, from: &str| Place {
+            time,
+            terminal: terminal.into(),
+            from: from.into(),
+        };
+        assert!(latest_lines(&Latest::default(), "bob", when).is_empty());
+        let latest = Latest { sign_in: Some(place(5, "pts/1", "")), failed: 0, last_failed: None };
+        assert_eq!(latest_lines(&latest, "bob", when), ["Last sign-in: <5> on pts/1"]);
+        let latest = Latest {
+            sign_in: Some(place(5, "pts/1", "")),
+            failed: 1,
+            last_failed: Some(place(9, "pts/2", "10.0.0.2")),
+        };
+        assert_eq!(
+            latest_lines(&latest, "bob", when),
+            [
+                "Last sign-in: <5> on pts/1",
+                "Since then, 1 wrong password was typed for bob, the last on <9> on pts/2 from \
+                 10.0.0.2."
+            ]
+        );
+        let latest = Latest { sign_in: None, failed: 3, last_failed: Some(place(9, "tty1", "")) };
+        assert_eq!(
+            latest_lines(&latest, "bob", when),
+            ["Before this sign-in, 3 wrong passwords were typed for bob, the last on <9> on tty1."]
+        );
+    }
 
     #[test]
     fn notices_wait_for_each_person() {

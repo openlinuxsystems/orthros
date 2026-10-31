@@ -18,7 +18,8 @@
 //! and `notifications` lists them (ADR 0212).
 //! `authd` keeps the accounts, which `user` and `passwd` change, `login`
 //! signs people in through it, and `elevate`, and `sudo` in front of it,
-//! run a command as an administrator (ADRs 0218, 0250 and 0219).
+//! run a command as an administrator (ADRs 0218, 0250 and 0219); `last`,
+//! `lastb` and `lastlog` show the sign-ins it records (ADR 0254).
 
 mod account;
 mod args;
@@ -40,6 +41,7 @@ mod hwinfo;
 mod iostat;
 mod ip;
 mod keymaps;
+mod last;
 mod log;
 mod logd;
 mod logger;
@@ -125,6 +127,9 @@ const TOOLS: &[(&str, Tool)] = &[
     ("journalctl", log::journalctl),
     ("keymap", keymaps::main),
     ("kill", signals::kill),
+    ("last", last::last),
+    ("lastb", last::lastb),
+    ("lastlog", last::lastlog),
     ("log", log::main),
     ("logd", logd::main),
     ("logger", logger::main),

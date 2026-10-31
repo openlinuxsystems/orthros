@@ -192,6 +192,36 @@ in, or making them no longer one, asks first, since nobody could
 elevate afterwards; the startup-trouble menu (below) enables a disabled
 administrator again.
 
+## Who signed in, and when
+
+As you sign in, Dukovo says when you last did, and whether anyone typed
+a wrong password for your account since:
+
+```
+Last sign-in: Sat Oct 31 12:40 2026 on pts/0
+Since then, 1 wrong password was typed for bob, the last on Sat Oct 31 12:44 2026 on pts/1.
+```
+
+`last` lists your sign-ins, newest first, with how long each lasted,
+and when the computer started; `lastb` lists the wrong passwords typed
+for your account, and `lastlog` your last sign-in. They are Linux's
+commands, with their options:
+
+```
+$ last
+bob      pts/1                         Sat Oct 31 12:46   still logged in
+bob      pts/1                         Sat Oct 31 12:41 - 12:45  (00:04)
+reboot   system boot  0.13.0           Sat Oct 31 12:39   still running
+
+sign-in records begin Sat Oct 31 12:39:01 2026
+```
+
+Your sign-ins are yours: on Linux anyone reads everyone's, but here each
+person sees only their own, and an administrator sees everyone's, with
+`elevate last`, `elevate lastb` and `elevate lastlog`. The wrong
+passwords typed for names that are no account's are for administrators
+alone.
+
 ## Changing a password
 
 `passwd` changes yours, given the one you have; an administrator,
@@ -231,6 +261,7 @@ recovery key.
 | `/system/state/authd/passwords` | The passwords' Argon2id hashes, which only the authd service reads |
 | `/system/state/authd/notices` | What each person is told at their next sign-in, such as a password reset |
 | `/system/state/authd/retired` | The numbers of removed accounts, which no account gets again |
+| `/system/state/sign-ins` | Who signed in, when, and the wrong passwords typed: a file for each account, which that person reads, and one of the computer's starts and stops |
 | `/users/.removed` | The archived homes of removed accounts |
 
 `/etc/passwd` and `/etc/group` lead to the first two, so programs from

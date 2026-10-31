@@ -34,6 +34,9 @@ static const char *const ELSEWHERE[][2] = {
 		{"elevate", "the elevate boot test's: it runs commands as an administrator through authd"},
 		{"sudo", "the elevate boot test's: it runs elevate as sudo"},
 		{"logger", "the signin boot test's: a user writes a line to the log with it"},
+		{"last", "the signin and elevate boot tests': it reads authd's sign-in records"},
+		{"lastb", "the signin boot test's: it reads the wrong passwords authd recorded"},
+		{"lastlog", "the signin and elevate boot tests': it reads each account's last sign-in"},
 };
 
 enum { ELSEWHERE_COUNT = sizeof(ELSEWHERE) / sizeof(ELSEWHERE[0]) };

@@ -25,6 +25,7 @@
 #[cfg(feature = "hash")]
 pub mod hash;
 pub mod request;
+pub mod signins;
 #[cfg(test)]
 mod tests;
 

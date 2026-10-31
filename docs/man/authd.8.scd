@@ -231,10 +231,18 @@ of authd ends the sessions it started.
 Without the names capability authd logs *no names capability: sign-in
 cannot start sessions* when it starts, and refuses *session*.
 
-Before a session's programs start, authd writes on its terminal what
-the person is to be told since they last signed in, and forgets it once
-the session starts: today, that a password was reset from the
-startup-trouble menu, which every administrator is told:
+Before a session's programs start, authd writes on its terminal when
+the person last signed in, and the wrong passwords typed for them since
+(see SIGN-IN RECORDS), as Linux's pam_lastlog does:
+
+```
+Last sign-in: Sat Oct 31 12:40 2026 on pts/0
+Since then, 1 wrong password was typed for bob, the last on Sat Oct 31 12:44 2026 on pts/1.
+```
+
+Then what the person is to be told since they last signed in, which
+authd forgets once the session starts: today, that a password was reset
+from the startup-trouble menu, which every administrator is told:
 
 ```
 authd: the password of alice was reset from the startup-trouble menu, by process 61 (user 0)
@@ -244,6 +252,41 @@ authd: the password of alice was reset from the startup-trouble menu, by process
 Your password was reset from the startup-trouble menu on Sat Oct 31 12:40 2026.
 The password of alice was reset from the startup-trouble menu on Sat Oct 31 12:40 2026.
 ```
+
+# SIGN-IN RECORDS
+
+authd records the sign-ins in _/system/state/sign-ins_, for *last*(1),
+*lastb*(1) and *lastlog*(8) (ADR 0254), a line of text each: the time
+in seconds since the epoch, what happened, and its fields, *-* for
+none:
+
+```
+1793440000 boot 0.13.0
+1793440100 in alice pts/0 - 61
+1793440200 failed bob pts/1 -
+1793440300 out alice pts/0 - 61
+1793440400 down
+```
+
+- *boot*: the computer started, with the kernel's release. authd
+  records it as it starts, once for each start of the computer, with
+  the kernel's time of the start.
+- *down*: authd was asked to end, as Spark asks each service when the
+  computer stops. The sessions end with it.
+- *in* and *out*: someone signed in, or their session's first process
+  ended, with the terminal, where from (*-* at the computer itself),
+  and that process, which pairs them.
+- *failed*: a wrong password was typed at a sign-in, with the name
+  typed.
+
+The starts and stops are in _system_, which everyone reads. Each
+account's sign-ins, sign-outs and wrong passwords are in a file named
+by its number, root's and the account's own group's, mode 0640, so the
+person and root read it. The wrong passwords typed for names that are
+no account's are in _unknown_, root's alone. The directory is 0711, so
+no one but root lists it. A file that grew past 512 KiB keeps its
+newest 4096 lines, and its newest sign-in with its sign-out and its
+newest start if they are older.
 
 # ELEVATE
 
@@ -371,6 +414,9 @@ _/system/state/authd/notices_
 	What each person is told at their next sign-in: a line
 	_name_<tab>_text_ each.
 
+_/system/state/sign-ins_
+	The sign-in records (see SIGN-IN RECORDS).
+
 _/system/live/authd/socket_
 	The socket authd answers at.
 
@@ -384,6 +430,7 @@ exits with 1 if it cannot start.
 
 # SEE ALSO
 
-*login*(1), *elevate*(8), *sudo*(8), *user*(8), *passwd*(1), *id*(1), *consoled*(8), *service*(8),
+*login*(1), *elevate*(8), *sudo*(8), *user*(8), *passwd*(1), *id*(1), *last*(1),
+*lastlog*(8), *consoled*(8), *service*(8),
 *service.toml*(5), *spark*(8), *logd*(8), *radix-names*(2), *radix-posix*(7),
 *systools*(1)

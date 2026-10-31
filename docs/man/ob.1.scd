@@ -577,10 +577,14 @@ _target/userspace/_).
 		signintest checks that each session's
 		leader acts for its user on a terminal of its own, and that
 		*authd*(8) resets no password outside the startup-trouble menu. Bob signs out
-		and the sign-in comes back; a wrong password is refused after a
-		wait and the right one signs him in again; alice, still signed
-		in on tty1, cannot list bob's home. The power button ends it
-		(ADR 0250).
+		and the sign-in comes back; a name that is no account's and a
+		wrong password are refused, the second after a wait, and the
+		right one signs him in again, told of his last sign-in and the
+		wrong password since. *last*(1), *lastb*(1) and *lastlog*(8)
+		show him his own sign-ins alone, with a hint; alice, still
+		signed in on tty1, cannot list bob's home, and reads every
+		wrong password, the unknown name's too, with *elevate lastb*.
+		The power button ends it (ADRs 0250 and 0254).
 
 	*elevate*
 		Boot 2 CPUs under BIOS from USB with the shipped services and
@@ -604,8 +608,10 @@ _target/userspace/_).
 		signed in. Alice cannot disable her own account; she disables
 		bob's, which ends his session on tty2 at once, and his password
 		then gets that it is disabled, until she enables it and he signs
-		in again. The power button ends it (ADRs 0219, 0220, 0251 and
-		0252).
+		in again. *elevate last* and *elevate lastlog* show her everyone's
+		sign-ins: both of bob's, hers, the computer's start, and root's
+		none. The power button ends it (ADRs 0219, 0220, 0251, 0252 and
+		0254).
 
 	*startup-trouble*
 		Boot 2 CPUs under UEFI from USB with *startup-trouble*, as the

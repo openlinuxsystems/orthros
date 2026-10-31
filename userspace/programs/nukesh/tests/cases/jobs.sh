@@ -51,3 +51,11 @@ echo kept | { set -m; cat & wait; }
 true & sleep 0.5; jobs; (exit 3) & sleep 0.5; jobs; jobs; echo "listed"
 sh -c 'exit 4' & sleep 0.5; wait $!; echo "waited $?"; jobs; echo "none left"
 false & sleep 0.5; true & sleep 0.5; jobs %1; jobs
+# A command substitution runs without job control, as bash's does: a
+# pipeline in it stays in the shell's process group, so a program in it
+# that sets the terminal is not stopped as a background job's would be.
+set -m
+mine=$(ps -o pgid= -p $$)
+piped=$(sh -c 'ps -o pgid= -p $$' | cat)
+[ "$piped" = "$mine" ] && echo "a command substitution's pipeline: the shell's group"
+set +m

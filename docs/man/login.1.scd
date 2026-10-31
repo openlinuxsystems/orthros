@@ -29,7 +29,15 @@ each wrong one in a row, with *The name or the password is wrong.*,
 whichever it was, and the name is asked again. The right password of a
 disabled account (*user*(8)) is answered with *The account* _name_ *is
 disabled*. Every sign-in and sign-out, and every wrong password, is a
-security event in the audit log (*authd*(8)).
+security event in the audit log (*authd*(8)), and authd records each
+for *last*(1), *lastb*(1) and *lastlog*(8) (ADR 0254). Before the shell
+starts, authd says when the person last signed in, and the wrong
+passwords typed for them since:
+
+```
+Last sign-in: Sat Oct 31 12:40 2026 on pts/0
+Since then, 1 wrong password was typed for bob, the last on Sat Oct 31 12:44 2026 on pts/1.
+```
 
 Each console signs in on its own: two people, or one person twice, can
 be signed in on two consoles at once, and *who*(1) lists them.
@@ -132,5 +140,5 @@ authd could not be reached in 30 seconds, saying so.
 
 # SEE ALSO
 
-*authd*(8), *consoled*(8), *user*(8), *passwd*(1), *who*(1), *nukesh*(1),
-*dukovo-boot*(7), *systools*(1)
+*authd*(8), *consoled*(8), *user*(8), *passwd*(1), *who*(1), *last*(1),
+*lastlog*(8), *nukesh*(1), *dukovo-boot*(7), *systools*(1)
