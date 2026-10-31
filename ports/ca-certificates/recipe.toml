@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# The certificate authorities Dukovo trusts (ADR 0192): the root
+# certificates Mozilla trusts for TLS servers, as the Common CA Database
+# (CCADB) publishes them, in one PEM file,
+# /system/resources/certificates/ca-certificates.crt, which
+# /etc/ssl/certs/ca-certificates.crt and /etc/ssl/cert.pem lead to, where
+# Debian's and Alpine's ca-certificates put theirs.
+#
+# Only data is taken, no code: the certificates of the rustls project's
+# webpki-root-certs crate, which its webpki-ccadb crate makes from CCADB's
+# report of the certificates included in Mozilla's root store, under the
+# Community Data License Agreement - Permissive 2.0. pem.py writes them out
+# as they are, each after its name.
+name = "ca-certificates"
+version = "1.0.11"
+summary = "the root certificates Mozilla trusts for TLS servers"
+license = "CDLA-Permissive-2.0"
+homepage = "https://www.ccadb.org/"
+image = ["system/resources/certificates/ca-certificates.crt"]
+notices = ["LICENSE-CCADB"]
+
+# The repository of the webpki-roots and webpki-root-certs crates.
+[source]
+git = "https://github.com/rustls/webpki-roots.git"
+commit = "7ebfa0b377fd0c7e0a2848f9d9b2867a4c2198cf"
+tag = "v/1.0.11"

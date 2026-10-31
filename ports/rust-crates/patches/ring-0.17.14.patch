@@ -1,0 +1,30 @@
+SPDX-FileCopyrightText: 2015-2016 Brian Smith
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: ISC
+
+ring 0.17 builds its x86-64 assembly for Radix as for Linux, whose ELF
+and System V calling convention Radix's programs have (ADR 0192), and
+takes random bytes from getrandom, which takes them from getentropy.
+
+diff --git a/ring-0.17.14/build.rs b/ring-0.17.14/build.rs
+--- a/ring-0.17.14/build.rs
++++ b/ring-0.17.14/build.rs
+@@ -252,6 +252,7 @@
+     "netbsd",
+     "openbsd",
+     "linux",
++    "radix",
+     "redox",
+     "solaris",
+ ];
+diff --git a/ring-0.17.14/src/rand.rs b/ring-0.17.14/src/rand.rs
+--- a/ring-0.17.14/src/rand.rs
++++ b/ring-0.17.14/src/rand.rs
+@@ -137,6 +137,7 @@
+     target_os = "linux",
+     target_os = "netbsd",
+     target_os = "openbsd",
++    target_os = "radix",
+     target_os = "redox",
+     target_os = "solaris",
+     target_os = "vita",

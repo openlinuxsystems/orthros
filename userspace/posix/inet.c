@@ -6,7 +6,9 @@
 // addresses, data both ways, shutdown and the end of the stream, the
 // options, a connection refused, non-blocking connect and accept with
 // poll, a listener shared with a child, a socket that listens unbound,
-// and more connections at once than an interface's first socket slots.
+// more connections at once than an interface's first socket slots, and
+// a connection made while a thread waits in accept and another opens a
+// descriptor.
 // UDP: sendto and recvfrom, datagrams kept whole, sendmsg and recvmsg
 // over several buffers, connect, and MSG_DONTWAIT. The errors of
 // addresses in use or not on the machine and of families not there. And
@@ -25,6 +27,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <pthread.h>
 #include <radix/radix.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -132,6 +135,51 @@ static void many_connections(void) {
 		CHECK(read(accepted[i], &got, 1) == 1 && got == byte);
 		CHECK(close(clients[i]) == 0);
 		CHECK(close(accepted[i]) == 0);
+	}
+	CHECK(close(server) == 0);
+}
+
+// A listener, and what a thread that waits in accept on it took.
+struct waiter {
+	int server;
+	int accepted;
+};
+
+static void *accept_one(void *arg) {
+	struct waiter *waiter = arg;
+	waiter->accepted = accept(waiter->server, NULL, NULL);
+	return NULL;
+}
+
+// A thread that waits in accept gets the connection made while it waits,
+// even when another thread's socket took the descriptor accept was to
+// fill, the lowest free one: the kernel gives the connection back to the
+// listener, and accept takes it into the next free descriptor. It was
+// closed, and accept waited on (rustls's handshakes in the tls boot test
+// found it).
+static void accept_while_another_opens(void) {
+	int server = listener();
+	unsigned short port = port_of(server);
+	// Ten seconds at most, so that a lost connection fails the check.
+	struct timeval patience = {.tv_sec = 10};
+	CHECK(setsockopt(server, SOL_SOCKET, SO_RCVTIMEO, &patience, sizeof(patience)) == 0);
+	for(int round = 0; round < 3; round++) {
+		struct waiter waiter = {.server = server, .accepted = -1};
+		pthread_t thread;
+		CHECK(pthread_create(&thread, NULL, accept_one, &waiter) == 0);
+		// Long enough for the thread to wait in accept.
+		struct timespec pause = {.tv_nsec = 50000000};
+		while(nanosleep(&pause, &pause) != 0 && errno == EINTR) {}
+		int client = connected(port);
+		CHECK(pthread_join(thread, NULL) == 0);
+		CHECK(waiter.accepted >= 0 && waiter.accepted != client);
+		char byte = 'a';
+		CHECK(write(client, &byte, 1) == 1);
+		CHECK(read(waiter.accepted, &byte, 1) == 1 && byte == 'a');
+		CHECK(write(waiter.accepted, "b", 1) == 1);
+		CHECK(read(client, &byte, 1) == 1 && byte == 'b');
+		CHECK(close(client) == 0);
+		CHECK(close(waiter.accepted) == 0);
 	}
 	CHECK(close(server) == 0);
 }
@@ -546,6 +594,7 @@ int main(void) {
 	RUN(bench_order);
 	RUN(short_connections);
 	RUN(many_connections);
+	RUN(accept_while_another_opens);
 	RUN(tcp);
 	RUN(non_blocking);
 	RUN(unbound);

@@ -130,3 +130,16 @@ SPDX-License-Identifier = "Apache-2.0 OR MIT"
 path = "userspace/programs/manifest/src/bundle/examples/*.json"
 SPDX-FileCopyrightText = "2026 The Dukovo contributors"
 SPDX-License-Identifier = "Apache-2.0 OR MIT"
+
+# The test certificates, keys and signatures OpenSSL made for tls-test
+# (testdata/make.sh), the message it signed, and the sealed messages'
+# hashes (testdata/aead.py), which tls-test reads (ADR 0192).
+[[annotations]]
+path = [
+    "userspace/programs/tls-test/testdata/*.pem",
+    "userspace/programs/tls-test/testdata/*.key",
+    "userspace/programs/tls-test/testdata/*.sig",
+    "userspace/programs/tls-test/testdata/*.txt",
+]
+SPDX-FileCopyrightText = "2026 The Dukovo contributors"
+SPDX-License-Identifier = "Apache-2.0 OR MIT"

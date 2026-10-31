@@ -313,8 +313,11 @@ interface file = 0x000c version 9 {
     /// Takes a connection that waits at a listening socket, waiting for
     /// one unless the description is non_blocking, and puts a
     /// description of its end in slot `to` with `flags`: a socket of its
-    /// own, connected, with the listening socket's name. A socket that
-    /// does not listen fails with invalid_argument. Needs the read right.
+    /// own, connected, with the listening socket's name. Slot `to` must
+    /// be empty, else occupied; a connection that cannot go in it, as
+    /// another thread filled it while the call waited, goes back to the
+    /// front of those that wait, so none is lost. A socket that does not
+    /// listen fails with invalid_argument. Needs the read right.
     method accept = 16 (to: slot, flags: PipeFlags) -> ()
         raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument,
                 no_memory, not_socket, would_block, interrupted];

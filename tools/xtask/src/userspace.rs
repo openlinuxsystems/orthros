@@ -63,11 +63,19 @@ pub const ARCHIVE_LINKS: &[(&str, &str)] =
     &[("system/bin", "commands"), ("system/lib", "libraries"), ("system/share", "resources")];
 
 /// Symbolic links among the default settings, which Spark copies as
-/// links: `/etc/resolv.conf` leads to the one netd(8) writes (ADR 0191),
-/// as Linux's leads to systemd-resolved's, until an administrator makes
-/// it a file of their own.
-pub const DEFAULT_LINKS: &[(&str, &str)] =
-    &[("system/resources/default-settings/resolv.conf", "/system/live/netd/resolv.conf")];
+/// links, each until an administrator makes it a file of their own:
+/// `/etc/resolv.conf` leads to the one netd(8) writes (ADR 0191), as
+/// Linux's leads to systemd-resolved's, and Debian's and Alpine's names
+/// for the root certificates lead to the system's (ADR 0192).
+pub const DEFAULT_LINKS: &[(&str, &str)] = &[
+    ("system/resources/default-settings/resolv.conf", "/system/live/netd/resolv.conf"),
+    ("system/resources/default-settings/ssl/cert.pem", CERTIFICATES),
+    ("system/resources/default-settings/ssl/certs/ca-certificates.crt", CERTIFICATES),
+];
+
+/// The root certificates the system trusts, which ports/ca-certificates
+/// writes (dukovo-certificates(7)).
+pub const CERTIFICATES: &str = "/system/resources/certificates/ca-certificates.crt";
 
 /// The `.hidden` file of `/system`: the names of its links, which
 /// listings leave out (ADR 0113).
@@ -80,6 +88,7 @@ pub const STD_ARCHIVE: &[(&str, &str)] = &[
     ("system/commands/nukesh", "nukesh"),
     ("system/commands/systools", "systools"),
     ("system/tests/posix/std-test", "std-test"),
+    ("system/tests/posix/tls-test", "tls-test"),
 ];
 
 /// Symbolic links to those programs in the boot archive: each link's path,
@@ -687,6 +696,10 @@ mod tests {
                 "system/resources",
                 "system/resources/default-settings",
                 "system/resources/default-settings/resolv.conf",
+                "system/resources/default-settings/ssl",
+                "system/resources/default-settings/ssl/cert.pem",
+                "system/resources/default-settings/ssl/certs",
+                "system/resources/default-settings/ssl/certs/ca-certificates.crt",
                 "system/settings",
                 "system/settings/hosts",
                 "system/share",
@@ -708,6 +721,11 @@ mod tests {
         let resolv = archive.find("/system/resources/default-settings/resolv.conf").unwrap();
         let netd = &b"/system/live/netd/resolv.conf"[..];
         assert_eq!((resolv.kind, resolv.data), (radix_bootfs::Kind::Symlink, netd));
+        for name in ["ssl/cert.pem", "ssl/certs/ca-certificates.crt"] {
+            let link = archive.find(&format!("/system/resources/default-settings/{name}")).unwrap();
+            let roots = CERTIFICATES.as_bytes();
+            assert_eq!((link.kind, link.data), (radix_bootfs::Kind::Symlink, roots), "{name}");
+        }
         let hidden = archive.find("/system/.hidden").unwrap();
         assert_eq!((hidden.mode, hidden.data), (0o644, &b"bin\nlib\nshare\n"[..]));
         assert_eq!(write_archive(&files, None).ok(), None, "the programs are gone");
