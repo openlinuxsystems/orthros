@@ -1524,7 +1524,7 @@ pub const CASES: &[Case] = &[
         about: "QEMU with a test device's memory as an Intel LPSS and an AMD DesignWare I2C controller's registers, which an ACPI table of the test's names with a device on each bus: the kernel takes LPSS out of reset, sets each controller up for the slowest of its devices with the firmware's counts or its clock's, and names the buses and devices in /sys/bus/i2c",
         firmware: Firmware::Bios,
         media: Media::Usb,
-        cmdline: "selftest=i2c init-after-selftest",
+        cmdline: "selftest=i2c init-after-selftest console-sign-in=off",
         cpus: 1,
         memory: "1G",
         reboot: false,
