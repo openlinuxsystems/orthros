@@ -174,8 +174,10 @@ writes files, directories, renames and hard links as ntfs-3g does, with
 names Windows can open, and compressed and sparse files as Windows
 does. A symbolic link Dukovo makes is a Windows link when Windows can
 follow it (a relative path of names Windows takes), and a WSL link
-otherwise. Encrypted files, and files so fragmented that their record
-overflows, are not written yet. An NTFS that Windows hibernated with
+otherwise. A file so fragmented that where its clusters are overflows
+its record goes on in more records, as Windows spreads it. Encrypted
+files, and files of so many names that Windows moved them out of their
+record, are not written yet. An NTFS that Windows hibernated with
 (Fast Startup), left dirty or with changes in its journal to replay is
 mounted read-only, since writing it would lose Windows' changes: shut
 Windows down fully (hold Shift as you choose Shut down) and Dukovo

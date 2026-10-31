@@ -43,9 +43,12 @@
 //! can follow them, and as WSL's otherwise, each listed in
 //! `$Extend\$Reparse`.
 //!
-//! Radix does not write encrypted data, nor a file whose attributes are
-//! in more than one record, nor a directory whose index bitmap is in
-//! clusters: those fail with [`Error::NotSupported`].
+//! A file whose runs outgrow its record has its data cut into pieces in
+//! extension records, which its attribute list names, and back when they
+//! fit again (ADR 0239). Radix does not write encrypted data, nor a file
+//! whose other attributes are in more than one record, nor a directory
+//! whose index has a list or its bitmap in clusters: those fail with
+//! [`Error::NotSupported`].
 
 use alloc::sync::Weak;
 use core::any::Any;
@@ -67,6 +70,7 @@ use crate::fs::{
     Info, Inner, Loaded, Scratch, Stream, Value, records, replace_named, replace_stream, zeroed,
 };
 use crate::index::{self, FileName, NAME_MAX, ROOT_HEADER, attributes, namespace};
+use crate::list::{self, Extent};
 use crate::lznt1;
 use crate::names::{self, Dup};
 use crate::record::{self, Record, attr_flags, fix_up, kind, record_of, u16_at, u32_at, u64_at};
@@ -237,8 +241,13 @@ struct State {
     dir: Option<Dir>,
     /// Why its data cannot be written, if it cannot.
     fixed: Option<Error>,
-    /// Whether its attributes are in more than one record.
+    /// Whether attributes other than its data's are in more than one
+    /// record: Radix does not change it.
     listed: bool,
+    /// Whether its base record has an attribute list, which names the
+    /// pieces of its data in other records, `extents` (ADR 0239).
+    list: bool,
+    extents: KVec<Extent>,
     /// Whether its record on the disk is behind.
     dirty: bool,
     /// How many times it has fallen behind, so that a change made while
@@ -296,10 +305,15 @@ impl NtfsNode {
             blocks,
             bitmap,
             reparse,
+            list,
+            extents,
             listed,
             view,
             ..
         } = loaded;
+        // A directory's index Radix does not spread over records.
+        let listed = listed || (list && root.is_some());
+        let extents = extents.unwrap_or_else(mem::vec);
         // A view index is loaded after its file's data.
         let (root, root_of_view) = if view { (None, root) } else { (root, None) };
         let (blocks, blocks_of_view) = if view { (None, blocks) } else { (blocks, None) };
@@ -371,7 +385,11 @@ impl NtfsNode {
                         // Compressed and sparse data are written a unit
                         // at a time; encrypted data is not.
                         let known = attr_flags::COMPRESSED | attr_flags::SPARSE;
-                        if stream.flags & !known != 0 || (compressed && cs > MAX_COMPRESS_CLUSTER) {
+                        let unit = cs.checked_shl(stream.unit.into());
+                        if stream.flags & !known != 0
+                            || (compressed && cs > MAX_COMPRESS_CLUSTER)
+                            || (stream.packed() && unit.is_none_or(|u| u > MAX_UNIT))
+                        {
                             fixed = Some(Error::NotSupported);
                         }
                         if stream.flags & attr_flags::ENCRYPTED != 0 {
@@ -424,6 +442,8 @@ impl NtfsNode {
             dir,
             fixed,
             listed,
+            list,
+            extents,
             dirty: false,
             changes: 0,
             removed: false,
@@ -593,9 +613,27 @@ impl NtfsNode {
         Ok(buf)
     }
 
-    /// Writes `buf` as its record, in the cache.
-    fn write_rec(&self, buf: &[u8]) -> Result<()> {
+    /// Writes `buf` as its record, in the cache, its attribute list
+    /// rebuilt first if it has one.
+    fn write_rec(&self, buf: &mut [u8]) -> Result<()> {
+        let st = self.state.lock();
+        self.write_base(buf, &st)
+    }
+
+    /// [`Self::write_rec`] with its state `st` held.
+    fn write_base(&self, buf: &mut [u8], st: &State) -> Result<()> {
+        if st.list {
+            let reference = self.record | (u64::from(st.sequence) << 48);
+            let value = list::build(buf, reference, &st.extents)?;
+            list::put(buf, &value)?;
+        }
         self.fs.vol.write_record(self.record, buf, false)
+    }
+
+    /// The bytes an attribute added to its record takes in its attribute
+    /// list, if it has one.
+    fn listing(&self) -> usize {
+        if self.state.lock().list { 0x20 } else { 0 }
     }
 
     /// What its names say of it, its data `size` bytes.
@@ -626,32 +664,157 @@ impl NtfsNode {
     }
 
     /// Puts its data's attribute, as memory has it, in its record `buf`,
-    /// for data of `size` bytes.
-    fn put_data(&self, st: &State, buf: &mut [u8], size: u64) -> Result<()> {
+    /// for data of `size` bytes; when the record has no room for where its
+    /// clusters are and `spread` allows, in extension records, which its
+    /// attribute list names (ADR 0239). Returns the extension records it
+    /// no longer takes, to free once `buf` is written. A record it then
+    /// takes is written now; `buf` is the caller's to write.
+    fn put_data(
+        &self,
+        st: &mut State,
+        buf: &mut [u8],
+        size: u64,
+        spread: bool,
+    ) -> Result<KVec<u64>> {
         let cs = u64::from(self.fs.vol.geo.cluster_size);
-        match &st.data {
+        let stream = match &st.data {
             Some(Data::Resident(bytes)) => {
                 let at = edit::find(buf, kind::DATA, &[]).ok_or(Error::Corrupt)?;
                 if buf[at + 8] != 0 {
                     return Err(Error::Corrupt);
                 }
                 let n = bytes.len().min(size as usize);
-                edit::set_value(buf, at, &bytes[..n])
+                edit::set_value(buf, at, &bytes[..n])?;
+                return Ok(mem::vec());
             }
-            Some(Data::Clusters(stream)) => {
-                let clusters = stream.runs.clusters();
-                let sizes = edit::Sizes {
-                    allocated: clusters * cs,
-                    size,
-                    initialized: stream.initialized.min(size),
-                    compressed: stream.runs.allocated_in(0, clusters) * cs,
-                    unit: stream.unit,
-                    packed: stream.flags,
-                };
-                replace_stream(buf, kind::DATA, &stream.runs, clusters, sizes)
+            Some(Data::Clusters(stream)) => stream,
+            _ => return Ok(mem::vec()),
+        };
+        let clusters = stream.runs.clusters();
+        let sizes = edit::Sizes {
+            allocated: clusters * cs,
+            size,
+            initialized: stream.initialized.min(size),
+            compressed: stream.runs.allocated_in(0, clusters) * cs,
+            unit: stream.unit,
+            packed: stream.flags,
+        };
+        if !st.list {
+            match replace_stream(buf, kind::DATA, &stream.runs, clusters, sizes) {
+                Err(Error::NoSpace) if spread => {}
+                done => return done.map(|()| mem::vec()),
             }
-            _ => Ok(()),
+        } else {
+            // All of it back in the record, its list gone, if it fits.
+            let mut whole = mem::copy(buf)?;
+            list::remove(&mut whole);
+            list::remove_data(&mut whole);
+            match replace_stream(&mut whole, kind::DATA, &stream.runs, clusters, sizes) {
+                Ok(()) => {
+                    buf.copy_from_slice(&whole);
+                    st.list = false;
+                    let freed = collect(st.extents.iter().map(|e| record_of(e.reference)))?;
+                    st.extents.clear();
+                    return Ok(freed);
+                }
+                Err(Error::NoSpace) if spread => {}
+                Err(err) => return Err(err),
+            }
         }
+        self.spread(st, buf, sizes)
+    }
+
+    /// The run lists' budget of an extension record of `stream`'s piece:
+    /// its record but for its header, the piece's attribute's and the end
+    /// marker.
+    fn piece_budget(&self, stream: &Stream) -> usize {
+        let rs = self.fs.vol.geo.record_size as usize;
+        let header = if stream.packed() { 0x48 } else { 0x40 };
+        (rs - edit::first_attr(rs) - 8 - header) / 8 * 8
+    }
+
+    /// The base record `buf` with its data out and an attribute list
+    /// naming `extents` in, as [`list::build`] makes it.
+    fn listed_base(buf: &[u8], reference: u64, extents: &[Extent]) -> Result<KVec<u8>> {
+        let mut base = mem::copy(buf)?;
+        list::remove_data(&mut base);
+        let value = list::build(&base, reference, extents)?;
+        list::put(&mut base, &value)?;
+        Ok(base)
+    }
+
+    /// [`Self::put_data`]: its data's runs cut into pieces, each in an
+    /// extension record of its own, the ones it has first, its base
+    /// record `buf` naming them in its list. Nothing is written if the
+    /// list has no room in it.
+    #[inline(never)]
+    fn spread(&self, st: &mut State, buf: &mut [u8], sizes: edit::Sizes) -> Result<KVec<u64>> {
+        let fs = &self.fs;
+        let Some(Data::Clusters(stream)) = &st.data else { return Err(Error::Corrupt) };
+        let cuts = stream.runs.cuts(0, stream.grain(), self.piece_budget(stream))?;
+        let reference = self.record | (u64::from(st.sequence) << 48);
+        let mut extents = mem::vec_with_capacity(cuts.len())?;
+        let mut from = 0;
+        for (i, &cut) in cuts.iter().enumerate() {
+            let at = st.extents.get(i).map_or(0, |e| e.reference);
+            let _ = extents.push_within_capacity(Extent { reference: at, lowest: from, id: 0 });
+            from = cut;
+        }
+        // The list must fit, whatever the records it names.
+        Self::listed_base(buf, reference, &extents)?;
+        let flags = stream.flags & (attr_flags::COMPRESSED | attr_flags::SPARSE);
+        let rs = fs.vol.geo.record_size as usize;
+        let mut rec = zeroed(rs)?;
+        let mut from = 0;
+        for (i, &cut) in cuts.iter().enumerate() {
+            let (number, fresh) = match st.extents.get(i) {
+                Some(e) => (record_of(e.reference), false),
+                None => (fs.take_record()?, true),
+            };
+            let made = (|| {
+                let usn = match fs.vol.read_record(number, &mut rec) {
+                    Ok(()) => {
+                        let used = Record::new(&rec).is_ok_and(|r| r.in_use());
+                        if used == fresh || (!fresh && record_of(u64_at(&rec, 0x20)) != self.record)
+                        {
+                            return Err(Error::Corrupt);
+                        }
+                        Some((u16_at(&rec, 0x10).max(1), u16_at(&rec, edit::RECORD_USA)))
+                    }
+                    Err(_) if fresh => None,
+                    Err(err) => return Err(err),
+                };
+                let (sequence, usn) = usn.unwrap_or((1, 0));
+                edit::format_record(&mut rec, number, sequence, record::flags::IN_USE);
+                put_u16(&mut rec, edit::RECORD_USA, usn);
+                edit::put_u64(&mut rec, 0x20, reference);
+                let id = edit::next_instance(&mut rec);
+                let packed = stream.runs.pack(from, cut)?;
+                let attr =
+                    edit::non_resident(kind::DATA, &[], id, flags, from, cut - 1, &packed, sizes)?;
+                edit::insert(&mut rec, &attr)?;
+                fs.vol.write_record(number, &rec, false)?;
+                Ok(Extent { reference: number | (u64::from(sequence) << 48), lowest: from, id })
+            })();
+            match made {
+                Ok(extent) => extents[i] = extent,
+                Err(err) => {
+                    if fresh {
+                        let _ = fs.give_record(number);
+                    }
+                    // Those taken so far stay in use, named by no list,
+                    // until `chkdsk` frees them.
+                    return Err(err);
+                }
+            }
+            from = cut;
+        }
+        let base = Self::listed_base(buf, reference, &extents)?;
+        buf.copy_from_slice(&base);
+        let freed = collect(st.extents.iter().skip(cuts.len()).map(|e| record_of(e.reference)))?;
+        st.extents = extents;
+        st.list = true;
+        Ok(freed)
     }
 
     /// Writes its size, times, attributes and where its clusters are to
@@ -683,9 +846,11 @@ impl NtfsNode {
         let mut buf = self.read_rec()?;
         let si = edit::find(&buf, kind::STANDARD_INFORMATION, &[]).ok_or(Error::Corrupt)?;
         names::put_standard(edit::value_mut(&mut buf, si), &dup, st.info.attributes);
-        if self.kind == Kind::File && st.fixed.is_none() {
-            self.put_data(&st, &mut buf, size)?;
-        }
+        let freed = if self.kind == Kind::File && st.fixed.is_none() {
+            self.put_data(&mut st, &mut buf, size, true)?
+        } else {
+            mem::vec()
+        };
         let mut names = mem::vec();
         let at: KVec<usize> = collect(edit::find_all(&buf, kind::FILE_NAME))?;
         for &at in &at {
@@ -698,7 +863,11 @@ impl NtfsNode {
             mem::push(&mut names, (name.parent(), collect(name.units())?))?;
         }
         self.fs.changing()?;
-        self.write_rec(&buf)?;
+        self.write_base(&mut buf, &st)?;
+        // The records its data left, once its list no longer names them.
+        for &number in &freed {
+            NtfsNode::free_record(&self.fs, number)?;
+        }
         st.dirty = st.changes != seen;
         let reference = self.record | (u64::from(st.sequence) << 48);
         drop(st);
@@ -762,16 +931,29 @@ impl NtfsNode {
         }
     }
 
-    /// Fails with [`Error::NoSpace`] if its record has no room for where
-    /// the clusters of its data `stream` are.
+    /// Fails with [`Error::NoSpace`] if its records have no room for
+    /// where the clusters of its data `stream` are: its base record, or
+    /// extension records its base record's attribute list has room to
+    /// name (ADR 0239).
     fn runs_fit(&self, stream: &Stream) -> Result<()> {
         let buf = self.read_rec()?;
-        let at = edit::find(&buf, kind::DATA, &[]).ok_or(Error::Corrupt)?;
         let packed = stream.runs.pack(0, stream.runs.clusters())?;
         let header = if stream.packed() { 0x48 } else { 0x40 };
         let len = (header + packed.len()).next_multiple_of(8);
-        let old = u32_at(&buf, at + 4) as usize;
-        if edit::used(&buf) - old + len > buf.len() { Err(Error::NoSpace) } else { Ok(()) }
+        let mut others = mem::copy(&buf)?;
+        list::remove(&mut others);
+        list::remove_data(&mut others);
+        if edit::used(&others) + len <= buf.len() {
+            return Ok(());
+        }
+        let cuts = stream.runs.cuts(0, stream.grain(), self.piece_budget(stream))?;
+        let mut from = 0;
+        let mut extents = mem::vec_with_capacity(cuts.len())?;
+        for &cut in &cuts {
+            let _ = extents.push_within_capacity(Extent { reference: 0, lowest: from, id: 0 });
+            from = cut;
+        }
+        Self::listed_base(&buf, 0, &extents).map(|_| ())
     }
 
     /// Gives the holes of the sparse `stream` that bytes `from..to` fall
@@ -856,7 +1038,8 @@ impl NtfsNode {
         }
         self.fs.changing()?;
         self.to_clusters(&mut st, size)?;
-        self.put_data(&st, buf, size)?;
+        // Data that was in the record has no extension records to free.
+        self.put_data(&mut st, buf, size, false)?;
         if edit::room(buf) < need {
             return Err(Error::NoSpace);
         }
@@ -1183,7 +1366,7 @@ impl NtfsNode {
             Ok(()) => {
                 dir.root = root;
                 put_root(&mut buf, dir)?;
-                self.write_rec(&buf)
+                self.write_base(&mut buf, &st)
             }
             // Blocks first given to a root that then failed to go down
             // to them go back: its record never says it had them.
@@ -1199,7 +1382,7 @@ impl NtfsNode {
             Err(err) => {
                 if grew {
                     put_root(&mut buf, dir)?;
-                    self.write_rec(&buf)?;
+                    self.write_base(&mut buf, &st)?;
                 }
                 Err(err)
             }
@@ -1380,7 +1563,7 @@ impl NtfsNode {
         for &i in &gone {
             edit::remove(&mut buf, names[i].at);
         }
-        node.write_rec(&buf)?;
+        node.write_rec(&mut buf)?;
         let left = first_parent(&buf)?;
         let mut st = node.state.lock();
         st.links = st.links.saturating_sub(lost);
@@ -1409,7 +1592,7 @@ impl NtfsNode {
         let dup = node.dup(&node.state.lock(), size);
         let key = names::file_name(self.reference(), &dup, units, ns)?;
         let mut buf = node.read_rec()?;
-        let need = (0x18 + key.len()).next_multiple_of(8);
+        let need = (0x18 + key.len()).next_multiple_of(8) + node.listing();
         if edit::room(&buf) < need {
             node.make_room(&mut buf, need, size)?;
         }
@@ -1422,7 +1605,7 @@ impl NtfsNode {
         self.change_index(Some(entry.len()), &mut |root, store| {
             tree::insert(root, store, tree::Order::Names(upcase), &entry)
         })?;
-        node.write_rec(&buf)?;
+        node.write_rec(&mut buf)?;
         if ns != namespace::DOS {
             node.state.lock().links += 1;
         }
@@ -2191,6 +2374,9 @@ impl Drop for NtfsNode {
         let st = self.state.get_mut();
         if self.fs.read_only || !st.removed || st.listed {
             return;
+        }
+        for extent in &st.extents {
+            let _ = NtfsNode::free_record(&self.fs, record_of(extent.reference));
         }
         if let Some(Data::Clusters(stream)) = &st.data
             && st.fixed.is_none()

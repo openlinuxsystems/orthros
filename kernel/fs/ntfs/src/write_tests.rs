@@ -615,7 +615,8 @@ fn what_ntfs_3g_wrote_is_written_to() {
     let small = make_file(&dir, "small.txt", b"small, in its record", usize::MAX);
     expected.insert(String::from("compressed/new.txt"), made.clone());
     expected.insert(String::from("compressed/small.txt"), b"small, in its record".to_vec());
-    // Files whose record overflows into others are not written yet.
+    // Files whose names overflow their record into others are not
+    // written yet.
     let linked = walk(&root, "linked.txt").unwrap();
     assert_eq!(linked.write(0, &Slice(b"x")).err(), Some(Error::NotSupported));
     drop((root, dir, text, mixed, new, small, linked));
@@ -805,6 +806,198 @@ fn links_windows_and_wsl_made_go() {
 /// runs `chkdsk /f` on each). The files synced before the changes, which
 /// none changed, keep their records and their bytes, as The Sleuth Kit
 /// reads them by record.
+/// `image`'s master file table, as The Sleuth Kit reads it.
+fn mft(image: &[u8]) -> Vec<u8> {
+    let file = Scratch::new(image);
+    run(Command::new(tool("icat")).args(["-f", "ntfs"]).arg(&file.0).arg("0"))
+}
+
+/// Record `number` of the master file table `mft` of records of `size`
+/// bytes, its update sequence put back.
+fn record_in(mft: &[u8], number: u64, size: usize) -> Vec<u8> {
+    let mut rec = mft[number as usize * size..][..size].to_vec();
+    crate::record::fix_up(&mut rec, b"FILE").unwrap();
+    rec
+}
+
+/// The records other than its own that the attribute list of the file in
+/// record `number` names for pieces of its data, and whether it has a
+/// list.
+fn data_records(mft: &[u8], number: u64, size: usize) -> (bool, Vec<u64>) {
+    let rec = record_in(mft, number, size);
+    let rec = crate::record::Record::new(&rec).unwrap();
+    let Some(list) = rec.attrs().map(Result::unwrap).find(|a| a.kind() == 0x20) else {
+        return (false, Vec::new());
+    };
+    assert!(!list.non_resident(), "Radix keeps its lists in their records");
+    let mut records = Vec::new();
+    for entry in crate::record::list_entries(list.value()) {
+        let entry = entry.unwrap();
+        let at = crate::record::record_of(entry.reference());
+        if entry.kind() == 0x80 && entry.name().is_empty() && at != number {
+            records.push(at);
+        }
+    }
+    (true, records)
+}
+
+/// Whether record `number` of `mft` is a file's.
+fn in_use(mft: &[u8], number: u64, size: usize) -> bool {
+    crate::record::Record::new(&record_in(mft, number, size)).unwrap().in_use()
+}
+
+/// Files `names` in `dir`, `clusters` clusters each of `cluster` bytes,
+/// written a cluster of each in turn, so that each takes every
+/// `names.len()`th cluster: as many runs as clusters, more than a record
+/// holds where of them. Their data, by name.
+fn interleaved(
+    dir: &NodeRef,
+    names: &[&str],
+    clusters: usize,
+    cluster: usize,
+) -> BTreeMap<String, Vec<u8>> {
+    let nodes: Vec<NodeRef> =
+        names.iter().map(|name| dir.create(name, Kind::File, FILE).unwrap()).collect();
+    let data: Vec<Vec<u8>> =
+        (0..names.len()).map(|i| pattern(60 + i as u32, clusters * cluster)).collect();
+    for c in 0..clusters {
+        for (node, data) in nodes.iter().zip(&data) {
+            let at = c * cluster;
+            write_all(node, at as u64, &data[at..at + cluster]);
+        }
+    }
+    names.iter().map(|n| String::from(*n)).zip(data).collect()
+}
+
+#[test]
+fn fragmented_files_spread_over_records() {
+    for (mib, sector, cluster) in [(16, 512, 512), (32, 512, 4096), (32, 4096, 4096)] {
+        let image = Image::mkntfs(mib, sector, cluster);
+        let volume = Volume::new_in(sector, &image.bytes());
+        let rs = volume.fs.geometry().record_size as usize;
+        let root = volume.root();
+        // Two files of 2000 runs each: 6000 bytes of runs, more than a
+        // record of 4 KiB holds.
+        let mut expected = interleaved(&root, &["big.bin", "gone.bin"], 2000, cluster as usize);
+        let big = walk(&root, "big.bin").unwrap();
+        let gone = walk(&root, "gone.bin").unwrap();
+        let (big_id, gone_id) = (big.stat().id, gone.stat().id);
+        drop((big, gone));
+        let image = volume.image();
+        check(&image, sector, &expected);
+        assert!(ntfscat(&image, "/big.bin") == expected["big.bin"], "ntfs-3g reads other bytes");
+        let table = mft(&image);
+        let (listed, big_pieces) = data_records(&table, big_id, rs);
+        assert!(listed && big_pieces.len() >= 2, "{big_pieces:?}");
+        let (_, gone_pieces) = data_records(&table, gone_id, rs);
+        assert!(gone_pieces.len() >= 2, "{gone_pieces:?}");
+        for &n in big_pieces.iter().chain(&gone_pieces) {
+            assert!(in_use(&table, n, rs));
+        }
+
+        // Mounted again, its pieces read from its list: changed in the
+        // middle, given another name, grown, and the other file removed.
+        let volume = volume.remount();
+        let root = volume.root();
+        let big = walk(&root, "big.bin").unwrap();
+        let middle = expected["big.bin"].len() / 2 + 77;
+        let data = expected.get_mut("big.bin").unwrap();
+        write_all(&big, middle as u64, b"changed in a piece in another record");
+        data[middle..middle + 36].copy_from_slice(b"changed in a piece in another record");
+        let tail = pattern(3, 300_000);
+        write_all(&big, data.len() as u64, &tail);
+        data.extend_from_slice(&tail);
+        root.link("big link.bin", &big).unwrap();
+        root.remove("gone.bin").unwrap();
+        expected.remove("gone.bin");
+        expected.insert(String::from("big link.bin"), expected["big.bin"].clone());
+        let image = volume.image();
+        check(&image, sector, &expected);
+        let table = mft(&image);
+        let (listed, pieces) = data_records(&table, big_id, rs);
+        assert!(listed && pieces.len() >= 2, "{pieces:?}");
+        assert!(!in_use(&table, gone_id, rs));
+        for &n in &gone_pieces {
+            assert!(!in_use(&table, n, rs), "gone.bin's record {n} is still in use");
+        }
+
+        // Cut short, its runs fit its record again: its list goes, and
+        // with it the records it named.
+        big.set_size(10 * u64::from(cluster)).unwrap();
+        root.remove("big link.bin").unwrap();
+        expected.remove("big link.bin");
+        expected.get_mut("big.bin").unwrap().truncate(10 * cluster as usize);
+        drop((root, big));
+        let image = volume.image();
+        check(&image, sector, &expected);
+        let table = mft(&image);
+        assert_eq!(data_records(&table, big_id, rs), (false, Vec::new()));
+        for &n in &pieces {
+            assert!(!in_use(&table, n, rs), "big.bin's record {n} is still in use");
+        }
+    }
+}
+
+#[test]
+fn compressed_files_spread_on_their_units_edges() {
+    for (mib, sector, cluster, units) in [(16, 512, 512, 250), (32, 512, 4096, 150)] {
+        let image = Image::mkntfs(mib, sector, cluster);
+        let volume = Volume::new_in(sector, &image.bytes());
+        let rs = volume.fs.geometry().record_size as usize;
+        let root = volume.root();
+        let dir = root.create("compressed", Kind::Directory, DIR).unwrap();
+        radix_vfs::downcast::<NtfsNode>(&*dir).unwrap().mark_compressed().unwrap();
+        // Two files' units written in turn, each written back: a run of
+        // each unit's clusters, apart, and a hole for what it saves.
+        let unit = 16 * cluster as usize;
+        let text = crate::tests::text();
+        let names = ["a.txt", "b.txt"];
+        let mut expected = BTreeMap::new();
+        expected.insert(String::from("compressed"), Vec::new());
+        let nodes: Vec<NodeRef> =
+            names.iter().map(|n| dir.create(n, Kind::File, FILE).unwrap()).collect();
+        let data: Vec<Vec<u8>> = (0..2)
+            .map(|i| text.iter().cycle().skip(i * 1000).take(units * unit).copied().collect())
+            .collect();
+        for u in 0..units {
+            for (node, data) in nodes.iter().zip(&data) {
+                write_all(node, (u * unit) as u64, &data[u * unit..(u + 1) * unit]);
+                radix_vfs::downcast::<NtfsNode>(&**node).unwrap().flush().unwrap();
+            }
+        }
+        for (name, data) in names.iter().zip(&data) {
+            expected.insert(format!("compressed/{name}"), data.clone());
+        }
+        let ids: Vec<u64> = nodes.iter().map(|n| n.stat().id).collect();
+        drop((root, dir, nodes));
+        let image = volume.image();
+        check(&image, sector, &expected);
+        let table = mft(&image);
+        for &id in &ids {
+            let (listed, pieces) = data_records(&table, id, rs);
+            assert!(listed && !pieces.is_empty(), "{pieces:?}");
+            // Each piece starts on a unit's edge.
+            for &n in &pieces {
+                let rec = record_in(&table, n, rs);
+                let rec = crate::record::Record::new(&rec).unwrap();
+                for attr in rec.attrs().map(Result::unwrap).filter(|a| a.kind() == 0x80) {
+                    assert_eq!(attr.lowest_vcn() % 16, 0, "a piece in record {n} splits a unit");
+                    assert_eq!((attr.highest_vcn() + 1) % 16, 0, "record {n} splits a unit");
+                }
+            }
+        }
+        // Mounted again, a unit in a piece in another record changed.
+        let volume = volume.remount();
+        let a = walk(&volume.root(), "compressed/a.txt").unwrap();
+        let at = units / 2 * unit + 100;
+        write_all(&a, at as u64, &pattern(5, 3000));
+        let want = expected.get_mut("compressed/a.txt").unwrap();
+        want[at..at + 3000].copy_from_slice(&pattern(5, 3000));
+        drop(a);
+        check(&volume.image(), sector, &expected);
+    }
+}
+
 #[test]
 fn a_power_cut_leaves_what_was_synced() {
     let image = Image::mkntfs(16, 512, 4096);

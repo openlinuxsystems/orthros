@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! NTFS, read (Phase 11f.1) and written (11f.2 and 11f.3).
+//! NTFS, read (Phase 11f.1) and written (11f.2 to 11f.4).
 //!
 //! NTFS is what Windows formats its disks with, and many USB disks come
 //! with. Microsoft publishes no specification of it; this crate is built
@@ -13,9 +13,9 @@
 //! `ntfscp`, and read a volume ntfs-3g filled through FUSE; what Radix
 //! writes, `ntfsresize --info`, `ntfsfix -n` and The Sleuth Kit check.
 //! In CI, Windows' own `chkdsk` checks the volumes the tests write
-//! (`windows_tests`). ADRs 0236 (reading), 0237 (writing) and 0238
+//! (`windows_tests`). ADRs 0236 (reading), 0237 (writing), 0238
 //! (compressed and sparse data, links, the hibernation override and
-//! power cuts) record the decisions.
+//! power cuts) and 0239 (attribute lists) record the decisions.
 //!
 //! - [`boot`] reads the boot sector: how big clusters and records are,
 //!   and where the master file table is.
@@ -27,7 +27,8 @@
 //! - [`index`] walks directory indexes, B+ trees of names, and [`tree`]
 //!   changes them.
 //! - [`edit`] changes file records: attributes made, resized and taken
-//!   out.
+//!   out; [`list`] makes the attribute list of a file whose data is
+//!   spread over more records.
 //! - [`space`] finds free clusters in `$Bitmap` and free records in the
 //!   master file table's bitmap.
 //! - [`names`] makes the names and times Radix writes.
@@ -55,6 +56,7 @@ pub mod boot;
 pub mod edit;
 pub mod fs;
 pub mod index;
+pub mod list;
 pub mod lznt1;
 pub mod names;
 pub mod node;

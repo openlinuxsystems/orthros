@@ -120,6 +120,10 @@ pub fn next_instance(buf: &mut [u8]) -> u16 {
 
 /// The offsets of the attributes of the record `buf`, which must have been
 /// checked ([`crate::record::Record::new`]), up to the end marker.
+pub fn attrs(buf: &[u8]) -> impl Iterator<Item = usize> + '_ {
+    offsets(buf)
+}
+
 fn offsets(buf: &[u8]) -> impl Iterator<Item = usize> + '_ {
     let mut at = usize::from(u16_at(buf, 0x14));
     let end = used(buf);
@@ -138,7 +142,7 @@ fn offsets(buf: &[u8]) -> impl Iterator<Item = usize> + '_ {
 }
 
 /// The name of the attribute at `at` of `buf`, as bytes.
-fn name_at(buf: &[u8], at: usize) -> &[u8] {
+pub fn name_at(buf: &[u8], at: usize) -> &[u8] {
     let off = at + usize::from(u16_at(buf, at + 0x0a));
     &buf[off..off + 2 * usize::from(buf[at + 9])]
 }

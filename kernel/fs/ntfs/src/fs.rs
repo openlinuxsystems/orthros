@@ -53,6 +53,7 @@ use radix_vfs::{Error, FileSystem, FsInfo, FsKind, Kind, Node, NodeRef, Result};
 use crate::boot::Geometry;
 use crate::edit::{self, Sizes, fix_down, put_u16};
 use crate::index::{FileName, NAME_MAX, namespace};
+use crate::list::Extent;
 use crate::node::NtfsNode;
 use crate::record::{
     self, Attr, Record, attr_flags, fix_up, kind, list_entries, name_is, record_of, u16_at, u32_at,
@@ -219,8 +220,12 @@ pub(crate) struct Loaded {
     pub(crate) version: Option<(u8, u8, u16)>,
     /// Its unnamed `$BITMAP`: the master file table's, of its records.
     pub(crate) own_bitmap: Option<Value>,
-    /// Whether its attributes are in more than one record, which Radix
-    /// does not change yet.
+    /// Whether its base record has an attribute list.
+    pub(crate) list: bool,
+    /// The pieces of its data in its extension records, in order.
+    pub(crate) extents: Option<KVec<Extent>>,
+    /// Whether attributes other than its data's are in its extension
+    /// records, or it is the system's: Radix does not change it.
     pub(crate) listed: bool,
     /// Whether its index is `$R`, of reparse points, not of names.
     pub(crate) view: bool,
@@ -418,7 +423,8 @@ impl Volume {
             }
             return Ok(loaded);
         };
-        loaded.listed = true;
+        loaded.list = true;
+        loaded.listed = number < records::FIRST_USER;
         // Every attribute is in the list, the base record's too, in order:
         // a non-resident one's pieces by their first VCN.
         let mut other = zeroed(rs)?;
@@ -429,6 +435,16 @@ impl Volume {
             let bytes: &[u8] = if at == number {
                 &base
             } else {
+                if entry.kind() == kind::DATA && entry.name().is_empty() {
+                    let extent = Extent {
+                        reference: entry.reference(),
+                        lowest: entry.lowest_vcn(),
+                        id: entry.id(),
+                    };
+                    mem::push(loaded.extents.get_or_insert_with(mem::vec), extent)?;
+                } else {
+                    loaded.listed = true;
+                }
                 if other_number != Some(at) {
                     self.read_record(at, &mut other)?;
                     let rec = Record::new(&other)?;
