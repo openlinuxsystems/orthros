@@ -1333,10 +1333,7 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                     socket::accept(user, socket, a.to, a.flags, non_blocking)?;
                 }
                 AnySocket::Inet(socket) => {
-                    // A connection that cannot go in the slot, as another
-                    // thread filled it first, is closed.
-                    let accepted = inet::file(user, socket.accept(non_blocking)?, a.flags)?;
-                    inet::install(user, a.to, accepted, a.flags)?;
+                    inet::accept(user, socket, a.to, a.flags, non_blocking)?;
                 }
             }
             answer(label, 0, [0; 8])

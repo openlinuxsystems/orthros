@@ -10,7 +10,7 @@
 name = "rust-crates"
 version = "1"
 summary = "crates.io crates patched for Radix, for programs in Rust"
-license = "(MIT OR Apache-2.0) AND MIT AND (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT)"
+license = "(MIT OR Apache-2.0) AND MIT AND (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT) AND Apache-2.0 AND ISC"
 homepage = "https://crates.io"
 depends = ["rust-std"]
 toolchain = true
@@ -68,6 +68,12 @@ name = "platform-info"
 version = "2.1.0"
 sha256 = "9368d62437c8cbb7c31ee37fd8c08a7d390e09a3ff75698a674953f46705ffcb"
 license = "MIT"
+
+[[crate]]
+name = "ring"
+version = "0.17.14"
+sha256 = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
+license = "Apache-2.0 AND ISC"
 
 [[crate]]
 name = "rustix"

@@ -176,6 +176,15 @@ struct Part {
     other: OtherEnd,
 }
 
+/// A connection a listening socket took for [`accept`], with its ends.
+struct Taken {
+    part: Part,
+    local: Option<Endpoint>,
+    peer: Option<Peer>,
+    /// The listening socket's options, which the connection has.
+    options: Options,
+}
+
 /// Where a socket is in its life.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
@@ -650,8 +659,8 @@ impl InetSocket {
     }
 
     /// Takes a connection made to it, waiting for one unless
-    /// `non_blocking` (radix-file(2)'s `accept`): a connected socket.
-    pub fn accept(&self, non_blocking: bool) -> Result<InetSocket, Status> {
+    /// `non_blocking`, for [`accept`].
+    fn take(&self, non_blocking: bool) -> Result<Taken, Status> {
         let timeout = self.state.lock().options.receive_timeout_ns;
         self.wait(non_blocking, timeout, Kernel::WouldBlock, "accept", |state| {
             if state.phase != Phase::Listening {
@@ -664,7 +673,6 @@ impl InetSocket {
                 })
             });
             let Some(index) = made else { return Ok(None) };
-            let mut accepted = InetSocket::new(Kind::Stream)?;
             let part = state.parts.swap_remove(index);
             // Another socket listens in its place, if there is memory for one.
             let (address, port) = state.local.unwrap_or((None, 0));
@@ -681,19 +689,55 @@ impl InetSocket {
                 ends.unwrap_or((None, None))
             };
             part.interface.kick();
-            {
-                // Not locked: no one else has it yet, and two sockets' locks
-                // are never held at once.
-                let new = accepted.state.get_mut();
-                new.phase = Phase::Connected;
-                new.local = local.map(|ip| (Some(v4(ip.addr)), ip.port));
-                new.peer = peer.map(|ip| (v4(ip.addr), ip.port));
-                new.options = state.options;
-                // Room for one part was reserved when it was made.
-                let _ = new.parts.push_within_capacity(part);
-            }
-            Ok(Some(accepted))
+            Ok(Some(Taken {
+                part,
+                local: local.map(|ip| (Some(v4(ip.addr)), ip.port)),
+                peer: peer.map(|ip| (v4(ip.addr), ip.port)),
+                options: state.options,
+            }))
         })
+    }
+
+    /// Has `taken`, a connection its listening socket took, connect it, a
+    /// new stream socket that no one else has yet.
+    fn have(&self, taken: Taken) {
+        let mut state = self.state.lock();
+        state.phase = Phase::Connected;
+        state.local = taken.local;
+        state.peer = taken.peer;
+        state.options = taken.options;
+        // Room for one part was reserved when it was made.
+        let _ = state.parts.push_within_capacity(taken.part);
+    }
+
+    /// Gives up the connection [`have`](Self::have) gave it, which no one
+    /// used: it is fresh again.
+    fn give_up(&self) -> Option<Part> {
+        let mut state = self.state.lock();
+        let part = state.parts.pop()?;
+        state.phase = Phase::Fresh;
+        state.local = None;
+        state.peer = None;
+        Some(part)
+    }
+
+    /// Takes back `part`, a connection [`take`](Self::take) took that did
+    /// not go where it was going, to the front of the connections that
+    /// wait, so that the next `accept` takes it. One that can no longer
+    /// wait, as there is no memory for it, is reset.
+    fn give_back(&self, part: Part) {
+        let mut state = self.state.lock();
+        if state.phase == Phase::Listening && state.parts.try_reserve(1).is_ok() {
+            // Room was reserved just now.
+            let _ = state.parts.push_within_capacity(part);
+            state.parts.rotate_right(1);
+            drop(state);
+            // Another thread may wait in `accept` for it.
+            net::changed();
+            return;
+        }
+        drop(state);
+        release_part(part, false, &mut None);
     }
 
     /// Connects it to `to` (radix-file(2)'s `connect_address`), the caller
@@ -1157,44 +1201,51 @@ impl InetSocket {
 /// not ended is closed if the socket is `connected` through it, and left
 /// to its interface to finish, holding `port`; else it is reset.
 fn release_parts(parts: &mut Vec<Part, Kmalloc>, connected: bool, mut port: Option<Held>) {
-    while let Some(Part { interface, handle, leases, .. }) = parts.pop() {
-        let mut stack = interface.stack.lock();
-        match leases {
-            Leases::Udp(leases) => {
-                memory::end_udp(&mut stack, handle, leases, interface.name.as_str());
-            }
-            Leases::Tcp(leases) => {
-                let open = stack.socket_mut::<tcp::Socket<'static>>(handle).is_some_and(|socket| {
-                    match socket.state() {
-                        tcp::State::Closed | tcp::State::Listen => false,
-                        // Its own connection ends as connections do.
-                        _ if connected => {
-                            socket.close();
-                            true
-                        }
-                        // A listening socket's that no one took are reset.
-                        _ => {
-                            socket.abort();
-                            true
-                        }
+    while let Some(part) = parts.pop() {
+        release_part(part, connected, &mut port);
+    }
+}
+
+/// Takes `part` out of its stack, as [`release_parts`] does: a
+/// connection left to finish takes `port`.
+fn release_part(part: Part, connected: bool, port: &mut Option<Held>) {
+    let Part { interface, handle, leases, .. } = part;
+    let mut stack = interface.stack.lock();
+    match leases {
+        Leases::Udp(leases) => {
+            memory::end_udp(&mut stack, handle, leases, interface.name.as_str());
+        }
+        Leases::Tcp(leases) => {
+            let open = stack.socket_mut::<tcp::Socket<'static>>(handle).is_some_and(|socket| {
+                match socket.state() {
+                    tcp::State::Closed | tcp::State::Listen => false,
+                    // Its own connection ends as connections do.
+                    _ if connected => {
+                        socket.close();
+                        true
                     }
-                });
-                if open {
-                    let orphan = Orphan {
-                        handle,
-                        leases: Some(leases),
-                        port: port.take(),
-                        deadline_ns: sched::now_ns().saturating_add(net::ORPHAN_NS),
-                    };
-                    interface.adopt(&mut stack, orphan);
-                } else {
-                    memory::end_tcp(&mut stack, handle, leases, interface.name.as_str());
+                    // A listening socket's that no one took are reset.
+                    _ => {
+                        socket.abort();
+                        true
+                    }
                 }
+            });
+            if open {
+                let orphan = Orphan {
+                    handle,
+                    leases: Some(leases),
+                    port: port.take(),
+                    deadline_ns: sched::now_ns().saturating_add(net::ORPHAN_NS),
+                };
+                interface.adopt(&mut stack, orphan);
+            } else {
+                memory::end_tcp(&mut stack, handle, leases, interface.name.as_str());
             }
         }
-        drop(stack);
-        interface.kick();
     }
+    drop(stack);
+    interface.kick();
 }
 
 /// The IPv4 address `address` is: IPv4 is the stack's only protocol,
@@ -1463,6 +1514,42 @@ pub fn make(
     flags: PipeFlags,
 ) -> Result<(), Status> {
     install(user, to, file(user, InetSocket::new(kind)?, flags)?, flags)
+}
+
+/// Takes a connection made to `listener`, waiting for one unless
+/// `non_blocking` (radix-file(2)'s `accept`), and puts a description of a
+/// new socket, connected through it, in `user`'s slot `to`, with `flags`.
+/// A connection that cannot go in the slot, as another thread filled it
+/// while this one waited, goes back to the front of those that wait, so
+/// none is lost, as with a Unix-domain socket's.
+pub fn accept(
+    user: &crate::user::UserRef,
+    listener: &InetSocket,
+    to: u32,
+    flags: PipeFlags,
+    non_blocking: bool,
+) -> Result<(), Status> {
+    let taken = listener.take(non_blocking)?;
+    let made = match InetSocket::new(Kind::Stream).and_then(|socket| file(user, socket, flags)) {
+        Ok(made) => made,
+        Err(err) => {
+            listener.give_back(taken.part);
+            return Err(err);
+        }
+    };
+    // A network socket's file, as it was made just now.
+    let Some(socket) = made.inet() else {
+        listener.give_back(taken.part);
+        return Err(status(Kernel::InvalidArgument));
+    };
+    socket.have(taken);
+    if let Err(err) = install(user, to, made.clone(), flags) {
+        if let Some(part) = socket.give_up() {
+            listener.give_back(part);
+        }
+        return Err(err);
+    }
+    Ok(())
 }
 
 /// Puts a capability to `file`, a network socket's description, in
