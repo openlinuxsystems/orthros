@@ -869,3 +869,128 @@ fn bytes_go_across_only_to_the_next_byte_expected() {
     assert!(!client_socket.heard_window_across(ack + 1, window, smoltcp::time::Instant::ZERO));
     assert!(client_socket.heard_window_across(ack, window, smoltcp::time::Instant::ZERO));
 }
+
+fn slots(len: usize) -> &'static mut [SocketStorage<'static>] {
+    let mut slots = Vec::new();
+    slots.resize_with(len, || SocketStorage::EMPTY);
+    slots.leak()
+}
+
+#[test]
+fn grows_its_socket_slots_and_keeps_its_sockets() {
+    let (mut a, mut b) = pair();
+    let server = b.add_socket(tcp_memory().socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(7).unwrap();
+    let client = a.add_socket(tcp_memory().socket()).ok().unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 10);
+    for _ in 1..4 {
+        a.add_socket(udp_memory().socket()).ok().unwrap();
+    }
+    assert_eq!(a.socket_slots(), 4);
+    let refused = a.add_socket(udp_memory().socket()).err().unwrap();
+    // Not more slots are given back.
+    let same = slots(4);
+    let same_place = same.as_ptr();
+    assert_eq!(a.grow_sockets(same).err().unwrap().as_ptr(), same_place);
+    // Twice as many: the old slots come back empty, and the sockets keep
+    // their handles and their connection.
+    let more = slots(8);
+    let old = a.grow_sockets(more).ok().unwrap();
+    assert_eq!(old.len(), 4);
+    assert_eq!(a.socket_slots(), 8);
+    a.add_socket(refused).ok().unwrap();
+    a.socket_mut::<tcp::Socket<'static>>(client).unwrap().send_slice(b"hello").unwrap();
+    run(&mut a, &mut b, &mut now, 10);
+    let mut got = [0; 16];
+    let len = b.socket_mut::<tcp::Socket<'static>>(server).unwrap().recv_slice(&mut got).unwrap();
+    assert_eq!(&got[..len], b"hello");
+}
+
+/// A clock for timestamps in milliseconds, which the tests move.
+static CLOCK_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+fn clock_ms() -> u32 {
+    CLOCK_MS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A TCP socket that sends timestamps from [`clock_ms`].
+fn timed_tcp_socket() -> tcp::Socket<'static> {
+    let mut socket = tcp_memory().socket();
+    socket.set_tsval_generator(Some(clock_ms));
+    socket
+}
+
+#[test]
+fn a_connection_in_time_wait_gives_its_memory_back_and_lasts() {
+    let (mut a, mut b) = pair();
+    let server = b.add_socket(tcp_memory().socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(7).unwrap();
+    let memory = tcp_memory();
+    let lent = tcp_places(&memory);
+    let client = a.add_socket(memory.socket()).ok().unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 10);
+    assert!(a.shed_tcp(client).is_none(), "only in TIME-WAIT");
+    a.socket_mut::<tcp::Socket<'static>>(client).unwrap().close();
+    run(&mut a, &mut b, &mut now, 10);
+    b.socket_mut::<tcp::Socket<'static>>(server).unwrap().close();
+    run(&mut a, &mut b, &mut now, 10);
+    assert_eq!(a.socket_mut::<tcp::Socket<'static>>(client).unwrap().state(), tcp::State::TimeWait);
+    assert_eq!(tcp_places(&a.shed_tcp(client).unwrap()), lent);
+    assert!(a.shed_tcp(client).unwrap().receive.is_empty(), "shed already");
+    // It stays until TIME-WAIT ends, and then holds nothing.
+    run(&mut a, &mut b, &mut now, 100);
+    assert_eq!(a.socket_mut::<tcp::Socket<'static>>(client).unwrap().state(), tcp::State::TimeWait);
+    now += 10_000_000_000;
+    run(&mut a, &mut b, &mut now, 1);
+    assert_eq!(a.socket_mut::<tcp::Socket<'static>>(client).unwrap().state(), tcp::State::Closed);
+    let left = a.remove_tcp(client).unwrap();
+    assert!(left.receive.is_empty() && left.transmit.is_empty());
+}
+
+#[test]
+fn a_new_connection_takes_the_place_of_one_in_time_wait() {
+    // The server closes first, so it is the one in TIME-WAIT, in the slot
+    // before the socket that listens now; the client connects again from
+    // the same port. As on Linux, the SYN goes to the connection first,
+    // which gives way to it, and the listening socket takes it at once,
+    // rather than the old connection answering it and the client trying
+    // again a second later.
+    let (mut a, mut b) = pair();
+    let first = b.add_socket(timed_tcp_socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(first).unwrap().listen(7).unwrap();
+    let client = a.add_socket(timed_tcp_socket()).ok().unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 10);
+    assert_eq!(
+        b.socket_mut::<tcp::Socket<'static>>(first).unwrap().state(),
+        tcp::State::Established
+    );
+    let listener = b.add_socket(timed_tcp_socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(listener).unwrap().listen(7).unwrap();
+    CLOCK_MS.store(100, std::sync::atomic::Ordering::Relaxed);
+    b.socket_mut::<tcp::Socket<'static>>(first).unwrap().close();
+    run(&mut a, &mut b, &mut now, 10);
+    a.socket_mut::<tcp::Socket<'static>>(client).unwrap().close();
+    run(&mut a, &mut b, &mut now, 10);
+    assert_eq!(b.socket_mut::<tcp::Socket<'static>>(first).unwrap().state(), tcp::State::TimeWait);
+    a.remove_tcp(client).unwrap();
+
+    CLOCK_MS.store(200, std::sync::atomic::Ordering::Relaxed);
+    let again = a.add_socket(timed_tcp_socket()).ok().unwrap();
+    a.connect(again, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    run(&mut a, &mut b, &mut now, 10);
+    assert_eq!(
+        a.socket_mut::<tcp::Socket<'static>>(again).unwrap().state(),
+        tcp::State::Established
+    );
+    assert_eq!(b.socket_mut::<tcp::Socket<'static>>(first).unwrap().state(), tcp::State::Closed);
+    assert_eq!(
+        b.socket_mut::<tcp::Socket<'static>>(listener).unwrap().state(),
+        tcp::State::Established
+    );
+}

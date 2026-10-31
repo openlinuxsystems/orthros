@@ -96,6 +96,19 @@ impl<L: Link> Stack<L> {
         }
     }
 
+    /// Gives back the memory of the TCP socket `handle`, in TIME-WAIT, whose
+    /// program closed it: it stays until TIME-WAIT ends, with no memory of
+    /// its own, only its slot. `None` if the stack has no such socket, or
+    /// it is in another state.
+    pub fn shed_tcp(&mut self, handle: SocketHandle) -> Option<TcpMemory> {
+        let socket = self.socket_mut::<tcp::Socket<'static>>(handle)?;
+        let (receive, transmit) = socket.shed_buffers()?;
+        Some(TcpMemory {
+            receive: lent(receive.into_storage()),
+            transmit: lent(transmit.into_storage()),
+        })
+    }
+
     /// Takes the UDP socket `handle` out of the stack, as
     /// [`Stack::remove_tcp`] does.
     pub fn remove_udp(&mut self, handle: SocketHandle) -> Option<UdpMemory> {

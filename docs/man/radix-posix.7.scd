@@ -319,7 +319,9 @@ EALREADY until then, and EISCONN once connected. A connection to a port
 no one listens on fails with ECONNREFUSED. A listening socket takes up
 to four handshakes at once on each interface, whatever its backlog.
 Each TCP socket has 64 KiB each way, and each UDP socket 64 KiB and 16
-datagrams each way. A TCP connection over the loopback interface passes
+datagrams each way. Each interface holds up to 16,384 sockets, and
+ENOBUFS says it holds that many. A TCP connection closed by its program
+holds no buffers in TIME-WAIT. A TCP connection over the loopback interface passes
 its bytes straight into the other end's buffer, so while it does, it
 holds 64 KiB each way, the receiver's, and a writer waits for the
 reader once that is full. A datagram is sent and received whole: *sendmsg*
@@ -333,7 +335,8 @@ nothing), *SO_KEEPALIVE*, *SO_BROADCAST*, *SO_RCVBUF* and *SO_SNDBUF*
 *TCP_KEEPIDLE*, *TCP_KEEPINTVL*, *TCP_KEEPCNT* and *IP_TTL*. Keep-alive
 probes go as on Linux: after 7,200 seconds of quiet, then 75 seconds
 apart, and 9 unanswered reset the connection. TCP's congestion control
-is CUBIC. *getsockopt* also answers *SO_TYPE*, *SO_DOMAIN*, *SO_PROTOCOL*,
+is CUBIC, its loss recovery uses SACK, and PAWS drops segments with old
+timestamps. *getsockopt* also answers *SO_TYPE*, *SO_DOMAIN*, *SO_PROTOCOL*,
 *SO_ERROR* and *SO_ACCEPTCONN*. *SOCK_RAW* fails with EPERM, and control
 messages with EOPNOTSUPP.
 

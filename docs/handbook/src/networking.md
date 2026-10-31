@@ -43,6 +43,14 @@ WireGuard. This page grows with each.
   TCP_KEEPCNT change. A connection with nothing to send stays open
   however long it is quiet; one whose data goes unacknowledged for 15
   minutes is reset.
+  A window that loses several segments resends each of them in about
+  one round trip, from the SACK blocks the other end sends, and old
+  duplicates are dropped by their timestamps (PAWS)
+  ([ADR 0188](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0188-tcp-recovers-from-losses-with-sack-and-an-interface-holds-thousands-of-sockets.md)).
+- **Thousands of sockets on each interface**: up to 16,384, in slots the
+  interface adds as they fill. A connection in TIME-WAIT that its
+  program closed keeps none of its buffers, and a client may connect
+  again from the same port at once, as on Linux (ADR 0188).
 - **Sockets for programs, through network capabilities**
   ([ADR 0183](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0183-programs-reach-the-network-through-capabilities-of-its-ports.md)).
   A program uses the network only if it was given a network

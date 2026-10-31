@@ -407,6 +407,26 @@ impl<L: Link> Stack<L> {
         self.sockets.try_add(socket)
     }
 
+    /// How many sockets the stack has slots for.
+    pub fn socket_slots(&self) -> usize {
+        self.sockets.capacity()
+    }
+
+    /// Moves the stack's sockets into `slots`, more of them and empty,
+    /// each to the same place, so that their handles stay, and gives back
+    /// the slots they were in, empty, to take the memory of.
+    ///
+    /// # Errors
+    ///
+    /// `slots`, back, if they are not more than the stack has, or not
+    /// empty.
+    pub fn grow_sockets(
+        &mut self,
+        slots: &'static mut [SocketStorage<'static>],
+    ) -> Result<&'static mut [SocketStorage<'static>], &'static mut [SocketStorage<'static>]> {
+        self.sockets.grow(slots).map(lent)
+    }
+
     /// The socket `handle` of the stack: `None` if the stack has no such
     /// socket, or it is of another kind. smoltcp's own `get_mut` panics
     /// then; the kernel's calls do not (ADR 0182).
