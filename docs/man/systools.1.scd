@@ -38,7 +38,7 @@ notifications *notify-send*(1) sends to the console, and
 *notifications*(1) lists them; *ip*(8) and *ss*(8) read the network's
 interfaces and sockets from *radix-sysfs*(5) and *radix-proc*(5), and
 *ip*(8) sets the interfaces up through the network capability
-(*radix-network*(2));
+(*radix-network*(2)), as *netd*(8) does by DHCP or as *network*(5) says;
 *shutdown*(8), *reboot*(8), *poweroff*(8), *halt*(8) and *service*(8)
 ask Spark over its control socket (*spark*(8)); *authd*(8) keeps the
 accounts, which *user*(8) makes and lists and whose passwords
@@ -125,6 +125,8 @@ error that starts with the tool's name.
 :  the USB devices, or the tree of their buses and ports
 |  *mkswap*(8)
 :  make a swap area on a disk or partition
+|  *netd*(8)
+:  set the network cards up, by DHCP or as their settings say
 |  *notifications*(1)
 :  the notifications notifyd keeps
 |  *notify-send*(1)

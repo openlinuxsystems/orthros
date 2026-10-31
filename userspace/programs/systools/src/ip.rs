@@ -32,8 +32,8 @@ use crate::sys::SYS;
 use crate::util::{Fail, fail_with, usage};
 
 /// Where the kernel shows the interfaces and the routes.
-const INTERFACES: &str = "/kernel/class/net";
-const ROUTES: &str = "/processes/net/route";
+pub const INTERFACES: &str = "/kernel/class/net";
+pub const ROUTES: &str = "/processes/net/route";
 
 /// The most addresses an interface takes (radix-network(2)).
 const ADDRESSES_MAX: usize = network::ADDRESSES_MAX as usize;
@@ -47,7 +47,7 @@ pub struct Cidr {
 
 impl Cidr {
     /// `10.0.2.15/24`, or an address alone, which is a /32.
-    fn parse(text: &str) -> Option<Cidr> {
+    pub fn parse(text: &str) -> Option<Cidr> {
         let (ip, prefix) = match text.split_once('/') {
             Some((ip, prefix)) => (ip, prefix.parse().ok().filter(|&prefix| prefix <= 32)?),
             None => (text, 32),
@@ -55,22 +55,22 @@ impl Cidr {
         Some(Cidr { ip: ip.parse().ok()?, prefix })
     }
 
-    fn mask(self) -> u32 {
+    pub fn mask(self) -> u32 {
         u32::MAX.checked_shl(32 - u32::from(self.prefix)).unwrap_or(0)
     }
 
     /// The network's first address.
-    fn network(self) -> Ipv4Addr {
+    pub fn network(self) -> Ipv4Addr {
         Ipv4Addr::from(u32::from(self.ip) & self.mask())
     }
 
     /// The address that reaches every host of the network: none for a
     /// /31 or /32, which have no such address.
-    fn broadcast(self) -> Option<Ipv4Addr> {
+    pub fn broadcast(self) -> Option<Ipv4Addr> {
         (self.prefix < 31).then(|| Ipv4Addr::from(u32::from(self.ip) | !self.mask()))
     }
 
-    fn contains(self, ip: Ipv4Addr) -> bool {
+    pub fn contains(self, ip: Ipv4Addr) -> bool {
         u32::from(ip) & self.mask() == u32::from(self.network())
     }
 }
@@ -180,7 +180,7 @@ pub trait Network {
 
 /// The kernel, through the network capabilities in the NETWORK_SLOTS
 /// slots from SLOT_NETWORK: the first that allows it.
-struct Slots;
+pub struct Slots;
 
 impl Network for Slots {
     fn configure(

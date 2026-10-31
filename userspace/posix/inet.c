@@ -374,6 +374,8 @@ static void errors(void) {
 	// One socket to a port.
 	at = loopback(port_of(a));
 	CHECK_ERROR(bind(b, (struct sockaddr *)&at, sizeof(at)), EADDRINUSE);
+	// The port stays the first one's after a bind is refused it.
+	CHECK_ERROR(bind(b, (struct sockaddr *)&at, sizeof(at)), EADDRINUSE);
 	// An address the machine does not have.
 	struct sockaddr_in away = loopback(0);
 	away.sin_addr.s_addr = inet_addr("10.9.9.9");

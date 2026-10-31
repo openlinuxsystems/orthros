@@ -22,6 +22,8 @@ const SHIPPED: &[(&str, &str)] = &[
     ("leaver", include_str!("../../../spark/tests/services/stop/leaver.toml")),
     ("stubborn", include_str!("../../../spark/tests/services/stop/stubborn.toml")),
     ("authd", include_str!("../../../defaults/spark/services/authd.toml")),
+    ("netd", include_str!("../../../defaults/spark/services/netd.toml")),
+    ("netd", include_str!("../../../spark/tests/services/dhcp/netd.toml")),
 ];
 
 /// `text` with the first line of service_version added.
@@ -54,6 +56,14 @@ fn every_shipped_file_reads() {
     let listen = &granted.permissions.network.listen;
     assert_eq!(listen, &[Ports { first: 8000, last: 8009 }, Ports { first: 9000, last: 9000 }]);
     assert_eq!(granted.network_grants(), 3);
+    // Port 68 on each card, servers anywhere, and setting the cards up.
+    let netd = service::from_toml(SHIPPED[SHIPPED.len() - 2].1).unwrap();
+    assert_eq!(netd.network_grants(), 3);
+    assert!(netd.permissions.admin.network && !netd.permissions.runs_with_your_access);
+    assert_eq!(
+        service::from_toml(SHIPPED[SHIPPED.len() - 1].1).unwrap().permissions,
+        netd.permissions
+    );
 }
 
 #[test]

@@ -97,11 +97,15 @@ WireGuard. This page grows with each.
   ([ADR 0190](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0190-interfaces-are-shown-as-linux-shows-them-and-set-up-through-the-network-capability.md)).
   The interfaces are in `/kernel/class/net` and the counts, routes and
   sockets in `/processes/net`, in Linux's formats.
+- **`netd` sets every card up by DHCP** at boot, or as
+  `/system/settings/network` says, keeps each lease across restarts and
+  reboots, and writes the DNS servers where `/etc/resolv.conf` leads
+  ([ADR 0191](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0191-netd-sets-each-card-up-by-dhcp-or-as-its-settings-say.md)).
+  What a DHCP server says is checked before it reaches the routes or
+  the resolver.
 
 Native programs use the sockets through radix-network(2) and
-radix-file(2). Nothing configures the network by itself yet: there is
-no DHCP until `netd` lands, and a card gets an address from the boot
-flags or from `ip`.
+radix-file(2).
 
 ## Giving a service the network
 
@@ -119,10 +123,49 @@ in the service's network slots. The service can bind to and listen on
 ports 80 and 443, and nothing more: binding another port, connecting
 out or sending a datagram anywhere fails with `EACCES`.
 
-## Giving a card an address
+## Setting the cards up
 
-The first card takes its address from two kernel flags
-(dukovo-boot(7)):
+netd(8) runs on every machine and asks DHCP for each card's address,
+router and DNS servers, with nothing to configure. The system's log
+says what it got:
+
+```
+netd: net0: asking for an address by DHCP
+netd: net0 has 10.0.2.15/24 from 10.0.2.2 for 1 day, router 10.0.2.2, DNS 10.0.2.3
+```
+
+To give a card an address of its own, name it in
+`/system/settings/network` (network(5)), by its name or its MAC
+address, and have netd read the file again:
+
+```
+# cat >> /system/settings/network
+[net0]
+address = 192.168.1.10/24
+router = 192.168.1.1
+dns = 192.168.1.1
+# service netd reload
+```
+
+`dhcp = no` in a card's section, with no address, has netd leave it
+alone. netd changes only the addresses it gave, so one added with ip(8)
+stays. `/etc/resolv.conf` is a link to the file netd writes,
+`/system/live/netd/resolv.conf`; to use DNS servers of your own, give a
+card `dns =` settings, or make `/etc/resolv.conf` a file in place of the
+link.
+
+The `dhcp` boot test has netd set a card up by QEMU's DHCP server,
+restarts netd, and changes the settings to an address of their own and
+back:
+
+```
+./ob test --case dhcp
+```
+
+## Giving a card an address at boot
+
+The first card can also take its address from two kernel flags
+(dukovo-boot(7)), and netd then leaves it as it is:
 
 ```
 ip=10.0.2.15/24 gateway=10.0.2.2
