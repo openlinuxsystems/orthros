@@ -275,6 +275,12 @@ We implement these from their published descriptions. No code is copied.
   `radix-nvme` drives NVMe controllers: queue pairs, PRP lists, Identify,
   Dataset Management, controller reset and shutdown
   ([ADR 0115](docs/adr/0115-nvme-from-the-specification.md)).
+- The DMTF's "System Management BIOS (SMBIOS) Reference Specification",
+  DSP0134, version 3.7.0 (2023), from which `radix-smbios` reads the
+  firmware's tables for the kernel and `hwinfo`, and Linux's
+  `/sys/class/dmi/id`, whose files and boot line Radix takes
+  ([ADR 0231](docs/adr/0231-the-firmwares-smbios-tables-and-hwinfo.md)).
+  We use no code of Linux's `dmi_scan` or of dmidecode.
 - The block device `ioctl` requests of Linux's user API (`<linux/fs.h>`),
   BLKGETSIZE64 to BLKDISCARD, whose numbers and meanings Radix's block
   devices take ([ADR 0111](docs/adr/0111-one-queue-for-every-disk.md)).

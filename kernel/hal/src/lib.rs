@@ -388,6 +388,16 @@ pub struct Watchdog {
     pub restarted: bool,
 }
 
+/// The firmware's SMBIOS tables (Phase 11e, ADR 0231), as
+/// [`Platform::smbios`] finds them, where the firmware keeps them.
+#[derive(Clone, Copy, Debug)]
+pub struct Smbios {
+    /// The entry point, `_SM3_` or `_SM_`, as long as it says it is.
+    pub entry: &'static [u8],
+    /// The structures, up to and with the one that ends them.
+    pub table: &'static [u8],
+}
+
 /// Devices: what drivers need from the machine (Phase 7).
 ///
 /// Drivers never see raw pointers: device registers come as
@@ -748,6 +758,11 @@ pub trait Platform {
     /// Prints the firmware tables found by [`Platform::init`], one per call
     /// of `line`.
     fn describe_firmware(line: &mut dyn FnMut(core::fmt::Arguments<'_>));
+
+    /// The firmware's SMBIOS tables, which [`Platform::init`] found: on a
+    /// PC, through the UEFI system table or in the BIOS's area. `None`
+    /// where there are none.
+    fn smbios() -> Option<Smbios>;
 
     /// Whether there is a debug console (a serial port) for the kernel
     /// debugger to talk on.

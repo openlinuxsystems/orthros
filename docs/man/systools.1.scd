@@ -78,6 +78,8 @@ error that starts with the tool's name.
 :  halt, power off or restart the machine
 |  *hexdump*(1), *hd*(1)
 :  a file's bytes, in hexadecimal or other formats
+|  *hwinfo*(8)
+:  what the machine is, as its firmware's SMBIOS tables say
 |  *ionice*(1)
 :  a process's I/O class and level
 |  *iostat*(1)

@@ -169,6 +169,7 @@ dependencies = [
  "radix-sched",
  "radix-scsi",
  "radix-sensors",
+ "radix-smbios",
  "radix-sync",
  "radix-tty",
  "radix-uacpi",
@@ -232,6 +233,7 @@ dependencies = [
  "radix-random",
  "radix-relocs",
  "radix-sensors",
+ "radix-smbios",
  "radix-smbus",
  "radix-sync",
  "radix-vtd",
@@ -469,6 +471,10 @@ version = "0.10.4"
 dependencies = [
  "radix-hw",
 ]
+
+[[package]]
+name = "radix-smbios"
+version = "0.10.4"
 
 [[package]]
 name = "radix-smbus"

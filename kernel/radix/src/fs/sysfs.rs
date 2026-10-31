@@ -32,6 +32,12 @@
 //!   hexadecimal) and `type` (Linux's names: `System RAM`, `Reserved`,
 //!   `ACPI Tables`...), for each range of the firmware's memory map
 //!   (ADR 0144);
+//! - `/kernel/class/dmi/id`, where the firmware has SMBIOS tables
+//!   (ADR 0231): Linux's files of the names the firmware gives the
+//!   machine, its board, chassis and firmware (`sys_vendor`,
+//!   `product_name`, `board_name`, `bios_version`, `chassis_type`...),
+//!   those it gives, without the serial numbers and the UUID
+//!   ([`crate::dmi`]);
 //! - `/kernel/class/watchdog/watchdog0`, when the kernel drives a hardware
 //!   watchdog (ADR 0143): its `identity`, its `state` (`active` or
 //!   `inactive`), its `timeout`, `min_timeout` and `max_timeout` in
@@ -109,7 +115,10 @@ pub fn set_command_line(line: &'static str) {
     let _ = COMMAND_LINE.set(line);
 }
 
-/// A `sys` filesystem: every mount shows the same tree.
+/// A `sys` filesystem: every mount shows the same tree. Kept out of line,
+/// so that [`super::make`]'s frame, under every mount and the deep ones
+/// like a Btrfs disk's, does not carry its own.
+#[inline(never)]
 pub fn make() -> Result<FsRef> {
     if let Some(root) = ROOT.get() {
         let root: NodeRef = root.clone();
@@ -144,7 +153,8 @@ pub fn make() -> Result<FsRef> {
     let thermal = thermal::zones().next().is_some();
     let mut monitors = false;
     hwmon::devices(&mut |_| monitors = true);
-    let class = if crate::watchdog::found().is_some() || power || thermal || monitors {
+    let dmi = crate::dmi::found();
+    let class = if crate::watchdog::found().is_some() || power || thermal || monitors || dmi {
         Some(root.add_dir("class", next_id())?)
     } else {
         None
@@ -167,6 +177,9 @@ pub fn make() -> Result<FsRef> {
         dir.add("max_timeout", value(move |text| writeln!(text, "{max_seconds}"))?)?;
         let status = if restarted { 32 } else { 0 };
         dir.add("bootstatus", value(move |text| writeln!(text, "{status}"))?)?;
+    }
+    if dmi && let Some(class) = &class {
+        dmi_class(class)?;
     }
     if power && let Some(class) = &class {
         power_supply(class)?;
@@ -273,6 +286,19 @@ fn thermal_class(class: &FixedDir) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `/kernel/class/dmi/id`: the firmware's names for the machine.
+fn dmi_class(class: &FixedDir) -> Result<()> {
+    let id = class.add_dir("dmi", next_id())?.add_dir("id", next_id())?;
+    let mut result = Ok(());
+    crate::dmi::files(&mut |name, file| {
+        if result.is_ok() {
+            result =
+                value(move |text| writeln!(text, "{file}")).and_then(|node| id.add(name, node));
+        }
+    });
+    result
 }
 
 /// `/kernel/class/hwmon`: the temperature sensors.

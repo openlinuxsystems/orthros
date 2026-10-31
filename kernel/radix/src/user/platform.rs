@@ -4,7 +4,7 @@
 //! The methods of the platform capability (Phase 11, radix-platform(2),
 //! ADR 0208): the controls the machine's embedded controller keeps, its
 //! fans' duties and curves, its LEDs and its ARGB header, through
-//! [`crate::crosec`].
+//! [`crate::crosec`]; and the firmware's SMBIOS tables whole (ADR 0231).
 //!
 //! The arguments are checked here before anything reaches the EC, which
 //! takes what it is sent as it is: Framework's EC copies a fan curve
@@ -15,10 +15,11 @@ use radix_abi::errors::{File, Kernel};
 use radix_abi::platform::{
     self as abi, AutoFanArgs, AutoLedArgs, Controls, DescribeArgs, DescribeResults, FanCurveArgs,
     FanCurveResults, LedArgs, LedResults, SetFanCurveArgs, SetFanDutyArgs, SetLedArgs, SetRgbArgs,
+    SmbiosArgs, SmbiosResults, SmbiosTable,
 };
 use radix_cap::{Capability, ObjectKind, Rights};
 use radix_crosec::{Error, FanCurve};
-use radix_hal::UserMode;
+use radix_hal::{Platform, UserMode};
 
 use super::methods::{Answer, answer};
 use super::{Result, UserRef, cap_error, error};
@@ -134,6 +135,23 @@ pub fn method(user: &UserRef, cap: &Capability, label: u32, args: &[u64; 8]) -> 
             check(Rights::CONTROL)?;
             set_rgb(a.first, a.colors.address, a.colors.len)?;
             answer(label, 0, [0; 8])
+        }
+        abi::SMBIOS => {
+            let a = SmbiosArgs::decode(args)?;
+            check(Rights::READ)?;
+            let tables = Arch::smbios().ok_or(error(Kernel::NotSupported))?;
+            let bytes = match a.table {
+                SmbiosTable::EntryPoint => tables.entry,
+                SmbiosTable::Structures => tables.table,
+            };
+            let part = &bytes[..bytes.len().min(a.buffer.len as usize)];
+            if !radix_ipc::range::user_bytes(a.buffer.address, part.len() as u64)
+                || !Arch::copy_to_user(a.buffer.address, part)
+            {
+                return Err(error(Kernel::BadAddress));
+            }
+            let results = SmbiosResults { length: bytes.len() as u64 };
+            answer(label, SmbiosResults::WORDS, results.encode())
         }
         _ => Err(error(Kernel::NoSuchMethod)),
     }

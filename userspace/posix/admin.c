@@ -623,7 +623,9 @@ static void power(void) {
 // 0208), with no embedded controller to ask and no platform capability
 // to ask with, which the framework-ec boot test gives it; and lsusb and
 // sensors (ADR 0230), of the boot stick, and of chips not there: the
-// usb-devices and acpi-thermal boot tests run them on more.
+// usb-devices and acpi-thermal boot tests run them on more; and hwinfo
+// (ADR 0231), from /kernel/class/dmi/id without the platform capability,
+// which the smbios boot test gives it.
 static void hardware(void) {
 	CONTAINS("00:00.0 Host bridge: Intel Corporation 82G33/G31/P35/P31 Express DRAM Controller\n",
 	         "/bin/lspci");
@@ -653,6 +655,11 @@ static void hardware(void) {
 	STATUS(1, "/bin/lsusb", "-s", "x:1");
 	RUN_WITH(1, "", "", 0, "/bin/sensors", "nosuch-*");
 	STATUS(1, "/bin/sensors", "-x");
+	CONTAINS("System\n  Manufacturer:     QEMU\n  Product:          Standard PC (Q35 + ICH9, 2009)\n",
+	         "/bin/hwinfo", "system");
+	STATUS(1, "/bin/hwinfo", "memory");
+	STATUS(1, "/bin/hwinfo", "-s");
+	STATUS(1, "/bin/hwinfo", "nosuch");
 }
 
 // The storage tools on a disk and a mount that are not there, and on

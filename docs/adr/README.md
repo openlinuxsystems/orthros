@@ -202,3 +202,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0211](0211-the-audit-log-and-trimming-the-log.md) | Security events of the kernel and Spark go to an audit log, and logd trims the log by age and size | Accepted |
 | [0212](0212-notifications-and-the-privacy-promise.md) | notifyd passes notifications to the console's bottom line, naming the sender as the kernel does, and the privacy promise | Accepted |
 | [0230](0230-sensors-and-lsusb-with-the-usb-id-database.md) | sensors and lsusb are systools, with the USB ID database as a port | Accepted |
+| [0231](0231-the-firmwares-smbios-tables-and-hwinfo.md) | The firmware's SMBIOS tables show what the machine is, and hwinfo shows them | Accepted |

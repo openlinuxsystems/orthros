@@ -182,12 +182,32 @@ _/kernel/firmware/memmap/_*n*_/start_, _end_, _type_
 	*System RAM*, *Reserved*, *ACPI Tables*, *ACPI Non-volatile Storage*
 	or *Unusable memory*. *lsmem*(1) reads it.
 
+_/kernel/class/dmi/id/sys_vendor_, _product_name_, _product_version_, _product_family_, _product_sku_
+	Where the firmware has SMBIOS tables (ADR 0231), what it calls the
+	machine: who made it, its product name, version, family and SKU, as
+	Linux's _/sys/class/dmi/id_ has them. A file the firmware gives no
+	string for is not there. The machine's serial number and UUID, which
+	Linux shows to root alone, are not here: *hwinfo*(8) reads them
+	through the platform capability (*radix-platform*(2)).
+
+_/kernel/class/dmi/id/board_vendor_, _board_name_, _board_version_, _board_asset_tag_
+	Its main board's maker, name, version and asset tag.
+
+_/kernel/class/dmi/id/chassis_type_, _chassis_vendor_, _chassis_version_, _chassis_asset_tag_
+	Its chassis's type, a number of the specification's (DSP0134's
+	7.4.1: *3* a desktop, *10* a notebook), maker, version and asset tag.
+
+_/kernel/class/dmi/id/bios_vendor_, _bios_version_, _bios_date_, _bios_release_, _ec_firmware_release_
+	Its firmware's vendor, version and date (_MM/DD/YYYY_), and the
+	releases of the firmware and of the embedded controller's, as
+	_major.minor_.
+
 _/kernel/class/watchdog/watchdog0/identity_
 	The hardware watchdog the kernel drives, if any (*spark*(8)'s
 	*WATCHDOG*): _the Intel 6300ESB watchdog_, _the Intel ICH9 TCO
 	timer_, _the Intel ICH10 TCO timer_, _the Intel PCH TCO timer_ or _the
-	AMD FCH watchdog_. Without one, or a battery or AC adapter,
-	_/kernel/class_ is not there.
+	AMD FCH watchdog_. Without one, a battery or AC adapter, or SMBIOS
+	tables, _/kernel/class_ is not there.
 
 _/kernel/class/watchdog/watchdog0/state_
 	*active* while it runs, else *inactive*.
