@@ -21,6 +21,10 @@
 //! - `/kernel/bus/pci/devices/<address>/vendor`, `device`, `class`,
 //!   `revision`, `subsystem_vendor` and `subsystem_device`, in
 //!   hexadecimal, for every PCI function the scan found;
+//! - `/kernel/bus/i2c/devices/i2c-0/name`, when the kernel drives the
+//!   chipset's SMBus host controller (ADR 0206), as Linux names its
+//!   adapter (`SMBus I801 adapter at <port>`, or `SMBus PIIX4 adapter
+//!   port 0 at <port>` for AMD's FCH);
 //! - `/kernel/firmware/memmap/<n>/start`, `end` (its last byte, in
 //!   hexadecimal) and `type` (Linux's names: `System RAM`, `Reserved`,
 //!   `ACPI Tables`...), for each range of the firmware's memory map
@@ -77,7 +81,7 @@
 use core::fmt::{self, Write};
 
 use radix_block::DeviceRef;
-use radix_hal::{MemoryKind, MemoryRegion, Smp, Watchdog};
+use radix_hal::{Devices, MemoryKind, MemoryRegion, Smp, Watchdog};
 use radix_klog::TextBuf;
 use radix_sync::Once;
 use radix_vfs::synthetic::{FixedDir, Generated, Generator, Link, ListedDir, Listing, SyntheticFs};
@@ -87,7 +91,7 @@ use radix_uacpi::thermal::STEPS;
 
 use super::disk;
 use crate::acpi::{devices, thermal};
-use crate::{Arch, hwmon, pstate};
+use crate::{Arch, hwmon, i2c, pstate};
 
 static COMMAND_LINE: Once<&'static str> = Once::new();
 static ROOT: Once<KArc<FixedDir>> = Once::new();
@@ -113,6 +117,17 @@ pub fn make() -> Result<FsRef> {
     let pci = bus.add_dir("pci", next_id())?;
     let devices: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(PciDevices)?;
     pci.add("devices", ListedDir::make(next_id(), devices)?)?;
+    if i2c::found() {
+        let i2c = bus.add_dir("i2c", next_id())?.add_dir("devices", next_id())?;
+        let adapter = i2c.add_dir("i2c-0", next_id())?;
+        adapter.add(
+            "name",
+            value(|text| {
+                Arch::smbus_name(text)?;
+                writeln!(text)
+            })?,
+        )?;
+    }
     let firmware = root.add_dir("firmware", next_id())?;
     let memmap: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(MemoryMap)?;
     firmware.add("memmap", ListedDir::make(next_id(), memmap)?)?;

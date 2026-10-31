@@ -130,6 +130,12 @@ _/kernel/bus/pci/devices/_*address*_/subsystem_vendor_, _subsystem_device_
 	found is listed, whether or not a driver uses it. *lspci*(8) reads
 	them.
 
+_/kernel/bus/i2c/devices/i2c-0/name_
+	When the kernel drives the chipset's SMBus controller (ADR 0206),
+	its adapter's name, as Linux gives it: *SMBus I801 adapter at 0700*
+	for Intel's, with its I/O port in hexadecimal, or *SMBus PIIX4
+	adapter port 0 at 0b00* for that of AMD's FCH.
+
 _/kernel/firmware/memmap/_*n*_/start_, _end_, _type_
 	The firmware's memory map, as the boot loader gave it to the kernel,
 	a directory a range numbered from *0* in its order, as Linux's

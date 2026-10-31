@@ -58,6 +58,7 @@ mod debug_console;
 mod domains;
 mod fs;
 mod hwmon;
+mod i2c;
 mod iommutest;
 mod join;
 mod kdb;
@@ -252,6 +253,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     user::power::start();
     acpi::finish_events();
     watchdog::find();
+    i2c::find();
     mce::start(flags.value("mce-poll"));
     pstate::start(flags.value("pstate") == Some("off"), flags.value("epp"));
     acpi::thermal::start();

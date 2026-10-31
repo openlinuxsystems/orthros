@@ -55,6 +55,7 @@ mod rtc;
 mod sci;
 mod sensors;
 mod serial;
+mod smbus;
 mod smp;
 mod space;
 mod thread;
@@ -478,6 +479,14 @@ impl Devices for Arch {
 
     fn watchdog_stop() {
         watchdog::stop();
+    }
+
+    fn find_smbus() -> bool {
+        smbus::find()
+    }
+
+    fn smbus_name(out: &mut dyn core::fmt::Write) -> core::fmt::Result {
+        smbus::name(out)
     }
 }
 

@@ -14,7 +14,7 @@ use radix_sync::{Once, SpinLock};
 
 use crate::io::{inb, inl, inw, outb, outl, outw};
 use crate::paging::{self, Access, Cache};
-use crate::{acpi, apic, devices, entry, memory, smp};
+use crate::{acpi, apic, devices, entry, memory, smbus, smp};
 
 /// The most one mapping of firmware memory takes: a region the firmware
 /// declares larger fails alone, rather than costing the kernel its memory
@@ -60,6 +60,7 @@ pub fn unmap(virt: usize, len: usize) {
 
 /// Reads `width` bytes (1, 2 or 4) from I/O port `port`.
 pub fn read_port(port: u16, width: u8) -> u32 {
+    smbus::firmware_port(port);
     // SAFETY: the firmware's AML names the port (see the module's
     // comment); a read touches no memory.
     unsafe {
@@ -73,6 +74,7 @@ pub fn read_port(port: u16, width: u8) -> u32 {
 
 /// Writes `width` bytes (1, 2 or 4) of `value` to I/O port `port`.
 pub fn write_port(port: u16, width: u8, value: u32) {
+    smbus::firmware_port(port);
     // SAFETY: the firmware's AML names the port and the value, as its
     // code has the machine do (see the module's comment).
     unsafe {

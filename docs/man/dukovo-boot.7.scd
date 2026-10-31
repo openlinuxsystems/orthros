@@ -147,7 +147,8 @@ _/system/resources/licenses/_
   and partitions. The functions are listed in
   _/kernel/bus/pci/devices_ (*radix-sysfs*(5)).
 . Unless *aml=off*, uACPI then runs the firmware's AML, and the kernel
-  hears the power button through it; see *ACPI*.
+  hears the power button through it; see *ACPI*. The kernel then drives
+  the chipset's SMBus controller, if it has one; see *SMBUS*.
 . Each CPU then picks its own speed where it can; see *CPU FREQUENCY*.
   The firmware's thermal zones are watched from then on; see *ACPI*.
   The kernel then looks for the CPUs' temperature sensors; see
@@ -734,6 +735,26 @@ QEMU's CPUs have neither, even under KVM:
 
 The sensors, and the thermal zones of *ACPI*, are in
 _/kernel/class/hwmon_, as on Linux (*radix-sysfs*(5)).
+
+# SMBUS
+
+The SMBus is the chipset's slow bus to the memory modules' SPD EEPROMs
+and sensor chips. The kernel drives Intel's controller and that of AMD's
+FCH (ADR 0206), and the log says where it is and which EEPROMs answer:
+
+```
+SMBus: Intel's controller (8086:2930) at port 0x700 (SMBus I801 adapter at 0700); memory modules' EEPROMs answer at 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57
+SMBus: the FCH's controller (revision 0x61) at port 0xb00 (SMBus PIIX4 adapter port 0 at 0b00); no memory module's EEPROM answers
+```
+
+A controller the kernel leaves alone is a warning: Intel's without an
+I/O base, or the FCH's switched off. Otherwise:
+
+	SMBus: none the kernel drives
+
+Once the firmware's AML reads or writes the controller's ports, the
+kernel leaves it to the firmware, as Linux does. The adapter is named in
+_/kernel/bus/i2c/devices/i2c-0/name_ (*radix-sysfs*(5)).
 
 # IOMMU
 

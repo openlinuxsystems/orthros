@@ -54,8 +54,8 @@ pub fn stop() {
     }
 }
 
-/// What the watchdog reaches.
-struct Chipset;
+/// What the watchdog reaches, and the SMBus host controller (ADR 0206).
+pub(crate) struct Chipset;
 
 /// The FCH's power management index and data ports.
 const FCH_PM_PORTS: [u16; 2] = [0xcd6, 0xcd7];
@@ -85,10 +85,10 @@ impl Platform for Chipset {
             return 0xff;
         }
         // SAFETY: `reachable` keeps the access off the legacy DMA
-        // controllers and PCI configuration, and `radix-watchdog` reaches
-        // only the TCO registers at the base the chipset decodes them at
-        // and the FCH's power management registers, none of which moves
-        // memory.
+        // controllers and PCI configuration, and `radix-watchdog` and
+        // `radix-smbus` reach only the TCO and SMBus registers at the
+        // bases the chipset decodes them at and the FCH's power management
+        // registers, none of which moves memory.
         unsafe { inb(port) }
     }
 

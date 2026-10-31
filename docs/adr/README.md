@@ -193,3 +193,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0203](0203-thermal-zones-through-uacpi.md) | Thermal zones through uACPI | Accepted |
 | [0204](0204-zens-scalable-machine-check-banks.md) | Zen's scalable machine-check banks | Accepted |
 | [0205](0205-the-cpus-temperature-sensors.md) | The CPUs' temperature sensors | Accepted |
+| [0206](0206-the-chipsets-smbus-controller.md) | The chipset's SMBus controller | Accepted |

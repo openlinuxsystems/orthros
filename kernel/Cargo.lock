@@ -231,6 +231,7 @@ dependencies = [
  "radix-random",
  "radix-relocs",
  "radix-sensors",
+ "radix-smbus",
  "radix-sync",
  "radix-vtd",
  "radix-watchdog",
@@ -459,6 +460,13 @@ dependencies = [
 
 [[package]]
 name = "radix-sensors"
+version = "0.10.4"
+dependencies = [
+ "radix-hw",
+]
+
+[[package]]
+name = "radix-smbus"
 version = "0.10.4"
 dependencies = [
  "radix-hw",

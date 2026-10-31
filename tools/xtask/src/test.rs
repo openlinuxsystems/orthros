@@ -90,6 +90,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-sched",
     "radix-scsi",
     "radix-sensors",
+    "radix-smbus",
     "radix-sync",
     "radix-tty",
     "radix-uacpi",
@@ -1289,6 +1290,22 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: tlb,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "smbus",
+        about: "the kernel drives the SMBus controller of q35's ICH9 and finds the eight memory modules' EEPROMs QEMU puts on it; Linux's /sys/bus/i2c names its adapter at the console",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "",
+        cpus: 1,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: smbus,
         disks: &[],
         second: None,
     },
@@ -4392,6 +4409,26 @@ fn tlb(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     selftest_passed(vm, "tlb")?;
     vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+fn smbus(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    // Said after the PCI scan, among the lines the boot report reads past.
+    vm.expect_anywhere(
+        "SMBus: Intel's controller (8086:2930) at port 0x700 (SMBus I801 adapter at 0700); \
+         memory modules' EEPROMs answer at 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57",
+    )?;
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // `is` between name and value, so that no needle is in a typed line.
+    vm.type_text("echo \"name is $(cat /sys/bus/i2c/devices/i2c-0/name)\"\n")?;
+    vm.expect_screen(&["name is SMBus I801 adapter at 0700"])?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: asked to power off the machine")?;
+    vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
+    // QEMU ends when the guest enters ACPI's S5.
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 
 fn msr(vm: &mut Vm, case: &Case) -> Result<(), String> {

@@ -501,6 +501,16 @@ pub trait Devices {
 
     /// Stops the watchdog.
     fn watchdog_stop();
+
+    /// Finds the chipset's SMBus host controller, Intel's or that of AMD's
+    /// FCH (Phase 11e, ADR 0206), and logs it and the memory modules'
+    /// EEPROMs that answer on it. Called once, after the PCI scan; whether
+    /// there is one.
+    fn find_smbus() -> bool;
+
+    /// Writes the name of the controller [`Devices::find_smbus`] found, as
+    /// Linux names its adapter; fails if there is none.
+    fn smbus_name(out: &mut dyn core::fmt::Write) -> core::fmt::Result;
 }
 
 /// What the interpreter of the firmware's AML needs from the machine

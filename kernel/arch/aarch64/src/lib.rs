@@ -301,6 +301,14 @@ impl Devices for Arch {
     fn watchdog_pet() {}
 
     fn watchdog_stop() {}
+
+    fn find_smbus() -> bool {
+        false
+    }
+
+    fn smbus_name(_out: &mut dyn core::fmt::Write) -> core::fmt::Result {
+        Err(core::fmt::Error)
+    }
 }
 
 /// A placeholder thread context.
