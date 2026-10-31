@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The machine's I2C and SMBus adapters (Phase 11e, ADR 0206): for now the
+//! The machine's I2C and SMBus adapters (Phase 11e, ADR 0206): the
 //! chipset's SMBus host controller, which the platform finds after the
 //! PCI scan, and `/kernel/bus/i2c/devices/i2c-0` names, as Linux's sysfs
-//! does.
+//! does; and the DesignWare I2C controllers that Intel's LPSS and AMD's
+//! FCH have, `i2c-1` onwards ([`designware`], ADR 0234).
 //!
 //! On it, the memory modules' SPD EEPROMs (ADR 0232), found as Linux's
 //! `i2c_register_spd` finds them. The SMBIOS tables say how many memory
@@ -26,6 +27,8 @@ use radix_spd::{Eeprom, MAX_SIZE};
 use radix_sync::{Mutex, Once};
 
 use crate::{Arch, sched};
+
+pub mod designware;
 
 /// Whether the platform found the SMBus host controller.
 static FOUND: AtomicBool = AtomicBool::new(false);
@@ -49,7 +52,8 @@ struct Read {
 }
 
 /// Asks the platform for the SMBus host controller, which logs it, then
-/// looks for the memory modules' SPD EEPROMs on it.
+/// looks for the memory modules' SPD EEPROMs on it; then finds the
+/// DesignWare controllers.
 pub fn find() {
     if Arch::find_smbus(wait) {
         FOUND.store(true, Ordering::Release);
@@ -57,6 +61,7 @@ pub fn find() {
     } else {
         info!("SMBus: none the kernel drives");
     }
+    designware::find();
 }
 
 /// Whether there is one.

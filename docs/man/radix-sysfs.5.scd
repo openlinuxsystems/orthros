@@ -184,6 +184,16 @@ _/kernel/bus/i2c/devices/0-00_*nn*_/name_, _eeprom_
 	up to a second, and kept. A read that fails is an I/O error.
 	*hwinfo*(8) decodes them.
 
+_/kernel/bus/i2c/devices/i2c-_*n*_/name_
+	Each I2C bus of a DesignWare controller, Intel LPSS's or AMD's,
+	numbered from *1* in the order the kernel found them (ADR 0234):
+	*Synopsys DesignWare I2C adapter*, as Linux names it.
+
+_/kernel/bus/i2c/devices/i2c-_*HID*:*nn*_/name_
+	Each device the firmware names on one of those buses, by its ACPI
+	name, as Linux names it: its _\_HID_ and its place among the devices
+	of that _\_HID_ on the buses, in hexadecimal, as *PNP0C50:00*.
+
 _/kernel/firmware/memmap/_*n*_/start_, _end_, _type_
 	The firmware's memory map, as the boot loader gave it to the kernel,
 	a directory a range numbered from *0* in its order, as Linux's

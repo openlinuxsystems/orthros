@@ -35,6 +35,9 @@
 //! - `gpio` fires the firmware's events on the GPIO controllers the `gpio`
 //!   boot test's SSDT names, and checks that each runs its method once
 //!   (`gpio`).
+//! - `i2c` checks how the I2C controllers the `i2c` boot test's SSDT
+//!   names were set up, the devices found on their buses, and a transfer
+//!   on each (`i2c::designware`).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -76,6 +79,7 @@ pub fn run(name: &str) {
         "iommu" => iommutest::run(),
         "net" => crate::net::selftest(),
         "gpio" => crate::gpio::selftest(),
+        "i2c" => crate::i2c::designware::selftest(),
         _ => warn!("selftest: no test called `{name}`; the tests are {SELFTESTS:?}"),
     }
 }

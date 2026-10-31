@@ -149,8 +149,8 @@ _/system/resources/licenses/_
 . Unless *aml=off*, uACPI then runs the firmware's AML, and the kernel
   hears the power button through it; see *ACPI*. The kernel then drives
   the chipset's GPIO controllers, its SMBus controller, if it has one,
-  and Framework's embedded controller; see *GPIO*, *SMBUS* and
-  *EMBEDDED CONTROLLER*.
+  its I2C controllers and Framework's embedded controller; see *GPIO*,
+  *SMBUS*, *I2C* and *EMBEDDED CONTROLLER*.
 . Each CPU then picks its own speed where it can; see *CPU FREQUENCY*.
   The firmware's thermal zones are watched from then on; see *ACPI*.
   The kernel then looks for the CPUs' temperature sensors; see
@@ -820,6 +820,29 @@ kernel leaves it to the firmware, as Linux does. The adapter is named in
 _/kernel/bus/i2c/devices/i2c-0/name_ (*radix-sysfs*(5)), and each EEPROM
 found is _/kernel/bus/i2c/devices/0-00<address>_; *hwinfo*(8) decodes
 them.
+
+# I2C
+
+A laptop's touchpad sits on one of the chipset's I2C buses. The kernel
+drives the DesignWare I2C controllers of Intel Sunrise Point's LPSS (PCI
+functions, or ACPI _INT3442_ to _INT3447_) and of AMD's FCH (ACPI
+_AMDI0010_, _AMD0010_), once the firmware's AML runs (ADR 0234). The
+devices on a bus are those the firmware names with an _I2cSerialBus_
+resource; the bus runs in fast mode if all of them allow 400 kHz, else
+in standard mode, with the firmware's counts for its clock if it has
+them (_SSCN_, _FMCN_). Each bus, from _i2c-1_, and each device on it is
+logged:
+
+```
+I2C: Intel Sunrise Point's controller \_SB_.PCI0.I2C1 (0000:00:15.1) is i2c-2: fast mode (400 kHz), 64-byte FIFOs, the firmware's counts
+I2C: i2c-2 has \_SB_.PCI0.I2C1.TPD0 (PNP0C50) at 0x2c, up to 400 kHz
+```
+
+A controller the kernel cannot use is a warning that says why: its
+registers cannot be mapped or read all ones, or it is not a DesignWare
+controller. An LPSS function that is a UART or an SPI controller is left
+alone. The buses and devices are named in _/kernel/bus/i2c/devices_
+(*radix-sysfs*(5)).
 
 # IOMMU
 

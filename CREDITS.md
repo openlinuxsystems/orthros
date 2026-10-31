@@ -300,6 +300,17 @@ We implement these from their published descriptions. No code is copied.
   controllers up and of running the firmware's GPIO events Radix takes
   ([ADR 0233](docs/adr/0233-gpio-controllers-and-the-firmwares-gpio-events.md)).
   We use no code of Linux's.
+- Synopsys's DesignWare DW_apb_i2c registers, as Intel's *100 Series
+  Chipset Family PCH Datasheet* (LPSS) and AMD's Processor Programming
+  References give them, from which `radix-i2c` drives the I2C
+  controllers; NXP's *I2C-bus specification and user manual* (UM10204),
+  whose SCL times its counts are computed from; the ACPI Specification's
+  I2C serial bus connection; and Linux's `i2c-designware`, `intel-lpss`
+  and `i2c-core-acpi`, whose way of setting the controllers up, of
+  choosing the bus's speed and of naming the buses and devices in
+  `/sys/bus/i2c` Radix takes
+  ([ADR 0234](docs/adr/0234-designware-i2c-controllers-and-the-devices-acpi-names-on-them.md)).
+  We use no code of Linux's.
 - The block device `ioctl` requests of Linux's user API (`<linux/fs.h>`),
   BLKGETSIZE64 to BLKDISCARD, whose numbers and meanings Radix's block
   devices take ([ADR 0111](docs/adr/0111-one-queue-for-every-disk.md)).

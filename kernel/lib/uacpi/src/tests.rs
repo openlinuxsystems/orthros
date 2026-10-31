@@ -519,6 +519,25 @@ fn a_machine_runs_its_firmwares_aml_from_start_to_power_off() {
     gpio.run_with(c"_EVT", 0x2a).unwrap();
     assert_eq!(machine.port(EVT_PORT), 0x2a);
 
+    // A PCI function's node, by its _ADR among all the devices; the
+    // devices in it, by their _HIDs, and whether they are there.
+    let mut all = Vec::new();
+    find_all_devices(&mut |node| all.push(node));
+    let i2c = all.iter().copied().find(|node| node.address() == Ok(0x0015_0001)).unwrap();
+    assert_eq!(i2c.path().to_string(), "\\_SB_.PCI0.I2C1");
+    assert_eq!(i2c.parent().and_then(Node::hid).unwrap().as_str(), "PNP0A08");
+    let touchpad = i2c.find("TPD0").unwrap();
+    assert_eq!(touchpad.hid().unwrap().to_string(), "PNP0C50");
+    assert!(touchpad.present() && touchpad.parent() == Some(i2c) && all.contains(&touchpad));
+    // The I2cSerialBusV2's 18 bytes and its controller's path, and the
+    // End Tag.
+    assert_eq!(touchpad.bytes(c"_CRS", <[u8]>::len), Ok(18 + 15 + 2));
+    let absent = i2c.find("TPD1").unwrap();
+    assert!(!absent.present() && all.contains(&absent));
+    assert_eq!(absent.hid().unwrap().as_str(), "SYNA0000");
+    assert!(i2c.hid().is_none() && gpio.parent().unwrap().parent().is_some());
+    assert_eq!(gpio.address().map_err(Error::is_not_found), Err(true));
+
     // Its events: two queued, its GPE raised. The interrupt queues the
     // queries, which run each event's `_Qxx`; their `Notify`s reach the
     // handlers on the notify queue, and the GPE is on again.

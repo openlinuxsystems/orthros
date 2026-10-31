@@ -32,6 +32,10 @@
 //!   memory module's SPD EEPROM on it (ADR 0232): its kind, as Linux
 //!   names its driver (`spd`, `ee1004` or `spd5118`), and its bytes,
 //!   read the first time the file is opened ([`crate::i2c`]);
+//! - `/kernel/bus/i2c/devices/i2c-<n>/name` for each DesignWare I2C bus
+//!   from 1 (ADR 0234), `Synopsys DesignWare I2C adapter` as on Linux,
+//!   and `i2c-<_HID>:<nn>/name` for each device the firmware names on
+//!   one, its ACPI name (`PNP0C50:00`, the `nn`th of its `_HID`);
 //! - `/kernel/firmware/memmap/<n>/start`, `end` (its last byte, in
 //!   hexadecimal) and `type` (Linux's names: `System RAM`, `Reserved`,
 //!   `ACPI Tables`...), for each range of the firmware's memory map
@@ -203,7 +207,8 @@ pub fn make() -> Result<FsRef> {
 }
 
 /// `/kernel/bus/i2c/devices`: the SMBus adapter, and the memory modules'
-/// SPD EEPROMs on it.
+/// SPD EEPROMs on it; the DesignWare buses, and the devices the firmware
+/// names on them.
 fn i2c_bus(bus: &FixedDir) -> Result<()> {
     let devices = bus.add_dir("i2c", next_id())?.add_dir("devices", next_id())?;
     let adapter = devices.add_dir("i2c-0", next_id())?;
@@ -226,6 +231,29 @@ fn i2c_bus(bus: &FixedDir) -> Result<()> {
                 "eeprom",
                 value(move |text| i2c::read_spd(index, |bytes| text.write_bytes(bytes)))?,
             )
+        });
+    });
+    // As Linux names them: the adapter by its driver, and a device the
+    // ACPI namespace names by its ACPI name, as `i2c-PNP0C50:00`.
+    i2c::designware::buses(&mut |number| {
+        let mut name = TextBuf::<16>::new();
+        let _ = write!(name, "i2c-{number}");
+        result = result.and_then(|()| {
+            devices
+                .add_dir(name.as_str(), next_id())?
+                .add("name", value(|text| writeln!(text, "Synopsys DesignWare I2C adapter"))?)
+        });
+    });
+    i2c::designware::devices(&mut |device| {
+        let Some(hid) = device.hid else { return };
+        let mut acpi = TextBuf::<24>::new();
+        let _ = write!(acpi, "{hid}:{:02x}", device.instance);
+        let mut name = TextBuf::<32>::new();
+        let _ = write!(name, "i2c-{acpi}");
+        result = result.and_then(|()| {
+            devices
+                .add_dir(name.as_str(), next_id())?
+                .add("name", value(move |text| writeln!(text, "{acpi}"))?)
         });
     });
     result

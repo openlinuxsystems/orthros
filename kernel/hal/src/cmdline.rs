@@ -116,7 +116,7 @@ pub const FLAGS: &[Flag] = &[
         summary: "run a self-test at the end of boot: page-fault, crash-reboot, breakpoint, \
                   mm-stress, stack-overflow, smep, smap, tlb, msr, caps, fpu, sched-fair, \
                   sched-rt, sched-pi, sched-balance, lockdep, rcu, oom, user, ipc, fuzz, bench, \
-                  iommu, net or gpio",
+                  iommu, net, gpio or i2c",
     },
     Flag {
         name: "fuzz-seed",
@@ -169,6 +169,7 @@ pub const SELFTESTS: &[&str] = &[
     "iommu",
     "net",
     "gpio",
+    "i2c",
 ];
 
 /// A parsed view of the command line.

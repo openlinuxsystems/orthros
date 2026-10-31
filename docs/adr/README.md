@@ -213,3 +213,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0231](0231-the-firmwares-smbios-tables-and-hwinfo.md) | The firmware's SMBIOS tables show what the machine is, and hwinfo shows them | Accepted |
 | [0232](0232-memory-modules-spd-eeproms-over-the-smbus.md) | Memory modules' SPD EEPROMs are read over the SMBus, when first opened | Accepted |
 | [0233](0233-gpio-controllers-and-the-firmwares-gpio-events.md) | GPIO controllers are driven from their ACPI devices, and run the firmware's GPIO events | Accepted |
+| [0234](0234-designware-i2c-controllers-and-the-devices-acpi-names-on-them.md) | DesignWare I2C controllers are polled, at the speed the devices the ACPI namespace names on them allow | Accepted |
