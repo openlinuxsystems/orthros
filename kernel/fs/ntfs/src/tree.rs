@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Changing a directory's index: names put in and taken out of its B+
-//! tree ([`crate::index`] reads it).
+//! tree ([`crate::index`] reads it). `$Extend\$Reparse`'s index of
+//! reparse points is kept the same way, its keys in their own
+//! [`Order`].
 //!
 //! A name goes into the leaf where a lookup for it ends, in order. A node
 //! with no room left splits at its middle entry, which goes up into its
@@ -52,6 +54,74 @@ pub trait Store {
     fn root_fits(&self, len: usize) -> bool;
     /// The size of a block.
     fn block_size(&self) -> usize;
+}
+
+/// How an index orders its keys, which the tree's functions take as
+/// UTF-16 units.
+#[derive(Clone, Copy)]
+pub enum Order<'a> {
+    /// A directory's file names, through the volume's up-case table
+    /// ([`collate`]).
+    Names(&'a Upcase),
+    /// Keys of 32-bit little-endian numbers compared in turn, as Windows'
+    /// `COLLATION_NTOFS_ULONGS`: `$Reparse`'s, a reparse tag and a file
+    /// reference. Their units are the key's bytes in pairs ([`ulongs`]).
+    Ulongs,
+}
+
+impl Order<'_> {
+    /// The order of `key` and the key of `entry`.
+    fn compare(self, key: &[u16], entry: &[u8]) -> Result<Ordering> {
+        match self {
+            Order::Names(upcase) => Ok(collate(upcase, key, key_of(entry)?.units())),
+            Order::Ulongs => {
+                let theirs = raw_key(entry)?;
+                let ours = key.chunks(2).map(|p| {
+                    u32::from(p[0]) | u32::from(p.get(1).copied().unwrap_or(0)) << 16
+                });
+                let theirs = theirs.chunks(4).map(|b| {
+                    let mut n = [0u8; 4];
+                    n[..b.len()].copy_from_slice(b);
+                    u32::from_le_bytes(n)
+                });
+                Ok(ours.cmp(theirs))
+            }
+        }
+    }
+
+    /// The key of `entry`, as the tree's functions take it.
+    fn key(self, entry: &[u8]) -> Result<KVec<u16>> {
+        match self {
+            Order::Names(_) => units_of(entry),
+            Order::Ulongs => ulongs(raw_key(entry)?),
+        }
+    }
+
+    /// Whether `entry` is the file `reference`'s: a directory's entries
+    /// say which file they are for, and `$Reparse`'s keys do.
+    fn is_of(self, entry: &[u8], reference: u64) -> bool {
+        match self {
+            Order::Names(_) => {
+                crate::record::record_of(u64_at(entry, 0)) == crate::record::record_of(reference)
+            }
+            Order::Ulongs => true,
+        }
+    }
+}
+
+/// The units [`Order::Ulongs`] takes for a key of `bytes`.
+pub fn ulongs(bytes: &[u8]) -> Result<KVec<u16>> {
+    let mut v = mem::vec();
+    for pair in bytes.chunks(2) {
+        mem::push(&mut v, u16::from(pair[0]) | u16::from(pair.get(1).copied().unwrap_or(0)) << 8)?;
+    }
+    Ok(v)
+}
+
+/// The bytes of `entry`'s key.
+fn raw_key(entry: &[u8]) -> Result<&[u8]> {
+    let len = usize::from(u16_at(entry, 0x0a));
+    entry.get(0x10..0x10 + len).ok_or(Error::Corrupt)
 }
 
 /// The order of the names `a` and `b` in an index: as the up-case table
@@ -116,8 +186,7 @@ fn subnode_of(entry: &[u8]) -> Option<u64> {
 }
 
 fn key_of(entry: &[u8]) -> Result<FileName<'_>> {
-    let len = usize::from(u16_at(entry, 0x0a));
-    FileName::new(entry.get(0x10..0x10 + len).ok_or(Error::Corrupt)?)
+    FileName::new(raw_key(entry)?)
 }
 
 /// Which node of the tree: the root, or the block at a VCN.
@@ -294,7 +363,7 @@ struct Step {
 fn descend(
     root: &[u8],
     store: &mut dyn Store,
-    upcase: &Upcase,
+    order: Order<'_>,
     name: &[u16],
 ) -> Result<(KVec<Step>, bool)> {
     let mut path = mem::vec();
@@ -310,7 +379,7 @@ fn descend(
                 index = i;
                 break;
             }
-            match collate(upcase, name, key_of(e)?.units()) {
+            match order.compare(name, e)? {
                 Ordering::Greater => {}
                 order => {
                     index = i;
@@ -347,11 +416,11 @@ fn units_of(entry: &[u8]) -> Result<KVec<u16>> {
 pub fn insert(
     root: &mut KVec<u8>,
     store: &mut dyn Store,
-    upcase: &Upcase,
+    order: Order<'_>,
     entry: &[u8],
 ) -> Result<()> {
-    let units = units_of(entry)?;
-    let (mut path, found) = descend(root, store, upcase, &units)?;
+    let units = order.key(entry)?;
+    let (mut path, found) = descend(root, store, order, &units)?;
     if found {
         return Err(Error::Exists);
     }
@@ -502,18 +571,18 @@ fn edge_path(root: &[u8], store: &mut dyn Store, vcn: u64, rightmost: bool) -> R
 pub fn remove(
     root: &mut KVec<u8>,
     store: &mut dyn Store,
-    upcase: &Upcase,
+    order: Order<'_>,
     name: &[u16],
     reference: u64,
 ) -> Result<()> {
-    let (mut path, found) = descend(root, store, upcase, name)?;
+    let (mut path, found) = descend(root, store, order, name)?;
     if !found {
         return Err(Error::NotFound);
     }
     let Step { mut node, index } = path.pop().ok_or(Error::Corrupt)?;
     let mut entries = node.entries()?;
     let e = &entries[index];
-    if crate::record::record_of(u64_at(e, 0)) != crate::record::record_of(reference) {
+    if !order.is_of(e, reference) {
         return Err(Error::NotFound);
     }
     let Some(vcn) = subnode_of(e) else {
@@ -523,7 +592,7 @@ pub fn remove(
         write_node(root, store, &node)?;
         let empty = entries.len() == 1 && node.at != At::Root;
         mem::push(&mut path, Step { node, index })?;
-        return if empty { settle(root, store, upcase, path) } else { Ok(()) };
+        return if empty { settle(root, store, order, path) } else { Ok(()) };
     };
     // In a node above: the greatest entry of the subtree before it takes
     // its place, keeping its subtree.
@@ -541,8 +610,8 @@ pub fn remove(
     propagate(root, store, path, node, entries)?;
     // Where the greatest came from may be an empty leaf now: found again
     // from the top, as the nodes above may have split.
-    let units = units_of(&greatest)?;
-    let (mut path, found) = descend(root, store, upcase, &units)?;
+    let units = order.key(&greatest)?;
+    let (mut path, found) = descend(root, store, order, &units)?;
     let step = path.last().ok_or(Error::Corrupt)?;
     let offsets = step.node.offsets()?;
     let sub = subnode_of(step.node.entry(offsets[step.index]));
@@ -552,7 +621,7 @@ pub fn remove(
                 mem::push(&mut path, s)?;
             }
             let leaf = &path.last().ok_or(Error::Corrupt)?.node;
-            if leaf.offsets()?.len() == 1 { settle(root, store, upcase, path) } else { Ok(()) }
+            if leaf.offsets()?.len() == 1 { settle(root, store, order, path) } else { Ok(()) }
         }
         _ => Err(Error::Corrupt),
     }
@@ -565,7 +634,7 @@ pub fn remove(
 fn settle(
     root: &mut KVec<u8>,
     store: &mut dyn Store,
-    upcase: &Upcase,
+    order: Order<'_>,
     mut path: KVec<Step>,
 ) -> Result<()> {
     let Step { node: leaf, .. } = path.pop().ok_or(Error::Corrupt)?;
@@ -591,7 +660,7 @@ fn settle(
             return Ok(());
         }
         mem::push(&mut path, Step { node: parent, index: 0 })?;
-        return settle(root, store, upcase, path);
+        return settle(root, store, order, path);
     } else {
         // The last entry pointed here: the entry before it comes down to
         // the end of the subtree before, which the last entry now points
@@ -614,14 +683,14 @@ fn settle(
     let put = if rightmost { entries.len() - 1 } else { 0 };
     mem::insert(&mut entries, put, down.clone_in()?)?;
     propagate(root, store, path, target, entries)?;
-    tidy(root, store, upcase, &units_of(&down)?)
+    tidy(root, store, order, &order.key(&down)?)
 }
 
 /// Replaces each block on the way to `name` that has no names but a
 /// child by that child, from the top down.
-fn tidy(root: &mut KVec<u8>, store: &mut dyn Store, upcase: &Upcase, name: &[u16]) -> Result<()> {
+fn tidy(root: &mut KVec<u8>, store: &mut dyn Store, order: Order<'_>, name: &[u16]) -> Result<()> {
     for _ in 0..MAX_DEPTH {
-        let (path, _) = descend(root, store, upcase, name)?;
+        let (path, _) = descend(root, store, order, name)?;
         let mut changed = false;
         for i in 1..path.len() {
             let node = &path[i].node;
@@ -675,14 +744,14 @@ struct Visit {
 pub fn walk(
     root: &[u8],
     store: &mut dyn Store,
-    upcase: &Upcase,
+    order: Order<'_>,
     after: Option<&[u16]>,
     f: &mut dyn FnMut(&[u8]) -> Result<bool>,
 ) -> Result<()> {
     let mut stack: KVec<Visit> = mem::vec();
     match after {
         Some(name) => {
-            let (path, found) = descend(root, store, upcase, name)?;
+            let (path, found) = descend(root, store, order, name)?;
             let last = path.len() - 1;
             for (i, Step { node, index }) in path.into_iter().enumerate() {
                 let offsets = node.offsets()?;
@@ -737,18 +806,18 @@ pub fn walk(
 pub fn update(
     root: &mut KVec<u8>,
     store: &mut dyn Store,
-    upcase: &Upcase,
+    order: Order<'_>,
     name: &[u16],
     reference: u64,
     patch: &mut dyn FnMut(&mut [u8]),
 ) -> Result<()> {
-    let (mut path, found) = descend(root, store, upcase, name)?;
+    let (mut path, found) = descend(root, store, order, name)?;
     let Some(Step { mut node, index }) = path.pop().filter(|_| found) else {
         return Err(Error::NotFound);
     };
     let at = node.offsets()?[index];
     let e = node.entry(at);
-    if crate::record::record_of(u64_at(e, 0)) != crate::record::record_of(reference) {
+    if !order.is_of(e, reference) {
         return Err(Error::NotFound);
     }
     let key_len = usize::from(u16_at(e, 0x0a));

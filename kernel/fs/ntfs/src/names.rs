@@ -98,10 +98,15 @@ pub struct Dup {
     pub size: u64,
     /// Its attributes ([`crate::index::attributes`]).
     pub flags: u32,
+    /// Its reparse point's tag, for one with
+    /// [`crate::index::attributes::REPARSE_POINT`].
+    pub reparse: u32,
 }
 
 impl Dup {
-    /// Puts it in the `$FILE_NAME` value `value`.
+    /// Puts it in the `$FILE_NAME` value `value`. The field a reparse
+    /// point's tag goes in is otherwise its extended attributes' size,
+    /// which stays.
     pub fn put(&self, value: &mut [u8]) {
         put_u64(value, 0x08, self.created);
         put_u64(value, 0x10, self.modified);
@@ -110,6 +115,9 @@ impl Dup {
         put_u64(value, 0x28, self.allocated);
         put_u64(value, 0x30, self.size);
         put_u32(value, 0x38, self.flags);
+        if self.flags & crate::index::attributes::REPARSE_POINT != 0 {
+            put_u32(value, 0x3c, self.reparse);
+        }
     }
 }
 

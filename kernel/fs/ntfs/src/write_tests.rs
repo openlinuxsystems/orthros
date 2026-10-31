@@ -25,7 +25,7 @@ use radix_vfs::{Access, Error, FileSystem, Kind, NodeRef, Slice};
 use crate::NtfsFs;
 use crate::node::NtfsNode;
 use crate::tests::{
-    Image, SIZES, VOLUMES, names, pattern, read_all, run, scratch, test_names, tool, walk,
+    Image, SIZES, VOLUMES, names, pattern, read_all, read_link, run, scratch, test_names, tool, walk,
 };
 
 const DIR: Access = Access::default_for(Kind::Directory);
@@ -563,6 +563,154 @@ fn what_ntfs_3g_wrote_is_written_to() {
         assert!(seen[path] == *data, "{path}: The Sleuth Kit reads other bytes");
         assert!(ntfscat(&written, &format!("/{path}")) == *data, "{path}: ntfs-3g reads other bytes");
     }
+}
+
+/// What `$Extend\$Reparse` lists in `volume`: each reparse point's tag
+/// and its file's record.
+fn reparse_points(volume: &Volume) -> Vec<(u32, u64)> {
+    let root = volume.root();
+    let node = radix_vfs::downcast::<NtfsNode>(&*root).unwrap();
+    node.reparse_points().unwrap().to_vec()
+}
+
+#[test]
+fn links_are_made_as_windows_and_wsl_make_them() {
+    use crate::reparse::tag::{LX_SYMLINK, SYMLINK};
+    for (mib, sector, cluster) in VOLUMES {
+        let image = Image::mkntfs(mib, sector, cluster);
+        let volume = Volume::new_in(sector, &image.bytes());
+        let root = volume.root();
+        let docs = root.create("docs", Kind::Directory, DIR).unwrap();
+        make_file(&docs, "a.txt", b"a\n", usize::MAX);
+        // Relative paths of names Windows takes are Windows' links, to a
+        // directory as one; any other path is WSL's, as it is.
+        let links: &[(&str, &str, &str, u32)] = &[
+            ("", "to docs", "docs", SYMLINK),
+            ("", "to a", "docs/a.txt", SYMLINK),
+            ("", "nowhere", "missing/file", SYMLINK),
+            ("docs", "up", "..", SYMLINK),
+            ("docs", "here", "./a.txt", SYMLINK),
+            ("", "absolute", "/system/resources", LX_SYMLINK),
+            ("", "colon", "a:b", LX_SYMLINK),
+            ("", "slash", "docs/", LX_SYMLINK),
+            ("docs", "\u{1f600} emoji", "\u{e9}t\u{e9}/\u{1f600}", SYMLINK),
+        ];
+        let mut records = Vec::new();
+        for &(dir, name, target, tag) in links {
+            let at = if dir.is_empty() { root.clone() } else { walk(&root, dir).unwrap() };
+            let node = at.make_link(name, target, FILE).unwrap();
+            assert_eq!(node.stat().kind, Kind::Symlink);
+            assert_eq!(read_link(&node), target);
+            records.push((tag, node.stat().id));
+        }
+        records.sort_by_key(|&(tag, record)| (tag, record));
+        assert_eq!(reparse_points(&volume), records);
+        assert_eq!(root.make_link("to a", "x", FILE).err(), Some(Error::Exists));
+        assert_eq!(root.make_link("bad?", "x", FILE).err(), Some(Error::BadName));
+        // Another name, a new name, and the last name going.
+        let to_a = walk(&root, "to a").unwrap();
+        root.link("to a again", &to_a).unwrap();
+        root.remove("to a").unwrap();
+        root.rename("colon", &*docs, "colon moved").unwrap();
+        root.remove("nowhere").unwrap();
+        let gone = walk(&root, "absolute").unwrap().stat().id;
+        root.remove("absolute").unwrap();
+        drop((to_a, docs, root));
+        records.retain(|&(_, record)| record != gone);
+        let volume = volume.remount();
+        let root = volume.root();
+        let left = [
+            ("to docs", "docs"),
+            ("to a again", "docs/a.txt"),
+            ("docs/up", ".."),
+            ("docs/here", "./a.txt"),
+            ("docs/colon moved", "a:b"),
+            ("slash", "docs/"),
+            ("docs/\u{1f600} emoji", "\u{e9}t\u{e9}/\u{1f600}"),
+        ];
+        let mut listed = Vec::new();
+        for (path, target) in left {
+            let node = walk(&root, path).unwrap();
+            assert_eq!(node.stat().kind, Kind::Symlink, "{path}");
+            assert_eq!(read_link(&node), target, "{path}");
+            let tag = if target.contains(':') || target.ends_with('/') { LX_SYMLINK } else { SYMLINK };
+            listed.push((tag, node.stat().id));
+        }
+        listed.sort();
+        assert_eq!(reparse_points(&volume), listed);
+        assert!(walk(&root, "nowhere").is_err() && walk(&root, "absolute").is_err());
+        drop(root);
+        let written = volume.image();
+        ntfs_3g_check(&written);
+        // Windows takes a link to a directory as a directory, as The
+        // Sleuth Kit shows it, and any other as a file.
+        let seen = fls(&Scratch::new(&written));
+        for (path, _) in left {
+            let dir = matches!(path, "to docs" | "docs/up");
+            assert_eq!(seen[path].0 == Kind::Directory, dir, "{path}");
+        }
+    }
+}
+
+#[test]
+fn reparse_index_grows_into_blocks_and_back() {
+    let image = Image::mkntfs(32, 512, 4096);
+    let volume = Volume::new_in(512, &image.bytes());
+    let root = volume.root();
+    let dir = root.create("links", Kind::Directory, DIR).unwrap();
+    let mut made = Vec::new();
+    for i in 0..600 {
+        let target = if i % 3 == 0 { format!("/absolute/{i}") } else { format!("file {i}") };
+        let node = dir.make_link(&format!("link {i:03}"), &target, FILE).unwrap();
+        made.push((i, node.stat().id));
+    }
+    let listed = reparse_points(&volume);
+    assert_eq!(listed.len(), 600);
+    assert!(listed.is_sorted(), "$Reparse keeps its keys in order");
+    for (i, _) in made.iter().filter(|(i, _)| i % 2 == 0) {
+        dir.remove(&format!("link {i:03}")).unwrap();
+    }
+    drop((dir, root));
+    let volume = volume.remount();
+    let mut left: Vec<(u32, u64)> = made
+        .iter()
+        .filter(|(i, _)| i % 2 == 1)
+        .map(|&(i, id)| {
+            let tag = if i % 3 == 0 { crate::reparse::tag::LX_SYMLINK } else { crate::reparse::tag::SYMLINK };
+            (tag, id)
+        })
+        .collect();
+    left.sort();
+    assert_eq!(reparse_points(&volume), left);
+    let root = volume.root();
+    let dir = walk(&root, "links").unwrap();
+    for (i, _) in made.iter().filter(|(i, _)| i % 2 == 1) {
+        dir.remove(&format!("link {i:03}")).unwrap();
+    }
+    assert_eq!(reparse_points(&volume), []);
+    drop((dir, root));
+    ntfs_3g_check(&volume.image());
+}
+
+#[test]
+fn links_windows_and_wsl_made_go() {
+    let volume = Volume::new_in(512, &crate::tests::ntfs_3g());
+    let root = volume.root();
+    let before = reparse_points(&volume);
+    // ntfs-3g listed the reparse points it made: Windows' links, the
+    // junction and WSL's.
+    assert_eq!(before.len(), 4, "{before:x?}");
+    for path in ["windows link", "junction", "wsl link", "Documents/Deep/er/absolute link"] {
+        let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let dir = if dir.is_empty() { root.clone() } else { walk(&root, dir).unwrap() };
+        dir.remove(name).unwrap();
+    }
+    root.remove("interix link").unwrap();
+    assert_eq!(reparse_points(&volume), []);
+    drop(root);
+    let volume = volume.remount();
+    assert_eq!(reparse_points(&volume), []);
+    ntfs_3g_check(&volume.image());
 }
 
 /// What a step of [`random_changes_read_back`] does.

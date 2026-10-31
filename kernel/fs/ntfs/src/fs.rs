@@ -207,7 +207,8 @@ pub(crate) struct Loaded {
     pub(crate) parent: u64,
     /// Its data: the unnamed `$DATA`.
     pub(crate) data: Option<Value>,
-    /// Its directory index: `$I30`'s root, blocks and bitmap.
+    /// Its directory index: `$I30`'s root, blocks and bitmap; or
+    /// `$Reparse`'s `$R`, a view index.
     pub(crate) root: Option<KVec<u8>>,
     pub(crate) blocks: Option<Value>,
     pub(crate) bitmap: Option<Value>,
@@ -220,6 +221,8 @@ pub(crate) struct Loaded {
     /// Whether its attributes are in more than one record, which Radix
     /// does not change yet.
     pub(crate) listed: bool,
+    /// Whether its index is `$R`, of reparse points, not of names.
+    pub(crate) view: bool,
 }
 
 /// Adds the attribute `attr` to the value in `slot`: a resident one, or a
@@ -281,14 +284,17 @@ fn take(loaded: &mut Loaded, attr: &Attr<'_>, clusters: u64) -> Result<()> {
             }
         }
         kind::DATA if attr.unnamed() => piece(&mut loaded.data, attr, clusters)?,
-        kind::INDEX_ROOT if named("$I30") => {
+        kind::INDEX_ROOT if named("$I30") || named("$R") => {
             if attr.non_resident() || loaded.root.is_some() {
                 return Err(Error::Corrupt);
             }
+            loaded.view = named("$R");
             loaded.root = Some(mem::copy(attr.value())?);
         }
-        kind::INDEX_ALLOCATION if named("$I30") => piece(&mut loaded.blocks, attr, clusters)?,
-        kind::BITMAP if named("$I30") => piece(&mut loaded.bitmap, attr, clusters)?,
+        kind::INDEX_ALLOCATION if named("$I30") || named("$R") => {
+            piece(&mut loaded.blocks, attr, clusters)?
+        }
+        kind::BITMAP if named("$I30") || named("$R") => piece(&mut loaded.bitmap, attr, clusters)?,
         kind::BITMAP if attr.unnamed() => piece(&mut loaded.own_bitmap, attr, clusters)?,
         kind::REPARSE_POINT => piece(&mut loaded.reparse, attr, clusters)?,
         kind::VOLUME_NAME => loaded.label = Some(mem::copy(attr.value())?),

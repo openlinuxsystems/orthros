@@ -149,7 +149,7 @@ pub(crate) fn read_all(node: &NodeRef) -> Vec<u8> {
     out
 }
 
-fn read_link(node: &NodeRef) -> String {
+pub(crate) fn read_link(node: &NodeRef) -> String {
     let mut out = [0u8; 256];
     let n = node.read_link(&mut SliceMut(&mut out)).unwrap();
     String::from_utf8(out[..n].to_vec()).unwrap()

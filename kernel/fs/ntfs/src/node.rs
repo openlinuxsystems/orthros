@@ -128,9 +128,9 @@ struct Mark {
     count: u32,
 }
 
-/// A directory's index.
+/// A directory's index, or `$Reparse`'s.
 struct Dir {
-    /// `$I30`'s root.
+    /// `$I30`'s root, or `$R`'s.
     root: KVec<u8>,
     /// Its blocks, if it has any.
     blocks: Option<Stream>,
@@ -138,10 +138,72 @@ struct Dir {
     bitmap: KVec<u8>,
     /// Whether the bitmap is in clusters, which Radix does not change.
     fixed: bool,
+    /// Whether it is `$R`, of reparse points, not `$I30`.
+    view: bool,
     /// Where listings stopped.
     marks: KVec<Mark>,
     next_mark: u32,
 }
+
+impl Dir {
+    /// The name of its attributes, as UTF-16 bytes.
+    fn name(&self) -> &'static [u8] {
+        if self.view { &edit::R } else { &I30 }
+    }
+
+    /// The index of the directory or view index whose `$INDEX_ROOT` value
+    /// is `root`, with `blocks` and `bitmap` if it has them; and its size
+    /// and the bytes its blocks hold.
+    #[inline(never)]
+    fn load(
+        vol: &crate::fs::Volume,
+        root: KVec<u8>,
+        blocks: Option<Value>,
+        bitmap: Option<Value>,
+        view: bool,
+    ) -> Result<(Dir, u64, u64)> {
+        // A directory's index is of names, collated as names are; a view
+        // index's keys are numbers.
+        let indexed = if view { 0 } else { record::kind::FILE_NAME };
+        let collation = if view { COLLATION_ULONGS } else { COLLATION_NAMES };
+        if root.len() < ROOT_HEADER + 16
+            || u32_at(&root, 0) != indexed
+            || u32_at(&root, 4) != collation
+        {
+            return Err(Error::Corrupt);
+        }
+        let blocks = match blocks {
+            Some(Value::Clusters(stream)) => Some(stream),
+            Some(Value::Resident(_)) => return Err(Error::Corrupt),
+            None => None,
+        };
+        let (bitmap, in_clusters) = match &bitmap {
+            Some(value @ Value::Clusters(_)) => (vol.read_whole(value, MAX_WHOLE_BITMAP)?, true),
+            Some(Value::Resident(bytes)) => (mem::copy(bytes)?, false),
+            None => (mem::vec(), false),
+        };
+        if blocks.is_some() && bitmap.is_empty() {
+            return Err(Error::Corrupt);
+        }
+        let size = blocks.as_ref().map_or(root.len() as u64, |b| b.size);
+        let allocated = blocks.as_ref().map_or(0, |b| b.size);
+        let dir = Dir {
+            root,
+            blocks,
+            bitmap,
+            fixed: in_clusters,
+            view,
+            marks: mem::vec(),
+            next_mark: 1,
+        };
+        Ok((dir, size, allocated))
+    }
+}
+
+/// An index root's collation rules: names through the up-case table, and
+/// 32-bit numbers in turn.
+const COLLATION_NAMES: u32 = 1;
+const COLLATION_ULONGS: u32 = 0x13;
 
 /// What a node knows of itself that changes.
 struct State {
@@ -184,6 +246,11 @@ pub struct NtfsNode {
     cache: Option<FileCache>,
     /// A link's target, as the disk has it, and as a path once worked out.
     link: Option<Target>,
+    /// Its reparse point's tag, if it has one.
+    tag: u32,
+    /// Whether its record holds a directory's index: a directory's, or
+    /// a link to a directory's, as Windows makes them.
+    indexed: bool,
     path: Once<KVec<u8>>,
     me: Once<Weak<NtfsNode, Alloc>>,
     pinned: AtomicBool,
@@ -211,8 +278,13 @@ impl NtfsNode {
             bitmap,
             reparse,
             listed,
+            view,
             ..
         } = loaded;
+        // A view index is loaded after its file's data.
+        let (root, root_of_view) = if view { (None, root) } else { (root, None) };
+        let (blocks, blocks_of_view) = if view { (None, blocks) } else { (blocks, None) };
+        let (bitmap, bitmap_of_view) = if view { (None, bitmap) } else { (bitmap, None) };
         let vol = &fs.vol;
         let cs = u64::from(vol.geo.cluster_size);
         let reparse = match &reparse {
@@ -305,37 +377,19 @@ impl NtfsNode {
             }
             Kind::Directory => {
                 let root = root.ok_or(Error::Corrupt)?;
-                // A directory's index is of names, collated as names are.
-                if root.len() < ROOT_HEADER + 16 || u32_at(&root, 0) != record::kind::FILE_NAME {
-                    return Err(Error::Corrupt);
-                }
-                let blocks = match blocks {
-                    Some(Value::Clusters(stream)) => Some(stream),
-                    Some(Value::Resident(_)) => return Err(Error::Corrupt),
-                    None => None,
-                };
-                let (bitmap, in_clusters) = match &bitmap {
-                    Some(value @ Value::Clusters(_)) => {
-                        (vol.read_whole(value, MAX_WHOLE_BITMAP)?, true)
-                    }
-                    Some(Value::Resident(bytes)) => (mem::copy(bytes)?, false),
-                    None => (mem::vec(), false),
-                };
-                if blocks.is_some() && bitmap.is_empty() {
-                    return Err(Error::Corrupt);
-                }
-                size = blocks.as_ref().map_or(root.len() as u64, |b| b.size);
-                allocated = blocks.as_ref().map_or(0, |b| b.size);
-                dir = Some(Dir {
-                    root,
-                    blocks,
-                    bitmap,
-                    fixed: in_clusters,
-                    marks: mem::vec(),
-                    next_mark: 1,
-                });
+                let (index, bytes, held) = Dir::load(vol, root, blocks, bitmap, false)?;
+                (size, allocated) = (bytes, held);
+                dir = Some(index);
             }
             _ => {}
+        }
+        // `$Reparse` is a file with a view index, which Radix keeps, but
+        // whose data is none.
+        if view
+            && kind == Kind::File
+            && let Some(root) = root_of_view
+        {
+            dir = Some(Dir::load(vol, root, blocks_of_view, bitmap_of_view, true)?.0);
         }
         if kind == Kind::Symlink {
             fixed = Some(Error::NotSupported);
@@ -362,6 +416,8 @@ impl NtfsNode {
             state: Mutex::new(state),
             cache,
             link,
+            tag,
+            indexed: flags & record::flags::DIRECTORY != 0,
             path: Once::new(),
             me: Once::new(),
             pinned: AtomicBool::new(false),
@@ -455,6 +511,27 @@ impl NtfsNode {
         Ok(())
     }
 
+    /// What `$Reparse` lists: each reparse point's tag and the record
+    /// its file is in, in order.
+    #[cfg(test)]
+    pub(crate) fn reparse_points(&self) -> Result<KVec<(u32, u64)>> {
+        let index = {
+            let mut ns = self.fs.ns.lock();
+            self.reparse_index(&mut ns)?
+        };
+        let mut st = index.state.lock();
+        let dir = st.dir.as_mut().ok_or(Error::Corrupt)?;
+        let mut store =
+            DirStore { fs: &self.fs, blocks: &mut dir.blocks, bitmap: &mut dir.bitmap, others: 0 };
+        let mut out = mem::vec();
+        tree::walk(&dir.root, &mut store, tree::Order::Ulongs, None, &mut |e| {
+            let key = &e[0x10..0x1c];
+            mem::push(&mut out, (u32_at(key, 0), record_of(u64_at(key, 4))))?;
+            Ok(true)
+        })?;
+        Ok(out)
+    }
+
     /// Notes that its data changed: Windows' archive bit goes on.
     fn data_changed(&self) {
         {
@@ -516,7 +593,7 @@ impl NtfsNode {
             (Some(_), _) => (st.allocated, size),
             (None, _) => (0, 0),
         };
-        let dir = if self.kind == Kind::Directory { attributes::DIRECTORY } else { 0 };
+        let dir = if self.indexed { attributes::DIRECTORY } else { 0 };
         Dup {
             created: names::to_nt(st.info.created),
             modified: names::to_nt(st.info.modified),
@@ -525,6 +602,7 @@ impl NtfsNode {
             allocated,
             size,
             flags: st.info.attributes | dir,
+            reparse: self.tag,
         }
     }
 
@@ -980,11 +1058,12 @@ impl Store for DirStore<'_> {
 /// A directory's fresh index root: of names, blocks as `fields` (bytes 8
 /// to 16 of its parent's root: their size and clusters) say, no entries
 /// but the last.
-fn fresh_root(fields: &[u8]) -> Result<KVec<u8>> {
+fn fresh_root(fields: &[u8], view: bool) -> Result<KVec<u8>> {
     let mut r = zeroed(0x30)?;
-    put_u32(&mut r, 0, kind::FILE_NAME);
-    // Collated as file names.
-    put_u32(&mut r, 4, 1);
+    // Of file names, collated as names are; or a view index's, collated
+    // as numbers.
+    put_u32(&mut r, 0, if view { 0 } else { kind::FILE_NAME });
+    put_u32(&mut r, 4, if view { COLLATION_ULONGS } else { COLLATION_NAMES });
     r[8..16].copy_from_slice(fields);
     let h = ROOT_HEADER;
     put_u32(&mut r, h, 0x10);
@@ -998,10 +1077,10 @@ fn fresh_root(fields: &[u8]) -> Result<KVec<u8>> {
 /// Puts `dir`'s root, and its bitmap if it has blocks, in its record
 /// `buf`.
 fn put_root(buf: &mut [u8], dir: &Dir) -> Result<()> {
-    let at = edit::find(buf, kind::INDEX_ROOT, &I30).ok_or(Error::Corrupt)?;
+    let at = edit::find(buf, kind::INDEX_ROOT, dir.name()).ok_or(Error::Corrupt)?;
     edit::set_value(buf, at, &dir.root)?;
     if dir.blocks.is_some() {
-        let at = edit::find(buf, kind::BITMAP, &I30).ok_or(Error::Corrupt)?;
+        let at = edit::find(buf, kind::BITMAP, dir.name()).ok_or(Error::Corrupt)?;
         edit::set_value(buf, at, &dir.bitmap)?;
     }
     Ok(())
@@ -1068,7 +1147,7 @@ impl NtfsNode {
             Some(adds) => self.prepare(dir, &mut buf, adds)?,
             None => false,
         };
-        let root_at = edit::find(&buf, kind::INDEX_ROOT, &I30).ok_or(Error::Corrupt)?;
+        let root_at = edit::find(&buf, kind::INDEX_ROOT, dir.name()).ok_or(Error::Corrupt)?;
         let others = edit::used(&buf) - u32_at(&buf, root_at + 4) as usize;
         if others > rs {
             return Err(Error::Corrupt);
@@ -1110,6 +1189,7 @@ impl NtfsNode {
     /// bytes may need ([`NtfsNode::change_index`]), with the record `buf`
     /// saying where they are; whether it took any.
     fn prepare(&self, dir: &mut Dir, buf: &mut [u8], adds: usize) -> Result<bool> {
+        let name = dir.name();
         let geo = &self.fs.vol.geo;
         let rs = geo.record_size as usize;
         let cs = u64::from(geo.cluster_size);
@@ -1122,7 +1202,7 @@ impl NtfsNode {
                 others: 0,
             };
             if store.blocks.is_none() {
-                let root_at = edit::find(buf, kind::INDEX_ROOT, &I30).ok_or(Error::Corrupt)?;
+                let root_at = edit::find(buf, kind::INDEX_ROOT, name).ok_or(Error::Corrupt)?;
                 let others = edit::used(buf) - u32_at(buf, root_at + 4) as usize;
                 // The entry, and a block's number in each entry if the
                 // root goes down.
@@ -1143,8 +1223,8 @@ impl NtfsNode {
             // root it keeps meanwhile is an empty one.
             let mut fields = [0u8; 8];
             fields.copy_from_slice(dir.root.get(8..16).ok_or(Error::Corrupt)?);
-            let at = edit::find(buf, kind::INDEX_ROOT, &I30).ok_or(Error::Corrupt)?;
-            edit::set_value(buf, at, &fresh_root(&fields)?)?;
+            let at = edit::find(buf, kind::INDEX_ROOT, name).ok_or(Error::Corrupt)?;
+            edit::set_value(buf, at, &fresh_root(&fields, dir.view)?)?;
         }
         let blocks = dir.blocks.get_or_insert_with(Stream::new);
         let count = blocks.size / index_size;
@@ -1167,12 +1247,12 @@ impl NtfsNode {
             }
             let clusters = blocks.runs.clusters();
             let sizes = edit::Sizes { allocated: clusters * cs, size, initialized: size, ..edit::Sizes::default() };
-            replace_named(buf, kind::INDEX_ALLOCATION, &I30, &blocks.runs, clusters, sizes)?;
-            match edit::find(buf, kind::BITMAP, &I30) {
+            replace_named(buf, kind::INDEX_ALLOCATION, name, &blocks.runs, clusters, sizes)?;
+            match edit::find(buf, kind::BITMAP, name) {
                 Some(at) => edit::set_value(buf, at, &dir.bitmap)?,
                 None => {
                     let i = u16_at(buf, 0x28);
-                    let attr = edit::resident(kind::BITMAP, &I30, i, &dir.bitmap, false)?;
+                    let attr = edit::resident(kind::BITMAP, name, i, &dir.bitmap, false)?;
                     edit::insert(buf, &attr)?;
                     edit::next_instance(buf);
                 }
@@ -1201,7 +1281,7 @@ impl NtfsNode {
     fn update_entry(&self, name: &[u16], reference: u64, dup: &Dup) -> Result<()> {
         let upcase = &self.fs.upcase;
         self.change_index(None, &mut |root, store| {
-            tree::update(root, store, upcase, name, reference, &mut |key| dup.put(key))
+            tree::update(root, store, tree::Order::Names(upcase), name, reference, &mut |key| dup.put(key))
         })
     }
 
@@ -1225,8 +1305,8 @@ impl NtfsNode {
 
     /// Takes the name `units` of `node` (of that case, or the same but for
     /// case) out of this directory, with its short name or the long one it
-    /// is short for. The caller holds `ns`.
-    fn remove_name(&self, node: &NtfsNode, units: &[u16]) -> Result<()> {
+    /// is short for. The caller holds `ns`, whose scratch is `scratch`.
+    fn remove_name(&self, scratch: &mut Scratch, node: &NtfsNode, units: &[u16]) -> Result<()> {
         node.editable()?;
         let reference = node.reference();
         let mut buf = node.read_rec()?;
@@ -1251,10 +1331,20 @@ impl NtfsNode {
         if let Some(twin) = twin {
             mem::push(&mut gone, twin)?;
         }
+        // A reparse point's last name going takes it out of `$Reparse`
+        // first; one `$Reparse` did not list goes all the same.
+        let lost = gone.iter().filter(|&&i| names[i].ns != namespace::DOS).count() as u32;
+        if node.tag != 0 && node.state.lock().links <= lost {
+            let index = self.reparse_index(scratch);
+            match index.and_then(|r| r.note_reparse(node.tag, reference, false)) {
+                Ok(()) | Err(Error::NotFound | Error::NotSupported) => {}
+                Err(err) => return Err(err),
+            }
+        }
         for &i in &gone {
             let name = &names[i].units;
             self.change_index(Some(0), &mut |root, store| {
-                tree::remove(root, store, upcase, name, reference)
+                tree::remove(root, store, tree::Order::Names(upcase), name, reference)
             })?;
         }
         // The later attribute first, so that the other stays where it is.
@@ -1263,7 +1353,6 @@ impl NtfsNode {
             edit::remove(&mut buf, names[i].at);
         }
         node.write_rec(&buf)?;
-        let lost = gone.iter().filter(|&&i| names[i].ns != namespace::DOS).count() as u32;
         let left = first_parent(&buf)?;
         let mut st = node.state.lock();
         st.links = st.links.saturating_sub(lost);
@@ -1303,7 +1392,7 @@ impl NtfsNode {
         let entry = tree::make_entry(reference, &key, None)?;
         let upcase = &self.fs.upcase;
         self.change_index(Some(entry.len()), &mut |root, store| {
-            tree::insert(root, store, upcase, &entry)
+            tree::insert(root, store, tree::Order::Names(upcase), &entry)
         })?;
         node.write_rec(&buf)?;
         if ns != namespace::DOS {
@@ -1314,9 +1403,18 @@ impl NtfsNode {
 
     /// Makes a record for a new file or directory (`kind`) named `units`
     /// (in namespace `ns`) in this directory; returns its reference and
-    /// its `$FILE_NAME`. The caller holds `ns`.
+    /// its `$FILE_NAME`. A link's record has the reparse point `link`
+    /// holds, with whether it leads to a directory: then, as Windows makes
+    /// such links, its record has an empty index of names too. The caller
+    /// holds `ns`.
     #[inline(never)]
-    fn new_record(&self, kind: Kind, units: &[u16], ns: u8) -> Result<(u64, KVec<u8>)> {
+    fn new_record(
+        &self,
+        kind: Kind,
+        units: &[u16],
+        ns: u8,
+        link: Option<(&[u8], bool)>,
+    ) -> Result<(u64, KVec<u8>)> {
         let (parent, security, mut fields, compress) = {
             let st = self.state.lock();
             let dir = st.dir.as_ref().ok_or(Error::NotDirectory)?;
@@ -1341,10 +1439,13 @@ impl NtfsNode {
                 }
                 Err(_) => 1,
             };
-            let is_dir = kind == Kind::Directory;
+            let is_dir = kind == Kind::Directory || link.is_some_and(|(_, to_dir)| to_dir);
             let t = names::to_nt(now());
-            let file_attributes = if is_dir { 0 } else { attributes::ARCHIVE }
-                | if compress { attributes::COMPRESSED } else { 0 };
+            let file_attributes = match link {
+                Some(_) => attributes::ARCHIVE | attributes::REPARSE_POINT,
+                None if kind == Kind::Directory => 0,
+                None => attributes::ARCHIVE,
+            } | if compress && link.is_none() { attributes::COMPRESSED } else { 0 };
             let dup = Dup {
                 created: t,
                 modified: t,
@@ -1353,6 +1454,7 @@ impl NtfsNode {
                 allocated: 0,
                 size: 0,
                 flags: file_attributes | if is_dir { attributes::DIRECTORY } else { 0 },
+                reparse: link.map_or(0, |(value, _)| u32_at(value, 0)),
             };
             let flags = record::flags::IN_USE | if is_dir { record::flags::DIRECTORY } else { 0 };
             edit::format_record(&mut buf, number, sequence, flags);
@@ -1368,9 +1470,17 @@ impl NtfsNode {
                 if fields[0..4] == [0; 4] {
                     fields[0..4].copy_from_slice(&fs.vol.geo.index_size.to_le_bytes());
                 }
-                put(&mut buf, kind::INDEX_ROOT, &I30, &fresh_root(&fields)?, false)?;
+                put(&mut buf, kind::INDEX_ROOT, &I30, &fresh_root(&fields, false)?, false)?;
             } else {
                 put(&mut buf, kind::DATA, &[], &[], false)?;
+            }
+            if let Some((value, _)) = link {
+                // A target too long for the record fails as one too long
+                // for the filesystem.
+                put(&mut buf, kind::REPARSE_POINT, &[], value, false).map_err(|err| match err {
+                    Error::NoSpace => Error::NameTooLong,
+                    err => err,
+                })?;
             }
             fs.vol.write_record(number, &buf, false)?;
             Ok((number | (u64::from(sequence) << 48), key))
@@ -1381,6 +1491,66 @@ impl NtfsNode {
         made
     }
 
+    /// `$Extend\$Reparse`, whose index lists the volume's reparse
+    /// points: a volume without it gets no links. The caller holds `ns`.
+    fn reparse_index(&self, scratch: &mut Scratch) -> Result<KArc<NtfsNode>> {
+        let mut node = Inner::node_for(&self.fs, records::ROOT)?;
+        for name in ["$Extend", "$Reparse"] {
+            let found = node.find(scratch, &units_vec(name)?)?.ok_or(Error::NotSupported)?;
+            node = Inner::node_for(&self.fs, found.reference)?;
+        }
+        if node.state.lock().dir.as_ref().is_none_or(|d| !d.view) {
+            return Err(Error::NotSupported);
+        }
+        Ok(node)
+    }
+
+    /// Puts the entry for the reparse point of tag `tag` of the file
+    /// `reference` in this index, `$Reparse`'s, or takes it out (`add`
+    /// false). The caller holds `ns`.
+    fn note_reparse(&self, tag: u32, reference: u64, add: bool) -> Result<()> {
+        let mut key = [0u8; 12];
+        key[..4].copy_from_slice(&tag.to_le_bytes());
+        key[4..].copy_from_slice(&reference.to_le_bytes());
+        if add {
+            // A view index's entry starts with where its data is, after
+            // its key, and its length, none.
+            let entry = tree::make_entry(0x10 + key.len() as u64, &key, None)?;
+            self.change_index(Some(entry.len()), &mut |root, store| {
+                tree::insert(root, store, tree::Order::Ulongs, &entry)
+            })
+        } else {
+            let units = tree::ulongs(&key)?;
+            self.change_index(Some(0), &mut |root, store| {
+                tree::remove(root, store, tree::Order::Ulongs, &units, reference)
+            })
+        }
+    }
+
+    /// Whether the relative path `target` leads from this directory to a
+    /// directory on the volume: a link to it is made as Windows makes
+    /// links to directories. One through a link, out of the volume or to
+    /// nothing does not. The caller holds `ns`.
+    fn leads_to_dir(&self, scratch: &mut Scratch, target: &str) -> bool {
+        let Some(mut at) = self.me.get().and_then(Weak::upgrade) else { return false };
+        for part in target.split('/') {
+            let next = match part {
+                "." => continue,
+                ".." if at.record == records::ROOT => return false,
+                ".." => Inner::node_for(&self.fs, at.state.lock().parent),
+                name => match units_vec(name).and_then(|units| at.find(scratch, &units)) {
+                    Ok(Some(found)) => Inner::node_for(&self.fs, found.reference),
+                    _ => return false,
+                },
+            };
+            match next {
+                Ok(node) if node.kind == Kind::Directory => at = node,
+                _ => return false,
+            }
+        }
+        true
+    }
+
     /// Whether this directory has no entries.
     fn is_empty_dir(&self) -> Result<bool> {
         let mut st = self.state.lock();
@@ -1388,7 +1558,7 @@ impl NtfsNode {
         let mut store =
             DirStore { fs: &self.fs, blocks: &mut dir.blocks, bitmap: &mut dir.bitmap, others: 0 };
         let mut empty = true;
-        tree::walk(&dir.root, &mut store, &self.fs.upcase, None, &mut |_| {
+        tree::walk(&dir.root, &mut store, tree::Order::Names(&self.fs.upcase), None, &mut |_| {
             empty = false;
             Ok(false)
         })?;
@@ -1609,6 +1779,57 @@ impl Node for NtfsNode {
         Ok(())
     }
 
+    // A link Windows can follow is a Windows symbolic link, relative, to
+    // a directory if its target is one when it is made; any other is
+    // WSL's (`reparse`). `$Reparse` lists it.
+    fn make_link(&self, name: &str, target: &str, _access: Access) -> Result<NodeRef> {
+        self.writable()?;
+        check_name(name)?;
+        self.is_dir()?;
+        names::check_windows(name)?;
+        let units = units_vec(name)?;
+        let windows = reparse::windows_link(target)?;
+        let mut ns = self.fs.ns.lock();
+        if self.removed() {
+            return Err(Error::NotFound);
+        }
+        self.editable()?;
+        if self.find(&mut ns, &units)?.is_some() {
+            return Err(Error::Exists);
+        }
+        let index = self.reparse_index(&mut ns)?;
+        let (value, to_dir) = match windows {
+            Some(value) => {
+                let to_dir = self.leads_to_dir(&mut ns, target);
+                (value, to_dir)
+            }
+            None => (reparse::wsl_link(target.as_bytes())?, false),
+        };
+        let tag = u32_at(&value, 0);
+        self.fs.changing()?;
+        let made = Some((&value[..], to_dir));
+        let (reference, key) =
+            self.new_record(Kind::Symlink, &units, names::namespace_of(name), made)?;
+        if let Err(err) = index.note_reparse(tag, reference, true) {
+            let _ = NtfsNode::free_record(&self.fs, record_of(reference));
+            return Err(err);
+        }
+        let entry = tree::make_entry(reference, &key, None)?;
+        let upcase = &self.fs.upcase;
+        let put = self.change_index(Some(entry.len()), &mut |root, store| {
+            tree::insert(root, store, tree::Order::Names(upcase), &entry)
+        });
+        if let Err(err) = put {
+            let _ = index.note_reparse(tag, reference, false);
+            let _ = NtfsNode::free_record(&self.fs, record_of(reference));
+            return Err(err);
+        }
+        self.touch();
+        let node = Inner::node_for(&self.fs, reference)?;
+        drop(ns);
+        Ok(node)
+    }
+
     fn create(&self, name: &str, kind: Kind, _access: Access) -> Result<NodeRef> {
         self.writable()?;
         check_name(name)?;
@@ -1627,11 +1848,11 @@ impl Node for NtfsNode {
             return Err(Error::Exists);
         }
         self.fs.changing()?;
-        let (reference, key) = self.new_record(kind, &units, names::namespace_of(name))?;
+        let (reference, key) = self.new_record(kind, &units, names::namespace_of(name), None)?;
         let entry = tree::make_entry(reference, &key, None)?;
         let upcase = &self.fs.upcase;
         let put = self.change_index(Some(entry.len()), &mut |root, store| {
-            tree::insert(root, store, upcase, &entry)
+            tree::insert(root, store, tree::Order::Names(upcase), &entry)
         });
         if let Err(err) = put {
             let _ = NtfsNode::free_record(&self.fs, record_of(reference));
@@ -1702,7 +1923,7 @@ impl Node for NtfsNode {
         }
         self.editable()?;
         self.fs.changing()?;
-        self.remove_name(&node, &units)?;
+        self.remove_name(&mut ns, &node, &units)?;
         self.touch();
         // Its record and clusters go when the last reference to it does:
         // now, unless a handle has it.
@@ -1761,10 +1982,10 @@ impl Node for NtfsNode {
         target.editable()?;
         self.fs.changing()?;
         if let Some(old) = &replaced {
-            target.remove_name(old, &to_units)?;
+            target.remove_name(&mut ns, old, &to_units)?;
         }
         target.add_name(&moving, &to_units, names::namespace_of(to))?;
-        self.remove_name(&moving, &stored)?;
+        self.remove_name(&mut ns, &moving, &stored)?;
         {
             let mut st = moving.state.lock();
             if record_of(st.parent) == self.record {
@@ -1817,7 +2038,7 @@ impl Node for NtfsNode {
         {
             let mut store =
                 DirStore { fs, blocks: &mut dir.blocks, bitmap: &mut dir.bitmap, others: 0 };
-            tree::walk(&dir.root, &mut store, &fs.upcase, start.as_deref(), &mut |e| {
+            tree::walk(&dir.root, &mut store, tree::Order::Names(&fs.upcase), start.as_deref(), &mut |e| {
                 let reference = u64_at(e, 0);
                 let key_len = usize::from(u16_at(e, 0x0a));
                 let name = FileName::new(e.get(0x10..0x10 + key_len).ok_or(Error::Corrupt)?)?;

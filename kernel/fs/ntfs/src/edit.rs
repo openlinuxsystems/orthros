@@ -353,6 +353,10 @@ pub fn value_mut(buf: &mut [u8], at: usize) -> &mut [u8] {
 /// `$I30`, the name of a directory's index attributes, as UTF-16 bytes.
 pub const I30: [u8; 8] = [b'$', 0, b'I', 0, b'3', 0, b'0', 0];
 
+/// `$R`, the name of `$Extend\$Reparse`'s index of reparse points, as
+/// UTF-16 bytes.
+pub const R: [u8; 4] = [b'$', 0, b'R', 0];
+
 /// A copy of `bytes`.
 pub fn copy(bytes: &[u8]) -> Result<KVec<u8>> {
     Ok(mem::copy(bytes)?)
