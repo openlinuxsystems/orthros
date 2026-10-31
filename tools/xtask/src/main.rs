@@ -342,6 +342,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    allow
   interfaces       a virtio card with no address: a bound socket sends a
                    DHCPDISCOVER and gets QEMU's offer, and ip sets it up
+  dhcp             netd sets a virtio card up by DHCP, keeps the lease and
+                   goes on with it, and takes the settings file's address
 
   --case <name>         Run only this boot test; repeat for more
   --timeout <seconds>   Limit for each boot test (default 300)"
