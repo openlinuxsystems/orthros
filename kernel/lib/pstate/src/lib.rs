@@ -333,6 +333,19 @@ impl Scale {
     }
 }
 
+/// What each step of passive cooling takes off the highest level, in
+/// percent, as Linux's processor cooling does with frequencies (ADR
+/// 0203).
+const COOLING_STEP_PERCENT: u32 = 20;
+
+/// The highest level a CPU may be asked for at passive cooling's `step`:
+/// a fifth of its highest level off a step, but never below its lowest.
+pub fn cooled(levels: Levels, step: u8) -> u8 {
+    let percent = 100u32.saturating_sub(COOLING_STEP_PERCENT * u32::from(step));
+    let level = u32::from(levels.highest) * percent / 100;
+    u8::try_from(level).unwrap_or(u8::MAX).max(levels.lowest)
+}
+
 /// The level AMD's highest frequency is worked out from, as Linux has it:
 /// the highest level, but on CPUs that rank their cores (whose highest
 /// levels differ, `ranked`), whose highest level is a rank.
@@ -522,6 +535,16 @@ mod tests {
         assert_eq!(scale.khz(amd_highest(zen, true, 0x1a, 0x70)), 4_150_000);
         // A nominal level of 0 divides by 1.
         assert_eq!(Scale::amd(Levels::default(), 3_000_000).khz(1), 3_000_000);
+    }
+
+    #[test]
+    fn cooling_takes_a_fifth_of_the_highest_level_off_a_step() {
+        let levels = Levels { lowest: 4, efficient: 8, nominal: 18, highest: 34 };
+        let steps: Vec<_> = (0..=3).map(|step| cooled(levels, step)).collect();
+        assert_eq!(steps, [34, 27, 20, 13]);
+        // Never below the lowest level.
+        assert_eq!(cooled(Levels { lowest: 20, ..levels }, 3), 20);
+        assert_eq!(cooled(levels, 9), 4);
     }
 
     #[test]
