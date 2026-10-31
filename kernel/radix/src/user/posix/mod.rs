@@ -146,6 +146,12 @@ pub struct PosixState {
     pub directory: Option<Directory>,
 }
 
+/// Whether two processes act for the same user, which `kill` asks of
+/// those in the sender's session (ADR 0214).
+pub(super) fn same_user(one: &ProcessRef, other: &ProcessRef) -> bool {
+    one.user() == other.user()
+}
+
 /// A working directory's path, as [`PosixState::directory`] keeps it.
 pub type Directory = alloc::sync::Arc<Vec<u8, Kmalloc>, Kmalloc>;
 
@@ -560,7 +566,7 @@ pub fn method(
             let target = with_tree(|tree| -> Result<(ProcessRef, bool)> {
                 join(tree, me)?;
                 let target = find(tree, a.pid).ok_or(error(Kernel::NoSuchProcess))?;
-                Ok((target, tree.may_signal(me.number(), a.pid)))
+                Ok((target, tree.may_trace(me.number(), a.pid)))
             })?;
             let (target, permitted) = target;
             if !permitted {
@@ -767,7 +773,7 @@ fn kill(me: &ProcessRef, pid: i64, sig: u32, info: Info) -> Result<()> {
         let mut allowed = 0;
         let mut failed = false;
         let count = tree.targets(sender, group, pid, &mut |member| {
-            if !tree.may_signal(sender, member.pid) {
+            if !tree.may_signal(sender, member.pid, same_user) {
                 return;
             }
             allowed += 1;

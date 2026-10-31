@@ -39,9 +39,11 @@ killed by* _signal_ *+++*. A record the kernel had no room for, when
 rtrace did not read fast enough, shows as *--- some records were lost
 here ---*.
 
-Tracing another process needs what *kill*(1) needs. A process has one
-trace at a time: tracing one already traced (by rtrace or a debugger)
-fails, and rtrace cannot trace itself.
+Only a process's descendants may be traced, as Linux's Yama has it at
+level 1 (ADR 0214): with *-p*, those of rtrace itself, as when a shell
+runs *cmd & exec rtrace -p $!*. A process has one trace at a time:
+tracing one already traced (by rtrace or a debugger) fails, and rtrace
+cannot trace itself.
 
 # OPTIONS
 

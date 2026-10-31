@@ -1358,13 +1358,19 @@ impl Node for InetSocket {
     }
 }
 
-/// A description of `socket`, with `flags`.
-pub fn file(socket: InetSocket, flags: PipeFlags) -> Result<FileRef, Status> {
+/// A description of `socket`, with `flags`, acting for `user`'s process's
+/// name.
+pub fn file(
+    user: &crate::user::UserRef,
+    socket: InetSocket,
+    flags: PipeFlags,
+) -> Result<FileRef, Status> {
     let mount = pipe::mount().map_err(super::status)?;
     let node: NodeRef = mem::arc(socket).map_err(|_| status(Kernel::NoMemory))?;
     let description =
         Description { non_blocking: flags.contains(PipeFlags::NON_BLOCKING), append: false };
-    FileObject::with(Location { mount, node }, description).ok_or(status(Kernel::NoMemory))
+    FileObject::with(Location { mount, node }, description, user.process.identity())
+        .ok_or(status(Kernel::NoMemory))
 }
 
 /// Makes a network socket of `kind` for `user`'s process, in slot `to`,
@@ -1375,7 +1381,7 @@ pub fn make(
     kind: Kind,
     flags: PipeFlags,
 ) -> Result<(), Status> {
-    install(user, to, file(InetSocket::new(kind)?, flags)?, flags)
+    install(user, to, file(user, InetSocket::new(kind)?, flags)?, flags)
 }
 
 /// Puts a capability to `file`, a network socket's description, in

@@ -371,8 +371,15 @@ fn groups_and_sessions_follow_posix() {
     assert_eq!(tree.new_session(12), Ok(12));
     assert_eq!(tree.get(12).unwrap().group, 12);
     assert_eq!(tree.set_group(10, 12, 11), Err(TreeError::NotPermitted));
-    // Signals: to itself, its descendants and its session.
-    assert!(tree.may_signal(10, 12) && tree.may_signal(11, 10) && !tree.may_signal(12, 11));
+    // Signals: to itself, its descendants and its session's processes of
+    // its user; tracing: only its descendants.
+    let same = |_: &u64, _: &u64| true;
+    assert!(tree.may_signal(10, 12, same) && tree.may_signal(11, 10, same));
+    assert!(!tree.may_signal(12, 11, same));
+    let user = |pid: &u64| if *pid == 11 { 1000 } else { 0 };
+    let users = |a: &u64, b: &u64| user(a) == user(b);
+    assert!(!tree.may_signal(11, 10, users) && tree.may_signal(10, 11, users));
+    assert!(tree.may_trace(10, 12) && !tree.may_trace(11, 10) && !tree.may_trace(11, 12));
     let mut named = Vec::new();
     assert_eq!(tree.targets(10, 10, -11, &mut |m| named.push(m.pid)), 1);
     assert_eq!(named, [11]);

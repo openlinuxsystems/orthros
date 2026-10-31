@@ -295,13 +295,14 @@ enum ProcessState: u8 {
 }
 
 /// A process.
-interface process = 0x000a version 7 {
+interface process = 0x000a version 8 {
     kind = process;
     /// Makes a kernel object, charged to this process's resource domain,
     /// and puts its capability, with every right, in slot `to`: a process
     /// with a capability space of `size` slots (MIN_SLOTS to MAX_SLOTS),
-    /// which ends when this one does, an endpoint, or a notification
-    /// (`size` 0 for both). Needs the control right.
+    /// which ends when this one does and acts for this one's name
+    /// (radix-names(2)), an endpoint, or a notification (`size` 0 for
+    /// both). Needs the control right.
     method create = 1 (kind: ObjectKind, size: u32, to: slot) -> ()
         raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument, no_memory,
                 gone];
@@ -372,8 +373,9 @@ interface process = 0x000a version 7 {
     /// and process in SLOT_THREAD, SLOT_SPACE and SLOT_PROCESS), and one
     /// thread, which goes on from this call with the calling thread's
     /// registers and returns 0. The caller gets the child's number. The
-    /// child has the caller's signal actions, mask and process group and
-    /// session, its resource limits and file mode mask, and the calling
+    /// child has the caller's name (radix-names(2)), signal actions, mask
+    /// and process group and session, its resource limits and file mode
+    /// mask, and the calling
     /// thread's scheduling policy and nice level, and no pending signals
     /// or timers.
     method fork = 11 () -> (child: u64)
@@ -391,12 +393,16 @@ interface process = 0x000a version 7 {
     /// POSIX timers are deleted, and it does not return. The new program's
     /// stack has room for as much as RLIMIT_STACK says, from 128 KiB to
     /// 1 GiB. Called on a process `create` made that has not
-    /// started, the process starts. Needs the control right, and the read
-    /// right on the file.
+    /// started, the process starts. The process keeps its name
+    /// (radix-names(2)). Needs the control right, the read right on the
+    /// file, and execute permission on it for the name it acts for, and
+    /// on its interpreter for that of SLOT_ROOT (denied), which the
+    /// bypass right gives only if one of the file's execute bits is set
+    /// (radix-directory(2)).
     method exec = 12 (file: slot, block: in bytes) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
                 no_memory, bad_address, gone, is_directory, io, corrupt, not_executable,
-                arguments_too_long, not_found];
+                arguments_too_long, not_found, denied];
     /// Waits for a child of the caller to end (or with `flags`, to stop or
     /// continue), and returns its number and wait status and the CPU time
     /// it used, in user mode and in the kernel (as `times` splits it).
@@ -413,7 +419,8 @@ interface process = 0x000a version 7 {
     /// `pid`, to every process of the process group minus `pid`, with 0
     /// to the caller's process group, or with -1 to every process the
     /// caller may signal but itself. The caller may signal itself, its
-    /// descendants and the processes of its session.
+    /// descendants and the processes of its session that act for its user
+    /// (radix-names(2)).
     method kill = 14 (pid: i64, signal: u32) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_such_process,
                 not_permitted];
@@ -664,8 +671,9 @@ interface process = 0x000a version 7 {
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address,
                 no_memory];
     /// Traces process `pid` and puts a trace file, which reads its
-    /// records, in slot `to` (radix-trace(2)). Tracing a process needs
-    /// what `kill` needs; one already traced fails with busy, and the
+    /// records, in slot `to` (radix-trace(2)). Only the caller's
+    /// descendants may be traced, as Linux's Yama has it at level 1
+    /// (not_permitted); one already traced fails with busy, and the
     /// caller's own with invalid_argument.
     method trace = 53 (pid: u64, flags: TraceFlags, to: slot) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, occupied,
@@ -679,4 +687,10 @@ interface process = 0x000a version 7 {
     /// process, and the send right on the notification.
     method notify_children = 54 (notification: slot) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed];
+    /// The name the process acts for (radix-names(2)): its user and group,
+    /// which getuid(2) and getgid(2) give, and how many other groups it
+    /// has, of which as many as fit are written to `groups` as u32s, as
+    /// getgroups(2) gives them. Needs the read right.
+    method identity = 55 (groups: out bytes) -> (user: u32, group: u32, count: u32)
+        raises [no_such_slot, empty_slot, missing_rights, bad_address];
 }

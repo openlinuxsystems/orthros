@@ -41,7 +41,7 @@ use radix_klog::TextBuf;
 use radix_mm::{FRAMES, Kmalloc, Owner, PAGE_SIZE};
 use radix_sync::Once;
 use radix_vfs::synthetic::{FixedDir, Generated, Generator, ListedDir, Listing, SyntheticFs};
-use radix_vfs::{Error, FsKind, FsRef, KArc, Kind, NodeRef, Result, Text, mem};
+use radix_vfs::{Access, Error, FsKind, FsRef, KArc, Kind, NodeRef, Result, Text, mem};
 
 use super::FileRef;
 use crate::acpi::devices::{self, MAX_LIDS};
@@ -155,11 +155,18 @@ impl Listing for Root {
             "acpi" if devices::lids().next().is_some() => return acpi(),
             _ => {
                 let number: u64 = name.parse().map_err(|_| Error::NotFound)?;
-                if name.starts_with('0') || process_by_number(number).is_none() {
-                    return Err(Error::NotFound);
-                }
-                let listing: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(ProcessDir { number })?;
-                return ListedDir::make(PROCESS_ID_BASE + PER_PROCESS * number, listing);
+                let process = (!name.starts_with('0'))
+                    .then(|| process_by_number(number))
+                    .flatten()
+                    .ok_or(Error::NotFound)?;
+                // The process's user's, so that others see only its status
+                // through a capability without the bypass right (ADR 0214).
+                let identity = process.identity();
+                let (owner, group) = (identity.user, identity.group);
+                let listing: radix_vfs::mem::KBox<dyn Listing> =
+                    mem::boxed(ProcessDir { number, owner, group })?;
+                let id = PROCESS_ID_BASE + PER_PROCESS * number;
+                return ListedDir::with_access(id, listing, Access { owner, group, mode: 0o555 });
             }
         };
         Generated::from_fn(file_id(name), generate)
@@ -195,9 +202,12 @@ fn acpi() -> Result<NodeRef> {
     Ok(dir)
 }
 
-/// A process's directory.
+/// A process's directory, which belongs to the user and group it acts
+/// for: its `status` anyone may read, and its other files only they.
 struct ProcessDir {
     number: u64,
+    owner: u32,
+    group: u32,
 }
 
 impl Listing for ProcessDir {
@@ -224,7 +234,10 @@ impl Listing for ProcessDir {
                 // It has gone since: an empty file.
                 None => Ok(()),
             })?;
-        Generated::make(PROCESS_ID_BASE + PER_PROCESS * number + 1 + index as u64, generate)
+        let mode = if name == "status" { 0o444 } else { 0o400 };
+        let access = Access { owner: self.owner, group: self.group, mode };
+        let id = PROCESS_ID_BASE + PER_PROCESS * number + 1 + index as u64;
+        Generated::with_access(id, generate, access)
     }
 }
 
@@ -270,6 +283,9 @@ fn status(process: &ProcessRef, text: &mut Text) -> fmt::Result {
     process.describe(text)?;
     let number = process.number();
     let (phase, _) = process.state();
+    let identity = process.identity();
+    writeln!(text, "user: {}", identity.user)?;
+    writeln!(text, "user_group: {}", identity.group)?;
     let place = posix::tree_place(number);
     if let Some((parent, group, session, _)) = place {
         writeln!(text, "parent: {parent}")?;

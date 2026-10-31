@@ -169,8 +169,10 @@ memory ends the process as SIGKILL would.
 Real-time signals queue with their values, up to 1,024 per process
 (what *RLIMIT_SIGPENDING* says), and are taken lowest number first and
 in order within a number. *kill* may signal the caller, its descendants and the
-processes of its session; *kill(-1, ...)* signals all of those but the
-caller and process 1. Users come later in Phase 13, and with them POSIX's rules.
+processes of its session that act for the same user (EPERM otherwise);
+*kill(-1, ...)* signals all of those but the caller and process 1.
+Tracing (*rtrace*(1)) reaches only the caller's descendants, as Linux's
+Yama has it at level 1 (ADR 0214).
 
 Spark, process 1, takes only the signals it has a handler for, as Linux's
 init does: the others, SIGKILL and SIGSTOP included, are dropped, and a
@@ -518,11 +520,35 @@ with EPERM.
 *fchmod* and *fchown* need a descriptor open for writing (EACCES
 otherwise), as *futimens* does.
 
-Users come with the rest of Phase 13. Until then every process is user 0
-and group 0, *setuid* and its kin succeed only for 0, and the modes are
-kept but not checked: *access* says a file that is there may be read,
-written and run. There are no login records, so *getlogin* fails and
-*logname* finds no login name.
+Every process acts for a name: a user, a group and other groups
+(*radix-names*(2), ADR 0214), which *getuid*, *geteuid*, *getgid*,
+*getegid* and *getgroups* give. A process gets it from the one that made
+it, by *fork* or *posix_spawn*, and keeps it through *exec*; only a holder
+of the names capability starts a process with another, as sign-in will
+(Phase 13b.5). There is no setuid: *setuid*, *setgid*, *setgroups* and
+their kin succeed when they change nothing and fail with EPERM
+otherwise. Everything Spark starts acts for root, user 0 and group 0.
+
+The kernel checks owners, groups and modes as Linux does (the second
+gate): searching a directory needs its execute bit, reading or writing
+a file its read or write bit, listing a directory its read bit, and
+making, removing or renaming in a directory its write and execute bits
+(in a sticky one, only the owner of the file or of the directory removes
+or renames a file); a hard link needs the file's owner, or its read and
+write bits, as Linux's *fs.protected_hardlinks* has it. Each fails with
+EACCES. Only the owner changes a file's mode or sets its times to given
+values, and to its own groups its group (EPERM otherwise); giving a file
+to another user needs the bypass right. *exec* needs an execute bit,
+and, unlike on Linux, a file the caller may read. *access* and
+*faccessat* ask the same through *check_access* (*radix-directory*(2)).
+A process whose root has the bypass right, as everything Spark starts
+has, passes all of it but for running a file with no execute bit, as
+Linux's root does. *opendir* and *chdir* need the directory's read and
+execute bits, as on Linux; a directory opened with *O_PATH* needs
+neither.
+
+There are no login records yet, so *getlogin* fails and *logname* finds
+no login name.
 
 # TESTS
 

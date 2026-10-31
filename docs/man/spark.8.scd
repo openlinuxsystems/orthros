@@ -9,7 +9,7 @@ spark - the first program, which starts every other
 
 # SYNOPSIS
 
-Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--no-volumes*] [*--compress* _disk_ ...] [*--watchdog* _seconds_] [*--test-hang*] [*--services* | *--service-dir* _directory_] [*--posix*] [*--network*] [_program_ [_argument_ ...]]]
+Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--no-volumes*] [*--compress* _disk_ ...] [*--watchdog* _seconds_] [*--test-hang*] [*--services* | *--service-dir* _directory_] [*--posix*] [*--network*] [*--names*] [_program_ [_argument_ ...]]]
 
 # DESCRIPTION
 
@@ -63,13 +63,18 @@ Spark gets what every program gets (see *radix-startup*(2)) and more:
 - the boot archive, mapped read-only at a random address, whose place
   and size the start-up page gives;
 - the root of the system's file tree, an empty tmpfs, as a directory
-  capability with every right in *SLOT_ROOT* (7);
+  capability with every right in *SLOT_ROOT* (7), the bypass right among
+  them, acting for root (*radix-names*(2));
 - a memory object of 4 MiB in slot 8, the first of the extra slots, from
   which it makes the memory of the program a boot test names;
 - the *services* resource domain in slot 9, below the root domain, in
   which it makes a domain for each service (*radix-resource-domain*(2));
 - the power capability in slot 10, which turns the machine off,
   restarts it or halts it (*radix-power*(2)), and which only Spark holds;
+- a network capability for every port in slot 11 (below);
+- the platform capability in slot 12 (below);
+- the names capability in slot 13, the one that gives processes and
+  capabilities the names they act for (*radix-names*(2), ADR 0214);
 - an image placed at a random address, as every position-independent
   program is (see *radix-processes*(7)).
 
@@ -435,6 +440,17 @@ capability too, in _SLOT_NETWORK_ (*radix-startup*(2)); a program
 started without it cannot use the network at all. The *sockets* boot
 test (*ob*(1)) boots with *-- --network /system/tests/sockets virtio*.
 
+# NAMES
+
+Spark acts for root, and its root directory has the bypass right, which
+passes the owners and modes of files (*radix-names*(2), ADR 0214). The
+programs and services it starts act for root too, with that right on the
+root it gives them, until sign-in (Phase 13b.5) and service files that
+name an account (13b.4). With *--names* before the program, a POSIX
+program gets the names capability as its descriptor 3, as the
+*principals* boot test (*ob*(1)) needs to start processes for other
+users: *-- --posix --names /system/tests/posix/principals*.
+
 A service gets only what its file asks for, derived from that
 capability: with *network.outbound*, one with the send right for every
 port, and for each range of *network.listen*, one with the receive
@@ -619,4 +635,4 @@ _name_ *(process* _n_*) was ended by signal 9 (stopped by the out-of-memory poli
 *radix-files*(7), *radix-processes*(7), *radix-posix*(7), *radix-proc*(5),
 *radix-sysfs*(5), *radix-directory*(2), *radix-process*(2),
 *radix-resource-domain*(2), *radix-power*(2), *radix-platform*(2),
-*radix-startup*(2), *ob*(1), *watchdog*(8), *ectool*(8)
+*radix-names*(2), *radix-startup*(2), *ob*(1), *watchdog*(8), *ectool*(8)

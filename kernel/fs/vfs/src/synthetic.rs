@@ -37,12 +37,19 @@ pub type Generator = KBox<dyn Fn(&mut Text) -> fmt::Result + Send + Sync>;
 pub struct Generated {
     id: u64,
     generate: Generator,
+    access: Access,
 }
 
 impl Generated {
     /// A file whose text `generate` writes, numbered `id`.
     pub fn make(id: u64, generate: Generator) -> Result<NodeRef> {
-        Ok(mem::arc(Generated { id, generate })?)
+        Generated::with_access(id, generate, Access::default_for(Kind::File))
+    }
+
+    /// A file whose text `generate` writes, numbered `id`, with the owner,
+    /// group and mode `access`.
+    pub fn with_access(id: u64, generate: Generator, access: Access) -> Result<NodeRef> {
+        Ok(mem::arc(Generated { id, generate, access })?)
     }
 
     /// A file of `generate`'s text, from a plain function.
@@ -53,6 +60,10 @@ impl Generated {
 }
 
 impl Node for Generated {
+    fn access(&self) -> Access {
+        self.access
+    }
+
     fn stat(&self) -> Stat {
         // As on Linux, a generated file's size is unknown until read.
         Stat {
@@ -255,16 +266,27 @@ pub trait Listing: Send + Sync {
 pub struct ListedDir {
     id: u64,
     listing: KBox<dyn Listing>,
+    access: Access,
 }
 
 impl ListedDir {
     /// The directory numbered `id` of `listing`'s entries.
     pub fn make(id: u64, listing: KBox<dyn Listing>) -> Result<NodeRef> {
-        Ok(mem::arc(ListedDir { id, listing })?)
+        ListedDir::with_access(id, listing, Access::default_for(Kind::Directory))
+    }
+
+    /// The directory numbered `id` of `listing`'s entries, with the owner,
+    /// group and mode `access`.
+    pub fn with_access(id: u64, listing: KBox<dyn Listing>, access: Access) -> Result<NodeRef> {
+        Ok(mem::arc(ListedDir { id, listing, access })?)
     }
 }
 
 impl Node for ListedDir {
+    fn access(&self) -> Access {
+        self.access
+    }
+
     fn stat(&self) -> Stat {
         Stat {
             kind: Kind::Directory,

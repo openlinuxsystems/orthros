@@ -71,6 +71,7 @@ use super::account::{Account, AccountRef, Charge};
 use super::ipc::{self, Endpoint};
 use super::memory::{SpaceObject, SpaceRef};
 use super::methods::{Answer, answer};
+use super::names::Identity;
 use super::notify::{Notification, NotificationRef};
 use super::objects::{self, Found, Object};
 use super::posix::{self, PosixState, ThreadSignals};
@@ -116,6 +117,9 @@ pub struct ProcessObject {
     numbered: AtomicBool,
     /// Its name, which its threads take when they start.
     name: SpinLock<Name>,
+    /// The name it acts for (ADR 0214), which only changes before it
+    /// starts (radix-names(2)).
+    identity: SpinLock<Identity>,
     /// The capability space its threads use.
     cspace: SpaceId,
     /// The hidden capability space: its address space's original
@@ -240,7 +244,8 @@ pub fn bytes_of(slots: u32) -> u64 {
 /// its own SLOT_PROCESS (a forked process, which holds itself). `charge`
 /// is what the process itself is charged to its maker; the registry keeps
 /// it until the process goes. A process made for `maker` ends when
-/// `maker` does; if `maker` has ended already, this fails with `gone`.
+/// `maker` does, and acts for its name, or else for root; if `maker` has
+/// ended already, this fails with `gone`.
 pub fn create(
     at: Option<SlotRef>,
     name: &str,
@@ -276,7 +281,9 @@ pub fn create(
                 store.create(SlotRef::new(keep, 0), ObjectKind::AddressSpace).map_err(cap_error)?;
             objects::insert(store, id, Object::Space(space.clone()))
                 .map_err(|_| error(Kernel::NoMemory))?;
-            let process = allocate(name, cspace, keep, space, account, threads, on_exit, posix)?;
+            let identity = maker.map_or(Identity::ROOT, ProcessObject::identity);
+            let process =
+                allocate(name, cspace, keep, space, account, threads, on_exit, posix, identity)?;
             // Before its capability exists, so that a failure leaves
             // nothing to undo but the spaces.
             if let Some(maker) = maker {
@@ -315,11 +322,13 @@ fn allocate(
     threads: Vec<ThreadRef, Kmalloc>,
     on_exit: Option<fn(&ProcessObject, u64)>,
     posix: PosixState,
+    identity: Identity,
 ) -> Result<ProcessRef> {
     let process = ProcessObject {
         number: if FIRST_MADE.swap(true, Ordering::Relaxed) { sched::take_number() } else { 1 },
         numbered: AtomicBool::new(false),
         name: SpinLock::new(Name::new(name)),
+        identity: SpinLock::new(identity),
         cspace,
         keep,
         space: SpinLock::new(Some(space)),
@@ -418,6 +427,31 @@ impl ProcessObject {
     /// The account the objects it makes are charged to.
     pub fn account(&self) -> &AccountRef {
         &self.account
+    }
+
+    /// The name it acts for (ADR 0214).
+    pub fn identity(&self) -> Identity {
+        self.identity.lock().clone()
+    }
+
+    /// The number of the user it acts for.
+    pub fn user(&self) -> u32 {
+        self.identity.lock().user
+    }
+
+    /// Has it act for `identity` if it has not started (radix-names(2)'s
+    /// `name_process`, and `fork` for the child it makes); whether it had
+    /// not.
+    pub fn name_before_start(&self, identity: Identity) -> bool {
+        // Its state's lock keeps it from starting meanwhile.
+        let state = self.state.lock();
+        if state.phase != ProcessState::Created {
+            return false;
+        }
+        let before = core::mem::replace(&mut *self.identity.lock(), identity);
+        drop(state);
+        drop(before);
+        true
     }
 
     /// Its name.
@@ -1040,7 +1074,8 @@ pub fn method(
     label: u32,
     args: &[u64; 8],
 ) -> Result<Answer> {
-    let needs = if label == process::INFO { Rights::READ } else { Rights::CONTROL };
+    let reads = label == process::INFO || label == process::IDENTITY;
+    let needs = if reads { Rights::READ } else { Rights::CONTROL };
     found.cap.check(ObjectKind::Process, needs).map_err(cap_error)?;
     let target = match &found.object {
         Some(Object::Process(target)) => target,
@@ -1165,6 +1200,28 @@ pub fn method(
             };
             drop(state);
             answer(label, process::InfoResults::WORDS, results.encode())
+        }
+        process::IDENTITY => {
+            let a = process::IdentityArgs::decode(args)?;
+            let identity = target.identity();
+            let groups = identity.groups();
+            let fit = groups.len().min(a.groups.len as usize / 4);
+            let mut bytes = [0u8; radix_abi::names::GROUPS_MAX as usize * 4];
+            for (n, group) in groups[..fit].iter().enumerate() {
+                bytes[n * 4..n * 4 + 4].copy_from_slice(&group.to_le_bytes());
+            }
+            if fit > 0
+                && (!radix_ipc::range::user_bytes(a.groups.address, fit as u64 * 4)
+                    || !Arch::copy_to_user(a.groups.address, &bytes[..fit * 4]))
+            {
+                return Err(error(Kernel::BadAddress));
+            }
+            let results = process::IdentityResults {
+                user: identity.user,
+                group: identity.group,
+                count: groups.len() as u32,
+            };
+            answer(label, process::IdentityResults::WORDS, results.encode())
         }
         _ if label >= process::FORK => posix::method(user, slot, target, label, args),
         _ => Err(error(Kernel::NoSuchMethod)),

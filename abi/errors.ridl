@@ -196,4 +196,7 @@ errors file = 2 {
     /// The change would take its subvolume's quota group past its limit
     /// (Btrfs's simple quotas, radix-directory(2)'s `limit_qgroup`).
     quota_exceeded = 23 => EDQUOT;
+    /// The file's owner, group and mode do not let the name the
+    /// capability acts for do this: the second gate (radix-directory(2)).
+    denied = 24 => EACCES;
 }

@@ -3,7 +3,7 @@
 
 //! Rights: what a capability lets its holder do with its object.
 //!
-//! A capability's rights are a set of the twelve [`Rights`] below. Which of
+//! A capability's rights are a set of the thirteen [`Rights`] below. Which of
 //! them mean something depends on the object's kind
 //! ([`crate::ObjectKind::rights`]); a capability never holds a right its
 //! kind does not use. Derivation can only remove rights, never add them
@@ -48,11 +48,14 @@ impl Rights {
     /// Hand this capability, or one made from it, to another capability
     /// space.
     pub const TRANSFER: Rights = Rights(1 << 11);
+    /// Pass the second gate: the owners and modes of the files beneath a
+    /// directory (ADR 0214's override).
+    pub const BYPASS: Rights = Rights(1 << 12);
     /// Every right.
-    pub const ALL: Rights = Rights((1 << 12) - 1);
+    pub const ALL: Rights = Rights((1 << 13) - 1);
 
     /// Every right with its name, in bit order.
-    pub const NAMES: [(Rights, &'static str); 12] = [
+    pub const NAMES: [(Rights, &'static str); 13] = [
         (Rights::READ, "read"),
         (Rights::WRITE, "write"),
         (Rights::EXECUTE, "execute"),
@@ -65,6 +68,7 @@ impl Rights {
         (Rights::UNSEAL, "unseal"),
         (Rights::COPY, "copy"),
         (Rights::TRANSFER, "transfer"),
+        (Rights::BYPASS, "bypass"),
     ];
 
     /// The set's bits.
@@ -187,7 +191,7 @@ mod tests {
         assert_eq!(rw & Rights::WRITE, Rights::WRITE);
         assert_eq!(rw - Rights::WRITE, Rights::READ);
         assert_eq!(rw.len(), 2);
-        assert_eq!(Rights::from_bits(1 << 12), None);
+        assert_eq!(Rights::from_bits(1 << 13), None);
         assert_eq!(Rights::from_bits_truncate(0xffff), Rights::ALL);
     }
 

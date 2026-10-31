@@ -1201,6 +1201,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "principals",
+        about: "processes and capabilities act for names: alice, with a root stamped for her and no bypass right, cannot read bob's 0700 home, give her files away, remove bob's files from a sticky directory, run a file without an execute bit, or signal, trace or read more than the status of bob's processes, while root's bypass right reaches them all",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "lockdep -- --posix --names /system/tests/posix/principals",
+        cpus: 2,
+        memory: "512M",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: principals,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "spark-network",
         about: "Spark gives each service the network its file asks for, and none to one that asks for nothing",
         firmware: Firmware::Uefi,
@@ -3723,7 +3739,7 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     } else {
         vm.expect("Lock checker: ")?;
     }
-    vm.expect("Capabilities: ready; 20 object kinds, 12 rights")?;
+    vm.expect("Capabilities: ready; 21 object kinds, 13 rights")?;
     vm.expect("User mode: SYSCALL/SYSRET entry, user half ")?;
     vm.expect("Files: the root is a tmpfs; Spark mounts the rest")?;
     // Every test image carries the user test programs.
@@ -7067,6 +7083,27 @@ fn logging(vm: &mut Vm, case: &Case) -> Result<(), String> {
     }
     // Spark goes on supervising the services: no line ends the boot.
     vm.expect_anywhere("logd: keeping the log in /system/state/log, after record ")
+}
+
+/// The `principals` test: Spark starts principals
+/// (userspace/posix/principals.c) as root with the names capability,
+/// which starts itself as bob and as alice, each with a root of their own
+/// name, and checks the second gate between them (ADR 0214).
+fn principals(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_ahead("spark: started /system/tests/posix/principals as process ")?;
+    let code = program_line(vm, "(/system/tests/posix/principals) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> =
+        log.lines().filter(|line| line.contains("principals: FAILED")).map(str::trim).collect();
+    if !failed.is_empty() {
+        return Err(format!("principals failed: {}", failed.join("; ")));
+    }
+    if code != "0x0" || !log.contains("principals: every check passed") {
+        return Err(format!("principals exited with code {code}"));
+    }
+    vm.expect("spark: nothing more to do; waiting")
 }
 
 /// Spark starts two services that check the network capabilities they

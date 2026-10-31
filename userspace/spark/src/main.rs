@@ -7,8 +7,11 @@
 //! read-only, the root of the system's tree in `SLOT_ROOT` (an empty
 //! tmpfs), and from `SLOT_FIRST_EXTRA` on a memory object for the programs
 //! it starts, a capability to the `services` resource domain, the power
-//! capability and a network capability for all of the network's ports
-//! (radix-network(2)). Spark v2:
+//! capability, a network capability for all of the network's ports
+//! (radix-network(2)), the platform capability (radix-platform(2)) and
+//! the names capability (radix-names(2), ADR 0214).
+//! It acts for root, with the bypass right on its root, as the programs
+//! and services it starts do. Spark v2:
 //!
 //! 1. builds the directory hierarchy on the root (the plan's spec 7.1,
 //!    with plain names, ADR 0113): `/system`, `/applications`, `/users`,
@@ -39,7 +42,9 @@
 //!    its child, with a pseudo-terminal as its standard input, output and
 //!    error, and copies what it writes there to the kernel log. With
 //!    `--network` before those, the program gets Spark's network
-//!    capability too, in `SLOT_NETWORK`.
+//!    capability too, in `SLOT_NETWORK`, and with `--names`, a POSIX one
+//!    gets the names capability as its descriptor 3, as the `principals`
+//!    boot test needs.
 //!
 //! Then it supervises: it starts services again when they end, answers
 //! the control socket and shuts the machine down when asked. Spark must
@@ -85,6 +90,10 @@ const ARGS_MAX: usize = 16;
 /// Where the kernel gave Spark its network capability, after the memory
 /// for programs, the services' domain and the power capability.
 const NETWORK: u32 = SLOT_FIRST_EXTRA + 3;
+
+/// Where the kernel gave Spark the names capability, after the network
+/// and the platform capability.
+const NAMES: u32 = SLOT_FIRST_EXTRA + 5;
 
 /// The directories of the root, every one a mount point or a place for
 /// one (the plan's spec 7.1), named so that they need no explaining
@@ -238,12 +247,14 @@ fn run() -> Option<Supervisor> {
             break;
         }
     }
-    let (mut posix, mut network) = (false, None);
+    let (mut posix, mut network, mut names) = (false, None, None);
     loop {
         if words.next_if_eq(&"--posix").is_some() {
             posix = true;
         } else if words.next_if_eq(&"--network").is_some() {
             network = Some(NETWORK);
+        } else if words.next_if_eq(&"--names").is_some() {
+            names = Some(NAMES);
         } else {
             break;
         }
@@ -260,7 +271,7 @@ fn run() -> Option<Supervisor> {
         count += 1;
     }
     if posix {
-        match run_posix(&root, path, &rest[..count], network) {
+        match run_posix(&root, path, &rest[..count], network, names) {
             Ok(program) => supervisor.watch_program(program),
             Err(what) => println!("spark: could not start {path}: {what}"),
         }
@@ -295,8 +306,12 @@ fn run_native(root: &Dir, path: &str, args: &[&str], network: Option<u32>) {
         memory_order: PROGRAM_MEMORY_ORDER,
         share: &[],
         // The command line is the machine owner's: mounting or replacing
-        // a disk needs control, which a POSIX program it names has too.
-        root: Some((root.slot(), Rights::READ.union(Rights::WRITE).union(Rights::CONTROL))),
+        // a disk needs control, which a POSIX program it names has too,
+        // and it acts for root past the files' owners and modes.
+        root: Some((
+            root.slot(),
+            Rights::READ.union(Rights::WRITE).union(Rights::CONTROL).union(Rights::BYPASS),
+        )),
         network: network.map(|slot| (slot, Rights::ALL)),
     };
     let child = match spawn::spawn(&spawn) {
@@ -328,12 +343,14 @@ fn run_native(root: &Dir, path: &str, args: &[&str], network: Option<u32>) {
 
 /// Starts the POSIX program at `path` with `args` (radix-posix(7)) as
 /// Spark's child, on a new pseudo-terminal whose output goes to the
-/// kernel log, with the network capability in `network` if there is one.
+/// kernel log, with the network capability in `network` if there is one,
+/// and the names capability in `names` as its descriptor 3.
 fn run_posix(
     root: &Dir,
     path: &str,
     args: &[&str],
     network: Option<u32>,
+    names: Option<u32>,
 ) -> Result<Program, String> {
     let (master, terminal) =
         open_pty(root).map_err(|what| format!("cannot make a pseudo-terminal: {what}"))?;
@@ -353,7 +370,8 @@ fn run_posix(
         .into_iter()
         .zip([SLOT_ROOT, SLOT_RANDOM, SLOT_LOG])
         .chain(network.map(|slot| (slot, SLOT_NETWORK)))
-        .chain((0..3).map(|fd| (terminal.slot(), SLOT_FD_BASE + fd)));
+        .chain((0..3).map(|fd| (terminal.slot(), SLOT_FD_BASE + fd)))
+        .chain(names.map(|slot| (slot, SLOT_FD_BASE + 3)));
     let shared = shares.try_for_each(|(from, to)| {
         process::share(&SYS, child, from, to, Rights::ALL, 0).map_err(|status| (to, status))
     });

@@ -170,8 +170,7 @@ fn sample(select: &Select) -> Vec<Use> {
         if select.pids.as_ref().is_some_and(|l| !l.contains(&p.number)) {
             continue;
         }
-        // Until users come every process is root's.
-        let uid = 0;
+        let uid = p.user;
         if select.user.is_some_and(|user| user != Some(uid)) {
             continue;
         }
@@ -211,6 +210,7 @@ fn of_process(p: &Process, threads: &[Thread], select: &Select) -> Use {
     };
     Use {
         pid: p.number,
+        uid: p.user,
         name,
         user_ns: p.user_ns,
         system_ns: p.system_ns,
