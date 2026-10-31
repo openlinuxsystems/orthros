@@ -142,7 +142,8 @@ Init: /system/commands/spark is process 1
   _/system/resources/default-settings_ that _/system/settings_ lacks
   into it, with the directories it is in: the
   defaults the system ships, such as nano's _nanorc_ and the service
-  files, which an administrator edits in _/system/settings_. A file
+  files, which an administrator edits in _/system/settings_. A symbolic
+  link stays one, as _resolv.conf_'s to *netd*(8)'s file does. A file
   already there is never replaced, so an update can add settings without
   undoing edits. On Dukovo's root the first boot copies them all; with
   _/system/settings_ in memory, every boot does.

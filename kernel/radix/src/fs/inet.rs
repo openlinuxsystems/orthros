@@ -586,7 +586,9 @@ impl InetSocket {
             if !authority.receives_on(port) {
                 return Err(status(Kernel::OutOfRange));
             }
-            ports::take(self.kind.protocol(), port).ok_or(status(Kernel::AddressInUse))?
+            // Sockets on other interfaces may hold it too (ADR 0191).
+            ports::take_on(self.kind.protocol(), port, state.options.device)
+                .ok_or(status(Kernel::AddressInUse))?
         };
         let port = held.port();
         if self.kind == Kind::Datagram {
@@ -1053,7 +1055,9 @@ impl InetSocket {
     /// Binds it, under its lock, to the interface numbered `device`, or
     /// to none for 0 (SO_BINDTODEVICE): before a stream socket connects
     /// or listens; a datagram socket already bound moves its parts to
-    /// that interface, the datagrams waiting in the others lost.
+    /// that interface, the datagrams waiting in the others lost. A socket
+    /// that shares its port with those on other interfaces stays on its
+    /// own.
     fn bind_to_device(&self, state: &mut State, device: u64) -> Result<(), Status> {
         let no_device = File::NoDevice.status(0);
         let device = u32::try_from(device).map_err(|_| no_device)?;
@@ -1065,6 +1069,9 @@ impl InetSocket {
         }
         if device == state.options.device {
             return Ok(());
+        }
+        if state.held.as_ref().is_some_and(Held::shared) {
+            return Err(status(Kernel::InvalidArgument));
         }
         let was = core::mem::replace(&mut state.options.device, device);
         if let (Kind::Datagram, Some((address, port))) = (self.kind, state.local) {
