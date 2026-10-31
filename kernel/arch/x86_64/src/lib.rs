@@ -32,7 +32,6 @@
 mod acpi;
 mod apic;
 mod boot;
-mod copy;
 mod cpu;
 mod devices;
 mod entry;
