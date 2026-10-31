@@ -125,9 +125,31 @@ pull request as a change that makes it wrong.
 ## Architecture decision records
 
 `docs/adr/` holds one short Markdown file per decision, numbered in order.
-Copy [`0000-template.md`](docs/adr/0000-template.md), take the next number,
-and add it to the index in [`docs/adr/README.md`](docs/adr/README.md). A
-decision is never edited away: a later record supersedes it.
+Copy [`0000-template.md`](docs/adr/0000-template.md) and take the next
+number of your phase's block (see below). Do not add a row to the table in
+[`docs/adr/README.md`](docs/adr/README.md): `./ob docs` makes the index
+from the files, and fails if two records take one number. A decision is
+never edited away: a later record supersedes it.
+
+## Phases built in parallel
+
+When more than one phase is built at once, each pull request keeps to its
+phase's places, so that two of them do not edit the same lines:
+
+- ADR numbers: each phase takes numbers from its own block.
+- Boot tests: a phase's new tests go in `tools/xtask/src/test/phaseNN.rs`,
+  and their descriptions in [ob(1)](docs/man/ob.1.scd) under the phase's
+  heading at the end of the boot tests. `./ob test --list` names them all.
+- ridl interface numbers: Phase 11 takes `0x0020` to `0x002f`, Phase 12
+  `0x0030` to `0x003f` and Phase 13 `0x0040` to `0x004f`. Object kinds and
+  Spark's slots are numbered without gaps, so the pull request that merges
+  second takes the next free one.
+- The roadmap and CREDITS.md: add rows at the end of your phase's section
+  only.
+- `Cargo.lock`: on a conflict, take main's and let Cargo update it, rather
+  than merging its lines.
+- Merge main into a pull request only when GitHub says it conflicts, or its
+  checks fail because of main: each merge runs CI again.
 
 ## Conduct, governance and security
 
