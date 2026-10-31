@@ -347,7 +347,8 @@ impl Controller {
             return None;
         }
         while buffer.push_within_capacity(0).is_ok() {}
-        let xhci = match Xhci::new(start.regs.clone(), &mut host, &mut alloc(start.address)) {
+        let regs = start.regs.memory()?.clone();
+        let xhci = match Xhci::new(regs, &mut host, &mut alloc(start.address)) {
             Ok(xhci) => xhci,
             Err(err) => {
                 warn!("USB: the xHCI controller at {} could not be started: {err}", start.address);

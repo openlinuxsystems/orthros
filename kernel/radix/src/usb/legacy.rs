@@ -154,7 +154,14 @@ pub fn run(index: usize) {
     while controller.work() {}
     super::looked();
     loop {
+        if super::halted() {
+            // The machine goes down: what the ports say now is not news.
+            return;
+        }
         let busy = controller.ports() | controller.pipes() | controller.work() | controller.lights();
+        if super::halted() {
+            return;
+        }
         if controller.hcd.failed() {
             for device in &controller.devices {
                 shown::remove(controller.bus, device.path);
@@ -171,42 +178,19 @@ pub fn run(index: usize) {
     }
 }
 
+/// A started driver, and what to log of it.
+type Started = (Box<dyn Hcd + Send, Kmalloc>, TextBuf<96>, Handoff);
+
 /// Starts the driver of the controller `start` names.
-#[inline(never)]
 fn start_driver(
     start: &Start,
     waiter: &mut KernelWaiter,
 ) -> Result<(Box<dyn Hcd + Send, Kmalloc>, TextBuf<96>), radix_usbhc::Error> {
-    let heap = HEAP.with(Flags::MAY_SLEEP);
-    let mut alloc = alloc(start.address);
-    let mut about = TextBuf::<96>::new();
-    let (driver, handoff): (Box<dyn Hcd + Send, Kmalloc>, Handoff) = match start.kind {
-        Kind::Ehci => {
-            // Built on the heap from the constant, not on this stack.
-            let tables = Box::try_new_in(radix_usbhc::ehci::Tables::EMPTY, heap)
-                .map_err(|_| radix_usbhc::Error::NoMemory)?;
-            let ehci = radix_usbhc::ehci::Ehci::new(
-                &start.function,
-                start.regs.clone(),
-                waiter,
-                &mut alloc,
-                tables,
-            )?;
-            let info = ehci.info();
-            let _ = core::fmt::Write::write_fmt(
-                &mut about,
-                format_args!(
-                    "EHCI {:x}.{:x} controller at {}: {} ports, {} companion controllers",
-                    info.version >> 8,
-                    (info.version & 0xff) >> 4,
-                    start.address,
-                    info.ports,
-                    info.companions
-                ),
-            );
-            let boxed = Box::try_new_in(ehci, heap).map_err(|_| radix_usbhc::Error::NoMemory)?;
-            (boxed, info.handoff)
-        }
+    // Each in its own frame: the drivers are large while they start.
+    let (driver, mut about, handoff) = match start.kind {
+        Kind::Ehci => start_ehci(start, waiter)?,
+        Kind::Ohci => start_ohci(start, waiter)?,
+        Kind::Uhci => start_uhci(start, waiter)?,
         Kind::Xhci => return Err(radix_usbhc::Error::Unsupported("it is an xHCI controller")),
     };
     let _ = core::fmt::Write::write_str(
@@ -218,6 +202,86 @@ fn start_driver(
         },
     );
     Ok((driver, about))
+}
+
+#[inline(never)]
+fn start_ehci(start: &Start, waiter: &mut KernelWaiter) -> Result<Started, radix_usbhc::Error> {
+    let heap = HEAP.with(Flags::MAY_SLEEP);
+    // Built on the heap from the constant, not on this stack.
+    let tables = Box::try_new_in(radix_usbhc::ehci::Tables::EMPTY, heap)
+        .map_err(|_| radix_usbhc::Error::NoMemory)?;
+    let regs = start.regs.memory().ok_or(radix_usbhc::Error::Unsupported("no registers"))?;
+    let ehci = radix_usbhc::ehci::Ehci::new(
+        &start.function,
+        regs.clone(),
+        waiter,
+        &mut alloc(start.address),
+        tables,
+    )?;
+    let info = ehci.info();
+    let mut about = TextBuf::<96>::new();
+    let _ = core::fmt::Write::write_fmt(
+        &mut about,
+        format_args!(
+            "EHCI {:x}.{:x} controller at {}: {} ports, {} companion controllers",
+            info.version >> 8,
+            (info.version & 0xff) >> 4,
+            start.address,
+            info.ports,
+            info.companions
+        ),
+    );
+    let boxed = Box::try_new_in(ehci, heap).map_err(|_| radix_usbhc::Error::NoMemory)?;
+    Ok((boxed, about, info.handoff))
+}
+
+#[inline(never)]
+fn start_ohci(start: &Start, waiter: &mut KernelWaiter) -> Result<Started, radix_usbhc::Error> {
+    let heap = HEAP.with(Flags::MAY_SLEEP);
+    let tables = Box::try_new_in(radix_usbhc::ohci::Tables::EMPTY, heap)
+        .map_err(|_| radix_usbhc::Error::NoMemory)?;
+    let regs = start.regs.memory().ok_or(radix_usbhc::Error::Unsupported("no registers"))?;
+    let ohci =
+        radix_usbhc::ohci::Ohci::new(regs.clone(), waiter, &mut alloc(start.address), tables)?;
+    let info = ohci.info();
+    let mut about = TextBuf::<96>::new();
+    let _ = core::fmt::Write::write_fmt(
+        &mut about,
+        format_args!(
+            "OHCI {:x}.{:x} controller at {}: {} ports",
+            info.revision >> 4,
+            info.revision & 0xf,
+            start.address,
+            info.ports
+        ),
+    );
+    let boxed = Box::try_new_in(ohci, heap).map_err(|_| radix_usbhc::Error::NoMemory)?;
+    Ok((boxed, about, info.handoff))
+}
+
+#[inline(never)]
+fn start_uhci(start: &Start, waiter: &mut KernelWaiter) -> Result<Started, radix_usbhc::Error> {
+    let heap = HEAP.with(Flags::MAY_SLEEP);
+    let super::Window::Ports(io) = start.regs else {
+        return Err(radix_usbhc::Error::Unsupported("no I/O ports"));
+    };
+    let tables = Box::try_new_in(radix_usbhc::uhci::Tables::EMPTY, heap)
+        .map_err(|_| radix_usbhc::Error::NoMemory)?;
+    let uhci = radix_usbhc::uhci::Uhci::new(
+        &start.function,
+        io,
+        waiter,
+        &mut alloc(start.address),
+        tables,
+    )?;
+    let info = uhci.info();
+    let mut about = TextBuf::<96>::new();
+    let _ = core::fmt::Write::write_fmt(
+        &mut about,
+        format_args!("UHCI controller at {}: {} ports", start.address, info.ports),
+    );
+    let boxed = Box::try_new_in(uhci, heap).map_err(|_| radix_usbhc::Error::NoMemory)?;
+    Ok((boxed, about, info.handoff))
 }
 
 impl Legacy {
@@ -243,6 +307,8 @@ impl Legacy {
         let ports = hcd.ports();
         let (product, speed, version) = match start.kind {
             Kind::Ehci => ("EHCI Host Controller", "480", " 2.00"),
+            Kind::Ohci => ("OHCI PCI host controller", "12", " 1.10"),
+            Kind::Uhci => ("UHCI Host Controller", "12", " 1.10"),
             Kind::Xhci => ("xHCI Host Controller", "5000", " 3.00"),
         };
         let root = RootHub { ports, address: start.address, product, speed, version };
@@ -265,6 +331,9 @@ impl Legacy {
     fn ports(&mut self) -> bool {
         let mut any = false;
         for port in 1..=self.hcd.ports() {
+            if super::halted() {
+                break;
+            }
             let status = self.hcd.port(port);
             if status.connect_changed || status.other_changed {
                 any = true;

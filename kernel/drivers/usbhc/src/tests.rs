@@ -5,3 +5,6 @@
 
 mod ehci;
 mod intel;
+mod ohci;
+mod sim;
+mod uhci;

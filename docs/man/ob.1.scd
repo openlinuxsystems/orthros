@@ -1191,6 +1191,22 @@ _target/userspace/_).
 
 	_Phase 11: hardware support_
 
+	*usb-ehci*
+		Boot with a keyboard and a tablet on QEMU's EHCI controller,
+		which has no companions: the keyboard types into the shell, and
+		*lsusb -t* shows the bus at 480M with its EHCI driver.
+
+	*usb-ohci*
+		Boot with a full-speed keyboard on QEMU's OHCI controller, and a
+		mouse behind a hub: the keyboard types into the shell, and
+		*lsusb -t* shows the bus at 12M with its OHCI driver.
+
+	*usb-companions*
+		Boot with QEMU's ICH9 EHCI controller and its three UHCI
+		companions: a high-speed keyboard stays on the EHCI controller
+		and types, a full-speed hub is handed to a companion, which
+		names the mouse behind it, and *lsusb -t* shows both buses.
+
 ; Phase 11's boot tests go above this line.
 
 	_Phase 12: networking_

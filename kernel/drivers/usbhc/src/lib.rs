@@ -30,6 +30,8 @@
 
 pub mod ehci;
 pub mod intel;
+pub mod ohci;
+pub mod uhci;
 
 #[cfg(test)]
 mod tests;

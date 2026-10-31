@@ -8,14 +8,16 @@
 //! their descriptors, stall what a test names, never answer, or send
 //! interrupt reports a test queues.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
 use radix_hw::pci::{Address, Function};
-use radix_hw::{Dma, Mmio, Registers, fake_memory, fake_memory_write};
+use radix_hw::{Mmio, Registers};
 use radix_usb::host::{Data, Endpoint, Error, Hcd, Target, Tt, Waiter};
 use radix_usb::{Setup, Speed, TransferType, descriptor};
+
+use super::sim::{self, Answer, Pid, SimDevice, alloc, keyboard, r32, w32, write};
 
 use crate::Handoff;
 use crate::ehci::{Ehci, Tables};
@@ -24,27 +26,6 @@ const CAPLENGTH: usize = 0x20;
 const PORTS: usize = 4;
 /// Where the legacy support capability is in configuration space.
 const EECP: usize = 0x68;
-
-#[derive(Clone, Default)]
-struct SimDevice {
-    speed: Option<Speed>,
-    address: u8,
-    descriptors: HashMap<u16, Vec<u8>>,
-    /// bRequests it stalls.
-    stalls: Vec<u8>,
-    silent: bool,
-    /// The data of the control transfer under way, and an address to
-    /// take once its status stage is done.
-    pending: VecDeque<u8>,
-    new_address: Option<u8>,
-    /// Interrupt reports to send, a transfer each.
-    reports: VecDeque<Vec<u8>>,
-    /// The toggles its interrupt packets came with.
-    toggles: Vec<bool>,
-    setups: Vec<Setup>,
-    /// What each queue head that reached it said of its hub and port.
-    hub_ports: Vec<(u8, u8)>,
-}
 
 #[derive(Default)]
 struct State {
@@ -160,43 +141,6 @@ impl Registers for Sim {
     }
 }
 
-thread_local! {
-    /// The high half of the host addresses the test's memory is at: the
-    /// controller's structures hold the low half, as below 4 GiB.
-    static HIGH: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
-}
-
-/// The host address of the 32-bit address `phys`.
-fn full(phys: u32) -> u64 {
-    HIGH.with(|h| h.get().expect("memory was allocated")) | u64::from(phys)
-}
-
-fn read(phys: u32, out: &mut [u8]) {
-    fake_memory(full(phys), out);
-}
-
-fn write(phys: u32, data: &[u8]) {
-    fake_memory_write(full(phys), data);
-}
-
-fn r32(phys: u32) -> u32 {
-    let mut b = [0u8; 4];
-    read(phys, &mut b);
-    u32::from_le_bytes(b)
-}
-
-fn w32(phys: u32, value: u32) {
-    write(phys, &value.to_le_bytes());
-}
-
-/// What a transaction got from a device.
-enum Answer {
-    Data(Vec<u8>),
-    Nak,
-    Stall,
-    Silent,
-}
-
 impl State {
     fn device(&mut self, address: u8) -> Option<&mut SimDevice> {
         let ports = &self.portsc;
@@ -293,37 +237,12 @@ impl State {
         if device.speed != Some(Speed::High) {
             device.hub_ports.push((((caps >> 16) & 0x7f) as u8, ((caps >> 23) & 0x7f) as u8));
         }
-        let answer = if device.silent {
-            Answer::Silent
-        } else if pid == 2 {
-            let mut setup = [0u8; 8];
-            read(buffer, &mut setup);
-            Self::setup(device, setup)
-        } else if pid == 1 && endpoint == 0 {
-            if bytes == 0 {
-                if let Some(a) = device.new_address.take() {
-                    device.address = a;
-                }
-                Answer::Data(Vec::new())
-            } else {
-                let take = bytes.min(device.pending.len());
-                Answer::Data(device.pending.drain(..take).collect())
-            }
-        } else if pid == 1 {
-            device.toggles.push(toggle);
-            match device.reports.pop_front() {
-                Some(report) => Answer::Data(report),
-                None => Answer::Nak,
-            }
-        } else {
-            // OUT: the status stage of a transfer in, or data out.
-            if bytes == 0 {
-                if let Some(a) = device.new_address.take() {
-                    device.address = a;
-                }
-            }
-            Answer::Data(Vec::new())
+        let kind = match pid {
+            0 => Pid::Out,
+            1 => Pid::In,
+            _ => Pid::Setup,
         };
+        let answer = sim::answer(device, kind, endpoint, bytes, buffer, toggle);
         let done = match answer {
             Answer::Nak | Answer::Silent => return,
             Answer::Stall => token & !0x80 | 0x40,
@@ -347,29 +266,6 @@ impl State {
         w32(qtd + 8, done);
     }
 
-    fn setup(device: &mut SimDevice, bytes: [u8; 8]) -> Answer {
-        let setup = Setup {
-            request_type: bytes[0],
-            request: bytes[1],
-            value: u16::from_le_bytes([bytes[2], bytes[3]]),
-            index: u16::from_le_bytes([bytes[4], bytes[5]]),
-            length: u16::from_le_bytes([bytes[6], bytes[7]]),
-        };
-        device.setups.push(setup);
-        if device.stalls.contains(&setup.request) {
-            return Answer::Stall;
-        }
-        match setup.request {
-            6 => {
-                let Some(d) = device.descriptors.get(&setup.value) else { return Answer::Stall };
-                let n = d.len().min(usize::from(setup.length));
-                device.pending = d[..n].iter().copied().collect();
-            }
-            5 => device.new_address = Some(setup.value as u8),
-            _ => {}
-        }
-        Answer::Data(Vec::new())
-    }
 }
 
 /// The test's clock: each wait runs the controller a frame.
@@ -431,27 +327,6 @@ fn function(firmware_owns: bool, stubborn: bool) -> (Function, Arc<Config>) {
     let mmio = Mmio::fake(config.clone(), radix_hw::pci::CONFIG_SIZE);
     let address = Address { segment: 0, bus: 0, device: 0x1d, function: 7 };
     (Function::probe(address, mmio).unwrap(), config)
-}
-
-fn alloc(pages: usize, below: bool) -> Option<Dma> {
-    assert!(below, "the driver's structures are below 4 GiB");
-    let dma = Dma::fake(pages * 4096);
-    let high = dma.phys() & !0xffff_ffff;
-    let end = (dma.phys() + dma.len() as u64 - 1) & !0xffff_ffff;
-    HIGH.with(|h| {
-        assert_eq!(*h.get().get_or_insert(high), high, "the test's memory is in one 4 GiB");
-        h.set(Some(high));
-    });
-    assert_eq!(end, high, "the test's memory is in one 4 GiB");
-    Some(dma)
-}
-
-fn keyboard(speed: Speed) -> SimDevice {
-    let mut device = SimDevice { speed: Some(speed), ..SimDevice::default() };
-    let max0 = if speed == Speed::High { 64 } else { 8 };
-    let dev = vec![18, 1, 0, 2, 0, 0, 0, max0, 0x27, 0x06, 0x01, 0x00, 0, 0, 1, 2, 0, 1];
-    device.descriptors.insert(u16::from(descriptor::DEVICE) << 8, dev);
-    device
 }
 
 struct Rig {

@@ -62,6 +62,8 @@ const USB_CLASS: (u8, u8) = (0x0c, 0x03);
 enum Kind {
     Xhci,
     Ehci,
+    Ohci,
+    Uhci,
 }
 
 impl Kind {
@@ -70,6 +72,8 @@ impl Kind {
         match function.class() {
             radix_xhci::PCI_CLASS => Some(Kind::Xhci),
             radix_usbhc::ehci::PCI_CLASS => Some(Kind::Ehci),
+            radix_usbhc::ohci::PCI_CLASS => Some(Kind::Ohci),
+            radix_usbhc::uhci::PCI_CLASS => Some(Kind::Uhci),
             _ => None,
         }
     }
@@ -79,6 +83,8 @@ impl Kind {
         match self {
             Kind::Xhci => "xHCI",
             Kind::Ehci => "EHCI",
+            Kind::Ohci => "OHCI",
+            Kind::Uhci => "UHCI",
         }
     }
 
@@ -88,12 +94,16 @@ impl Kind {
         match self {
             Kind::Xhci => 0,
             Kind::Ehci => 1,
+            Kind::Ohci | Kind::Uhci => 2,
         }
     }
 }
 
 /// Set by `usb=off`.
 static OFF: AtomicBool = AtomicBool::new(false);
+/// Set when the controllers are halted for the machine to go down: the
+/// polled ones' threads then read no more.
+static HALTED: AtomicBool = AtomicBool::new(false);
 /// Controllers bound so far.
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Controllers that have looked at what was plugged into them at boot,
@@ -103,10 +113,66 @@ static LOOKED: AtomicUsize = AtomicUsize::new(0);
 /// most.
 const DISKS_NS: u64 = 5_000_000_000;
 
+/// Where a controller's registers are: memory, or I/O ports (UHCI's).
+#[derive(Clone)]
+enum Window {
+    Memory(Mmio),
+    Ports(IoWindow),
+}
+
+impl Window {
+    /// Its memory-mapped registers, if they are.
+    fn memory(&self) -> Option<&Mmio> {
+        match self {
+            Window::Memory(regs) => Some(regs),
+            Window::Ports(_) => None,
+        }
+    }
+}
+
+/// A controller's I/O BAR: the only ports it reaches.
+#[derive(Clone, Copy)]
+pub(super) struct IoWindow {
+    base: u16,
+    len: u16,
+}
+
+impl IoWindow {
+    fn port(&self, offset: u16, size: u16) -> Option<u16> {
+        (offset.checked_add(size)? <= self.len).then(|| self.base + offset)
+    }
+}
+
+impl radix_usbhc::uhci::Ports for IoWindow {
+    fn len(&self) -> u16 {
+        self.len
+    }
+
+    fn read16(&self, offset: u16) -> u16 {
+        self.port(offset, 2).map_or(u16::MAX, |port| Arch::device_port_read(port, 2) as u16)
+    }
+
+    fn write16(&self, offset: u16, value: u16) {
+        if let Some(port) = self.port(offset, 2) {
+            Arch::device_port_write(port, 2, u32::from(value));
+        }
+    }
+
+    fn read32(&self, offset: u16) -> u32 {
+        self.port(offset, 4).map_or(u32::MAX, |port| Arch::device_port_read(port, 4))
+    }
+
+    fn write32(&self, offset: u16, value: u32) {
+        if let Some(port) = self.port(offset, 4) {
+            Arch::device_port_write(port, 4, value);
+        }
+    }
+}
+
 /// What a controller's thread starts from.
 struct Start {
     kind: Kind,
-    regs: Mmio,
+    regs: Window,
     /// The function, whose configuration space EHCI's handoff is in.
     function: Function,
     /// Where it is on PCI, for the log.
@@ -127,7 +193,7 @@ static STARTS: [Once<Start>; MAX_CONTROLLERS] = [const { Once::new() }; MAX_CONT
 /// Each controller's thread, which its interrupt wakes.
 static THREADS: [Once<ThreadRef>; MAX_CONTROLLERS] = [const { Once::new() }; MAX_CONTROLLERS];
 /// Each controller's kind and registers, for [`shutdown`].
-static REGISTERS: [Once<(Kind, Mmio)>; MAX_CONTROLLERS] = [const { Once::new() }; MAX_CONTROLLERS];
+static REGISTERS: [Once<(Kind, Window)>; MAX_CONTROLLERS] = [const { Once::new() }; MAX_CONTROLLERS];
 
 /// Reads the `usb` flag: `usb=off` drives no controller.
 pub fn init(off: bool) {
@@ -177,7 +243,7 @@ pub fn bind_found() {
         let _ = ROUTED[routed].set((function.clone(), before));
         routed += 1;
     }
-    for order in 0..=1 {
+    for order in 0..=2 {
         for function in found.iter().flatten() {
             match Kind::of(function) {
                 Some(kind) if kind.order() == order => bind(function, kind),
@@ -187,12 +253,10 @@ pub fn bind_found() {
     }
     for function in found.iter().flatten().filter(|f| Kind::of(f).is_none()) {
         let (_, _, interface) = function.class();
-        let what = match interface {
-            0x00 => "UHCI controller",
-            0x10 => "OHCI controller",
-            _ => "USB controller",
-        };
-        info!("USB: the {what} at {} is not driven", function.address());
+        info!(
+            "USB: the controller at {} (interface {interface:#04x}) is not driven",
+            function.address()
+        );
     }
 }
 
@@ -211,19 +275,33 @@ fn bind(function: &Function, kind: Kind) {
     let bar = match kind {
         Kind::Xhci => radix_xhci::BAR,
         Kind::Ehci => radix_usbhc::ehci::BAR,
+        Kind::Ohci => radix_usbhc::ohci::BAR,
+        Kind::Uhci => radix_usbhc::uhci::BAR,
     };
-    let Some(Bar::Memory { address, size, .. }) = function.bar(bar) else {
-        warn!("USB: the {name} controller at {} has no registers", function.address());
-        return;
-    };
-    let Some(regs) =
-        usize::try_from(size).ok().and_then(|size| <Arch as Devices>::map_device(address, size))
-    else {
-        warn!("USB: the {name} controller at {} could not be mapped", function.address());
-        return;
+    let regs = match function.bar(bar) {
+        Some(Bar::Memory { address, size, .. }) if kind != Kind::Uhci => {
+            let Some(regs) = usize::try_from(size)
+                .ok()
+                .and_then(|size| <Arch as Devices>::map_device(address, size))
+            else {
+                warn!("USB: the {name} controller at {} could not be mapped", function.address());
+                return;
+            };
+            Window::Memory(regs)
+        }
+        Some(Bar::Io { port, size }) if kind == Kind::Uhci && port + size <= 0x1_0000 => {
+            Window::Ports(IoWindow { base: port as u16, len: size.min(0x100) as u16 })
+        }
+        _ => {
+            warn!("USB: the {name} controller at {} has no registers", function.address());
+            return;
+        }
     };
     COUNT.store(index + 1, Ordering::Relaxed);
     function.enable_memory_and_dma();
+    if kind == Kind::Uhci {
+        function.set_command(function.command() | radix_hw::pci::command::IO);
+    }
     // The older controllers are polled: the kernel routes no INTx yet.
     let interrupt = if kind != Kind::Xhci {
         None
@@ -307,17 +385,26 @@ pub fn lights_changed() {
     }
 }
 
+/// Whether the controllers were halted for the machine to go down.
+fn halted() -> bool {
+    HALTED.load(Ordering::SeqCst)
+}
+
 /// Halts every controller, before the machine is powered off, restarted
 /// or halted.
 pub fn shutdown() {
+    HALTED.store(true, Ordering::SeqCst);
     dbc::stop();
     for (kind, regs) in REGISTERS.iter().filter_map(Once::get) {
         let mut delay = |us: u32| Arch::delay_us(u64::from(us));
-        let halted = match kind {
-            Kind::Xhci => radix_xhci::stop(regs, &mut delay),
-            Kind::Ehci => {
+        let halted = match (kind, regs) {
+            (Kind::Xhci, Window::Memory(regs)) => radix_xhci::stop(regs, &mut delay),
+            (Kind::Ehci, Window::Memory(regs)) => {
                 radix_usbhc::ehci::operational(regs).is_some_and(|op| radix_usbhc::ehci::stop(&op, &mut delay))
             }
+            (Kind::Ohci, Window::Memory(regs)) => radix_usbhc::ohci::stop(regs),
+            (Kind::Uhci, Window::Ports(io)) => radix_usbhc::uhci::stop(io, &mut delay),
+            _ => true,
         };
         if !halted {
             warn!("USB: a controller did not halt");
