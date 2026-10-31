@@ -571,7 +571,9 @@ _target/userspace/_).
 		her shell. signintest makes bob through *authd*(8); the test
 		signs him in on tty2, where he cannot list alice's home,
 		*who*(1) lists both, and *signintest mount* finds that he
-		mounts and unmounts nothing; he leaves a note in his _/tmp_,
+		mounts and unmounts nothing; *signintest network* listens on
+		port 8080 and connects to it, but may not bind port 80 (ADR
+		0257); he leaves a note in his _/tmp_,
 		which is his, mode 1777 (ADR 0255); he writes a line with
 		*logger*(1), and
 		*log*(1) shows him that line alone, with its hint, while
@@ -592,7 +594,7 @@ _target/userspace/_).
 		may pass through her home, read her file and write the one she
 		makes after, which takes the folder's default list, as
 		*getfacl*(1) shows, but not list her home or write her file. The
-		power button ends it (ADRs 0250, 0254, 0255 and 0256).
+		power button ends it (ADRs 0250, 0254, 0255, 0256 and 0257).
 
 	*elevate*
 		Boot 2 CPUs under BIOS from USB with the shipped services and
@@ -606,7 +608,8 @@ _target/userspace/_).
 		root's environment with the fixed *PATH* and *SUDO_USER*, and the
 		hashes' file, which she cannot read herself, and the kernel log
 		and the audit log through *elevate dmesg* and
-		*elevate log --audit*. Ctrl+C stops an
+		*elevate log --audit*; elevated, *signintest network --low*
+		also listens on port 80. Ctrl+C stops an
 		elevated *sleep*(1) through its own terminal; *elevate -s* gives
 		root's shell on a terminal of its own; *elevate -k* locks the
 		pane again, *-n* then will not ask, a wrong password is asked
@@ -618,8 +621,8 @@ _target/userspace/_).
 		then gets that it is disabled, until she enables it and he signs
 		in again. *elevate last* and *elevate lastlog* show her everyone's
 		sign-ins: both of bob's, hers, the computer's start, and root's
-		none. The power button ends it (ADRs 0219, 0220, 0251, 0252 and
-		0254).
+		none. The power button ends it (ADRs 0219, 0220, 0251, 0252,
+		0254 and 0257).
 
 	*startup-trouble*
 		Boot 2 CPUs under UEFI from USB with *startup-trouble*, as the

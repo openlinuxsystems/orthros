@@ -48,6 +48,13 @@ always is. An administrator finds it at
 `/system/live/authd/tmp/NUMBER`; `elevate` itself sees the system's
 `/tmp`.
 
+Your session uses the network as anyone may on Linux: it connects
+out, and its programs listen on the ports from 1024, such as a web
+server you try out on port 8080. Ports below 1024, and setting up the
+network cards with `ip`, are an administrator's, through `elevate`
+(below); binding a low port otherwise fails with "Permission denied",
+as on Linux.
+
 Ctrl+Alt+Delete is the secure attention key: no program ever gets it,
 so whatever it shows is the system's own. With no password prompt on
 the console it shows a menu on the bottom line, where Enter takes you
@@ -109,7 +116,8 @@ The password is asked once in each terminal pane, and that pane stays
 unlocked for 15 minutes from its last elevated command; another pane,
 or another console, asks again. `elevate -k` locks the pane at once,
 and `elevate -s` gives root's own shell, whose prompt ends in `#`, for
-a run of work.
+a run of work. `elevate ip link set net0 up` sets a network card up,
+and an elevated server listens on port 80.
 
 An elevated command runs with root's environment, not yours: `PATH` is
 always `/system/commands:/applications/commands`, so a command of your

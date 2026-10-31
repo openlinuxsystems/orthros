@@ -40,3 +40,10 @@ names = true
 # inside elevate (ADR 0219), so that ectool(8) works there as at root's
 # shell.
 admin.hardware = true
+# The network, which it hands on (ADR 0257): each session connects out
+# and listens on the ports from 1024, as anyone may on Linux; root's
+# session and an administrator's command inside elevate also listen
+# below 1024 and set up the interfaces with ip(8).
+network.outbound = true
+network.listen = ["1-65535"]
+admin.network = true

@@ -31,7 +31,7 @@ use std::path::Path;
 
 use radix_abi::capability::{self, ObjectKind, Rights};
 use radix_abi::directory::{self, OpenFlags};
-use radix_abi::{Status, names, process, startup};
+use radix_abi::{Status, names, network, process, startup};
 
 use accounts::User;
 
@@ -300,9 +300,9 @@ pub fn start(
         }
     };
     let spares =
-        Spares::new(7).map_err(|err| format!("cannot start the session: no slots: {err}"))?;
-    let [stamped, root, program, child, view, given, scratch] =
-        [0, 1, 2, 3, 4, 5, 6].map(|i| spares.slot(i));
+        Spares::new(8).map_err(|err| format!("cannot start the session: no slots: {err}"))?;
+    let [stamped, root, program, child, view, given, scratch, network] =
+        [0, 1, 2, 3, 4, 5, 6, 7].map(|i| spares.slot(i));
     let others: Vec<u8> = groups.iter().flat_map(|g| g.to_le_bytes()).collect();
     names::stamp(&SYS, names, startup::SLOT_ROOT, stamped, user.uid, user.gid, &others)
         .map_err(failed("stamping its root"))?;
@@ -345,12 +345,57 @@ pub fn start(
         process::share(&SYS, child, from, to, Rights::ALL, 0)
             .map_err(failed("giving it its capabilities"))?;
     }
+    give_network(child, network, user.uid == 0).map_err(failed("giving it the network"))?;
     let block =
         exec_block(FIRST_PROGRAM.as_bytes(), &[b"login", b"--session"], &environment(user, term));
     process::exec(&SYS, child, program, &block).map_err(failed("starting login"))?;
     // The child stays in the tree after its capability goes, for wait.
     let number = process::info(&SYS, child).map_err(failed("its number"))?.number;
     Ok(number)
+}
+
+/// The first port everyone may listen on, as Linux's
+/// `net.ipv4.ip_unprivileged_port_start`: below it, only root's session
+/// and elevated commands listen (ADR 0257).
+pub const FIRST_OPEN_PORT: u32 = 1024;
+
+/// Gives `child` the network, from authd's network capabilities in the
+/// NETWORK_SLOTS slots from SLOT_NETWORK into its own from SLOT_NETWORK
+/// (ADR 0257). With `everything`, for root's session and elevated
+/// commands, each goes as authd holds it, setting up the interfaces
+/// included. Otherwise the child connects out, and listens on the ports
+/// from [`FIRST_OPEN_PORT`], but sets up nothing, as anyone may on Linux.
+/// `scratch` is an empty slot to restrict through.
+pub fn give_network(child: u32, scratch: u32, everything: bool) -> Result<(), Status> {
+    // Kept through fork and exec, as Spark gives them (ADR 0184).
+    let kept = Rights::COPY.union(Rights::TRANSFER);
+    let end = startup::SLOT_NETWORK + startup::NETWORK_SLOTS;
+    let mut to = startup::SLOT_NETWORK;
+    for from in startup::SLOT_NETWORK..end {
+        let Ok(info) = capability::info(&SYS, from) else { continue };
+        if info.kind != ObjectKind::Network {
+            continue;
+        }
+        if everything {
+            process::share(&SYS, child, from, to, Rights::ALL, 0)?;
+            to += 1;
+            continue;
+        }
+        let ports = network::ports(&SYS, from)?;
+        let past = ports.first.saturating_add(ports.count);
+        for (right, lowest) in [(Rights::SEND, 0), (Rights::RECEIVE, FIRST_OPEN_PORT)] {
+            let first = ports.first.max(lowest);
+            if info.rights.bits() & right.bits() == 0 || first >= past || to >= end {
+                continue;
+            }
+            network::restrict(&SYS, from, scratch, first, past - first, right.union(kept))?;
+            let shared = process::share(&SYS, child, scratch, to, Rights::ALL, 0);
+            let _ = capability::delete(&SYS, scratch);
+            shared?;
+            to += 1;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

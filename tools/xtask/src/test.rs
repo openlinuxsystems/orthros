@@ -7500,7 +7500,8 @@ fn accounts(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// him his own sign-ins alone, and alice, through elevate, every wrong
 /// password (ADR 0254). Bob's /tmp is his own, kept from one of his
 /// sessions to the next, and in neither alice's view nor the system's
-/// (ADR 0255). The power button ends it.
+/// (ADR 0255). His session listens on port 8080 but not on port 80 (ADR
+/// 0257). The power button ends it.
 fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
     owner_signs_in(vm, case)?;
     answer_prompt(vm, "$", "clear; id; pwd; echo \"$USER $HOME $SHELL\"; tty")?;
@@ -7527,6 +7528,10 @@ fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
     // unmounts /processes for no one.
     answer_prompt(vm, "$", "clear; /system/tests/posix/signintest mount")?;
     vm.expect_screen(&["signintest-mount: every check passed"])?;
+    // His session uses the network as anyone may on Linux: it listens on
+    // port 8080 and connects to it, but not on port 80 (ADR 0257).
+    answer_prompt(vm, "$", "clear; /system/tests/posix/signintest network")?;
+    vm.expect_screen(&["signintest-network: every check passed"])?;
     // His /tmp is his own (ADR 0255): his, mode 1777, and what he leaves
     // there is in no one else's.
     answer_prompt(
@@ -7773,7 +7778,7 @@ fn bob_signs_in(vm: &mut Vm) -> Result<(), String> {
 /// lines say each time. Alice disables bob's account, which ends his
 /// session at once and keeps him out until she enables it (ADR 0220),
 /// but not her own. Through elevate she reads everyone's sign-ins (ADR
-/// 0254). The power button ends it.
+/// 0254), and listens on port 80 (ADR 0257). The power button ends it.
 fn elevate(vm: &mut Vm, case: &Case) -> Result<(), String> {
     owner_signs_in(vm, case)?;
     bob_signs_in(vm)?;
@@ -7833,6 +7838,10 @@ fn elevate(vm: &mut Vm, case: &Case) -> Result<(), String> {
          | grep -c 'alice elevat[e]d' | sed 's/^[1-9][0-9]*$/audited/'",
     )?;
     vm.expect_screen(&["authd: alice elevated on", "audited"])?;
+    // An elevated command has the network as root has it: it listens on
+    // port 80 too (ADR 0257).
+    answer_prompt(vm, "$", "clear; elevate /system/tests/posix/signintest network --low")?;
+    vm.expect_screen(&["signintest-network-elevated: every check passed"])?;
     // Ctrl+C reaches the elevated command through its own terminal.
     answer_prompt(vm, "$", "clear; elevate sleep 1000; echo \"status $?\"")?;
     vm.expect_anywhere("runs /system/commands/sleep 1000, for process ")?;

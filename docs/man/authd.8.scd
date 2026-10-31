@@ -207,9 +207,10 @@ service holds:
   as the session's root in place of that copy: each name of the root at
   its place, with the user's own _/tmp_ at _tmp_ (see below);
 - it makes a process, names it for the user and their groups, and gives
-  it that root, the random source, the log, and the terminal as its
-  descriptors 0, 1 and 2, and nothing else of authd's: not its root,
-  not the names capability, not the bypass right;
+  it that root, the random source, the log, the terminal as its
+  descriptors 0, 1 and 2, and the network (see below), and nothing else
+  of authd's: not its root, not the names capability, not the bypass
+  right;
 - it runs *login --session* in it, with the environment *HOME*,
   *SHELL*, *USER*, *LOGNAME*, *PATH=/system/commands*, *TERM*,
   *LANG=C.UTF-8* and *EDITOR=nano*; login makes the terminal the
@@ -228,6 +229,15 @@ name added to the root after a session started is not in its view
 until the next sign-in. Root's sessions, and commands run with
 *elevate*(8), keep the whole tree and the system's _/tmp_; root finds a
 person's at its real path.
+
+The network comes from the capabilities that authd's service file asks
+Spark for (*network.outbound*, *network.listen* and *admin.network*,
+ADR 0257). A session connects out, and listens on the ports from 1024,
+as anyone may on Linux, but sets up no interface and listens on no port
+below 1024: binding one fails with *EACCES*, as on Linux. Root's
+sessions, and commands run with *elevate*(8), get the network as authd
+holds it, so *ip*(8) sets the interfaces up and a server listens on
+port 80.
 
 The groups are the account's own and each group of
 _/system/settings/group_ that lists its name, up to 32. A session
@@ -321,8 +331,9 @@ authd:
 - makes a process, its own child, acting for root as authd does, and
   gives it authd's root, which passes the owners and modes of files
   (the bypass right), the random source, the log, the platform
-  capability that its service file's *admin.hardware* gives it, and the
-  three descriptors as its 0, 1 and 2: the admin set;
+  capability that its service file's *admin.hardware* gives it, its
+  network capabilities, and the three descriptors as its 0, 1 and 2:
+  the admin set;
 - runs *elevate --started* in it, which makes the first terminal among
   them its controlling terminal in a new session, goes to the
   directory and runs the command, with the environment *elevate*(8)
