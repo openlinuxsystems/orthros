@@ -137,6 +137,10 @@ errors kernel = 1 {
     message_too_long = 48 => EMSGSIZE;
     /// The kernel has no room for another socket on the interface.
     no_buffers = 49 => ENOBUFS;
+    /// The datagram is to a broadcast address, from a socket that did
+    /// not say it sends to every host (radix-file(2)'s broadcast option,
+    /// SO_BROADCAST).
+    broadcast = 50 => EACCES;
 }
 
 /// Errors of files and directories (radix-directory(2), radix-file(2)).

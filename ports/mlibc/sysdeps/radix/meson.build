@@ -31,6 +31,7 @@ libc_sources += radix_sources + files(
 	'../../options/linux/generic/malloc.cpp',
 	'../../options/linux/generic/sys-random.cpp',
 	'generic/entry.cpp',
+	'generic/interfaces.cpp',
 	'generic/poll.cpp',
 	'generic/process.cpp',
 	'generic/socket.cpp',

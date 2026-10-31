@@ -28,7 +28,11 @@ memory = "none"
 # shells on the consoles until sign-in comes (Phase 13b.5).
 [permissions]
 runs-with-your-access = true
-# Root's shells may set the fans, the LEDs and the ARGB header with
-# ectool(8), as root may on Linux; from Phase 13 an administrator's do,
-# once elevated.
+# Root's shells may use the network, listen on any port and set the
+# interfaces up with ip(8), and set the fans, the LEDs and the ARGB
+# header with ectool(8), as root may on Linux; from Phase 13 an
+# administrator's do, once elevated.
+network.outbound = true
+network.listen = ["1-65535"]
+admin.network = true
 admin.hardware = true

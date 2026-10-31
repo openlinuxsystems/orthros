@@ -34,7 +34,10 @@ log through _/devices/kmsg_ (*radix-files*(7)), and *logd*(8) keeps it
 as the system's log and its audit log, which *log*(1) and
 *journalctl*(1) read and *logtrim*(8) trims; *notifyd*(8) passes the
 notifications *notify-send*(1) sends to the console, and
-*notifications*(1) lists them;
+*notifications*(1) lists them; *ip*(8) and *ss*(8) read the network's
+interfaces and sockets from *radix-sysfs*(5) and *radix-proc*(5), and
+*ip*(8) sets the interfaces up through the network capability
+(*radix-network*(2));
 *shutdown*(8), *reboot*(8), *poweroff*(8), *halt*(8) and *service*(8)
 ask Spark over its control socket (*spark*(8)). Until users come, in Phase 13 of the roadmap,
 every process is root's, so the user columns all say root and the
@@ -84,6 +87,8 @@ error that starts with the tool's name.
 :  a process's I/O class and level
 |  *iostat*(1)
 :  what the CPUs and the disks have done, per second
+|  *ip*(8)
+:  the network interfaces, their addresses and routes, and set them
 |  *journalctl*(1), *log*(1)
 :  the system's log
 |  *keymap*(1)
@@ -138,6 +143,8 @@ error that starts with the tool's name.
 :  start, stop and look at the services
 |  *shutdown*(8)
 :  stop the system, now or later
+|  *ss*(8)
+:  the TCP and UDP sockets
 |  *scrub*(8)
 :  read and check every block of a Btrfs filesystem
 |  *subvolume*(8)

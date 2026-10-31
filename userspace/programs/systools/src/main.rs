@@ -33,6 +33,7 @@ mod fstrim;
 mod hexdump;
 mod hwinfo;
 mod iostat;
+mod ip;
 mod keymaps;
 mod log;
 mod logd;
@@ -62,6 +63,7 @@ mod sensors;
 mod servicefiles;
 mod sessions;
 mod signals;
+mod ss;
 mod subvolume;
 mod swap;
 mod sys;
@@ -108,6 +110,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("hwinfo", hwinfo::main),
     ("ionice", priority::ionice),
     ("iostat", iostat::main),
+    ("ip", ip::main),
     ("journalctl", log::journalctl),
     ("keymap", keymaps::main),
     ("kill", signals::kill),
@@ -140,6 +143,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("sensors", sensors::main),
     ("service", power::service),
     ("shutdown", power::shutdown),
+    ("ss", ss::main),
     ("subvolume", subvolume::main),
     ("swapoff", swap::swapoff),
     ("swapon", swap::swapon),

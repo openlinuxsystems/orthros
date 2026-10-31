@@ -2270,6 +2270,22 @@ pub const CASES: &[Case] = &[
         disks: &[],
         second: None,
     },
+    Case {
+        name: "interfaces",
+        about: "a virtio network card with no address: a socket bound to it sends a DHCPDISCOVER from 0.0.0.0 and receives QEMU's offer, ip gives it the address and router offered and shows them, a connection goes through it, ss lists it, and ip takes them away again",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- --posix --network /system/tests/posix/interfaces",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-netdev", ECHO_NETDEV, "-device", "virtio-net-pci,netdev=n0"],
+        script: interfaces,
+        disks: &[],
+        second: None,
+    },
 ];
 
 /// `ob test`.
@@ -4809,6 +4825,40 @@ fn net(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// The `sockets` test (userspace/sockets): its program's steps over lo,
 /// through the card and refused, and every network socket's memory back
 /// in the kernel's.
+/// The `interfaces` test (userspace/posix/interfaces.c): the card comes
+/// up with no address, and ip(8) sets it up with what QEMU's DHCP server
+/// offered.
+fn interfaces(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_ahead("spark: started /system/tests/posix/interfaces as process ")?;
+    if let Some(line) = vm.log().lines().find(|line| line.contains("Net: net0 has the address")) {
+        return Err(format!("the card had an address before ip gave it one: {}", line.trim()));
+    }
+    vm.expect("interfaces: 10.0.2.2 offered 10.0.2.15 to net0, which had no address")?;
+    vm.expect("interfaces: a connection from 10.0.2.15 to 10.0.2.100 port 7 echoed what it sent")?;
+    let code = program_line(vm, "(/system/tests/posix/interfaces) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> =
+        log.lines().filter(|line| line.contains("interfaces: FAILED: ")).collect();
+    if !failed.is_empty() || !log.contains("interfaces: every check passed") || code != "0x0" {
+        return Err(format!("the interfaces test failed ({code}): {}", failed.join("; ")));
+    }
+    // ip's changes, each as the kernel logs it: the address, the router,
+    // the router gone and the address gone.
+    let set = |what: &str| log.lines().filter(|line| line.trim_end().ends_with(what)).count();
+    for (what, times) in [
+        ("Net: net0 is set to 1 address", 2),
+        ("Net: net0 is set to 1 address, with a router", 1),
+        ("Net: net0 is set to 0 addresses", 1),
+    ] {
+        if set(what) != times {
+            return Err(format!("the kernel logged \"{what}\" {} times, not {times}", set(what)));
+        }
+    }
+    vm.expect("spark: nothing more to do; waiting")
+}
+
 fn sockets(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("spark: built the hierarchy of 9 directories and mounted 9 filesystems")?;

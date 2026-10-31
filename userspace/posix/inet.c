@@ -10,6 +10,9 @@
 // UDP: sendto and recvfrom, datagrams kept whole, sendmsg and recvmsg
 // over several buffers, connect, and MSG_DONTWAIT. The errors of
 // addresses in use or not on the machine and of families not there. And
+// the interfaces' names and numbers (if_nametoindex, if_indextoname,
+// if_nameindex) and SO_BINDTODEVICE, of lo, the only interface this boot
+// has; the interfaces boot test binds to a card. And
 // the network capabilities: a child with none cannot make a socket
 // (EACCES), one that may only connect out cannot bind a port or listen,
 // and one that may only listen on ports 9000 to 9009 cannot connect out
@@ -18,6 +21,7 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -390,6 +394,64 @@ static void errors(void) {
 	close(d);
 }
 
+// lo's name and number, as /kernel/class/net gives them, and a socket
+// bound to it with SO_BINDTODEVICE, which still reaches 127.0.0.1.
+static void interfaces(void) {
+	CHECK(if_nametoindex("lo") == 1);
+	CHECK(if_nametoindex("net0") == 0 && errno == ENODEV);
+	CHECK(if_nametoindex("../lo") == 0);
+	char name[IF_NAMESIZE];
+	CHECK(if_indextoname(1, name) == name && !strcmp(name, "lo"));
+	CHECK(if_indextoname(2, name) == NULL && errno == ENXIO);
+	struct if_nameindex *list = if_nameindex();
+	CHECK(list != NULL);
+	if(list) {
+		CHECK(list[0].if_index == 1 && !strcmp(list[0].if_name, "lo"));
+		CHECK(list[1].if_index == 0 && list[1].if_name == NULL);
+		if_freenameindex(list);
+	}
+
+	int server = socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in at = loopback(0);
+	CHECK(bind(server, (struct sockaddr *)&at, sizeof(at)) == 0);
+	CHECK(listen(server, 1) == 0);
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	char bound[IF_NAMESIZE] = "x";
+	socklen_t len = sizeof(bound);
+	CHECK(getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, bound, &len) == 0 && len == 0);
+	// A name without its NUL, as the length says.
+	CHECK(setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, "lox", 2) == 0);
+	len = sizeof(bound);
+	CHECK(getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, bound, &len) == 0);
+	CHECK(len == 3 && !strcmp(bound, "lo"));
+	len = 4;
+	CHECK_ERROR(getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, bound, &len), EINVAL);
+	CHECK_ERROR(setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, "nosuch", 6), ENODEV);
+	at = loopback(port_of(server));
+	CHECK(connect(fd, (struct sockaddr *)&at, sizeof(at)) == 0);
+	int taken = accept(server, NULL, NULL);
+	CHECK(taken >= 0);
+	// A stream bound once it connected stays as it is.
+	CHECK_ERROR(setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, "", 0), EINVAL);
+	close(taken);
+	close(fd);
+	close(server);
+
+	// A datagram socket bound to lo, and then to none.
+	int d = socket(AF_INET, SOCK_DGRAM, 0);
+	CHECK(setsockopt(d, SOL_SOCKET, SO_BINDTODEVICE, "lo", 3) == 0);
+	at = loopback(0);
+	CHECK(bind(d, (struct sockaddr *)&at, sizeof(at)) == 0);
+	struct sockaddr_in self = loopback(port_of(d));
+	CHECK(sendto(d, "x", 1, 0, (struct sockaddr *)&self, sizeof(self)) == 1);
+	char byte = 0;
+	CHECK(recv(d, &byte, 1, 0) == 1 && byte == 'x');
+	CHECK(setsockopt(d, SOL_SOCKET, SO_BINDTODEVICE, "", 0) == 0);
+	len = sizeof(bound);
+	CHECK(getsockopt(d, SOL_SOCKET, SO_BINDTODEVICE, bound, &len) == 0 && len == 0);
+	close(d);
+}
+
 // Deletes every network capability the process has, but the one in slot
 // `keep` (0 for none).
 static void drop_network(uint32_t keep) {
@@ -488,6 +550,7 @@ int main(void) {
 	RUN(shared);
 	RUN(udp);
 	RUN(errors);
+	RUN(interfaces);
 	RUN(capabilities);
 	return check_end();
 }

@@ -868,6 +868,20 @@ _target/userspace/_).
 		socket's memory must come back to the kernel (*radix-network*(2),
 		ADR 0183).
 
+	*interfaces*
+		Boot 2 CPUs under UEFI from the USB stick with a virtio network
+		card on QEMU's user network, as for *sockets*, but with no
+		address. Spark starts _/system/tests/posix/interfaces_ with its
+		network capability: the program finds the card as *net0*,
+		number 2, through the C library and _/kernel/class/net_; sends a
+		DHCPDISCOVER from 0.0.0.0 through a socket bound to the card
+		with SO_BINDTODEVICE, which QEMU's DHCP server must answer with
+		an offer of 10.0.2.15 that the socket receives; gives the card
+		that address and the router with *ip*(8), which must show them;
+		connects through the card to QEMU's *cat*, which *ss*(8) must
+		list; and takes the address and router away again with *ip*(8),
+		each change logged by the kernel (ADR 0190).
+
 	*disk-check*
 		Boot 2 CPUs under UEFI with a 128 MiB NVMe disk whose serial
 		number is _dukovo-test-0_, and run the disk check of a real
