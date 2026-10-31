@@ -1488,8 +1488,30 @@ impl Shell {
             // one fails its error is the only one, as in bash and dash.
             match self.redirect(redirects, Scope::Command) {
                 Ok(saved) => {
-                    let name = crate::expand::printable(name);
-                    self.error(&format!("{name}: command not found"));
+                    let printable = crate::expand::printable(name);
+                    // At the prompt, a likely name (ADR 0259).
+                    let likely =
+                        (self.interactive && self.frames.is_empty() && self.colors.did_you_mean)
+                            .then(|| crate::suggest::did_you_mean(self, name))
+                            .flatten();
+                    match likely {
+                        Some(likely) => {
+                            let likely = if crate::colors::allowed(
+                                self.get("NO_COLOR").as_deref(),
+                                self.get("TERM").as_deref(),
+                                sys::isatty(2),
+                            ) && self.colors.on("line")
+                            {
+                                self.colors.style("line.command").paint(&likely)
+                            } else {
+                                likely
+                            };
+                            self.error(&format!(
+                                "{printable}: command not found. Did you mean {likely}?"
+                            ));
+                        }
+                        None => self.error(&format!("{printable}: command not found")),
+                    }
                     self.restore(saved);
                 }
                 Err(Some(flow)) => return Err(flow),

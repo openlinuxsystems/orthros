@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The shell's colours, and those it gives ls, grep, diff and ip
+# (colors.toml(5)).
+#
+# To change them for everyone, edit this file. To change them for
+# yourself, copy the keys you want into ~/.config/nukesh/colors.toml:
+# yours win, key by key. `nukesh --colors` shows every key in its colour;
+# `nukesh --colors --check` checks the files. Changes show in the next
+# shell you start.
+#
+# A style is a few words: one of the 16 colours, then `on` and another
+# for the background, and any of bold, dim, italic, underline and
+# reverse. The colours are black, red, green, yellow, blue, magenta,
+# cyan, white, and the same with `bright-` before them. "none" is the
+# terminal's own text. Only these 16 are offered, so the colours follow
+# your terminal's theme.
+#
+# Colours are off when NO_COLOR is set, when the output is not a
+# terminal, and everywhere with:
+enabled = true
+
+# The prompt: name@host folder ›, with a ✗ badge and the code after a
+# failed command, and an admin badge while you are root. The prompt is
+# drawn this way while PS1 is left at its default.
+[prompt]
+enabled = true
+user = "green"
+at = "bright-black"
+host = "green"
+path = "bold blue"
+symbol = "magenta"
+error = "bold bright-white on red"
+admin = "bold black on yellow"
+
+# The command line as you type it. An unknown command is underlined as
+# well as red, so that it shows without colour too.
+[line]
+enabled = true
+command = "green"
+unknown = "red underline"
+keyword = "bold blue"
+option = "cyan"
+string = "yellow"
+variable = "magenta"
+operator = "bold yellow"
+comment = "bright-black"
+hint = "bright-black"
+
+# Suggestions: faded text from your history after the cursor (→ or End
+# takes it), and "Did you mean ...?" after "command not found".
+[suggest]
+history = true
+did-you-mean = true
+
+# ls (LS_COLORS). `enabled = false` leaves ls without colour.
+[ls]
+enabled = true
+directory = "bold blue"
+program = "bold green"
+link = "cyan"
+broken-link = "red reverse"
+archive = "red"
+pipe = "yellow"
+socket = "magenta"
+device = "bold yellow"
+
+# grep (GREP_COLORS).
+[grep]
+enabled = true
+match = "bold red"
+file = "magenta"
+line = "green"
+separator = "bright-black"
+
+# diff (its --palette).
+[diff]
+enabled = true
+added = "green"
+removed = "red"
+header = "bold"
+hunk = "cyan"
+
+# ip (IP_COLORS).
+[ip]
+enabled = true
+name = "cyan"
+up = "green"
+down = "red"
+address = "magenta"
+address6 = "blue"
+mac = "yellow"

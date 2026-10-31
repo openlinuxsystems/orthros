@@ -11,22 +11,32 @@
 //! `TERM`) and input that is not a terminal get a plain reader: the
 //! prompt, then a line, read a byte at a time so that nothing after it is
 //! taken from the input.
+//!
+//! With colours (colors.toml(5), ADR 0258), the line is coloured as it is
+//! typed (`highlight`), a command from the history that starts with what
+//! was typed shows faded after the cursor (ADR 0259), and while `PS1` is
+//! left at its default the prompt is `name@host folder ›`, with a badge
+//! for a failed command's status and one while the shell is root's.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use reedline::{
-    Color, ColumnarMenu, Completer, CompletionResult, EditCommand, Emacs, Highlighter, HistoryItem,
-    KeyCode, KeyModifiers, Keybindings, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
-    PromptHistorySearchStatus, Reedline, ReedlineEvent, ReedlineMenu, Signal, Span, StyledText,
-    Suggestion, ValidationResult, Validator, Vi, default_emacs_keybindings,
-    default_vi_insert_keybindings, default_vi_normal_keybindings, default_vi_visual_keybindings,
+    Color, ColumnarMenu, Completer, CompletionResult, DefaultHinter, EditCommand, Emacs,
+    Highlighter, HistoryItem, KeyCode, KeyModifiers, Keybindings, MenuBuilder, Prompt,
+    PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline, ReedlineEvent,
+    ReedlineMenu, Signal, Span, StyledText, Suggestion, ValidationResult, Validator, Vi,
+    default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
+    default_vi_visual_keybindings,
 };
 
+use crate::colors::Colors;
+use crate::highlight;
 use crate::parse;
 use crate::shell::Shell;
 use crate::{prompt, sys, text, trap};
@@ -101,12 +111,26 @@ impl Editor {
 
     /// Makes reedline for the shell's settings now.
     fn build(&mut self) {
-        let (vi, colors, wakes) = {
+        let (vi, colors, wakes, palette) = {
             let shell = self.shell.borrow();
-            (shell.opts.vi, colors(&shell), needs_wakes(&shell))
+            (shell.opts.vi, colors(&shell), needs_wakes(&shell), shell.colors.clone())
         };
         let handle = Handle(self.shell.clone());
-        let mut line = new_reedline(vi, colors)
+        let mut line = new_reedline(vi, colors);
+        if colors && palette.on("line") {
+            line = line.with_highlighter(Box::new(ShellHighlighter {
+                shell: handle.clone(),
+                colors: (*palette).clone(),
+                known: RefCell::new((String::new(), HashMap::new())),
+            }));
+        }
+        // A hint shows only in its colour: without colours it would look
+        // typed.
+        if colors && palette.history_hints {
+            let style = palette.style("line.hint").to_reedline();
+            line = line.with_hinter(Box::new(DefaultHinter::default().with_style(style)));
+        }
+        let mut line = line
             .with_completer(Box::new(ShellCompleter(handle.clone())))
             .with_validator(Box::new(ShellValidator(handle)))
             .with_menu(ReedlineMenu::EngineCompleter(Box::new(
@@ -147,6 +171,10 @@ impl Editor {
         if self.line.is_none() {
             return self.read_plain(&ps1, timeout);
         }
+        let ps1 = {
+            let mut shell = self.shell.borrow_mut();
+            rich_prompt(&mut shell).unwrap_or(ps1)
+        };
         if wakes != self.wakes {
             self.build();
         } else if vi != self.vi {
@@ -300,9 +328,50 @@ fn now_millis() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Whether the editor may use colour: not with `NO_COLOR` set.
+/// Whether the editor may use colour: not with `NO_COLOR` set, nor with
+/// colors.toml's `enabled = false`. The editor runs only at a terminal
+/// that is not dumb.
 fn colors(shell: &Shell) -> bool {
-    shell.get("NO_COLOR").is_none_or(|v| v.is_empty())
+    shell.get("NO_COLOR").is_none_or(|v| v.is_empty()) && shell.colors.enabled
+}
+
+/// The prompt drawn while `PS1` is its default, `$ ` or `# ` (ADR 0258):
+/// `name@host folder › `, with `✗ status` after a failed command and
+/// `admin` while the shell is root's, then `#`. Colours are added when
+/// they may be used.
+fn rich_prompt(shell: &mut Shell) -> Option<String> {
+    let ps1 = shell.get("PS1").unwrap_or_default();
+    if !matches!(ps1.as_str(), "$ " | "# ") || !shell.colors.enabled || !shell.colors.on("prompt") {
+        return None;
+    }
+    let palette = shell.colors.clone();
+    let paint = colors(shell);
+    let style = |key: &str, text: &str| {
+        if paint { palette.style(&format!("prompt.{key}")).paint(text) } else { text.to_string() }
+    };
+    let user = prompt::expand(shell, "\\u");
+    let host = prompt::expand(shell, "\\h");
+    let path = prompt::expand(shell, "\\w");
+    let mut out = format!(
+        "{}{}{} {}",
+        style("user", &user),
+        style("at", "@"),
+        style("host", &host),
+        style("path", &path)
+    );
+    if shell.status != 0 {
+        out.push(' ');
+        out.push_str(&style("error", &format!(" ✗ {} ", shell.status)));
+    }
+    let root = sys::geteuid() == 0;
+    if root {
+        out.push(' ');
+        out.push_str(&style("admin", " admin "));
+    }
+    out.push(' ');
+    out.push_str(&style("symbol", if root { "#" } else { "›" }));
+    out.push(' ');
+    Some(out)
 }
 
 /// reedline with the keys for `vi` or Emacs, and no colouring of its own
@@ -348,6 +417,72 @@ impl Highlighter for Plain {
     fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
         let mut styled = StyledText::default();
         styled.buffer.push((Default::default(), line.to_string()));
+        styled
+    }
+}
+
+/// The line as typed, coloured by what each piece is (`highlight`).
+struct ShellHighlighter {
+    shell: Handle,
+    colors: Colors,
+    /// Whether each command name runs something, for the `PATH` and the
+    /// history's count they were looked up with: a command run since, or
+    /// a new `PATH`, may change the answers.
+    known: RefCell<(String, HashMap<String, bool>)>,
+}
+
+impl ShellHighlighter {
+    /// Whether `name`, as typed where a command starts, runs something:
+    /// an alias, function, builtin or reserved word, a file named by a
+    /// path, or a program on `PATH`.
+    fn known(&self, name: &str) -> bool {
+        // While the shell is busy (it never is while a line is read), the
+        // benefit of the doubt.
+        let Ok(shell) = self.shell.0.try_borrow() else { return true };
+        let stamp = format!(
+            "{}\0{}\0{}",
+            shell.get("PATH").unwrap_or_default(),
+            shell.history.generation,
+            shell.history.count()
+        );
+        let mut known = self.known.borrow_mut();
+        if known.0 != stamp {
+            *known = (stamp, HashMap::new());
+        }
+        if let Some(answer) = known.1.get(name) {
+            return *answer;
+        }
+        let answer = shell.aliases.contains_key(name)
+            || shell.functions.contains_key(name)
+            || crate::builtins::lookup(name)
+                .is_some_and(|_| crate::builtins::enabled(&shell, name))
+            || parse::is_reserved(name)
+            || shell.hash.contains_key(name)
+            || if name.contains('/') {
+                let path = match name.strip_prefix("~/") {
+                    Some(rest) => format!("{}/{rest}", shell.get("HOME").unwrap_or_default()),
+                    None => name.to_string(),
+                };
+                std::fs::metadata(text::to_os(&path)).is_ok()
+            } else {
+                shell.search_path(name, false).is_some()
+            };
+        known.1.insert(name.to_string(), answer);
+        answer
+    }
+}
+
+// SAFETY: as for `Handle`: reedline calls the highlighter only from
+// `read_line`, on the shell's thread.
+unsafe impl Send for ShellHighlighter {}
+
+impl Highlighter for ShellHighlighter {
+    fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
+        let mut styled = StyledText::default();
+        for (role, piece) in highlight::spans(line, &mut |name| self.known(name)) {
+            let style = role.key().map_or_else(Default::default, |key| self.colors.style(key));
+            styled.buffer.push((style.to_reedline(), piece));
+        }
         styled
     }
 }

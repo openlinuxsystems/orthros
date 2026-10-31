@@ -303,6 +303,8 @@ pub struct Shell {
     /// Programmable completion: each command's specification.
     pub completions: crate::complete::Specs,
     pub history: crate::history::History,
+    /// colors.toml(5), read when the shell is interactive (ADR 0258).
+    pub colors: Rc<crate::colors::Colors>,
     /// The terminal the shell controls, with job control.
     pub tty: Option<i32>,
     pub shell_pgid: i32,
@@ -401,6 +403,7 @@ impl Shell {
             rematch: Vec::new(),
             completions: crate::complete::Specs::default(),
             history: crate::history::History::default(),
+            colors: Rc::default(),
             tty: None,
             shell_pgid: 0,
             tty_modes: None,
