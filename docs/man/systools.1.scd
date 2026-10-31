@@ -38,7 +38,8 @@ notifications *notify-send*(1) sends to the console, and
 *shutdown*(8), *reboot*(8), *poweroff*(8), *halt*(8) and *service*(8)
 ask Spark over its control socket (*spark*(8)); *authd*(8) keeps the
 accounts, which *user*(8) makes and lists and whose passwords
-*passwd*(1) changes. The user columns show the user each process acts
+*passwd*(1) changes, and starts the sessions of those who sign in with
+*login*(1). The user columns show the user each process acts
 for (*radix-names*(2)).
 
 A mistake in the command line makes a tool fail with exit status 2 (1
@@ -95,6 +96,8 @@ error that starts with the tool's name.
 :  send a signal
 |  *logd*(8)
 :  keep the system's log
+|  *login*(1)
+:  sign in at a console
 |  *logtrim*(8)
 :  trim the system's log
 |  *lsblk*(8)

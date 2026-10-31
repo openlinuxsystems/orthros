@@ -38,6 +38,7 @@ mod iostat;
 mod keymaps;
 mod log;
 mod logd;
+mod login;
 mod logtrim;
 mod lsblk;
 mod lscpu;
@@ -65,6 +66,7 @@ mod sensors;
 mod servicefiles;
 mod sessions;
 mod signals;
+mod signin;
 mod subvolume;
 mod swap;
 mod sys;
@@ -117,6 +119,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("kill", signals::kill),
     ("log", log::main),
     ("logd", logd::main),
+    ("login", login::main),
     ("logtrim", logtrim::main),
     ("lsblk", lsblk::main),
     ("lscpu", lscpu::main),

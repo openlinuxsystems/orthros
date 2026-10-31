@@ -383,6 +383,23 @@ pub fn is_admin(user: &User, groups: &Table<Group>) -> bool {
             .any(|g| g.name == ADMINS && (g.gid == user.gid || g.members.contains(&user.name)))
 }
 
+/// The groups `user` is in besides its own, as initgroups(3) finds
+/// them: each group that lists it, once, without its own group, and at
+/// most `max`.
+pub fn other_groups(user: &User, groups: &Table<Group>, max: usize) -> Vec<u32> {
+    let mut found: Vec<u32> = Vec::new();
+    for group in groups.entries() {
+        if group.gid != user.gid
+            && group.members.contains(&user.name)
+            && !found.contains(&group.gid)
+        {
+            found.push(group.gid);
+        }
+    }
+    found.truncate(max);
+    found
+}
+
 /// Overwrites `secret`'s bytes with zeros before it goes, so that a
 /// password lasts in memory no longer than it is used.
 pub fn wipe(secret: &mut Vec<u8>) {

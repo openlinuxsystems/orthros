@@ -540,6 +540,14 @@ them to *init*, and the kernel does not read them.
 	33 on success and 35 after a panic. *ob test* boots its test images
 	with this flag. On real hardware the flag has no effect.
 
+*console-sign-in*=*off*
+	Read by *consoled*(8), not the kernel: each console runs root's
+	shell with no sign-in, as before sign-in came (ADR 0250), as
+	systemd's *systemd.debug_shell* gives a root shell on Linux. The
+	boot tests that type commands at a console use it. It opens nothing
+	that the command line could not open already: the words after *--*
+	start any program as root.
+
 # MICROCODE
 
 Processors run microcode that the vendor fixes with updates. Firmware

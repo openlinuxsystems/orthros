@@ -142,7 +142,15 @@ wrong in plain words:
 		Whether it holds the whole tree as Spark does, past the owners
 		and modes of files, in place of a view; *false* unless set, and
 		not with *files.\**. Only a service that starts other people's
-		shells needs it, as *consoled*(8) does until sign-in.
+		shells needs it, as *authd*(8) does.
+
+	*names* = *true* | *false*
+		Whether it holds the names capability (*radix-names*(2)),
+		which gives a process it starts, or a capability, another
+		user's name; *false* unless set. Spark hands it over as the
+		descriptor after those of *files.mount*, and
+		*NAMES_DESCRIPTOR* says which. Only *authd*(8) needs it, to
+		sign people in; a service that held it could act for anyone.
 
 	*admin.hardware* = *true* | *false*
 		Whether it may set the machine's fans, their curves, its LEDs

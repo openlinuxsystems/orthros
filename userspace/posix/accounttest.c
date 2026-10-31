@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 
+#include "authd.h"
 #include "check.h"
 #include "names.h"
 #include "programs.h"
@@ -31,7 +32,6 @@
 #define USER "/system/commands/user"
 #define PASSWD "/system/commands/passwd"
 #define ID "/system/commands/id"
-#define SOCKET "/system/live/authd/socket"
 #define PASSWORDS "/system/state/authd/passwords"
 #define ALICE 1000
 #define BOB 1001
@@ -79,31 +79,6 @@ static void account(const char *file, int line, int status, const char *input, c
 #define ACCOUNT(status, input, out, err, ...) \
 	account(__FILE__, __LINE__, status, input, out, err, (const char *const[]){__VA_ARGS__, NULL})
 
-// Connects to authd and sends it the request of `len` bytes; the
-// connection.
-static int send_request(const char *request, size_t len) {
-	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-	struct sockaddr_un address = {.sun_family = AF_UNIX};
-	strcpy(address.sun_path, SOCKET);
-	CHECK(fd >= 0 && connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0);
-	CHECK(write(fd, request, len) == (ssize_t)len);
-	CHECK(shutdown(fd, SHUT_WR) == 0);
-	return fd;
-}
-
-// The answer on the connection `fd`, which it closes.
-static void read_answer(int fd, char *answer, size_t size) {
-	size_t len = 0;
-	ssize_t got;
-	while(len < size - 1 && (got = read(fd, answer + len, size - 1 - len)) > 0)
-		len += got;
-	answer[len] = 0;
-	close(fd);
-}
-
-// A request's text and length: its fields, each ending in NUL.
-#define REQUEST(text) text, sizeof(text) - 1
-
 // Checks that authd answers `request` with `expected`, after at least
 // `at_least` milliseconds.
 static void asks(const char *file, int line, const char *request, size_t len, const char *expected,
@@ -148,15 +123,6 @@ static void owned(const char *file, int line, const char *path, mode_t mode, uid
 }
 
 #define OWNED(path, mode, owner) owned(__FILE__, __LINE__, path, mode, owner)
-
-// Waits for authd's socket.
-static void authd_answers(void) {
-	struct stat st;
-	long long deadline = check_now_ns() + 60 * 1000000000LL;
-	while(stat(SOCKET, &st) != 0 && check_now_ns() < deadline)
-		check_sleep_ms(100);
-	CHECK(S_ISSOCK(st.st_mode) && (st.st_mode & 0777) == 0666 && st.st_uid == 0);
-}
 
 // user(8) makes accounts, and refuses names that are taken or cannot be
 // names.

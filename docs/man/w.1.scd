@@ -18,7 +18,7 @@ w (procps-ng) does: the user, the terminal (TTY), when the session began
 (LOGIN@), how long since its terminal was read or written (IDLE), the
 CPU time of all the processes on its terminal (JCPU) and of the one it
 runs now, the newest of them (PCPU), and that one's command line (WHAT).
-Given a _user_, only that user's sessions.
+Given a _user_, a name or a number, only that user's sessions.
 
 Sessions are found as *who*(1) finds them.
 

@@ -549,6 +549,22 @@ _target/userspace/_).
 		and can neither read the hashes nor change the account files
 		(ADR 0218).
 
+	*signin*
+		Boot 2 CPUs under UEFI from USB with the shipped services and
+		_/system/tests/posix/signintest_ as root. The machine has no
+		account, so *login*(1) on tty1 asks for the owner's: the test
+		types alice, an administrator, and her password twice, and she
+		is signed in, with her ids, home, shell and terminal checked at
+		her shell. signintest makes bob through *authd*(8); the test
+		signs him in on tty2, where he cannot list alice's home,
+		*who*(1) lists both, and *signintest mount* finds that he
+		mounts and unmounts nothing; signintest checks that each session's
+		leader acts for its user on a terminal of its own. Bob signs out
+		and the sign-in comes back; a wrong password is refused after a
+		wait and the right one signs him in again; alice, still signed
+		in on tty1, cannot list bob's home. The power button ends it
+		(ADR 0250).
+
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test
 		services that run _/system/tests/posix/netgrant_: _granted_ asks

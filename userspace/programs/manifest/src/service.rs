@@ -66,6 +66,7 @@ pub const KEYS: &[&str] = &[
     "files.shared",
     "runs-with-your-access",
     "admin.hardware",
+    "names",
 ];
 
 /// The order of a service whose file gives none.
@@ -180,6 +181,10 @@ pub struct Permissions {
     pub runs_with_your_access: bool,
     /// `admin.*`: what of the machine it may administer.
     pub admin: Admin,
+    /// `names`: the names capability (radix-names(2), ADR 0218), which
+    /// gives processes and capabilities another user's name: authd's, to
+    /// build sessions with.
+    pub names: bool,
 }
 
 impl Permissions {
@@ -291,6 +296,8 @@ struct RawPermissions {
     runs_with_your_access: bool,
     #[serde(default)]
     admin: Admin,
+    #[serde(default)]
+    names: bool,
 }
 
 impl TryFrom<RawPermissions> for Permissions {
@@ -302,6 +309,7 @@ impl TryFrom<RawPermissions> for Permissions {
             files: raw.files,
             runs_with_your_access: raw.runs_with_your_access,
             admin: raw.admin,
+            names: raw.names,
         };
         let places = permissions.places();
         if permissions.runs_with_your_access && !places.is_empty() {
@@ -434,6 +442,9 @@ files.shared = []
 runs-with-your-access = false
 # Whether it may set the machine's fans, LEDs and ARGB header.
 admin.hardware = false
+# Giving processes and files another user's name: only for authd, which
+# signs people in.
+names = false
 "#;
 
 /// The file `service new` writes for the service `name`.

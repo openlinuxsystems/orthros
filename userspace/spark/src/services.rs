@@ -76,6 +76,8 @@ pub struct Spec {
     /// Whether it runs with Spark's root, the whole tree, in place of a
     /// view.
     pub whole_tree: bool,
+    /// Whether it gets the names capability (ADR 0218).
+    pub names: bool,
     /// The names of its secrets.
     pub secrets: Vec<String>,
 }
@@ -118,6 +120,7 @@ pub fn parse(name: &str, text: &str) -> Result<Spec, String> {
         places: file.permissions.places(),
         mounts: file.permissions.files.mount.clone(),
         whole_tree: file.permissions.runs_with_your_access,
+        names: file.permissions.names,
         secrets: file.secrets,
     })
 }

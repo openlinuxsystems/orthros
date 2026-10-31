@@ -15,8 +15,9 @@ authd - keep the accounts and check passwords
 
 authd keeps Dukovo's accounts and their passwords (ADR 0218). Spark runs
 it as the *authd* service. It alone changes the account files, and it
-alone reads the passwords' hashes: other programs ask it over a socket,
-as *user*(8) and *passwd*(1) do, and sign-in will.
+alone reads the passwords' hashes, and it alone starts the sessions of
+people who sign in: other programs ask it over a socket, as *login*(1),
+*user*(8) and *passwd*(1) do.
 
 An account is a name its owner chooses and a password, which may be
 empty: nothing else, and never an age, a birth date or an identity
@@ -57,12 +58,12 @@ authd answers at _/system/live/authd/socket_, which anyone may connect
 to. A request is its fields, each ending in a NUL byte, after which the
 client shuts down its end for writing; authd answers with one line,
 *ok* or *ok* _text_ when it did what was asked, or *no* _why_, then
-closes the connection:
+closes the connection, but for a session (below):
 
 *check* _name_ _password_
-	Whether _password_ is _name_'s. Root asks this of any account, as
-	sign-in will; another program only of the account it runs for, as a
-	screen lock does, and gets *no* for any other name, there or not.
+	Whether _password_ is _name_'s. Root asks this of any account;
+	another program only of the account it runs for, as a screen lock
+	does, and gets *no* for any other name, there or not.
 
 *passwd* _name_ _current_ _new_
 	Sets _name_'s password to _new_. Root changes anyone's, with an
@@ -71,6 +72,25 @@ closes the connection:
 
 *add* _name_ _full-name_ *admin*|*user* _password_
 	Makes an account (below). Only root may.
+
+*needs-owner*
+	*ok yes* if no account can be signed in to yet, which is the case
+	while there is no person's account (a number from 1000) and root's
+	is locked, with no password line or one authd cannot read; *ok no*
+	if one can.
+
+*owner* _name_ _full-name_ _password_
+	Makes the owner's account, an administrator's, at a machine's first
+	sign-in. Only root may, and only while *needs-owner* says *yes*.
+
+*session* _name_ _password_ _term_
+	Starts _name_'s session, if _password_ is theirs, on the terminal
+	sent with the request as a descriptor (*SCM_RIGHTS*), with *TERM*
+	set to _term_. Only root may, as *login*(1) runs. A wrong password
+	waits as *check*'s does. The answer is *ok* _process_, the number
+	of the session's first process, and the connection stays open: when
+	that process ends, authd writes *ended* _status_, its wait status,
+	and closes it. See SESSIONS.
 
 authd knows who asks by the connection: the kernel gives it the process
 at the other end, and the user and group it acted for when it connected
@@ -91,6 +111,48 @@ says whether the account is there.
 authd answers 64 connections at a time and 4 from one process; one that
 sends no whole request in 10 seconds is closed.
 
+# SESSIONS
+
+A session is the processes of someone who signed in, acting for their
+user and groups (*radix-names*(2)), on the terminal they signed in at
+(ADR 0250). authd starts its first process itself, as its own child,
+with the *names* capability that Spark gives it because its service
+file asks for it (*names = true*, *service.toml*(5)), and that no other
+service holds:
+
+- it stamps a copy of its root for the user and their groups, and makes
+  one without the bypass right or the control right from that, the
+  session's root, so that the session mounts and unmounts nothing;
+- it opens _/system/commands/login_ through that root, so that it is a
+  program the user may run;
+- it makes a process, names it for the user and their groups, and gives
+  it that root, the random source, the log, and the terminal as its
+  descriptors 0, 1 and 2, and nothing else of authd's: not its root,
+  not the names capability, not the bypass right;
+- it runs *login --session* in it, with the environment *HOME*,
+  *SHELL*, *USER*, *LOGNAME*, *PATH=/system/commands*, *TERM*,
+  *LANG=C.UTF-8* and *EDITOR=nano*; login makes the terminal the
+  controlling terminal of a new session and runs the user's shell in
+  their home.
+
+The groups are the account's own and each group of
+_/system/settings/group_ that lists its name, up to 32. A session
+started, and a session ended, with the wait status of its first
+process, are security events:
+
+```
+authd: alice signed in on pts/0: session process 63, for process 58 (user 0)
+authd: alice signed out on pts/0: session process 63 ended with status 0x0
+```
+
+The sessions' processes run in authd's resource domain, as the shells
+ran in *consoled*(8)'s before sign-in, so its service file sets no
+memory limit. A process authd makes ends when authd does, so a restart
+of authd ends the sessions it started.
+
+Without the names capability authd logs *no names capability: sign-in
+cannot start sessions* when it starts, and refuses *session*.
+
 # ACCOUNTS
 
 An account's name is 1 to 32 lowercase letters, digits, *\_*, *-* and
@@ -105,7 +167,9 @@ it is not there.
 
 When it starts, authd makes the home of each account that has none,
 such as one *ob image --user* made in an image before its first boot,
-whose files are all root's. It makes the folders while the home is
+whose files are all root's. On a machine with no account, whose image
+was made without *--user*, the first sign-in makes the owner's
+(*login*(1)). It makes the folders while the home is
 still root's, and gives the home to its user last, so that a user
 already running cannot put a link where a folder is to go.
 
@@ -144,5 +208,6 @@ exits with 1 if it cannot start.
 
 # SEE ALSO
 
-*user*(8), *passwd*(1), *id*(1), *service*(8), *spark*(8), *logd*(8),
-*radix-posix*(7), *systools*(1)
+*login*(1), *user*(8), *passwd*(1), *id*(1), *consoled*(8), *service*(8),
+*service.toml*(5), *spark*(8), *logd*(8), *radix-names*(2), *radix-posix*(7),
+*systools*(1)

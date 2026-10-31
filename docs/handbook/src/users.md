@@ -5,9 +5,9 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Users and administration
 
-This chapter describes accounts as of Phase 13b of the roadmap. The
-full references are authd(8), user(8), passwd(1) and, for building an
-image with an account in it, ob(1).
+This chapter describes accounts and signing in as of Phase 13b of the
+roadmap. The full references are login(1), authd(8), user(8),
+passwd(1) and, for building an image with an account in it, ob(1).
 
 ## Accounts
 
@@ -22,6 +22,49 @@ An administrator's account is also in the `admins` group. From the
 next step of Phase 13b, an administrator runs a command as root with
 `elevate`, which asks for their password once per terminal pane every
 15 minutes; until then, root administers.
+
+## Signing in
+
+Each console, Alt+F1 to Alt+F6, asks for a name and a password:
+
+```
+Dukovo Server 0.10.4 (tty1)
+
+Name: alice
+Password:
+$
+```
+
+Your session runs as you, in your home, until you leave it with `exit`
+or Ctrl+D; the console then asks again. Each console signs in on its
+own, so two people can work side by side, one on Alt+F1 and one on
+Alt+F2, and `who` lists them. A wrong name or password gets the same
+answer, after a wait.
+
+### The first boot
+
+A machine made without an account in its image has none, and no
+password anyone knows: Dukovo ships none. Its first console asks you to
+make the owner's account, an administrator's, and then signs you in:
+
+```
+Welcome to Dukovo. This computer has no account yet: make yours, the owner's,
+which administers it. Nothing but a name and a password is needed, and the
+password may be empty.
+
+Name: alice
+Full name (may be empty): Alice Liddell
+New password:
+The same again:
+Made alice, number 1000, home /users/alice
+```
+
+### Root's shell without signing in
+
+Someone who can change the kernel's command line at the boot menu can
+already run anything as root, so `console-sign-in=off` there gives
+each console root's shell with no sign-in, as Linux's `init=/bin/sh`
+does: a way back in when no password works. See dukovo-boot(7).
 
 ## Making accounts
 

@@ -933,7 +933,7 @@ pub const CASES: &[Case] = &[
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // No program: Spark starts the services, as on a normal boot.
-        cmdline: "",
+        cmdline: "console-sign-in=off",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -983,7 +983,7 @@ pub const CASES: &[Case] = &[
         firmware: Firmware::Bios,
         media: Media::Usb,
         // No program: Spark starts the console, as on a normal boot.
-        cmdline: "",
+        cmdline: "console-sign-in=off",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -999,7 +999,7 @@ pub const CASES: &[Case] = &[
         about: "QEMU with an ACPI table of the test's: uACPI finds its thermal zone, Linux's /sys/class/thermal and sensors show it at the console, and as it warms past its passive, hot and critical trip points the kernel says so and Spark powers the machine off",
         firmware: Firmware::Bios,
         media: Media::Usb,
-        cmdline: "",
+        cmdline: "console-sign-in=off",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -1017,7 +1017,7 @@ pub const CASES: &[Case] = &[
         media: Media::Usb,
         // No program: Spark starts the services, and the power button ends
         // the test. QEMU's controller has no Debug Capability for `dbc`.
-        cmdline: "lockdep dbc",
+        cmdline: "lockdep dbc console-sign-in=off",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -1045,7 +1045,7 @@ pub const CASES: &[Case] = &[
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // No program: Spark starts the services, as on a normal boot.
-        cmdline: "lockdep",
+        cmdline: "lockdep console-sign-in=off",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -1108,7 +1108,7 @@ pub const CASES: &[Case] = &[
         about: "a corrected error QEMU puts in a machine-check bank is logged at the next read, and a memory controller's counted by channel in Linux's EDAC files; an uncorrected one panics, and the next boot finds it in its bank",
         firmware: Firmware::Bios,
         media: Media::Usb,
-        cmdline: "mce-poll=1 panic=0",
+        cmdline: "mce-poll=1 panic=0 console-sign-in=off",
         cpus: 2,
         memory: "1G",
         reboot: true,
@@ -1265,6 +1265,24 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "signin",
+        about: "sign-in on the consoles: a machine with no account asks for its owner's, an administrator's, and signs her in; a second account signs in on Alt+F2 beside her; each session acts for its user on its own terminal, who lists both, neither reads the other's home, bob mounts and unmounts nothing, a wrong password waits and fails, and signing out shows the sign-in again",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        // Spark starts the services, consoled among them with sign-in, and
+        // signintest as root, which makes bob once alice is made.
+        cmdline: "lockdep -- --services --posix /system/tests/posix/signintest",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: signin,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "spark-network",
         about: "Spark gives each service the network its file asks for, and none to one that asks for nothing",
         firmware: Firmware::Uefi,
@@ -1383,7 +1401,7 @@ pub const CASES: &[Case] = &[
         about: "QEMU with an ACPI table of the test's that names a Framework EC: the kernel finds the device, sees no EC's memory map behind it and leaves it alone; ectool at the console, whose shell holds the platform capability, says there is no EC",
         firmware: Firmware::Bios,
         media: Media::Usb,
-        cmdline: "",
+        cmdline: "console-sign-in=off",
         cpus: 1,
         memory: "1G",
         reboot: false,
@@ -1399,7 +1417,7 @@ pub const CASES: &[Case] = &[
         about: "the kernel drives the SMBus controller of q35's ICH9 and finds the eight memory modules' EEPROMs QEMU puts on it; Linux's /sys/bus/i2c names its adapter at the console; SeaBIOS's SMBIOS tables are found in its area",
         firmware: Firmware::Bios,
         media: Media::Usb,
-        cmdline: "",
+        cmdline: "console-sign-in=off",
         cpus: 1,
         memory: "1G",
         reboot: false,
@@ -1415,7 +1433,7 @@ pub const CASES: &[Case] = &[
         about: "the kernel finds QEMU's SMBIOS tables through the UEFI system table, logs the machine as Linux does and shows its names in Linux's /sys/class/dmi/id, without the serial numbers; hwinfo shows them all at the console",
         firmware: Firmware::Uefi,
         media: Media::Usb,
-        cmdline: "",
+        cmdline: "console-sign-in=off",
         cpus: 1,
         memory: "1G",
         reboot: false,
@@ -1967,7 +1985,7 @@ pub const CASES: &[Case] = &[
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // No program: Spark starts the services, as on a normal boot.
-        cmdline: "",
+        cmdline: "console-sign-in=off",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -1984,7 +2002,7 @@ pub const CASES: &[Case] = &[
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // No program: Spark mounts the disks, as on a normal boot.
-        cmdline: "",
+        cmdline: "console-sign-in=off",
         cpus: 2,
         memory: "1G",
         reboot: false,
@@ -7233,6 +7251,110 @@ fn accounts(vm: &mut Vm, case: &Case) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The `signin` test (ADR 0250): a machine with no account shows the
+/// owner's sign-in on tty1, where alice's account is made and she is
+/// signed in; signintest (userspace/posix/signintest.c), as root, then
+/// makes bob, who signs in on tty2. Each sees only their own home, `who`
+/// lists both, signing out brings the sign-in back, and a wrong password
+/// is refused after a wait. The power button ends it.
+fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_anywhere("authd: 0 accounts; answering at /system/live/authd/socket")?;
+    vm.expect_anywhere("consoled: started /system/commands/login on tty1 as process ")?;
+    // No account can sign in yet: the owner's comes first.
+    vm.expect_screen(&[
+        &format!("{RELEASE} {VERSION} (tty1)"),
+        "This computer has no account yet: make yours, the owner's,",
+    ])?;
+    answer_prompt(vm, "Name:", "alice")?;
+    answer_prompt(vm, "Full name (may be empty):", "Alice Liddell")?;
+    answer_prompt(vm, "New password:", "queen of hearts")?;
+    answer_prompt(vm, "The same again:", "queen of hearts")?;
+    vm.expect_anywhere("authd: made the account alice (1000), an administrator's, for process ")?;
+    vm.expect_anywhere("authd: alice signed in on pts/")?;
+    vm.expect_screen(&["Made alice, number 1000, home /users/alice"])?;
+    answer_prompt(vm, "$", "clear; id; pwd; echo \"$USER $HOME $SHELL\"; tty")?;
+    vm.expect_screen(&[
+        "uid=1000(alice) gid=1000(alice) groups=1000(alice),10(admins)",
+        "alice /users/alice /system/commands/nukesh",
+        "/devices/pts/",
+    ])?;
+    // Bob, whom signintest made, signs in on the second console.
+    vm.expect_anywhere("signintest: bob is made")?;
+    vm.press(&["alt-f2"])?;
+    vm.expect_anywhere("consoled: started /system/commands/login on tty2 as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty2)")])?;
+    answer_prompt(vm, "Name:", "bob")?;
+    answer_prompt(vm, "Password:", "white rabbit")?;
+    vm.expect_anywhere("authd: bob signed in on pts/")?;
+    // Which pseudo-terminals the consoles got depends on what opened one
+    // first; signintest checks that they differ.
+    vm.expect_anywhere("signintest: alice on pts/")?;
+    vm.expect_anywhere("signintest: every check passed")?;
+    // Each is themself, and alice's home is closed to bob.
+    answer_prompt(vm, "$", "clear; id; ls /users/alice; echo \"status $?\"; who")?;
+    vm.expect_screen(&[
+        "uid=1001(bob) gid=1001(bob) groups=1001(bob)",
+        "cannot open directory '/users/alice': Permission denied",
+        "status 2",
+        "alice    pts/",
+        "bob      pts/",
+    ])?;
+    // His session's root holds no control right: he mounts on /tmp and
+    // unmounts /processes for no one.
+    answer_prompt(vm, "$", "clear; /system/tests/posix/signintest mount")?;
+    vm.expect_screen(&["signintest-mount: every check passed"])?;
+    // Bob signs out, and the sign-in comes back on a clear screen. A wrong
+    // password then waits and fails, and the right one signs him in again.
+    answer_prompt(vm, "$", "clear; exit")?;
+    vm.expect_anywhere("authd: bob signed out on pts/")?;
+    answer_prompt(vm, "Name:", "bob")?;
+    answer_prompt(vm, "Password:", "cheshire cat")?;
+    vm.expect_anywhere("authd: a wrong password for bob, from process ")?;
+    vm.expect_screen(&["The name or the password is wrong."])?;
+    answer_prompt(vm, "Name:", "bob")?;
+    answer_prompt(vm, "Password:", "white rabbit")?;
+    answer_prompt(vm, "$", "clear; whoami")?;
+    vm.expect_screen(&["bob"])?;
+    // Back on tty1, alice's session ran on through all of it.
+    vm.press(&["alt-f1"])?;
+    answer_prompt(vm, "$", "clear; ls /users/bob; echo \"status $?\"")?;
+    vm.expect_screen(&["cannot open directory '/users/bob': Permission denied", "status 2"])?;
+    vm.press_power_button()?;
+    vm.expect("spark: every service has stopped")?;
+    vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// Waits, for up to a minute, until the last line on the screen with
+/// anything on it ends with `prompt`, then types `text` and Enter. Waiting
+/// for the prompt itself, not text anywhere on the screen, keeps a line
+/// from being typed before the program reads it: a password typed before
+/// its prompt turns echo off would show.
+fn answer_prompt(vm: &mut Vm, prompt: &str, text: &str) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let screen = vm.screen()?;
+        // The cursor's block, after the prompt, reads as no character: `?`.
+        let shown = |line: &str| {
+            let line = line.trim_end();
+            line.strip_suffix('?').unwrap_or(line).trim_end().to_string()
+        };
+        let last = screen.iter().rev().map(|line| shown(line)).find(|line| !line.is_empty());
+        if last.as_ref().is_some_and(|line| line.ends_with(prompt)) {
+            return vm.type_text(&format!("{text}\n"));
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the screen does not end with the prompt \"{prompt}\"; its last line: {}",
+                last.unwrap_or_default()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
 }
 
 /// The `views` test: Spark starts views (userspace/posix/views.c) as

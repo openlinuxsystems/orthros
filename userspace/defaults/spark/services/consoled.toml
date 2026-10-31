@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 #
 # The virtual consoles on the screen and keyboard: consoled(8). Each
-# console runs root's shell; Alt+F1 to Alt+F6 switch between them.
+# console asks for a name and a password with login(1); Alt+F1 to Alt+F6
+# switch between them.
 #
 # service.toml(5) explains each setting. `service check consoled` checks
 # this file, and `service edit consoled` checks it as you save.
@@ -24,8 +25,8 @@ restart = "on-failure"
 cpu_weight = 200
 memory = "none"
 
-# What it holds: the whole tree, as Spark does, since it starts root's
-# shells on the consoles until sign-in comes (Phase 13b.5).
+# What it holds: the whole tree, as Spark does, since it runs login(1) as
+# root on each console, and root's shell when sign-in is off (consoled(8)).
 [permissions]
 runs-with-your-access = true
 # Root's shells may set the fans, the LEDs and the ARGB header with

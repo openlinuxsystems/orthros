@@ -12,11 +12,19 @@
 //! check\0alice\0secret\0
 //! passwd\0alice\0old secret\0new secret\0
 //! add\0bob\0Bob Smith\0admin\0his secret\0
+//! needs-owner\0
+//! owner\0chase\0Chase\0her secret\0
+//! session\0alice\0secret\0linux\0
 //! ```
 //!
 //! An answer is `ok`, maybe with words after it, or `no` and why, then a
 //! newline. authd tells who asks by the user its connection gives
 //! (SO_PEERCRED), never by what the request says.
+//!
+//! A `session` request comes with a terminal, sent with its first bytes
+//! (SCM_RIGHTS), and its answer is `ok` and the number of the session's
+//! first process; the connection then stays open until that process
+//! ends, when authd writes [`ended`]'s line and closes it (ADR 0250).
 
 use crate::wipe;
 
@@ -54,6 +62,31 @@ pub enum Request {
         /// Its password, which may be empty.
         password: Vec<u8>,
     },
+    /// Whether the machine needs its owner's account made: `ok yes` when
+    /// no account can be signed in to, `ok no` otherwise. Anyone may ask.
+    NeedsOwner,
+    /// Make the owner's account, an administrator's, as sign-in does at
+    /// first boot: only while no account can be signed in to, and
+    /// root's to ask.
+    Owner {
+        /// Its name.
+        name: String,
+        /// Its full name, which may be empty.
+        full_name: String,
+        /// Its password, which may be empty.
+        password: Vec<u8>,
+    },
+    /// Sign `name` in on the terminal sent with the request: start their
+    /// shell there, as them, if `password` is theirs. Root's to ask, as
+    /// sign-in programs run as root.
+    Session {
+        /// The user.
+        name: String,
+        /// The password to check.
+        password: Vec<u8>,
+        /// The terminal's type, for `TERM`.
+        term: String,
+    },
 }
 
 impl Request {
@@ -71,6 +104,13 @@ impl Request {
                 if *admin { b"admin" } else { b"user" },
                 password,
             ],
+            Request::NeedsOwner => vec![b"needs-owner"],
+            Request::Owner { name, full_name, password } => {
+                vec![b"owner", name.as_bytes(), full_name.as_bytes(), password]
+            }
+            Request::Session { name, password, term } => {
+                vec![b"session", name.as_bytes(), password, term.as_bytes()]
+            }
         };
         let mut bytes = Vec::new();
         for field in fields {
@@ -104,6 +144,17 @@ impl Request {
                 admin: kind == b"admin",
                 password: password.to_vec(),
             }),
+            [b"needs-owner"] => Ok(Request::NeedsOwner),
+            [b"owner", name, full_name, password] => Ok(Request::Owner {
+                name: text(name)?,
+                full_name: text(full_name)?,
+                password: password.to_vec(),
+            }),
+            [b"session", name, password, term] => Ok(Request::Session {
+                name: text(name)?,
+                password: password.to_vec(),
+                term: text(term)?,
+            }),
             _ => Err(malformed()),
         }
     }
@@ -111,11 +162,15 @@ impl Request {
     /// Overwrites the passwords it holds.
     pub fn wipe(&mut self) {
         match self {
-            Request::Check { password, .. } | Request::Add { password, .. } => wipe(password),
+            Request::Check { password, .. }
+            | Request::Add { password, .. }
+            | Request::Owner { password, .. }
+            | Request::Session { password, .. } => wipe(password),
             Request::Passwd { current, new, .. } => {
                 wipe(current);
                 wipe(new);
             }
+            Request::NeedsOwner => {}
         }
     }
 }
@@ -133,6 +188,13 @@ impl std::fmt::Debug for Request {
             Request::Passwd { name, .. } => write!(f, "Passwd {{ name: {name:?} }}"),
             Request::Add { name, full_name, admin, .. } => {
                 write!(f, "Add {{ name: {name:?}, full_name: {full_name:?}, admin: {admin} }}")
+            }
+            Request::NeedsOwner => write!(f, "NeedsOwner"),
+            Request::Owner { name, full_name, .. } => {
+                write!(f, "Owner {{ name: {name:?}, full_name: {full_name:?} }}")
+            }
+            Request::Session { name, term, .. } => {
+                write!(f, "Session {{ name: {name:?}, term: {term:?} }}")
             }
         }
     }
@@ -168,4 +230,15 @@ impl Answer {
             _ => Answer::Refused(format!("authd answered `{line}`")),
         }
     }
+}
+
+/// The line authd writes on a `session` connection when the session's
+/// first process ends with wait status `status`.
+pub fn ended(status: i32) -> String {
+    format!("ended {status}\n")
+}
+
+/// The wait status in a line [`ended`] made.
+pub fn ended_status(line: &str) -> Option<i32> {
+    line.trim_end_matches('\n').strip_prefix("ended ")?.parse().ok()
 }

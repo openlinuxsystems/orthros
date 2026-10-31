@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use super::request::{Answer, REQUEST_MAX, Request};
+use super::request::{Answer, REQUEST_MAX, Request, ended, ended_status};
 use super::*;
 
 const PASSWD_TEXT: &str = "root:x:0:0:root:/:/system/commands/nukesh
@@ -128,6 +128,13 @@ fn requests_go_and_come_back() {
             admin: true,
             password: b"\xffnot utf-8".to_vec(),
         },
+        Request::NeedsOwner,
+        Request::Owner { name: "chase".into(), full_name: String::new(), password: Vec::new() },
+        Request::Session {
+            name: "alice".into(),
+            password: b"s3cret".to_vec(),
+            term: "linux".into(),
+        },
     ];
     for request in requests {
         assert_eq!(Request::decode(&request.encode()), Ok(request));
@@ -136,9 +143,16 @@ fn requests_go_and_come_back() {
         Request::Check { name: "a".into(), password: b"b".to_vec() }.encode(),
         b"check\0a\0b\0"
     );
-    for bad in
-        [&b"check\0a\0"[..], b"check\0a\0b", b"check\0a\0b\0c\0", b"add\0a\0b\0root\0c\0", b""]
-    {
+    assert_eq!(Request::NeedsOwner.encode(), b"needs-owner\0");
+    for bad in [
+        &b"check\0a\0"[..],
+        b"check\0a\0b",
+        b"check\0a\0b\0c\0",
+        b"add\0a\0b\0root\0c\0",
+        b"session\0a\0b\0",
+        b"needs-owner\0x\0",
+        b"",
+    ] {
         assert!(Request::decode(bad).is_err(), "{bad:?}");
     }
     assert!(Request::decode(&vec![b'a'; REQUEST_MAX + 1]).is_err());
@@ -148,6 +162,29 @@ fn requests_go_and_come_back() {
 fn debug_leaves_out_passwords() {
     let request = Request::Check { name: "alice".into(), password: b"hunter2".to_vec() };
     assert!(!format!("{request:?}").contains("hunter2"));
+    let session = Request::Session {
+        name: "alice".into(),
+        password: b"hunter2".to_vec(),
+        term: "linux".into(),
+    };
+    assert!(!format!("{session:?}").contains("hunter2"));
+}
+
+#[test]
+fn other_groups_are_those_that_list_the_user() {
+    let groups =
+        groups("admins:x:10:alice,bob\nalice:x:1000:\naudio:x:29:alice\nagain:x:10:alice\n");
+    let users = users(PASSWD_TEXT);
+    let alice = users.entries().find(|u| u.name == "alice").unwrap();
+    assert_eq!(other_groups(alice, &groups, 32), [10, 29]);
+    assert_eq!(other_groups(alice, &groups, 1), [10]);
+}
+
+#[test]
+fn a_session_ends_with_its_status() {
+    assert_eq!(ended(256), "ended 256\n");
+    assert_eq!(ended_status(&ended(-1)), Some(-1));
+    assert_eq!(ended_status("ok 41\n"), None);
 }
 
 #[test]

@@ -27,20 +27,20 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use accounts::hash::{self, Cost};
-use accounts::request::{Answer, REQUEST_MAX, Request};
+use accounts::request::{self, Answer, REQUEST_MAX, Request};
 use accounts::{Group, Password, Table, User};
 
 use crate::args::Args;
-use crate::sys;
 use crate::util::{self, Fail};
+use crate::{signin, sys};
 
 /// How long a connection has to send its request.
 const REQUEST_TIME: Duration = Duration::from_secs(10);
@@ -113,6 +113,11 @@ struct Client {
     waiting: Option<(Request, Instant)>,
     /// Its answer, and when to send it.
     answer: Option<(Vec<u8>, Instant)>,
+    /// The terminal sent with its request, for a session.
+    terminal: Option<OwnedFd>,
+    /// The first process of the session started for it, whose end it
+    /// waits for.
+    session: Option<i32>,
     done: bool,
 }
 
@@ -121,6 +126,12 @@ struct Authd {
     listener: UnixListener,
     clients: Vec<Client>,
     wrong: HashMap<(String, String), Wrong>,
+    /// The names capability Spark gave it, to start sessions with.
+    names: Option<u32>,
+    /// The sessions it started that run, by their first process.
+    sessions: HashMap<i32, Session>,
+    /// The pipe's read end that SIGCHLD wakes it with.
+    children: File,
 }
 
 /// Set by SIGTERM: authd ends.
@@ -129,6 +140,26 @@ static STOP: AtomicBool = AtomicBool::new(false);
 extern "C" fn on_term(_: libc::c_int) {
     STOP.store(true, Ordering::Relaxed);
 }
+
+/// The write end of the pipe SIGCHLD wakes authd's loop with.
+static CHILDREN: AtomicI32 = AtomicI32::new(-1);
+
+extern "C" fn on_child(_: libc::c_int) {
+    let byte = 1u8;
+    // SAFETY: write(2) is async-signal-safe; the pipe does not block.
+    unsafe { libc::write(CHILDREN.load(Ordering::Relaxed), (&raw const byte).cast(), 1) };
+}
+
+/// A session authd started: whose it is, and on what terminal, for the
+/// audit log.
+struct Session {
+    name: String,
+    terminal: String,
+}
+
+/// How long a connection whose session runs may wait: as long as it
+/// runs.
+const SESSION_TIME: Duration = Duration::from_hours(100 * 365 * 24);
 
 /// A security event, for the audit log: Spark passes a line of a
 /// service's that starts with `<86>` on as one (ADR 0211).
@@ -296,6 +327,8 @@ impl Authd {
                 deadline: now + REQUEST_TIME,
                 waiting: None,
                 answer: None,
+                terminal: None,
+                session: None,
                 done: false,
             };
             if held >= CLIENTS_PER_PROCESS {
@@ -319,7 +352,7 @@ impl Authd {
                 client.done = true;
                 return;
             }
-            match client.stream.read(&mut buffer) {
+            match signin::receive(&client.stream, &mut buffer, &mut client.terminal) {
                 Ok(0) => {
                     client.ended = true;
                     let mut bytes = std::mem::take(&mut client.request);
@@ -356,7 +389,7 @@ impl Authd {
     fn take(&mut self, i: usize, request: Request, now: Instant) {
         let peer = self.clients[i].peer;
         let checks = match &request {
-            Request::Check { name, .. } => Some(name),
+            Request::Check { name, .. } | Request::Session { name, .. } => Some(name),
             Request::Passwd { name, .. } if !peer.is_root() => Some(name),
             _ => None,
         };
@@ -388,6 +421,33 @@ impl Authd {
                 }
                 Request::Add { name, full_name, admin, password } => {
                     (add(files, name, full_name, *admin, password, peer), now)
+                }
+                Request::NeedsOwner => {
+                    let needs = if needs_owner(&files) { "yes" } else { "no" };
+                    (Answer::Done(needs.into()), now)
+                }
+                Request::Owner { name, full_name, password } => {
+                    if !peer.is_root() {
+                        let why =
+                            "only a sign-in program, which runs as root, makes the owner's account";
+                        (Answer::Refused(why.into()), now)
+                    } else if !needs_owner(&files) {
+                        let why = "this computer has an account to sign in with already";
+                        (Answer::Refused(why.into()), now)
+                    } else {
+                        (add(files, name, full_name, true, password, peer), now)
+                    }
+                }
+                Request::Session { name, password, term } => {
+                    let (answer, at) = self.session(i, &files, name, password, term, peer, now);
+                    // A wrong password is in the audit log already; any
+                    // other refusal says why a console could not sign in.
+                    if let Answer::Refused(why) = &answer
+                        && at == now
+                    {
+                        eprintln!("authd: no session for {}: {why}", shown(name));
+                    }
+                    (answer, at)
                 }
             },
         };
@@ -435,6 +495,88 @@ impl Authd {
                 Err((Answer::Refused("the name or the password is wrong".into()), wrong.next))
             }
             Err(why) => Err((Answer::Refused(why), now)),
+        }
+    }
+
+    /// Starts `name`'s session on the terminal client `i` sent, if
+    /// `password` is theirs: root's to ask, as sign-in programs run as
+    /// root. The client then waits for the session's end.
+    #[allow(clippy::too_many_arguments)]
+    fn session(
+        &mut self,
+        i: usize,
+        files: &Files,
+        name: &str,
+        password: &[u8],
+        term: &str,
+        peer: Peer,
+        now: Instant,
+    ) -> (Answer, Instant) {
+        let terminal = self.clients[i].terminal.take();
+        if !peer.is_root() {
+            let why = "only a sign-in program, which runs as root, starts sessions";
+            return (Answer::Refused(why.into()), now);
+        }
+        let Some(terminal) = terminal.filter(signin::is_terminal) else {
+            return (Answer::Refused("a session request comes with its terminal".into()), now);
+        };
+        let Some(names) = self.names else {
+            let why = "authd holds no names capability to start sessions with: its service file \
+                       needs `names = true`";
+            return (Answer::Refused(why.into()), now);
+        };
+        if let Err(refused) = self.check_password(files, name, password, peer, now) {
+            return refused;
+        }
+        // A right password is an account's.
+        let Some(user) = files.user(name) else {
+            return (Answer::Refused(format!("there is no account {}", shown(name))), now);
+        };
+        let groups =
+            accounts::other_groups(user, &files.groups, radix_abi::names::GROUPS_MAX as usize);
+        let tty = signin::terminal_name(&terminal);
+        match signin::start(names, user, &groups, &terminal, term) {
+            Ok(process) => {
+                audit!(
+                    "{name} signed in on {tty}: session process {process}, for process {} (user {})",
+                    peer.process,
+                    peer.user
+                );
+                let process = process as i32;
+                self.sessions.insert(process, Session { name: name.into(), terminal: tty });
+                self.clients[i].session = Some(process);
+                (Answer::Done(process.to_string()), now)
+            }
+            Err(why) => (Answer::Refused(why), now),
+        }
+    }
+
+    /// Takes in the sessions that ended, and tells the connections that
+    /// wait for them.
+    fn reap(&mut self, now: Instant) {
+        let mut drained = [0u8; 64];
+        while (&self.children).read(&mut drained).is_ok_and(|n| n > 0) {}
+        loop {
+            let mut status = 0;
+            // SAFETY: waitpid writes the status.
+            let process = unsafe { libc::waitpid(-1, &raw mut status, libc::WNOHANG) };
+            if process <= 0 {
+                return;
+            }
+            if let Some(session) = self.sessions.remove(&process) {
+                audit!(
+                    "{} signed out on {}: session process {process} ended with status {status:#x}",
+                    session.name,
+                    session.terminal
+                );
+            }
+            for client in &mut self.clients {
+                if client.session == Some(process) {
+                    client.session = None;
+                    client.answer = Some((request::ended(status).into_bytes(), now));
+                    client.deadline = now + REQUEST_TIME;
+                }
+            }
         }
     }
 
@@ -569,18 +711,31 @@ impl Client {
         if *at > now {
             return;
         }
+        let mut sent = true;
         while !bytes.is_empty() {
             match self.stream.write(bytes) {
-                Ok(0) => break,
+                Ok(0) => {
+                    sent = false;
+                    break;
+                }
                 Ok(n) => {
                     bytes.drain(..n);
                 }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return,
-                Err(_) => break,
+                Err(_) => {
+                    sent = false;
+                    break;
+                }
             }
         }
-        self.done = true;
+        self.answer = None;
+        // One whose session runs waits for its end; the rest are done.
+        if sent && self.session.is_some() {
+            self.deadline = now + SESSION_TIME;
+        } else {
+            self.done = true;
+        }
     }
 }
 
@@ -610,11 +765,14 @@ impl Authd {
             }
             self.clients.retain(|c| !c.done);
             let listening = self.clients.len() < CLIENTS_MAX;
-            let mut fds = vec![libc::pollfd {
-                fd: if listening { self.listener.as_raw_fd() } else { -1 },
-                events: libc::POLLIN,
-                revents: 0,
-            }];
+            let mut fds = vec![
+                libc::pollfd {
+                    fd: if listening { self.listener.as_raw_fd() } else { -1 },
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd { fd: self.children.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+            ];
             // A client whose request came is not polled to read, as its
             // end is always there to read; it is still told hung up.
             for client in &self.clients {
@@ -651,7 +809,10 @@ impl Authd {
                 continue;
             }
             let now = Instant::now();
-            for (i, entry) in fds[1..].iter().enumerate() {
+            if fds[1].revents != 0 {
+                self.reap(now);
+            }
+            for (i, entry) in fds[2..].iter().enumerate() {
                 if entry.revents & libc::POLLOUT != 0 {
                     self.clients[i].send(now);
                 }
@@ -664,6 +825,35 @@ impl Authd {
             }
         }
     }
+}
+
+/// Has SIGCHLD write to a pipe, whose read end it returns, so that the
+/// loop wakes when a session's first process ends.
+fn watch_children() -> io::Result<File> {
+    let mut fds = [0; 2];
+    // SAFETY: pipe2 writes two descriptors.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    CHILDREN.store(fds[1], Ordering::Relaxed);
+    // SAFETY: all zeros is a valid sigaction; the handler only writes to
+    // the pipe; the read end is ours alone.
+    unsafe {
+        let mut action: libc::sigaction = util::zeroed();
+        action.sa_sigaction = on_child as extern "C" fn(libc::c_int) as *const () as usize;
+        action.sa_flags = libc::SA_RESTART | libc::SA_NOCLDSTOP;
+        libc::sigaction(libc::SIGCHLD, &raw const action, std::ptr::null_mut());
+        Ok(File::from_raw_fd(fds[0]))
+    }
+}
+
+/// Whether no account can be signed in to: no person's account, and
+/// root's password locked, as on a machine that was never set up. Then
+/// sign-in makes the owner's account first.
+fn needs_owner(files: &Files) -> bool {
+    let person = files.users.entries().any(User::is_person);
+    let root_signs_in = files.hash("root").is_some_and(|phc| phc.is_empty() || hash::readable(phc));
+    !person && !root_signs_in
 }
 
 /// Makes `path`, a directory, with `mode` if it is not there, and gives
@@ -713,8 +903,20 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             Err(why) => eprintln!("authd: {why}"),
         }
     }
+    let names = signin::names_slot();
+    if names.is_none() {
+        eprintln!("authd: no names capability: sign-in cannot start sessions");
+    }
+    let children = watch_children().map_err(|e| util::failed(&"a pipe", e))?;
     eprintln!("authd: {} accounts; answering at {}", people.len(), accounts::SOCKET);
-    let mut authd = Authd { listener, clients: Vec::new(), wrong: HashMap::new() };
+    let mut authd = Authd {
+        listener,
+        clients: Vec::new(),
+        wrong: HashMap::new(),
+        names,
+        sessions: HashMap::new(),
+        children,
+    };
     authd.run_loop().map_err(|e| util::failed(&"authd", e))?;
     let _ = fs::remove_file(accounts::SOCKET);
     Ok(0)

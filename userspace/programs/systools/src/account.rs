@@ -62,18 +62,18 @@ fn own_name() -> Result<String, Fail> {
 
 /// Where passwords come from: the terminal, or lines of the standard
 /// input.
-enum Input {
+pub(crate) enum Input {
     Terminal,
     Lines(io::StdinLock<'static>),
 }
 
 impl Input {
-    fn new() -> Input {
+    pub(crate) fn new() -> Input {
         if prompt::interactive() { Input::Terminal } else { Input::Lines(io::stdin().lock()) }
     }
 
     /// A password, asked with `prompt`.
-    fn password(&mut self, prompt: &str) -> Result<Vec<u8>, Fail> {
+    pub(crate) fn password(&mut self, prompt: &str) -> Result<Vec<u8>, Fail> {
         match self {
             Input::Terminal => match prompt::ask(prompt, false) {
                 Ok(prompt::Answer::Line(line)) => Ok(line),
@@ -99,7 +99,7 @@ impl Input {
     /// A new password for `name`: asked twice at a terminal, which must
     /// agree, then warned about if it is empty or short, and kept only if
     /// the person says so.
-    fn new_password(&mut self, name: &str) -> Result<Vec<u8>, Fail> {
+    pub(crate) fn new_password(&mut self, name: &str) -> Result<Vec<u8>, Fail> {
         let mut password = self.password("New password: ")?;
         if let Input::Terminal = self {
             let mut again = self.password("The same again: ")?;
