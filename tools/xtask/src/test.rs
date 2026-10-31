@@ -50,6 +50,9 @@ const CROSEC_TABLE: &str = "file=crosec.aml";
 /// The SSDT `gpio` gives QEMU (`src/acpi/gpio.asl`), likewise.
 const GPIO_AML: &[u8] = include_bytes!("acpi/gpio.aml");
 const GPIO_TABLE: &str = "file=gpio.aml";
+/// The SSDT `i2c` gives QEMU (`src/acpi/i2c.asl`), likewise.
+const I2C_AML: &[u8] = include_bytes!("acpi/i2c.aml");
+const I2C_TABLE: &str = "file=i2c.aml";
 /// The SMBIOS memory device of the `smbus` case, which QEMU gives in place
 /// of its own ([`ddr4_device`]).
 const DDR4_DEVICE: &str = "file=ddr4.smbios";
@@ -79,6 +82,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-fat",
     "radix-fbcon",
     "radix-gpio",
+    "radix-i2c",
     "radix-hal",
     "radix-hid",
     "radix-hw",
@@ -1450,6 +1454,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "i2c",
+        about: "QEMU with a test device's memory as an Intel LPSS and an AMD DesignWare I2C controller's registers, which an ACPI table of the test's names with a device on each bus: the kernel takes LPSS out of reset, sets each controller up for the slowest of its devices with the firmware's counts or its clock's, and names the buses and devices in /sys/bus/i2c",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "selftest=i2c init-after-selftest",
+        cpus: 1,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-device", "pc-testdev", "-acpitable", I2C_TABLE],
+        script: i2c,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "msr",
         about: "a read of an MSR the CPU lacks faults and goes on",
         firmware: Firmware::Bios,
@@ -2580,6 +2600,7 @@ fn run_case(
             THERMAL_TABLE => ("thermal.aml", THERMAL_AML.to_vec()),
             CROSEC_TABLE => ("crosec.aml", CROSEC_AML.to_vec()),
             GPIO_TABLE => ("gpio.aml", GPIO_AML.to_vec()),
+            I2C_TABLE => ("i2c.aml", I2C_AML.to_vec()),
             DDR4_DEVICE => ("ddr4.smbios", ddr4_device()),
             _ => continue,
         };
@@ -4723,6 +4744,40 @@ fn gpio(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_anywhere("GPIO: the firmware's events on \\_SB_.GPI0: pins 53 (_L35)")?;
     selftest_passed(vm, "gpio")?;
     vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+fn i2c(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect_anywhere(
+        "I2C: Intel Sunrise Point's controller \\_SB_.I2C1 is i2c-1: fast mode (400 kHz), \
+         64-byte FIFOs, the firmware's counts",
+    )?;
+    vm.expect_anywhere(
+        "I2C: AMD's controller \\_SB_.I2CB is i2c-2: standard mode (100 kHz), 16-byte FIFOs, \
+         counts for its 150 MHz clock",
+    )?;
+    vm.expect_anywhere("I2C: i2c-1 has \\_SB_.I2C1.TPD0 (DUKV0001) at 0x2c, up to 400 kHz")?;
+    vm.expect_anywhere("I2C: i2c-2 has \\_SB_.SNSR (DUKV0002) at 0x48, up to 100 kHz")?;
+    // The touchpad is found by its _CID and its _DSM read; the memory
+    // never answers the read of its HID descriptor (ADR 0235).
+    vm.expect_anywhere(
+        "I2C-HID: \\_SB_.I2C1.TPD0 on i2c-1 at 0x2c: its HID descriptor at 0x0020 could not \
+         be read (the transfer did not end in time); it is not used",
+    )?;
+    selftest_passed(vm, "i2c")?;
+    if vm.log().contains("DUKV0003") {
+        return Err("a device that is not there was found on a bus".to_string());
+    }
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // `is` between name and value, so that no needle is in a typed line.
+    vm.type_text("echo \"bus is $(cat /sys/bus/i2c/devices/i2c-2/name)\"\n")?;
+    vm.expect_screen(&["bus is Synopsys DesignWare I2C adapter"])?;
+    vm.type_text("echo \"device is $(cat /sys/bus/i2c/devices/i2c-DUKV0001:00/name)\"\n")?;
+    vm.expect_screen(&["device is DUKV0001:00"])?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: asked to power off the machine")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 
 fn smbios(vm: &mut Vm, case: &Case) -> Result<(), String> {

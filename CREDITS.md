@@ -446,6 +446,24 @@ We implement these from their published descriptions. No code is copied.
   Jan Hubička, Andreas Jaeger and Mark Mitchell and maintained by H.J. Lu
   and others, which `radix-elf` reads, with its `R_X86_64_RELATIVE`
   relocations.
+- Synopsys's DesignWare DW_apb_i2c registers, as Intel's *100 Series
+  Chipset Family PCH Datasheet* (LPSS) and AMD's Processor Programming
+  References give them, from which `radix-i2c` drives the I2C
+  controllers; NXP's *I2C-bus specification and user manual* (UM10204),
+  whose SCL times its counts are computed from; the ACPI Specification's
+  I2C serial bus connection; and Linux's `i2c-designware`, `intel-lpss`
+  and `i2c-core-acpi`, whose way of setting the controllers up, of
+  choosing the bus's speed and of naming the buses and devices in
+  `/sys/bus/i2c` Radix takes
+  ([ADR 0234](docs/adr/0234-designware-i2c-controllers-and-the-devices-acpi-names-on-them.md)).
+  We use no code of Linux's.
+- Microsoft's *HID over I2C Protocol Specification*, version 1.00, from
+  which `radix-i2c` reads a touchpad's HID descriptor, resets it and
+  reads its reports, with the ACPI `_DSM` that gives the descriptor's
+  register; and Linux's `i2c-hid-acpi` and `i2c-hid-core`, whose order
+  of setting a device up Radix takes
+  ([ADR 0235](docs/adr/0235-hid-over-i2c-touchpads-are-read-as-mice.md)).
+  We use no code of Linux's.
 
 ## Projects whose ideas we follow
 

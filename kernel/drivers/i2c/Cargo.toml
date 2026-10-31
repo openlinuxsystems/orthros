@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-i2c"
+description = "I2C controllers for the Radix kernel: the DesignWare controller of Intel's LPSS and AMD's FCH"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+radix-hw = { path = "../../lib/hw" }
+
+[dev-dependencies]
+radix-hw = { path = "../../lib/hw", features = ["fake"] }
+
+[lints]
+workspace = true
