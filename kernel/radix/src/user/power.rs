@@ -188,7 +188,9 @@ enum End {
     Halt,
 }
 
-/// A method of the power capability `cap`, called by `user`'s thread.
+/// A method of the power capability `cap`, called by `user`'s thread,
+/// kept out of line, as [`super::methods::call`] says.
+#[inline(never)]
 pub fn method(user: &UserRef, cap: &Capability, label: u32, args: &[u64; 8]) -> Result<Answer> {
     let end = match label {
         abi::NOTIFY_BUTTON => {

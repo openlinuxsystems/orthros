@@ -928,7 +928,8 @@ fn list(at: &Location, cursor: u64, address: u64, len: usize) -> Result<director
 }
 
 /// The file interface, on the file `found` in a slot, for `user`'s
-/// thread.
+/// thread, kept out of line, as [`super::methods::call`] says.
+#[inline(never)]
 pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> Result<Answer> {
     match label {
         file::READ => {
