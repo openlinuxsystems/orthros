@@ -59,6 +59,7 @@ radix-uacpi = { path = "../lib/uacpi" }
 radix-usb = { path = "../drivers/usb" }
 radix-vfs = { path = "../fs/vfs" }
 radix-virtio = { path = "../drivers/virtio" }
+radix-usbhc = { path = "../drivers/usbhc" }
 radix-xhci = { path = "../drivers/xhci" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

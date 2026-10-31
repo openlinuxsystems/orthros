@@ -184,6 +184,8 @@ pub(super) struct Controller {
 /// Why a device could not be set up.
 pub(super) enum Why {
     Driver(radix_xhci::Error),
+    /// A USB 2 or USB 1.1 controller's driver's error (ADR 0243).
+    Host(radix_usb::host::Error),
     Device(&'static str),
 }
 
@@ -193,30 +195,44 @@ impl From<radix_xhci::Error> for Why {
     }
 }
 
+impl From<radix_usb::host::Error> for Why {
+    fn from(err: radix_usb::host::Error) -> Why {
+        Why::Host(err)
+    }
+}
+
 impl fmt::Display for Why {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Why::Driver(err) => write!(f, "{err}"),
+            Why::Host(err) => write!(f, "{err}"),
             Why::Device(why) => f.write_str(why),
         }
     }
 }
 
 /// What a device's first configuration holds, for setting it up.
-struct Plan {
+pub(super) struct Plan {
     /// bConfigurationValue.
-    value: u8,
+    pub(super) value: u8,
     /// The endpoints of its interfaces' first settings, the first
     /// `count`.
     endpoints: [EndpointDescriptor; MAX_ENDPOINTS],
     count: usize,
     /// A hub's endpoint that reports its changes.
-    hub: Option<EndpointDescriptor>,
+    pub(super) hub: Option<EndpointDescriptor>,
     /// Its HID interfaces, the first `hid_count`.
     hids: [HidPlan; MAX_HIDS],
     hid_count: usize,
     /// Its first mass storage interface.
-    storage: Option<StoragePlan>,
+    pub(super) storage: Option<StoragePlan>,
+}
+
+impl Plan {
+    /// Its HID interfaces.
+    pub(super) fn hids(&self) -> &[HidPlan] {
+        &self.hids[..self.hid_count]
+    }
 }
 
 /// The thread of controller `index`.
@@ -331,7 +347,8 @@ impl Controller {
             return None;
         }
         while buffer.push_within_capacity(0).is_ok() {}
-        let xhci = match Xhci::new(start.regs.clone(), &mut host, &mut alloc(start.address)) {
+        let regs = start.regs.memory()?.clone();
+        let xhci = match Xhci::new(regs, &mut host, &mut alloc(start.address)) {
             Ok(xhci) => xhci,
             Err(err) => {
                 warn!("USB: the xHCI controller at {} could not be started: {err}", start.address);
@@ -341,7 +358,10 @@ impl Controller {
         describe(bus, start, &xhci);
         let usb3 = xhci.protocols().iter().any(|protocol| protocol.major == 3);
         let ports = xhci.info().ports;
-        shown::add_root_hub(bus, RootHub { ports, usb3, address: start.address });
+        let (speed, version) = if usb3 { ("5000", " 3.00") } else { ("480", " 2.00") };
+        let product = "xHCI Host Controller";
+        let root = RootHub { ports, address: start.address, product, speed, version };
+        shown::add_root_hub(bus, root);
         let Ok(xhci) = Box::try_new_in(xhci, heap) else {
             error!("USB: out of memory for the controller at {}", start.address);
             return None;
@@ -657,7 +677,7 @@ impl Controller {
                 }
             }
         }
-        for &interface in &plan.hids[..plan.hid_count] {
+        for &interface in plan.hids() {
             match self.start_hid(slot, interface) {
                 Ok(()) => shown::set_driver(self.bus, path, interface.interface, "usbhid"),
                 Err(why) => warn!(
@@ -706,171 +726,191 @@ impl Controller {
     ) -> Result<Plan, Why> {
         let speed = device.place().speed;
         let Controller { xhci, host, buffer, bus, .. } = self;
-        let mut bytes = [0u8; radix_usb::DEVICE_DESCRIPTOR_SIZE];
+        let mut bytes = [0u8; 8];
         let first = Setup::get_descriptor(descriptor::DEVICE, 0, 0, 8);
-        device.control_in(xhci, host, first, &mut bytes[..8])?;
-        let max = DeviceDescriptor::parse(&bytes[..8])
+        device.control_in(xhci, host, first, &mut bytes)?;
+        let max = DeviceDescriptor::parse(&bytes)
             .and_then(|d| d.max_packet0(speed))
             .ok_or(Why::Device("it says a packet size its speed does not allow"))?;
         device.set_max_packet(xhci, host, max)?;
-        let whole = Setup::get_descriptor(descriptor::DEVICE, 0, 0, bytes.len() as u16);
-        let came = device.control_in(xhci, host, whole, &mut bytes)?;
-        let found = DeviceDescriptor::parse(&bytes[..came])
-            .ok_or(Why::Device("it sent no device descriptor"))?;
-        // Strings, if it has them; a device may refuse them.
-        let language = {
-            let setup = Setup::get_descriptor(descriptor::STRING, 0, 0, 255);
-            match device.control_in(xhci, host, setup, &mut buffer[..255]) {
-                Ok(came) => radix_usb::first_language(&buffer[..came]),
-                Err(_) => 0x0409,
-            }
-        };
-        let mut string = |index: u8, out: &mut dyn Write| {
-            if index == 0 {
-                return;
-            }
-            let setup = Setup::get_descriptor(descriptor::STRING, index, language, 255);
-            if let Ok(came) = device.control_in(xhci, host, setup, &mut buffer[..255]) {
-                let _ = radix_usb::string(&buffer[..came], out);
-            }
-        };
-        let mut product = TextBuf::<64>::new();
-        string(found.product_string, &mut product);
-        let mut maker = TextBuf::<64>::new();
-        string(found.manufacturer_string, &mut maker);
-        let mut serial = TextBuf::<64>::new();
-        string(found.serial_string, &mut serial);
-        let _ = name.write_str(product.as_str());
-        if name.is_empty() {
-            let _ = name.write_str("a USB device");
-        }
-        // Its first configuration: what its interfaces are, and their
-        // endpoints.
-        let header = Setup::get_descriptor(descriptor::CONFIGURATION, 0, 0, 9);
-        let total = device
-            .control_in(xhci, host, header, &mut buffer[..9])
-            .ok()
-            .and_then(|came| Configuration::parse(&buffer[..came]))
-            .map_or(0, |config| usize::from(config.total_length).min(BUFFER_SIZE));
-        if total < 9 {
-            return Err(Why::Device("it has no configuration"));
-        }
-        let all = Setup::get_descriptor(descriptor::CONFIGURATION, 0, 0, total as u16);
-        let came = device.control_in(xhci, host, all, &mut buffer[..total])?;
-        let config = Configuration::parse(&buffer[..came])
-            .ok_or(Why::Device("its configuration is broken"))?;
-        let mut plan = Plan {
-            value: config.value,
-            endpoints: [EndpointDescriptor::default(); MAX_ENDPOINTS],
-            count: 0,
-            hub: None,
-            hids: [HidPlan::default(); MAX_HIDS],
-            hid_count: 0,
-            storage: None,
-        };
-        let mut named: [&str; 4] = [""; 4];
-        let mut count = 0;
-        let mut endpoints = 0;
-        let mut listed = [Interface::NONE; MAX_INTERFACES];
-        let mut listed_count = 0;
-        for interface in config.interfaces().filter(|i| i.descriptor.alternate == 0) {
-            let d = interface.descriptor;
-            if let Some(slot) = listed.get_mut(listed_count) {
-                *slot = Interface { descriptor: d, driver: None };
-                listed_count += 1;
-            }
-            let this = class_name(d.class, d.subclass, d.protocol);
-            if count < named.len() && !named[..count].contains(&this) {
-                named[count] = this;
-                count += 1;
-            }
-            if d.class == class::MASS_STORAGE && plan.storage.is_none() {
-                // Its other settings too: one may be UAS's.
-                let others = config
-                    .interfaces()
-                    .filter(|i| i.descriptor.number == d.number && i.descriptor.alternate != 0);
-                let settings = core::iter::once(interface.clone()).chain(others);
-                let strings = (found.serial_string, language);
-                plan.storage = StoragePlan::of(settings, config.value, strings);
-            }
-            if d.class == class::HID && plan.hid_count < MAX_HIDS {
-                let descriptor = interface
-                    .descriptors()
-                    .find(|&(kind, _)| kind == descriptor::HID)
-                    .map(|(_, bytes)| bytes);
-                let input = interface
-                    .endpoints()
-                    .find(|e| e.is_in() && e.transfer_type() == TransferType::Interrupt)
-                    .map(|e| e.address);
-                if let Some(hid) = HidPlan::of(d, descriptor, input) {
-                    plan.hids[plan.hid_count] = hid;
-                    plan.hid_count += 1;
-                }
-            }
-            for endpoint in interface.endpoints() {
-                if found.class == class::HUB
-                    && d.class == class::HUB
-                    && endpoint.is_in()
-                    && plan.hub.is_none()
-                {
-                    plan.hub = Some(endpoint);
-                }
-                if let Some(slot) = plan.endpoints.get_mut(plan.count) {
-                    *slot = endpoint;
-                    plan.count += 1;
-                }
-                endpoints += 1;
-            }
-        }
-        let mut kind = TextBuf::<64>::new();
-        if found.class != class::PER_INTERFACE {
-            let _ = kind.write_str(class_name(found.class, found.subclass, found.protocol));
-        } else {
-            for (i, this) in named[..count].iter().enumerate() {
-                let _ = write!(kind, "{}{this}", if i == 0 { "" } else { " and " });
-            }
-            if count == 0 {
-                let _ = kind.write_str("composite");
-            }
-        }
-        let mut from = TextBuf::<72>::new();
-        if !maker.is_empty() {
-            let _ = write!(from, ", {maker}");
-        }
-        info!(
-            "USB: {}: {name} ({:04x}:{:04x}{from}), {kind}, {speed}",
-            Name(*bus, path),
-            found.vendor,
-            found.product
-        );
-        if endpoints > plan.count {
-            warn!(
-                "USB: {}: only {} of its {endpoints} endpoints are used",
-                Name(*bus, path),
-                plan.count
-            );
-        }
-        // bMaxPower counts 8 mA at a time at USB 3's speeds, else 2.
-        let unit = if speed.is_super() { 8 } else { 2 };
-        *shown = Some(Shown {
-            bus: *bus as u8,
-            number: 0,
-            path,
-            speed,
-            device: found,
-            configuration: config.value,
-            interface_count: config.interfaces,
-            attributes: config.attributes,
-            max_power_ma: u16::from(config.max_power) * unit,
-            interfaces: listed,
-            listed: listed_count as u8,
-            hub_ports: 0,
-            manufacturer: maker,
-            product,
-            serial,
-        });
-        Ok(plan)
+        let mut control = |setup, out: &mut [u8]| Ok(device.control_in(xhci, host, setup, out)?);
+        read_device(&mut control, buffer, (*bus, path, speed), name, shown)
     }
+}
+
+/// Reads what the device at `path` on bus `bus`, talking at `speed`, is,
+/// its packet size known, through `control` (a control transfer in on its
+/// default pipe), with `buffer` to read into, and logs it; its name goes
+/// in `name`, and what the sysfs shows of it in `shown`. Returns what its
+/// first configuration holds. Every controller's thread sets its devices
+/// up with it.
+/// A control transfer in on a device's default pipe: what it read.
+pub(super) type ControlIn<'a> = dyn FnMut(Setup, &mut [u8]) -> Result<usize, Why> + 'a;
+
+#[inline(never)]
+pub(super) fn read_device(
+    control: &mut ControlIn<'_>,
+    buffer: &mut [u8],
+    (bus, path, speed): (usize, Path, Speed),
+    name: &mut TextBuf<64>,
+    shown: &mut Option<Shown>,
+) -> Result<Plan, Why> {
+    let mut bytes = [0u8; radix_usb::DEVICE_DESCRIPTOR_SIZE];
+    let whole = Setup::get_descriptor(descriptor::DEVICE, 0, 0, bytes.len() as u16);
+    let came = control(whole, &mut bytes)?;
+    let found = DeviceDescriptor::parse(&bytes[..came])
+        .ok_or(Why::Device("it sent no device descriptor"))?;
+    // Strings, if it has them; a device may refuse them.
+    let language = {
+        let setup = Setup::get_descriptor(descriptor::STRING, 0, 0, 255);
+        match control(setup, &mut buffer[..255]) {
+            Ok(came) => radix_usb::first_language(&buffer[..came]),
+            Err(_) => 0x0409,
+        }
+    };
+    let mut string = |index: u8, out: &mut dyn Write| {
+        if index == 0 {
+            return;
+        }
+        let setup = Setup::get_descriptor(descriptor::STRING, index, language, 255);
+        if let Ok(came) = control(setup, &mut buffer[..255]) {
+            let _ = radix_usb::string(&buffer[..came], out);
+        }
+    };
+    let mut product = TextBuf::<64>::new();
+    string(found.product_string, &mut product);
+    let mut maker = TextBuf::<64>::new();
+    string(found.manufacturer_string, &mut maker);
+    let mut serial = TextBuf::<64>::new();
+    string(found.serial_string, &mut serial);
+    let _ = name.write_str(product.as_str());
+    if name.is_empty() {
+        let _ = name.write_str("a USB device");
+    }
+    // Its first configuration: what its interfaces are, and their
+    // endpoints.
+    let header = Setup::get_descriptor(descriptor::CONFIGURATION, 0, 0, 9);
+    let total = control(header, &mut buffer[..9])
+        .ok()
+        .and_then(|came| Configuration::parse(&buffer[..came]))
+        .map_or(0, |config| usize::from(config.total_length).min(buffer.len()));
+    if total < 9 {
+        return Err(Why::Device("it has no configuration"));
+    }
+    let all = Setup::get_descriptor(descriptor::CONFIGURATION, 0, 0, total as u16);
+    let came = control(all, &mut buffer[..total])?;
+    let config =
+        Configuration::parse(&buffer[..came]).ok_or(Why::Device("its configuration is broken"))?;
+    let mut plan = Plan {
+        value: config.value,
+        endpoints: [EndpointDescriptor::default(); MAX_ENDPOINTS],
+        count: 0,
+        hub: None,
+        hids: [HidPlan::default(); MAX_HIDS],
+        hid_count: 0,
+        storage: None,
+    };
+    let mut named: [&str; 4] = [""; 4];
+    let mut count = 0;
+    let mut endpoints = 0;
+    let mut listed = [Interface::NONE; MAX_INTERFACES];
+    let mut listed_count = 0;
+    for interface in config.interfaces().filter(|i| i.descriptor.alternate == 0) {
+        let d = interface.descriptor;
+        if let Some(slot) = listed.get_mut(listed_count) {
+            *slot = Interface { descriptor: d, driver: None };
+            listed_count += 1;
+        }
+        let this = class_name(d.class, d.subclass, d.protocol);
+        if count < named.len() && !named[..count].contains(&this) {
+            named[count] = this;
+            count += 1;
+        }
+        if d.class == class::MASS_STORAGE && plan.storage.is_none() {
+            // Its other settings too: one may be UAS's.
+            let others = config
+                .interfaces()
+                .filter(|i| i.descriptor.number == d.number && i.descriptor.alternate != 0);
+            let settings = core::iter::once(interface.clone()).chain(others);
+            let strings = (found.serial_string, language);
+            plan.storage = StoragePlan::of(settings, config.value, strings);
+        }
+        if d.class == class::HID && plan.hid_count < MAX_HIDS {
+            let descriptor = interface
+                .descriptors()
+                .find(|&(kind, _)| kind == descriptor::HID)
+                .map(|(_, bytes)| bytes);
+            let input = interface
+                .endpoints()
+                .find(|e| e.is_in() && e.transfer_type() == TransferType::Interrupt);
+            if let Some(hid) = HidPlan::of(d, descriptor, input) {
+                plan.hids[plan.hid_count] = hid;
+                plan.hid_count += 1;
+            }
+        }
+        for endpoint in interface.endpoints() {
+            if found.class == class::HUB
+                && d.class == class::HUB
+                && endpoint.is_in()
+                && plan.hub.is_none()
+            {
+                plan.hub = Some(endpoint);
+            }
+            if let Some(slot) = plan.endpoints.get_mut(plan.count) {
+                *slot = endpoint;
+                plan.count += 1;
+            }
+            endpoints += 1;
+        }
+    }
+    let mut kind = TextBuf::<64>::new();
+    if found.class != class::PER_INTERFACE {
+        let _ = kind.write_str(class_name(found.class, found.subclass, found.protocol));
+    } else {
+        for (i, this) in named[..count].iter().enumerate() {
+            let _ = write!(kind, "{}{this}", if i == 0 { "" } else { " and " });
+        }
+        if count == 0 {
+            let _ = kind.write_str("composite");
+        }
+    }
+    let mut from = TextBuf::<72>::new();
+    if !maker.is_empty() {
+        let _ = write!(from, ", {maker}");
+    }
+    info!(
+        "USB: {}: {name} ({:04x}:{:04x}{from}), {kind}, {speed}",
+        Name(bus, path),
+        found.vendor,
+        found.product
+    );
+    if endpoints > plan.count {
+        warn!(
+            "USB: {}: only {} of its {endpoints} endpoints are used",
+            Name(bus, path),
+            plan.count
+        );
+    }
+    // bMaxPower counts 8 mA at a time at USB 3's speeds, else 2.
+    let unit = if speed.is_super() { 8 } else { 2 };
+    *shown = Some(Shown {
+        bus: bus as u8,
+        number: 0,
+        path,
+        speed,
+        device: found,
+        configuration: config.value,
+        interface_count: config.interfaces,
+        attributes: config.attributes,
+        max_power_ma: u16::from(config.max_power) * unit,
+        interfaces: listed,
+        listed: listed_count as u8,
+        hub_ports: 0,
+        manufacturer: maker,
+        product,
+        serial,
+    });
+    Ok(plan)
 }
 
 /// The speeds below high speed, which a high-speed hub's Transaction

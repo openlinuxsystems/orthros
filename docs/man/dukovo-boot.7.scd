@@ -944,7 +944,8 @@ cases of *ob*(1) test it under QEMU's VT-d unit and AMD IOMMU.
 
 # USB
 
-The PCI scan hands each xHCI controller to the USB driver, unless
+The PCI scan hands each xHCI controller, and each older one (below), to
+the USB driver, unless
 *usb=off*, which gives it a kernel thread, _usb1_, _usb2_ and on. The
 thread takes the controller from the firmware, resets and starts it, and
 logs what it is, its ports (USB 3 and USB 2 ones apart) and its interrupt:
@@ -1010,6 +1011,32 @@ is then not used. A UAS device that does not answer a request in 30 s,
 or breaks the protocol, is reset, and its requests in flight go again:
 
 	Disk: USB 1-2: it did not answer in time; it is reset
+
+The older controllers are driven too (ADR 0243): EHCI for USB 2.0's
+high speed, and the OHCI and UHCI controllers that carry low and full
+speed, on their own or as an EHCI controller's companions. Each gets a
+thread of its own and is polled every 10 ms. They are bound after the
+xHCI ones, an EHCI controller before its companions; on an Intel chipset
+with both, the USB 2.0 ports go to the xHCI controller first, as far as
+the firmware allows, and come back at power-off:
+
+	USB: the chipset's USB 2.0 ports 0x3fff and USB 3 ports 0xf go to the xHCI controller at 0000:00:14.0
+	USB: bus 2 is the EHCI 1.0 controller at 0000:00:1d.7: 6 ports, 3 companion controllers, polled
+	USB: bus 3 is the UHCI controller at 0000:00:1d.0: 2 ports, polled
+	USB: bus 6 is the OHCI 1.0 controller at 0000:00:12.0: 3 ports, polled, taken from the firmware
+
+An EHCI controller keeps the high-speed devices and hands the others to
+its companion, whose bus then names them; one with no companion leaves
+them:
+
+	USB: 2-3: a low- or full-speed device, handed to the companion controller
+	USB: 4-1: QEMU USB Hub (0409:55aa, QEMU), hub, full speed
+	USB: 2-3: the device could not be set up: it is a low- or full-speed device, and the controller has no companion for it
+
+Hubs, keyboards, mice and tablets work on them as on xHCI. USB disks on
+them are not read yet, and say so:
+
+	USB: 2-1: interface 0: disks on EHCI controllers are not read yet
 
 With the *dbc* flag the first controller with a Debug Capability turns
 it on, and the console goes there as well (ADR 0160); each controller

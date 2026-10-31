@@ -15,6 +15,8 @@
 //!   reached the same way and given back when dropped;
 //! - [`Page`], a page of RAM a device reads or writes for one request at
 //!   a time, while a driver borrows it (the page cache's pages);
+//! - [`IoPorts`], a window of registers in I/O port space, which the
+//!   kernel implements;
 //! - [`MsiMessage`], the address and data a device writes to raise a
 //!   message-signalled interrupt, which the architecture hands out with
 //!   the vector it raises;
@@ -47,6 +49,32 @@ use core::sync::atomic::{Ordering, fence};
 
 #[cfg(any(test, feature = "fake"))]
 use std::sync::Arc;
+
+/// A window of a device's registers in I/O port space (x86's), as UHCI
+/// and IDE controllers have them: offsets into it, which whoever
+/// implements it keeps accesses within. The kernel implements it over the
+/// architecture's port instructions, for the I/O BAR of a function it
+/// drives; tests, over a simulated device.
+pub trait IoPorts: Send {
+    /// The window's length.
+    fn len(&self) -> u16;
+    /// Whether the window has no ports.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Reads 8 bits at `offset`.
+    fn read8(&self, offset: u16) -> u8;
+    /// Writes 8 bits at `offset`.
+    fn write8(&self, offset: u16, value: u8);
+    /// Reads 16 bits at `offset`.
+    fn read16(&self, offset: u16) -> u16;
+    /// Writes 16 bits at `offset`.
+    fn write16(&self, offset: u16, value: u16);
+    /// Reads 32 bits at `offset`.
+    fn read32(&self, offset: u16) -> u32;
+    /// Writes 32 bits at `offset`.
+    fn write32(&self, offset: u16, value: u32);
+}
 
 /// A simulated device's registers, for tests (feature `fake`).
 #[cfg(any(test, feature = "fake"))]

@@ -332,6 +332,12 @@ impl Devices for Arch {
     }
 
     fn ec_write(_port: u16, _value: u8) {}
+
+    fn device_port_read(_port: u16, _size: u8) -> u32 {
+        u32::MAX
+    }
+
+    fn device_port_write(_port: u16, _size: u8, _value: u32) {}
 }
 
 /// A placeholder thread context.

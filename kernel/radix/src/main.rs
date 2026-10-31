@@ -64,6 +64,7 @@ mod hid;
 mod hwmon;
 mod i2c;
 mod iommutest;
+mod ioports;
 mod join;
 mod kdb;
 mod mce;

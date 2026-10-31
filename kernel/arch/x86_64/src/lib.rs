@@ -521,6 +521,32 @@ impl Devices for Arch {
     fn ec_write(port: u16, value: u8) {
         ec::write(port, value);
     }
+
+    fn device_port_read(port: u16, size: u8) -> u32 {
+        // SAFETY: the caller keeps to the I/O BAR of a function it drives;
+        // reading a device's register touches no memory the kernel owns.
+        unsafe {
+            match size {
+                1 => u32::from(io::inb(port)),
+                2 => u32::from(io::inw(port)),
+                _ => io::inl(port),
+            }
+        }
+    }
+
+    fn device_port_write(port: u16, size: u8, value: u32) {
+        // A device reads the memory written before it is told to look.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        // SAFETY: as for `device_port_read`; the memory the device may then
+        // read or write by DMA is its own, which the caller gave it.
+        unsafe {
+            match size {
+                1 => io::outb(port, value as u8),
+                2 => io::outw(port, value as u16),
+                _ => io::outl(port, value),
+            }
+        }
+    }
 }
 
 impl Aml for Arch {

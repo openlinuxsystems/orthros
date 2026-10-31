@@ -594,6 +594,17 @@ pub trait Devices {
     /// Writes the EC's command port or packet; does nothing for any other
     /// port.
     fn ec_write(port: u16, value: u8);
+
+    /// Reads `size` bytes (1, 2 or 4) from I/O port `port` (Phase 11g,
+    /// ADR 0243): only within the I/O BAR of a PCI function the caller
+    /// drives, as a UHCI controller's registers are. All ones where there
+    /// are no I/O ports.
+    fn device_port_read(port: u16, size: u8) -> u32;
+
+    /// Writes `size` bytes of `value` to I/O port `port`, within the I/O
+    /// BAR of a PCI function the caller drives; does nothing where there
+    /// are no I/O ports.
+    fn device_port_write(port: u16, size: u8, value: u32);
 }
 
 /// What the interpreter of the firmware's AML needs from the machine

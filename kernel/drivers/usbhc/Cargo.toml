@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-usbhc"
+description = "EHCI, OHCI and UHCI for the Radix kernel: the USB 2 and USB 1.1 host controllers of older PCs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+radix-hw = { path = "../../lib/hw" }
+radix-usb = { path = "../usb" }
+
+[dev-dependencies]
+radix-hw = { path = "../../lib/hw", features = ["fake"] }
+
+[lints]
+workspace = true

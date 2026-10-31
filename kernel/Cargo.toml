@@ -27,6 +27,7 @@ members = [
     "drivers/scsi",
     "drivers/smbus",
     "drivers/usb",
+    "drivers/usbhc",
     "drivers/virtio",
     "drivers/vtd",
     "drivers/watchdog",
