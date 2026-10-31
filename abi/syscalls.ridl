@@ -103,9 +103,10 @@ syscall ring_enter = 10 (ring: slot, submit: u32, min_complete: u32, timeout_ns:
 /// Writes a line of text to the kernel log, through a kernel_log
 /// capability, after the thread's name and number, as a record of the
 /// calling process (see radix-kernel-log(2)). A `<N>` before the text sets
-/// its syslog(3) level, N & 7, as a line written to /devices/kmsg does;
-/// without it the line is information. Control characters are shown as
-/// `?`, and text past WRITE_MAX bytes is cut.
+/// its syslog(3) level, N & 7, and facility, N >> 3, as a line written to
+/// /devices/kmsg does; without it the line is information of the user
+/// facility. Control characters are shown as `?`, and text past WRITE_MAX
+/// bytes is cut.
 syscall debug_log = 11 (log: slot, text: in bytes) -> ()
     raises [no_such_slot, empty_slot, wrong_kind, missing_rights, sealed, invalid_argument,
             bad_address, gone];

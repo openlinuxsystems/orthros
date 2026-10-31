@@ -4,7 +4,9 @@
 //! dmesg(1): the kernel log, read from `/devices/kmsg` a record at a time
 //! (radix-kernel-log(2)), as util-linux's dmesg prints it: each record's
 //! time since boot and text, filtered by level, followed (`-w`), or
-//! cleared (`-C`). Every record has facility 0, the kernel's.
+//! cleared (`-C`). The kernel's own records have facility 0, the
+//! kernel's; programs' have the facility they asked for, user unless
+//! another, and the number of the process that wrote them.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -25,12 +27,19 @@ const KMSG: &str = "/devices/kmsg";
 /// syslog(3)'s levels, by number.
 const LEVELS: [&str; 8] = ["emerg", "alert", "crit", "err", "warn", "notice", "info", "debug"];
 
+/// syslog(3)'s facilities, by number, as util-linux's dmesg names them.
+const FACILITIES: [&str; 24] = [
+    "kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron", "authpriv",
+    "ftp", "res0", "res1", "res2", "res3", "local0", "local1", "local2", "local3", "local4",
+    "local5", "local6", "local7",
+];
+
 /// A record of the log.
 pub struct Line {
     /// Its syslog(3) level.
     pub level: u8,
-    /// Whether a program wrote it (the user facility), not the kernel.
-    pub user: bool,
+    /// Its syslog(3) facility: 0, the kernel's, for the kernel's own.
+    pub facility: u8,
     /// The sequence number of the record since boot.
     pub seq: u64,
     /// The process that wrote it, for a program's record.
@@ -51,7 +60,7 @@ pub fn parse(record: &[u8]) -> Option<Line> {
     let process = fields.find_map(|f| f.strip_prefix("process=")?.parse().ok());
     Some(Line {
         level: (priority & 7) as u8,
-        user: priority >> 3 == 1,
+        facility: (priority >> 3).min(u32::from(u8::MAX)) as u8,
         seq,
         process,
         usec,
@@ -71,6 +80,19 @@ fn level(name: &str) -> Option<u8> {
         "critical" => Some(2),
         name => LEVELS.iter().position(|l| *l == name).map(|n| n as u8),
     }
+}
+
+/// Facilities from a list (`kern,user`).
+fn facility_list(text: &str) -> Result<Vec<u8>, Fail> {
+    util::list(text)
+        .map(|name| {
+            FACILITIES
+                .iter()
+                .position(|f| *f == name)
+                .map(|n| n as u8)
+                .ok_or_else(|| usage(format!("unknown facility '{name}'")))
+        })
+        .collect()
 }
 
 /// Levels from a list (`err,warn`, `err+` for err and above it, `+err`
@@ -111,10 +133,11 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let mut follow = false;
     let mut follow_new = false;
     let mut levels: Option<Vec<u8>> = None;
+    let mut facilities: Option<Vec<u8>> = None;
     let mut time = Time::Boot;
     let mut raw = false;
     let mut decode = false;
-    // Only the kernel's records, or only programs'.
+    // Only the kernel's own records, or only programs'.
     let mut only: Option<bool> = None;
     while let Some(arg) = args.next()? {
         match arg {
@@ -128,6 +151,8 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             Arg::Long(l) if l == "follow-new" => follow_new = true,
             Arg::Short('l') => levels = Some(level_list(&args.text()?)?),
             Arg::Long(l) if l == "level" => levels = Some(level_list(&args.text()?)?),
+            Arg::Short('f') => facilities = Some(facility_list(&args.text()?)?),
+            Arg::Long(l) if l == "facility" => facilities = Some(facility_list(&args.text()?)?),
             Arg::Short('t') => time = Time::None,
             Arg::Long(l) if l == "notime" => time = Time::None,
             Arg::Short('T') => time = Time::Human,
@@ -183,15 +208,16 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         }
         let Some(line) = parse(&buffer[..n]) else { continue };
         if levels.as_ref().is_some_and(|l| !l.contains(&line.level))
-            || only.is_some_and(|user| user != line.user)
+            || facilities.as_ref().is_some_and(|f| !f.contains(&line.facility))
+            || only.is_some_and(|user| user != line.process.is_some())
         {
             continue;
         }
         let mut text = String::new();
         if raw {
-            text.push_str(&format!("<{}>", line.level + if line.user { 8 } else { 0 }));
+            text.push_str(&format!("<{}>", u32::from(line.facility) * 8 + u32::from(line.level)));
         } else if decode {
-            let facility = if line.user { "user" } else { "kern" };
+            let facility = FACILITIES.get(usize::from(line.facility)).unwrap_or(&"?");
             text.push_str(&format!("{facility:<6}:{:<6}: ", LEVELS[line.level as usize]));
         }
         match time {
@@ -249,12 +275,16 @@ mod tests {
     fn records_and_levels() {
         let line = parse(b"6,12,1500000,-;spark: started\n").unwrap();
         assert_eq!(line.level, 6);
-        assert!(!line.user && line.process.is_none());
+        assert!(line.facility == 0 && line.process.is_none());
         assert_eq!(line.usec, 1_500_000);
         assert_eq!(line.text, "spark: started");
         let line = parse(b"14,13,1500001,-,process=1;spark[3]: started\n").unwrap();
-        assert_eq!((line.level, line.user, line.seq, line.process), (6, true, 13, Some(1)));
+        assert_eq!((line.level, line.facility, line.seq, line.process), (6, 1, 13, Some(1)));
         assert_eq!(line.text, "spark[3]: started");
+        let line = parse(b"86,14,1500002,-;kmsg: the kernel log was cleared\n").unwrap();
+        assert_eq!((line.level, line.facility, line.process), (6, 10, None));
+        assert_eq!(facility_list("kern,authpriv").unwrap(), [0, 10]);
+        assert!(facility_list("kernel").is_err());
         assert!(parse(b"garbage").is_none());
         assert_eq!(level("err"), Some(3));
         assert_eq!(level("warning"), Some(4));

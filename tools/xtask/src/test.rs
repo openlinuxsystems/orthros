@@ -1185,7 +1185,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "logging",
-        about: "logd keeps the kernel log, the services' lines among them, as lines of JSON; log, journalctl and dmesg read it by service, level, time and pattern; a program cannot pass its lines off as a service's; logd started again keeps no record twice",
+        about: "logd keeps the kernel log, the services' lines among them, as lines of JSON; log, journalctl and dmesg read it by service, level, time and pattern; a program cannot pass its lines off as a service's; logd started again keeps no record twice; the audit log holds Spark's and the kernel's security events and no program's; logtrim and journalctl --vacuum-time trim the log",
         firmware: Firmware::Bios,
         media: Media::Usb,
         cmdline: "lockdep -- --services --posix /system/tests/posix/logtest",

@@ -232,7 +232,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   spark-stop       Spark stops a service that ignores SIGTERM, and what a
                    service leaves behind
   logging          logd keeps the kernel log and the services' lines; log,
-                   journalctl and dmesg read them; a restart keeps none twice
+                   journalctl and dmesg read them; a restart keeps none twice;
+                   the audit log, and logtrim
   spark-network    Spark gives each service the network its file asks for
   page-fault       a page fault's panic report, on serial and on screen
   crash-log-uefi   the panic report survives a restart (UEFI)

@@ -52,14 +52,21 @@ _pattern_, *-n*, *--lines* [_n_], *-f*, *--follow*, *-r*, *--reverse*,
 *--disk-usage*
 	journalctl's line of how much space the log takes.
 
+*--vacuum-size* _size_, *--vacuum-time* _span_
+	Trim the log, as *logtrim --size* and *logtrim --days* do: remove
+	its oldest day files while they take more than _size_ (*500M*,
+	*1G*), or those older than _span_ (*2weeks*, *10d*, *6months*,
+	*1y*). The audit log keeps to its own setting (*log*(5)).
+
 *-a*, *--all*, *-l*, *--full*, *-m*, *--merge*, *-q*, *--quiet*, *-x*, *--catalog*, *--system*, *--no-pager*
 	Change nothing.
 
 # MATCHES
 
 A _match_ *\_SYSTEMD\_UNIT=*_service_ or *UNIT=*_service_ is *-u*;
-*SYSLOG\_IDENTIFIER=*_name_ or *\_COMM=*_name_ is *-t*. Other fields
-are not kept, and fail.
+*SYSLOG\_IDENTIFIER=*_name_ or *\_COMM=*_name_ is *-t*;
+*\_TRANSPORT=audit* reads the audit log, as *log --audit* does. Other
+fields are not kept, and fail.
 
 # EXIT STATUS
 
@@ -68,4 +75,4 @@ is wrong.
 
 # SEE ALSO
 
-*log*(1), *dmesg*(1), *logd*(8), *systools*(1)
+*log*(1), *dmesg*(1), *logd*(8), *logtrim*(8), *systools*(1)

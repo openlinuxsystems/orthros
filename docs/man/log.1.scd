@@ -104,8 +104,13 @@ Each option narrows what is shown; together they all must hold.
 	from this one, its number and the times of its first and last
 	records.
 
+*--audit*
+	The audit log's records: the security events the kernel and
+	Spark wrote (*logd*(8)), which it keeps for a year. Every other
+	option chooses among them as among the log's.
+
 *--disk-usage*
-	Print how much space the log takes.
+	Print how much space the log takes, the audit log's share among it.
 
 *--no-pager*
 	Changes nothing: log does not page.
@@ -129,6 +134,10 @@ Watch the log:
 
 	log -f
 
+The security events of the last week:
+
+	log --audit --all --since "7 days ago"
+
 # SEE ALSO
 
-*journalctl*(1), *dmesg*(1), *logd*(8), *systools*(1)
+*journalctl*(1), *dmesg*(1), *logd*(8), *logtrim*(8), *log*(5), *systools*(1)

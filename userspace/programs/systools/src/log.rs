@@ -9,13 +9,17 @@
 //! journalctl(1) is the same, taking journalctl's options and keeping
 //! its defaults (every boot unless `-b` or `-k`), for the scripts and the
 //! habits that come from Linux: `-u` names a service (`.service` may
-//! follow it), as `-t` names a program.
+//! follow it), as `-t` names a program. `--audit`, or journalctl's
+//! `_TRANSPORT=audit`, reads the audit log's security events (ADR 0211),
+//! and journalctl's `--vacuum-size` and `--vacuum-time` trim the log as
+//! logtrim(8) does.
 
 use std::ffi::OsStr;
 use std::io::{self, Write};
 
 use crate::args::{Arg, Args};
 use crate::logd::{self, Boot, Record, Request, Usage};
+use crate::logtrim;
 use crate::util::{self, Fail, fail, usage};
 
 /// How each record is shown.
@@ -64,6 +68,20 @@ enum Mode {
     Records,
     ListBoots,
     DiskUsage,
+    /// journalctl's `--vacuum-*`.
+    Vacuum,
+}
+
+/// What one of journalctl's matches, `FIELD=value`, picks.
+#[derive(Debug, PartialEq, Eq)]
+enum Match {
+    /// A service's records (`_SYSTEMD_UNIT=`, `UNIT=`).
+    Service(String),
+    /// A service's or a program's, by name (`SYSLOG_IDENTIFIER=`,
+    /// `_COMM=`).
+    Name(String),
+    /// The audit log's (`_TRANSPORT=audit`).
+    Audit,
 }
 
 /// How the records are shown.
@@ -129,6 +147,7 @@ fn run(args: &mut Args, journalctl: bool) -> Result<i32, Fail> {
     let mut utc = false;
     let mut hostname = true;
     let mut mode = Mode::Records;
+    let mut vacuum = Request { ask: "trim".into(), ..Request::default() };
     while let Some(arg) = args.next()? {
         match arg {
             Arg::Short('f') => request.follow = true,
@@ -167,6 +186,15 @@ fn run(args: &mut Args, journalctl: bool) -> Result<i32, Fail> {
             Arg::Long(l) if l == "no-hostname" => hostname = false,
             Arg::Long(l) if l == "list-boots" => mode = Mode::ListBoots,
             Arg::Long(l) if l == "disk-usage" => mode = Mode::DiskUsage,
+            Arg::Long(l) if l == "audit" && !journalctl => request.audit = true,
+            Arg::Long(l) if l == "vacuum-size" && journalctl => {
+                vacuum.keep_bytes = Some(logtrim::size(&args.text()?)?);
+                mode = Mode::Vacuum;
+            }
+            Arg::Long(l) if l == "vacuum-time" && journalctl => {
+                vacuum.keep_days = Some(span_days(&args.text()?)?);
+                mode = Mode::Vacuum;
+            }
             Arg::Long(l) if l == "no-pager" => {}
             // journalctl's: the end of the log in a pager, which is the
             // last thousand here; and the ones that change nothing here.
@@ -180,8 +208,9 @@ fn run(args: &mut Args, journalctl: bool) -> Result<i32, Fail> {
                 let operand = operand.to_string_lossy().into_owned();
                 match journalctl.then(|| field_match(&operand)).transpose()? {
                     None => request.names.push(operand),
-                    Some((true, service)) => request.services.push(service),
-                    Some((false, name)) => request.names.push(name),
+                    Some(Match::Service(service)) => request.services.push(service),
+                    Some(Match::Name(name)) => request.names.push(name),
+                    Some(Match::Audit) => request.audit = true,
                 }
             }
             other => return Err(args.unknown(&other)),
@@ -210,6 +239,10 @@ fn run(args: &mut Args, journalctl: bool) -> Result<i32, Fail> {
         Mode::Records => {}
         Mode::ListBoots => return list_boots(utc),
         Mode::DiskUsage => return disk_usage(journalctl),
+        Mode::Vacuum => {
+            logtrim::report(&logtrim::ask(&vacuum)?, false, true);
+            return Ok(0);
+        }
     }
 
     let show =
@@ -277,17 +310,37 @@ fn boot_value(args: &mut Args) -> String {
         .map_or_else(|| "0".to_string(), |v| v.to_string_lossy().into_owned())
 }
 
-/// The name one of journalctl's matches, `FIELD=value`, gives, of the
-/// fields that name a service or a program: and whether it is a
-/// service's only.
-fn field_match(text: &str) -> Result<(bool, String), Fail> {
+/// What one of journalctl's matches, `FIELD=value`, picks, of the fields
+/// that name a service or a program, or the audit log.
+fn field_match(text: &str) -> Result<Match, Fail> {
     match text.split_once('=') {
-        Some(("_SYSTEMD_UNIT" | "UNIT", value)) => Ok((true, unit(value))),
-        Some(("SYSLOG_IDENTIFIER" | "_COMM", value)) => Ok((false, value.to_string())),
+        Some(("_SYSTEMD_UNIT" | "UNIT", value)) => Ok(Match::Service(unit(value))),
+        Some(("SYSLOG_IDENTIFIER" | "_COMM", value)) => Ok(Match::Name(value.to_string())),
+        Some(("_TRANSPORT", "audit")) => Ok(Match::Audit),
         _ => Err(usage(format!(
-            "'{text}': the log is searched by _SYSTEMD_UNIT=, SYSLOG_IDENTIFIER= or _COMM= here"
+            "'{text}': the log is searched by _SYSTEMD_UNIT=, SYSLOG_IDENTIFIER=, _COMM= or \
+             _TRANSPORT=audit here"
         ))),
     }
+}
+
+/// The whole days of a time span as journalctl's `--vacuum-time` takes
+/// it: `2weeks`, `10d`, `6months`, `1y`.
+fn span_days(text: &str) -> Result<u64, Fail> {
+    let bad = || usage(format!("'{text}' is not a time span"));
+    let digits = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
+    let number: u64 = text[..digits].parse().map_err(|_| bad())?;
+    let seconds: u64 = match text[digits..].trim() {
+        "" | "s" | "sec" | "second" | "seconds" => 1,
+        "m" | "min" | "minute" | "minutes" => 60,
+        "h" | "hour" | "hours" => 3600,
+        "d" | "day" | "days" => 86_400,
+        "w" | "week" | "weeks" => 7 * 86_400,
+        "M" | "month" | "months" => 2_629_800,
+        "y" | "year" | "years" => 31_557_600,
+        _ => return Err(bad()),
+    };
+    Ok(number.saturating_mul(seconds) / 86_400)
 }
 
 /// Writes journalctl's `-- Boot ... --` line before the first record of
@@ -393,7 +446,12 @@ fn disk_usage(journalctl: bool) -> Result<i32, Fail> {
         println!("Archived and active journals take up {size} in the file system.");
     } else {
         let files = if usage.files == 1 { "file" } else { "files" };
-        println!("The log takes up {size} in {} {files} in {}.", usage.files, logd::DIRECTORY);
+        let audit = util::human(usage.audit_bytes, false);
+        println!(
+            "The log takes up {size} in {} {files} in {}, {audit} of it the audit log.",
+            usage.files,
+            logd::DIRECTORY
+        );
     }
     Ok(0)
 }
@@ -594,9 +652,18 @@ mod tests {
         assert_eq!(level("err..warning").unwrap(), 4);
         assert!(level("loud").is_err());
         assert_eq!(unit("volumed.service"), "volumed");
-        assert_eq!(field_match("_SYSTEMD_UNIT=logd.service").unwrap(), (true, "logd".into()));
-        assert_eq!(field_match("_COMM=nukesh").unwrap(), (false, "nukesh".into()));
-        assert!(field_match("_PID=1").is_err());
+        assert_eq!(
+            field_match("_SYSTEMD_UNIT=logd.service").unwrap(),
+            Match::Service("logd".into())
+        );
+        assert_eq!(field_match("_COMM=nukesh").unwrap(), Match::Name("nukesh".into()));
+        assert_eq!(field_match("_TRANSPORT=audit").unwrap(), Match::Audit);
+        assert!(field_match("_PID=1").is_err() && field_match("_TRANSPORT=kernel").is_err());
+        assert_eq!(span_days("2weeks").unwrap(), 14);
+        assert_eq!(span_days("6months").unwrap(), 182);
+        assert_eq!(span_days("1y").unwrap(), 365);
+        assert_eq!(span_days("12h").unwrap(), 0);
+        assert!(span_days("soon").is_err() && span_days("3fortnights").is_err());
         for boot in ["all", "0", "-1", "3", "00112233445566778899aabbccddeeff"] {
             assert!(is_boot(OsStr::new(boot)), "{boot}");
         }
@@ -615,6 +682,7 @@ mod tests {
             from: "program".into(),
             name: "logtest".into(),
             process: Some(42),
+            audit: false,
             text: "marker".into(),
         };
         let show = |output| Show { output, utc: true, host: Some("box".into()), color: false };

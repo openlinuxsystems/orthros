@@ -23,7 +23,7 @@ use radix_abi::Status;
 use radix_abi::errors::Kernel;
 use radix_abi::file::Whence;
 use radix_abi::kernel_log::WRITE_MAX;
-use radix_klog::{Level, TextBuf, error};
+use radix_klog::{Level, Origin, TextBuf, error};
 use radix_vfs::{In, Kind, Node, NodeRef, Out, Stat};
 
 use super::FileObject;
@@ -148,14 +148,14 @@ pub fn read(file: &FileObject, out: &mut dyn Out, non_blocking: bool) -> Result<
         }
         if let Some(record) = radix_klog::record(seq) {
             let mut line = TextBuf::<{ radix_klog::RECORD_TEXT + 48 }>::new();
-            // A program's record is of the user facility, 1, as Linux
-            // marks the lines written to its _/dev/kmsg_, and names its
-            // process after the flags, as Linux's `caller=` field does.
+            // The facility times eight and the level, as Linux's; a
+            // program's record names its process after the flags, as
+            // Linux's `caller=` field does.
+            let priority = u32::from(record.facility) * 8 + u32::from(priority(record.level));
             let _ = if record.process == 0 {
                 writeln!(
                     line,
-                    "{},{},{},-;{}",
-                    priority(record.level),
+                    "{priority},{},{},-;{}",
                     record.seq,
                     record.time_ns / 1000,
                     record.text()
@@ -163,8 +163,7 @@ pub fn read(file: &FileObject, out: &mut dyn Out, non_blocking: bool) -> Result<
             } else {
                 writeln!(
                     line,
-                    "{},{},{},-,process={};{}",
-                    8 + priority(record.level),
+                    "{priority},{},{},-,process={};{}",
                     record.seq,
                     record.time_ns / 1000,
                     record.process,
@@ -194,11 +193,13 @@ pub fn read(file: &FileObject, out: &mut dyn Out, non_blocking: bool) -> Result<
     }
 }
 
-/// The level a program's line asks for with `<priority>` first, as Linux
-/// takes it: the facility times eight and the level (systemd writes `<30>`
-/// for a daemon's information), of which only the level counts; and the
-/// text after it. Information without one.
-pub fn level_of(text: &[u8]) -> (Level, &[u8]) {
+/// The level and facility a program's line asks for with `<priority>`
+/// first, as Linux takes it: the facility times eight and the level
+/// (systemd writes `<30>` for a daemon's information, `<86>` is a
+/// security event's, ADR 0211); and the text after it. Information of the
+/// user facility without one; the user facility for the kernel's or one
+/// past the last.
+pub fn priority_of(text: &[u8]) -> (Level, u8, &[u8]) {
     if let [b'<', after @ ..] = text
         && let Some(end) = after.iter().position(|&b| b == b'>')
         && (1..=9).contains(&end)
@@ -211,9 +212,14 @@ pub fn level_of(text: &[u8]) -> (Level, &[u8]) {
             7 => Level::Debug,
             _ => Level::Info,
         };
-        return (level, &after[end + 1..]);
+        let facility = match priority >> 3 {
+            0 => radix_klog::USER,
+            facility if facility < u32::from(radix_klog::FACILITIES) => facility as u8,
+            _ => radix_klog::USER,
+        };
+        return (level, facility, &after[end + 1..]);
     }
-    (Level::Info, text)
+    (Level::Info, radix_klog::USER, text)
 }
 
 /// Logs `data`, a line, as a program's: with a `<N>` before it, at
@@ -227,7 +233,7 @@ pub fn write(data: &dyn In) -> Result<usize, Status> {
     while let [rest @ .., b'\n' | b'\r'] = text {
         text = rest;
     }
-    let (level, text) = level_of(text);
+    let (level, facility, text) = priority_of(text);
     let me = sched::running();
     let process = me.as_ref().and_then(|me| me.user()).map_or(0, |user| user.process.number());
     let name = me.as_ref().map(|me| me.name());
@@ -237,7 +243,7 @@ pub fn write(data: &dyn In) -> Result<usize, Status> {
     let process = u32::try_from(process).unwrap_or(u32::MAX);
     radix_klog::log_from(
         level,
-        process,
+        Origin { process, facility },
         format_args!("{}: {}", Shown(name.as_bytes()), Shown(text)),
     );
     Ok(len)
@@ -276,9 +282,17 @@ pub fn seek(file: &FileObject, offset: i64, whence: Whence) -> Result<u64, Statu
 }
 
 /// Clears the log, as `dmesg -C` does: readers that start or seek to the
-/// start later skip what it holds now.
+/// start later skip what it holds now. Says who did, for the audit log.
 pub fn clear() {
     CLEARED.store(next_seq(), Ordering::Release);
+    let me = sched::running();
+    let process = me.as_ref().and_then(|me| me.user()).map_or(0, |user| user.process.number());
+    let name = me.as_ref().map(|me| me.name());
+    let name = name.as_ref().map_or("?", |name| name.as_str());
+    radix_klog::audit(format_args!(
+        "kmsg: the kernel log was cleared by process {process} ({})",
+        Shown(name.as_bytes())
+    ));
 }
 
 /// What `poll` finds on `file`: readable while a record waits for its

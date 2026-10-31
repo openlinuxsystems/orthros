@@ -11,8 +11,9 @@
 //! The process tools read the kernel's `/processes` (radix-proc(5)); `lsof`
 //! lists the capabilities each process holds; `rtrace` reads a trace of
 //! a process's system calls (radix-trace(2)), and `dmesg` the kernel log
-//! through `/devices/kmsg`; `logd` keeps the system's log, which `log`
-//! and `journalctl` read (ADR 0210). Every process is root's until users come
+//! through `/devices/kmsg`; `logd` keeps the system's log and its audit
+//! log, which `log` and `journalctl` read and `logtrim` trims (ADRs 0210
+//! and 0211). Every process is root's until users come
 //! (Phase 13), so the user columns all say root.
 
 mod args;
@@ -31,6 +32,7 @@ mod iostat;
 mod keymaps;
 mod log;
 mod logd;
+mod logtrim;
 mod lsblk;
 mod lscpu;
 mod lsmem;
@@ -101,6 +103,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("kill", signals::kill),
     ("log", log::main),
     ("logd", logd::main),
+    ("logtrim", logtrim::main),
     ("lsblk", lsblk::main),
     ("lscpu", lscpu::main),
     ("lsmem", lsmem::main),

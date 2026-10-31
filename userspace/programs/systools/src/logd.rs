@@ -21,6 +21,11 @@
 //! Started again, logd goes on from the last record of this boot it kept,
 //! so no record is kept twice; a record the kernel's ring lost before
 //! logd read it is counted in a record of logd's own.
+//!
+//! A security event, a record of the authpriv or auth facility that the
+//! kernel or Spark wrote (a service's line with `<86>` in front, ADR
+//! 0211), is kept in the audit log too, in files of its own under
+//! `audit`, which logd keeps for longer. logd trims both (logtrim(8)).
 
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
@@ -30,21 +35,23 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use crate::args::{Arg, Args};
-use crate::dmesg;
-use crate::proc;
+use crate::logtrim::{Limits, Policy, Trimmed};
 use crate::util::{self, Fail, fail};
+use crate::{df, dmesg, logtrim, proc, sys};
 
 /// Where the log is kept.
 pub const DIRECTORY: &str = "/system/state/log";
 /// Where logd answers requests.
 pub const QUERY: &str = "/system/live/log/query";
+/// The directory of the audit log, in the log's.
+pub const AUDIT: &str = "audit";
 /// The boot's number, made by the first logd of each boot.
 const BOOT_FILE: &str = "/system/live/log/boot";
 /// The name of the day file logd writes to, for a logd started again to
@@ -62,6 +69,11 @@ const SYNC_AFTER: Duration = Duration::from_secs(5);
 const CLIENTS_MAX: usize = 32;
 /// A day, in nanoseconds.
 const DAY_NS: u64 = 86_400 * 1_000_000_000;
+/// How much logd writes between two trims, at most.
+const TRIM_AFTER: u64 = 64 << 20;
+/// The facilities of security events: auth and authpriv.
+const AUTH: u8 = 4;
+const AUTHPRIV: u8 = 10;
 
 /// One record of the log, as a line of a day's file.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +93,9 @@ pub struct Record {
     /// The process of the program that wrote it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<u64>,
+    /// Whether it is a security event, kept in the audit log too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub audit: bool,
     /// What it says.
     pub text: String,
 }
@@ -112,6 +127,9 @@ impl Record {
             }
             None => ("kernel", "kernel".to_string(), None, line.text.clone()),
         };
+        // The kernel's and Spark's; any other program's is a claim.
+        let audit = matches!(line.facility, AUTH | AUTHPRIV)
+            && line.process.is_none_or(|process| process == SPARK);
         Record {
             time: rfc3339(boot_ns + line.usec * 1000),
             boot: boot.to_string(),
@@ -120,12 +138,13 @@ impl Record {
             from: from.to_string(),
             name,
             process,
+            audit,
             text,
         }
     }
 
-    /// A record of logd's own.
-    fn own(text: String, boot: &str, seq: u64, level: &str) -> Record {
+    /// A record of logd's own: a security event if `audit`.
+    fn own(text: String, boot: &str, seq: u64, level: &str, audit: bool) -> Record {
         Record {
             time: rfc3339(util::now_ns()),
             boot: boot.to_string(),
@@ -134,6 +153,7 @@ impl Record {
             from: "service".to_string(),
             name: "logd".to_string(),
             process: None,
+            audit,
             text,
         }
     }
@@ -252,7 +272,7 @@ pub fn parse_rfc3339(text: &str) -> Option<u64> {
 }
 
 /// The name of the file of the day `ns` since the epoch falls on.
-fn day_file(ns: u64) -> String {
+pub fn day_file(ns: u64) -> String {
     let (year, month, day) = civil((ns / 1_000_000_000 / 86_400) as i64);
     format!("{year:04}-{month:02}-{day:02}.jsonl")
 }
@@ -342,33 +362,39 @@ struct Shared {
 
 /// Set by SIGTERM: logd flushes what it wrote and ends.
 static STOP: AtomicBool = AtomicBool::new(false);
+/// Set by SIGHUP: logd reads its settings again and trims.
+static RELOAD: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn on_term(_: libc::c_int) {
     STOP.store(true, Ordering::Relaxed);
 }
 
-/// The day file records are appended to.
-struct Writer {
-    dir: PathBuf,
-    name: String,
-    file: Option<File>,
-    /// When the first record not flushed to the disk yet was written.
-    dirty: Option<Instant>,
+extern "C" fn on_hangup(_: libc::c_int) {
+    RELOAD.store(true, Ordering::Relaxed);
 }
 
-impl Writer {
-    /// Appends `record` to the file of its day.
-    fn append(&mut self, record: &Record) -> io::Result<()> {
-        let name = day_file(record.time_ns());
-        if self.file.is_none() || name != self.name {
-            self.sync();
-            self.file = None;
+/// A day file being appended to.
+#[derive(Default)]
+struct Day {
+    name: String,
+    file: Option<File>,
+}
+
+impl Day {
+    /// Appends `line` to the file of day `name` in `dir`; returns whether
+    /// it began writing to that file.
+    fn append(&mut self, dir: &Path, name: &str, line: &[u8]) -> io::Result<bool> {
+        let begun = self.file.is_none() || self.name != name;
+        if begun {
+            if let Some(file) = self.file.take() {
+                let _ = file.sync_data();
+            }
             let mut file = OpenOptions::new()
                 .create(true)
                 .read(true)
                 .append(true)
                 .mode(0o640)
-                .open(self.dir.join(&name))?;
+                .open(dir.join(name))?;
             // A line a logd that ended was writing is ended, so that the
             // next one stands on its own.
             let len = file.metadata()?.len();
@@ -380,27 +406,65 @@ impl Writer {
                     file.write_all(b"\n")?;
                 }
             }
-            let _ = fs::write(WRITING, format!("{name}\n"));
             self.file = Some(file);
-            self.name = name;
+            self.name = name.to_string();
         }
+        if let Some(file) = self.file.as_mut() {
+            file.write_all(line)?;
+        }
+        Ok(begun)
+    }
+
+    fn sync(&self) {
+        if let Some(file) = &self.file {
+            let _ = file.sync_data();
+        }
+    }
+}
+
+/// The day files records are appended to: the log's, and the audit log's
+/// for security events.
+struct Writer {
+    dir: PathBuf,
+    log: Day,
+    audit: Day,
+    /// When the first record not flushed to the disk yet was written.
+    dirty: Option<Instant>,
+    /// What was written since the last trim, in bytes.
+    since_trim: u64,
+}
+
+impl Writer {
+    fn new(dir: PathBuf) -> Writer {
+        Writer { dir, log: Day::default(), audit: Day::default(), dirty: None, since_trim: 0 }
+    }
+
+    /// Appends `record` to the file of its day, and a security event to
+    /// the audit log's first: a logd that ends between keeps it twice
+    /// rather than not at all. Returns whether it began another day's
+    /// file of the log.
+    fn append(&mut self, record: &Record) -> io::Result<bool> {
+        let name = day_file(record.time_ns());
         let mut line = serde_json::to_string(record).map_err(io::Error::other)?;
         line.push('\n');
-        if let Some(file) = self.file.as_mut() {
-            file.write_all(line.as_bytes())?;
-            self.dirty.get_or_insert_with(Instant::now);
+        if record.audit {
+            self.audit.append(&self.dir.join(AUDIT), &name, line.as_bytes())?;
         }
-        Ok(())
+        let begun = self.log.append(&self.dir, &name, line.as_bytes())?;
+        if begun {
+            let _ = fs::write(WRITING, format!("{name}\n"));
+        }
+        self.dirty.get_or_insert_with(Instant::now);
+        self.since_trim += line.len() as u64;
+        Ok(begun)
     }
 
     /// Flushes what was written to the disk.
     fn sync(&mut self) {
-        if self.dirty.is_some()
-            && let Some(file) = &self.file
-        {
-            let _ = file.sync_data();
+        if self.dirty.take().is_some() {
+            self.log.sync();
+            self.audit.sync();
         }
-        self.dirty = None;
     }
 
     /// Flushes what was written to the disk if the first of it has waited
@@ -410,6 +474,84 @@ impl Writer {
             self.sync();
         }
     }
+
+    /// Removes the day files `policy` has no room for, or only says which
+    /// if `dry_run`, never the ones being written. A removal is a security
+    /// event, saying `why`.
+    fn trim(&mut self, policy: &Policy, dry_run: bool, why: &str) -> Trimmed {
+        if !dry_run {
+            self.since_trim = 0;
+        }
+        let audit_dir = self.dir.join(AUDIT);
+        let list = |dir: &Path| -> Vec<(String, u64)> {
+            day_files(dir)
+                .iter()
+                .filter_map(|path| {
+                    let name = path.file_name()?.to_str()?.to_string();
+                    Some((name, fs::metadata(path).ok()?.len()))
+                })
+                .collect()
+        };
+        let (log, audit) = (list(&self.dir), list(&audit_dir));
+        let total: u64 = log.iter().chain(&audit).map(|f| f.1).sum();
+        let today = (util::now_ns() / DAY_NS) as i64;
+        let writing = [self.log.name.as_str(), self.audit.name.as_str()];
+        let mut trimmed = Trimmed::default();
+        for (name, bytes) in logtrim::plan(&log, &audit, today, policy, &writing) {
+            if dry_run || fs::remove_file(self.dir.join(&name)).is_ok() {
+                trimmed.files.push(name);
+                trimmed.bytes += bytes;
+            }
+        }
+        trimmed.left = total - trimmed.bytes;
+        if !dry_run && !trimmed.files.is_empty() {
+            // Through Spark, as logd's line: a security event of a
+            // service, with its place in the kernel's sequence.
+            eprintln!(
+                "<86>logd: trimmed the log {why}: removed {} ({}), {} to {}",
+                plural(trimmed.files.len(), "day file"),
+                util::human(trimmed.bytes, false),
+                trimmed.files[0],
+                trimmed.files[trimmed.files.len() - 1],
+            );
+        }
+        trimmed
+    }
+}
+
+/// `n` things, as English says it.
+fn plural(n: usize, thing: &str) -> String {
+    if n == 1 { format!("1 {thing}") } else { format!("{n} {thing}s") }
+}
+
+/// A trim a request asks for: by `policy` (the settings' when None), or
+/// only what it would remove; and where to send the answer.
+struct TrimAsk {
+    policy: Option<Policy>,
+    dry_run: bool,
+    by: u64,
+    answer: mpsc::Sender<Trimmed>,
+}
+
+/// The policy `limits` set for the log in `dir`.
+fn settings_policy(limits: &Limits, dir: &Path) -> Policy {
+    let size = df::statvfs(dir.as_os_str()).map_or(0, |space| space.size);
+    let days = |days: u64| (days > 0).then_some(days);
+    Policy {
+        days: days(limits.keep_days),
+        audit_days: days(limits.audit_keep_days),
+        cap: limits.cap(size),
+        log_cap: 0,
+    }
+}
+
+/// The limits the settings file sets, saying what is wrong in it.
+fn read_limits() -> Limits {
+    let (limits, wrong) = Limits::read();
+    for wrong in wrong {
+        eprintln!("<4>logd: {wrong}");
+    }
+    limits
 }
 
 /// logd(8).
@@ -425,13 +567,18 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     // thread runs yet. A reader that goes away must not end logd: the
     // write to it fails instead.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
-    // SAFETY: all zeros is a valid sigaction: numbers, a signal set and a
-    // function address.
-    let mut action: libc::sigaction = unsafe { util::zeroed() };
-    action.sa_sigaction = on_term as *const () as usize;
-    // SAFETY: the handler only stores to an atomic.
-    unsafe { libc::sigaction(libc::SIGTERM, &raw const action, std::ptr::null_mut()) };
-    for path in [dir.as_path(), Path::new(QUERY).parent().unwrap_or(Path::new("/"))] {
+    for (signal, handler) in
+        [(libc::SIGTERM, on_term as extern "C" fn(libc::c_int)), (libc::SIGHUP, on_hangup)]
+    {
+        // SAFETY: all zeros is a valid sigaction: numbers, a signal set
+        // and a function address.
+        let mut action: libc::sigaction = unsafe { util::zeroed() };
+        action.sa_sigaction = handler as *const () as usize;
+        // SAFETY: the handlers only store to an atomic.
+        unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) };
+    }
+    let query_dir = Path::new(QUERY).parent().unwrap_or(Path::new("/"));
+    for path in [dir.as_path(), &dir.join(AUDIT), query_dir] {
         fs::create_dir_all(path).map_err(|e| util::failed(&path.display(), e))?;
     }
     let boot = boot_number().map_err(|e| util::failed(&BOOT_FILE, e))?;
@@ -448,7 +595,8 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let _ = fs::remove_file(QUERY);
     let listener = UnixListener::bind(QUERY).map_err(|e| util::failed(&QUERY, e))?;
     let shared = Arc::new(Shared { written: Mutex::new(0), changed: Condvar::new() });
-    let answering = Answering { dir: dir.clone(), boot: boot.clone(), boot_ns };
+    let (trims, asked) = mpsc::channel();
+    let answering = Answering { dir: dir.clone(), boot: boot.clone(), boot_ns, trims };
     {
         let shared = shared.clone();
         let answering = Arc::new(answering);
@@ -477,7 +625,9 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         None => eprintln!("logd: keeping the log in {}", dir.display()),
     }
 
-    let mut writer = Writer { dir, name: String::new(), file: None, dirty: None };
+    let mut limits = read_limits();
+    let mut writer = Writer::new(dir);
+    writer.trim(&settings_policy(&limits, &writer.dir), false, "as its settings say");
     let mut buffer = vec![0u8; 4096];
     let mut next = after.map_or(0, |seq| seq + 1);
     let mut failing = false;
@@ -485,6 +635,21 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         if STOP.load(Ordering::Relaxed) {
             writer.sync();
             return Ok(0);
+        }
+        if RELOAD.swap(false, Ordering::Relaxed) {
+            limits = read_limits();
+            writer.trim(&settings_policy(&limits, &writer.dir), false, "as its settings say");
+        }
+        while let Ok(ask) = asked.try_recv() {
+            let TrimAsk { policy, dry_run, by, answer } = ask;
+            let (policy, why) = match policy {
+                Some(policy) => (policy, format!("to the limits process {by} asked for")),
+                None => (
+                    settings_policy(&limits, &writer.dir),
+                    format!("as its settings say, asked by process {by}"),
+                ),
+            };
+            let _ = answer.send(writer.trim(&policy, dry_run, &why));
         }
         match kmsg.read(&mut buffer) {
             Ok(0) => wait_readable(&kmsg, Duration::from_secs(1)),
@@ -496,31 +661,52 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
                 let mut records = Vec::with_capacity(2);
                 if line.seq > next {
                     // Numbered as the last one lost, so that a logd started
-                    // again goes on from the record after them.
+                    // again goes on from the record after them. Lost records
+                    // can be security events: so is this.
                     let text = format!(
                         "{} records of the kernel log were lost before logd read them",
                         line.seq - next
                     );
-                    records.push(Record::own(text, &boot, line.seq - 1, "warning"));
+                    records.push(Record::own(text, &boot, line.seq - 1, "warning", true));
                 }
                 records.push(Record::of(&line, &boot, boot_ns));
                 next = line.seq + 1;
-                match records.iter().try_for_each(|record| writer.append(record)) {
-                    Ok(()) => failing = false,
-                    Err(err) => {
-                        // Said once, not for each record: what logd says
-                        // comes back to it as a record.
-                        if !failing {
-                            eprintln!("<3>logd: cannot write to {}: {err}", writer.dir.display());
+                let mut begun = false;
+                for record in &records {
+                    match writer.append(record) {
+                        Ok(new_day) => {
+                            begun |= new_day;
+                            failing = false;
                         }
-                        failing = true;
-                        writer.file = None;
-                        continue;
+                        Err(err) => {
+                            // Said once, not for each record: what logd says
+                            // comes back to it as a record.
+                            if !failing {
+                                eprintln!(
+                                    "<3>logd: cannot write to {}: {err}",
+                                    writer.dir.display()
+                                );
+                            }
+                            failing = true;
+                            writer.log.file = None;
+                            writer.audit.file = None;
+                        }
                     }
+                }
+                if failing {
+                    continue;
                 }
                 *shared.written.lock().unwrap_or_else(PoisonError::into_inner) += 1;
                 shared.changed.notify_all();
                 writer.sync_due();
+                // A day begins, or much was written: room is made.
+                if begun || writer.since_trim >= TRIM_AFTER {
+                    writer.trim(
+                        &settings_policy(&limits, &writer.dir),
+                        false,
+                        "as its settings say",
+                    );
+                }
             }
             // Records were lost from the ring; the next one read shows
             // how many.
@@ -546,8 +732,12 @@ fn wait_readable(file: &File, wait: Duration) {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Request {
-    /// What it asks for: `records` (the default), `boots` or `usage`.
+    /// What it asks for: `records` (the default), `boots`, `usage` or
+    /// `trim`.
     pub ask: String,
+    /// The audit log's records, not the log's.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub audit: bool,
     /// The boots: `all`, or the number of one, or how far back from this
     /// one (`0`, `-1`); this boot when empty.
     pub boot: String,
@@ -572,6 +762,15 @@ pub struct Request {
     pub lines: Option<usize>,
     /// Then new records as they come, until the connection closes.
     pub follow: bool,
+    /// For `trim`: keep the log's records of this many days, and no more
+    /// than these bytes of the log; the settings' limits without either.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_days: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_bytes: Option<u64>,
+    /// For `trim`: only say what would be removed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
 }
 
 /// What logd answers a request with when it cannot: a line of JSON.
@@ -589,11 +788,14 @@ pub struct Boot {
     pub records: u64,
 }
 
-/// How much the log takes, for `log --disk-usage`.
+/// How much the log takes, for `log --disk-usage`: the audit log's
+/// among it.
 #[derive(Serialize, Deserialize)]
 pub struct Usage {
     pub bytes: u64,
     pub files: u64,
+    #[serde(default)]
+    pub audit_bytes: u64,
 }
 
 /// What every request is answered from.
@@ -602,6 +804,8 @@ struct Answering {
     boot: String,
     /// When this boot started, in nanoseconds since the epoch.
     boot_ns: u64,
+    /// Where trims are asked of the writer, which makes them.
+    trims: mpsc::Sender<TrimAsk>,
 }
 
 /// Sends `error` as the answer.
@@ -631,6 +835,7 @@ fn serve(stream: &UnixStream, shared: &Shared, answering: &Answering) {
         "" | "records" => records(&mut out, &request, shared, answering),
         "boots" => boots(&mut out, &answering.dir),
         "usage" => usage(&mut out, &answering.dir),
+        "trim" => trim(&mut out, &request, stream, answering),
         other => Err(Answer::Refused(format!("logd does not know '{other}'"))),
     };
     match answered {
@@ -736,6 +941,12 @@ fn which_boot(request: &Request, answering: &Answering) -> Result<Option<String>
     }
 }
 
+/// The directory of the day files `request` reads: the audit log's, or
+/// the log's.
+fn records_dir(request: &Request, answering: &Answering) -> PathBuf {
+    if request.audit { answering.dir.join(AUDIT) } else { answering.dir.clone() }
+}
+
 /// The day files that can hold records `request` asks for: from the day
 /// of `since`, or the day before this boot's for this boot's records (a
 /// clock set back after boot can put them there), to the day of `until`.
@@ -745,7 +956,7 @@ fn files_for(request: &Request, boot: Option<&str>, answering: &Answering) -> Ve
         from = from.max(Some(day_file(answering.boot_ns.saturating_sub(DAY_NS))));
     }
     let to = request.until.map(day_file);
-    day_files(&answering.dir)
+    day_files(&records_dir(request, answering))
         .into_iter()
         .filter(|path| {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -843,8 +1054,10 @@ fn records(
             seen = *written;
         }
         // New records are in the file followed, or in newer ones.
-        let newer: Vec<PathBuf> =
-            day_files(&answering.dir).into_iter().filter(|f| *f >= path).collect();
+        let newer: Vec<PathBuf> = day_files(&records_dir(request, answering))
+            .into_iter()
+            .filter(|f| *f >= path)
+            .collect();
         let start = if newer.first() == Some(&path) { offset } else { 0 };
         if let Some(end) = each_record(&newer, start, |record| {
             if choice.wants(&record) {
@@ -892,10 +1105,45 @@ fn boots(out: &mut io::BufWriter<&UnixStream>, dir: &Path) -> Result<(), Answer>
 
 /// Answers a request for the space the log takes.
 fn usage(out: &mut io::BufWriter<&UnixStream>, dir: &Path) -> Result<(), Answer> {
-    let files = day_files(dir);
-    let bytes = files.iter().filter_map(|f| fs::metadata(f).ok()).map(|m| m.len()).sum();
-    serde_json::to_writer(&mut *out, &Usage { bytes, files: files.len() as u64 })
-        .map_err(|_| Answer::Gone)?;
+    let (log, audit) = (day_files(dir), day_files(&dir.join(AUDIT)));
+    let bytes = |files: &[PathBuf]| -> u64 {
+        files.iter().filter_map(|f| fs::metadata(f).ok()).map(|m| m.len()).sum()
+    };
+    let audit_bytes = bytes(&audit);
+    let usage = Usage {
+        bytes: bytes(&log) + audit_bytes,
+        files: (log.len() + audit.len()) as u64,
+        audit_bytes,
+    };
+    serde_json::to_writer(&mut *out, &usage).map_err(|_| Answer::Gone)?;
+    out.write_all(b"\n")?;
+    Ok(())
+}
+
+/// Answers a request to trim the log: asks the writer, which trims it
+/// between two records, saying which process asked.
+fn trim(
+    out: &mut io::BufWriter<&UnixStream>,
+    request: &Request,
+    stream: &UnixStream,
+    answering: &Answering,
+) -> Result<(), Answer> {
+    let policy = (request.keep_days.is_some() || request.keep_bytes.is_some()).then(|| Policy {
+        days: request.keep_days,
+        log_cap: request.keep_bytes.unwrap_or(0),
+        ..Policy::default()
+    });
+    let slot = sys::slot_of(stream.as_raw_fd());
+    let by = radix_abi::file::socket_state(&sys::SYS, slot).map_or(0, |state| state.peer);
+    let (answer, answered) = mpsc::channel();
+    let ask = TrimAsk { policy, dry_run: request.dry_run, by, answer };
+    if answering.trims.send(ask).is_err() {
+        return Err(Answer::Refused("logd is ending".into()));
+    }
+    let trimmed = answered
+        .recv_timeout(Duration::from_secs(60))
+        .map_err(|_| Answer::Refused("logd did not trim in time".into()))?;
+    serde_json::to_writer(&mut *out, &trimmed).map_err(|_| Answer::Gone)?;
     out.write_all(b"\n")?;
     Ok(())
 }
@@ -934,7 +1182,7 @@ mod tests {
     fn line(text: &str, process: Option<u64>, level: u8) -> dmesg::Line {
         dmesg::Line {
             level,
-            user: process.is_some(),
+            facility: u8::from(process.is_some()),
             seq: 7,
             process,
             usec: 2_500_000,
@@ -976,7 +1224,17 @@ mod tests {
         let kernel = Record::of(&line("ahci: port 0 up", None, 6), boot, 0);
         assert_eq!((kernel.from.as_str(), kernel.text.as_str()), ("kernel", "ahci: port 0 up"));
         let json = serde_json::to_string(&kernel).unwrap();
-        assert!(!json.contains("process"));
+        assert!(!json.contains("process") && !json.contains("audit"));
+        // Security events: the kernel's and Spark's; a program's is a claim.
+        let event = |text: &str, process| {
+            Record::of(&dmesg::Line { facility: AUTHPRIV, ..line(text, process, 6) }, boot, 0)
+        };
+        let cleared = event("kmsg: the kernel log was cleared by process 9 (dmesg)", None);
+        assert!(cleared.audit && cleared.from == "kernel");
+        let asked = event("spark[1]: spark: asked to stop volumed, by process 9", Some(1));
+        assert!(asked.audit && asked.name == "spark");
+        assert!(serde_json::to_string(&asked).unwrap().contains(r#""audit":true"#));
+        assert!(!event("sudo[4]: sudo: root opened a session", Some(42)).audit);
         assert_eq!(serde_json::from_str::<Record>(&json).unwrap(), kernel);
     }
 
@@ -1021,7 +1279,7 @@ mod tests {
     #[test]
     fn going_on_after_a_restart() {
         let dir = std::env::temp_dir().join(format!("logd-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(dir.join(AUDIT)).unwrap();
         let name = "2026-10-30.jsonl";
         let mut text = String::new();
         let mut seq = 0;
@@ -1042,15 +1300,23 @@ mod tests {
         assert_eq!(last_kept(&dir, name, "none"), None);
         assert_eq!(last_kept(&dir, "../x.jsonl", "this"), None);
         // The line cut short is ended before the next is appended.
-        let mut writer = Writer { dir: dir.clone(), name: String::new(), file: None, dirty: None };
+        let mut writer = Writer::new(dir.clone());
         let record = Record::of(&line("ahci: up", None, 6), "this", 1_793_395_501_000_000_000);
-        writer.append(&Record { seq: 4000, ..record }).unwrap();
+        writer.append(&Record { seq: 4000, ..record.clone() }).unwrap();
         writer.sync();
-        assert_eq!(writer.name, name);
+        assert_eq!(writer.log.name, name);
         assert_eq!(last_kept(&dir, name, "this"), Some(4000));
         let text = fs::read_to_string(dir.join(name)).unwrap();
         let last = r#"{"time":"2026-10-30T21:25:03.500000Z","boot":"this","seq":4000,"level":"info","from":"kernel","name":"kernel","text":"ahci: up"}"#;
         assert!(text.ends_with(&format!("T\n{last}\n")));
+        // A security event goes to the audit log's file of its day too.
+        let event = Record { seq: 4001, audit: true, ..record.clone() };
+        writer.append(&event).unwrap();
+        writer.sync();
+        let audit = fs::read_to_string(dir.join(AUDIT).join(name)).unwrap();
+        assert_eq!(audit.lines().count(), 1);
+        assert!(audit.contains(r#""seq":4001"#));
+        assert_eq!(last_kept(&dir, name, "this"), Some(4001));
         fs::remove_dir_all(&dir).unwrap();
         assert!(is_day_file(name) && !is_day_file("2026-10-3x.jsonl"));
     }

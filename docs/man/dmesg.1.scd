@@ -22,8 +22,10 @@ the oldest kept first. The kernel keeps the newest records in a ring;
 older ones are gone.
 
 The log holds what the kernel says and what programs write to it; each
-line a program wrote starts with its name and is of the user facility,
-the kernel's own of the kernel facility. *log*(1) shows the same records
+line a program wrote starts with its name and is of the facility its
+*<*_n_*>* gave, or the user facility, the kernel's own of the kernel
+facility, but for its security events, of authpriv (ADR 0211).
+*log*(1) shows the same records
 with the services' lines named by service, kept across boots by
 *logd*(8).
 
@@ -58,8 +60,14 @@ with the services' lines named by service, kept across boots by
 *-d*, *--show-delta*
 	The time since the record before, too.
 
+*-f*, *--facility* _list_
+	Only the records of these facilities, by commas: *kern*, *user*,
+	*mail*, *daemon*, *auth*, *syslog*, *lpr*, *news*, *uucp*, *cron*,
+	*authpriv*, *ftp*, *res0* to *res3*, *local0* to *local7*.
+
 *-r*, *--raw*
-	Each record's level as *<*_n_*>* before it.
+	Each record's facility and level as *<*_n_*>* before it: the
+	facility times eight plus the level.
 
 *-x*, *--decode*
 	Each record's facility and level by name before it.

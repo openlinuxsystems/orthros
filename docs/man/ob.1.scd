@@ -464,7 +464,9 @@ _target/userspace/_).
 		of it kept as the program's, the kernel's records alone, a line
 		*log -f* shows as it comes, the boots and the day files; then
 		*service logd restart*, after which no record is kept twice
-		(*logd*(8)).
+		(*logd*(8)); the audit log's events from Spark and the kernel
+		and none from a program; and *logtrim*(8) and journalctl's
+		*--vacuum-time* removing old day files, each removal an event.
 
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test

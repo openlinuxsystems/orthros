@@ -6,7 +6,8 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 # Logs, monitoring and troubleshooting
 
 This chapter describes the system's log as of Phase 13 of the roadmap.
-The full references are logd(8), log(1), journalctl(1) and dmesg(1).
+The full references are logd(8), log(1), journalctl(1), logtrim(8),
+log(5) and dmesg(1).
 
 ## What the log holds
 
@@ -55,10 +56,45 @@ Narrow it down with options, which all must hold together:
 directly, and `dmesg -k` or `dmesg -u` shows only the kernel's records or
 only the programs'.
 
+## The audit log
+
+Security events are kept twice: in the log, and in the audit log, which
+keeps them for a year in `/system/state/log/audit`. Today they are
+Spark's answers to requests that change something (a service started,
+stopped or restarted, the machine powered off), each with the process
+that asked; the power button; the kernel log cleared; records the
+kernel's ring lost before logd read them; and the log trimmed. Signing
+in, `elevate` and permissions will be, as they come.
+
+```
+$ log --audit
+Oct 30 21:40:12 dukovo spark: asked to restart volumed, by process 57
+```
+
+Only the kernel and Spark can put an event in the audit log. A service
+writes one by starting a line of its output with `<86>`, the syslog
+priority of a security event, and Spark passes it on as that service's;
+a program that writes the same to the kernel log only adds a line to
+the log. `journalctl _TRANSPORT=audit` reads the audit log too.
+
 ## How much space it takes
 
-`log --disk-usage` says how much the log takes. Trimming the oldest days
-by size and age comes with the next part of Phase 13.
+`log --disk-usage` says how much the log takes, and the audit log's
+share. logd keeps 90 days of the log and a year of the audit log, in at
+most 4 GiB or a tenth of their file system, whichever is less, and
+removes the oldest days first, each removal a security event. Change
+the limits in `/system/settings/log` and run `service logd reload`;
+0 lifts a limit:
+
+```
+keep-days = 30
+max-size = 1G
+```
+
+`logtrim` trims now (`logtrim -n` says what it would remove), and
+`logtrim --size 500M` or `logtrim --days 30` once to a limit of your
+own, as `journalctl --vacuum-size=500M` and `--vacuum-time=30d` do. The
+audit log keeps to its own setting.
 
 ## When logd is not running
 
