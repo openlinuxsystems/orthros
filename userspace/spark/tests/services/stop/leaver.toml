@@ -4,7 +4,8 @@
 # The spark-stop boot test's service that ends and leaves a process in
 # its domain, which Spark stops.
 
-description = Leaves a process behind
-program = /system/commands/nukesh
-arguments = -c "sleep 600 & echo left; exit 0"
-restart = never
+service_version = 1
+description = "Leaves a process behind"
+program = "/system/commands/nukesh"
+arguments = ["-c", "sleep 600 & echo left; exit 0"]
+restart = "never"

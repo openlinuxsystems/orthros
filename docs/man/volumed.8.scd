@@ -46,6 +46,13 @@ volumed: sdb is gone; unmounted /volumes/sdb
 volumed: mounted the FAT filesystem of sdb at /volumes/DUKOVOUSB
 ```
 
+Its service file gives it _/devices_ and _/volumes_ and nothing else of
+the tree (*service.toml*(5)). Spark hands it _/volumes_ as descriptor 3
+as well, as *files.mount* says and *MOUNT_PLACES* names, since nothing
+is mounted through a service's view; volumed mounts and unmounts through
+it, and through the root when *MOUNT_PLACES* names nothing, as for
+*eject*(1).
+
 Until Dukovo has users, every program reaches _/volumes_ as it reaches
 the rest of the root; once it has them, the user logged in at the
 console is given each volume volumed mounts.

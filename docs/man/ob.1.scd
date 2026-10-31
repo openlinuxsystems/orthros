@@ -513,6 +513,26 @@ _target/userspace/_).
 		it has it, a view's own, a pipe, a taken name and a path through
 		what it attached, and mounts beneath it (ADR 0215).
 
+	*services*
+		Boot 2 CPUs with the shipped services and
+		_/system/tests/posix/servicetest_, which checks their TOML files
+		with *service check* and finds each kept as Spark's last good
+		copy; writes a file of before Phase 13, which Spark converts to
+		TOML with its comments as it starts the service, keeping the old
+		one as _legacy.service.old_; writes a new file with *service
+		new* and edits it with *service edit*, which leaves the file as
+		it was when an edit does not read and is given up, and puts it in
+		place once it is fixed; has Spark start the new service, and
+		refuse one whose file does not read; and breaks the file of a
+		running service, which Spark then restarts from its last good
+		copy, saying which line is wrong (ADR 0216). Then gives the
+		service _inside_ a secret with *service secret set*, after Spark
+		has refused to start it without one, and has it check from
+		inside its view (ADR 0217): its secret as a read-only file and in
+		no variable, what every service reads, _/bin/sh_ and
+		_/usr/bin/env_, its own folder and _/tmp_, nothing past them,
+		and a file of mode 000 closed to it.
+
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test
 		services that run _/system/tests/posix/netgrant_: _granted_ asks

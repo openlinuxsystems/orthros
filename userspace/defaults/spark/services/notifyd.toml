@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Notifications: notifyd(8) takes them from notify-send(1) and other
+# programs and passes them to consoled(8), which shows them on the
+# screen's bottom line (ADR 0212).
+#
+# service.toml(5) explains each setting. `service check notifyd` checks
+# this file, and `service edit notifyd` checks it as you save.
+
+service_version = 1
+description = "Notifications"
+program = "/system/commands/notifyd"
+# Before consoled, so that the consoles find it when they start.
+order = 7
+# Started again whenever it ends: always, on-failure or never.
+restart = "always"
+
+[limits]
+memory = "16M"
+
+# What it holds beyond what every service reads (service.toml(5)): its
+# folder, where it answers on a socket. Every other service may only
+# connect there.
+[permissions]
+files.read-write = ["/system/live/notify"]

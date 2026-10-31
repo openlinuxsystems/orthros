@@ -3,20 +3,32 @@
 #
 # The virtual consoles on the screen and keyboard: consoled(8). Each
 # console runs root's shell; Alt+F1 to Alt+F6 switch between them.
+#
+# service.toml(5) explains each setting. `service check consoled` checks
+# this file, and `service edit consoled` checks it as you save.
 
-description = Virtual consoles
-program = /system/commands/consoled
-# First up, last down: the consoles show the other services stopping.
+service_version = 1
+description = "Virtual consoles"
+program = "/system/commands/consoled"
+# Lower starts first: first up, last down, so the consoles show the
+# other services stopping.
 order = 10
 # A machine with no screen has no consoles: consoled exits with 0 there,
 # and stays stopped.
-restart = on-failure
+restart = "on-failure"
+
+[limits]
 # The shells and all they run share its domain, so it has no memory
 # limit; twice the default CPU weight keeps typing quick when services
 # are busy.
-weight = 200
-memory = none
+cpu_weight = 200
+memory = "none"
+
+# What it holds: the whole tree, as Spark does, since it starts root's
+# shells on the consoles until sign-in comes (Phase 13b.5).
+[permissions]
+runs-with-your-access = true
 # Root's shells may set the fans, the LEDs and the ARGB header with
 # ectool(8), as root may on Linux; from Phase 13 an administrator's do,
 # once elevated.
-admin.hardware = yes
+admin.hardware = true

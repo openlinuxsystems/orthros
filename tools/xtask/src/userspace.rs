@@ -227,7 +227,7 @@ pub const STD_MANIFEST: &str = "userspace/programs/Cargo.toml";
 
 /// The programs on Rust's standard library whose unit tests run on the
 /// host: what they test does not need Radix.
-pub const HOST_TESTED: &[&str] = &["consoled", "keymap", "nukesh", "systools"];
+pub const HOST_TESTED: &[&str] = &["consoled", "keymap", "manifest", "nukesh", "systools"];
 
 /// The Cargo.lock of the host builds of the programs on Rust's standard
 /// library. They take the crates the ports patch for Radix from

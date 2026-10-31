@@ -136,7 +136,7 @@ found and ends like this:
 [    0.866770] Init: the boot archive is 91956 KiB with 1073 entries; starting /system/commands/spark
 [    1.583622] Init: /system/commands/spark is process 1
 ...
-[    1.945004] cpu1: spark[1]: spark: built the hierarchy of 9 directories and mounted 8 filesystems
+[    1.945004] cpu1: spark[1]: spark: built the hierarchy of 9 directories and mounted 9 filesystems
 [    1.994464] cpu1: spark[1]: spark: added 7 default settings to /system/settings
 [    2.025364] cpu1: spark[1]: spark: listening at /system/live/spark/control
 [    2.059082] cpu1: spark[1]: spark: 4 services in /system/settings/spark/services, 4 enabled

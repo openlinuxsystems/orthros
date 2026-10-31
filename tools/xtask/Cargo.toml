@@ -23,6 +23,9 @@ radix-kdb = { path = "../../kernel/lib/kdb" }
 radix-ksyms = { path = "../../kernel/lib/ksyms" }
 radix-microcode = { path = "../../kernel/lib/microcode" }
 radix-relocs = { path = "../../kernel/lib/relocs" }
+# The settings of service files, which `ob docs --check` compares with
+# service.toml(5).
+manifest = { path = "../../userspace/programs/manifest" }
 # The interface compiler, for the man(2) pages and C headers of abi/*.ridl.
 ridlc = { path = "../ridlc" }
 rustc-demangle = "0.1"

@@ -118,7 +118,7 @@ checks of every phase so far:
     Spark v1 is process 1` to `spark: nothing more to do; waiting`, with
     `hello` exiting with code `0x0` and all of its memory coming back.
 11. From Phase 7: Spark must say `built the hierarchy of 10 directories
-    and mounted 8 filesystems`. Photograph the `PCI:` lines, which list
+    and mounted 9 filesystems`. Photograph the `PCI:` lines, which list
     every PCI function with its vendor and device IDs and class: they
     name the SATA controller (class `0106xx`) and the Ethernet controller
     (class `0200xx`) that Phases 10 and 12 drive. No `Disk:` line is

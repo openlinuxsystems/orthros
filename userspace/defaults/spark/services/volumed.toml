@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Volumes: volumed(8) mounts each disk or partition plugged in after boot
+# at /volumes/<label>, as udisks does on Linux, and unmounts those of a
+# disk pulled out; eject(1) unmounts one before it is pulled out.
+#
+# service.toml(5) explains each setting. `service check volumed` checks
+# this file, and `service edit volumed` checks it as you save.
+
+service_version = 1
+description = "Volumes"
+program = "/system/commands/volumed"
+# After the disks are mounted, which it takes as done.
+order = 40
+# Started again whenever it ends: always, on-failure or never.
+restart = "always"
+
+# What it holds beyond what every service reads (service.toml(5)): the
+# disks, and /volumes, where it mounts them.
+[permissions]
+files.read-write = ["/devices"]
+files.mount = ["/volumes"]

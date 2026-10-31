@@ -72,7 +72,7 @@ once it has them, each user's go to their own consoles.
 _/system/live/notify/socket_
 	The socket notifyd answers on.
 
-_/system/settings/spark/services/notifyd.service_
+_/system/settings/spark/services/notifyd.toml_
 	The service.
 
 # EXIT STATUS
