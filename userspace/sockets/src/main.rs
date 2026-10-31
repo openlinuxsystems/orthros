@@ -454,12 +454,20 @@ fn udp(checks: &mut Checks, out: u32) {
     let mut small = [0u8; 8];
     let got: Vec<_> = (0..3).map(|_| bound.receive_from(&mut small).map(|(n, _)| n)).collect();
     checks.check(got == [Ok(1), Ok(2), Ok(8)], &format!("the datagrams came as {got:?}"));
-    let long = alloc::vec![0u8; 20_000];
+    // The longest datagram lo carries is Linux's, 65,507 bytes.
+    let mut longest = alloc::vec![7u8; 65_508];
     checks.refused(
-        sender.send_to(out, (LOOPBACK, 7001), &long),
+        sender.send_to(out, (LOOPBACK, 7001), &longest),
         Kernel::MessageTooLong,
         "sending a datagram longer than lo carries",
     );
+    longest.pop();
+    let sent = sender.send_to(out, (LOOPBACK, 7001), &longest);
+    checks.check(sent == Ok(65_507), "sending the longest datagram lo carries");
+    let mut whole = alloc::vec![0u8; 65_536];
+    let got = bound.receive_from(&mut whole).map(|(n, _)| n);
+    checks.check(got == Ok(65_507), &format!("the longest datagram came as {got:?}"));
+    checks.check(whole[..65_507].iter().all(|&b| b == 7), "the longest datagram's bytes");
     println!(
         "sockets: udp: datagrams went each way over lo, kept their bounds, and said where they came from"
     );

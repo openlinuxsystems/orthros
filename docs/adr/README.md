@@ -187,6 +187,8 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0182](0182-the-kernel-patches-smoltcp-so-socket-memory-comes-back.md) | The kernel patches smoltcp, so that a socket's memory comes back | Accepted |
 | [0183](0183-programs-reach-the-network-through-capabilities-of-its-ports.md) | Programs reach the network through capabilities of its ports | Accepted |
 | [0184](0184-services-and-the-c-library-use-the-network-capabilities-they-were-given.md) | Services and the C library use the network capabilities they were given | Accepted |
+| [0185](0185-loopback-runs-in-the-senders-thread-and-the-network-joins-the-gate.md) | Loopback runs in the sender's thread, and the network joins the gate | Accepted |
+| [0186](0186-a-loopback-connection-passes-its-bytes-straight-across.md) | A loopback connection passes its bytes straight across | Accepted |
 | [0200](0200-uacpi-runs-the-firmwares-aml-in-the-kernel.md) | uACPI runs the firmware's AML in the kernel | Accepted |
 | [0201](0201-batteries-adapters-and-lids-through-uacpi.md) | Batteries, AC adapters and lids through uACPI, and the embedded controller | Accepted |
 | [0202](0202-cpu-frequency-through-hwp-and-cppc.md) | CPU frequency through Intel's HWP and AMD's CPPC | Accepted |
@@ -198,3 +200,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0208](0208-programs-set-the-fans-leds-and-argb-header-through-the-platform-capability.md) | Programs set the fans, LEDs and ARGB header through the platform capability | Accepted |
 | [0210](0210-logd-keeps-the-kernel-log-as-the-system-log.md) | logd keeps the kernel log as the system's log, and the kernel says which process wrote each record | Accepted |
 | [0211](0211-the-audit-log-and-trimming-the-log.md) | Security events of the kernel and Spark go to an audit log, and logd trims the log by age and size | Accepted |
+| [0212](0212-notifications-and-the-privacy-promise.md) | notifyd passes notifications to the console's bottom line, naming the sender as the kernel does, and the privacy promise | Accepted |

@@ -15,8 +15,8 @@ use smoltcp::socket::{icmp, tcp, udp};
 use smoltcp::wire::{IpAddress, IpEndpoint};
 
 use crate::{
-    ConnectError, FRAME, Ipv4Address, Ipv4Cidr, Link, Loopback, Medium, Memory, PingError,
-    PingMemory, Pinger, Stack, TcpMemory, UdpMemory, parse_cidr,
+    Across, ConnectError, FRAME, Ipv4Address, Ipv4Cidr, Link, Loopback, Medium, Memory, OtherEnd,
+    PingError, PingMemory, Pinger, Stack, TcpMemory, UdpMemory, parse_cidr,
 };
 
 type Queue = Rc<RefCell<VecDeque<Vec<u8>>>>;
@@ -405,6 +405,140 @@ fn the_loopback_link_gives_back_what_is_sent_in_order() {
         assert_eq!(link.receive(&mut frame), None);
     }
     assert!(!link.send(&[0; 31]), "longer than its MTU");
+    assert!(!link.needs_checksums(), "its packets never leave memory");
+}
+
+/// Takes the loopback link's oldest packet and checks it is `bytes`.
+fn take(link: &mut Loopback, bytes: &[u8]) {
+    let (oldest, _) = link.oldest().unwrap();
+    oldest.read(|packet| assert_eq!(packet, bytes));
+}
+
+#[test]
+fn the_loopback_ring_wraps_round_its_end() {
+    // Slots of 48 bytes for packets of 40; the second ring has no room
+    // after its last slot for a header that says it wraps.
+    for len in [128, 100] {
+        let mut link = Loopback::new(leak(0u8, len), 40);
+        assert!(link.send(&[1; 40]) && link.send(&[2; 40]));
+        assert!(!link.send(&[0; 25]), "no room for a third slot");
+        take(&mut link, &[1; 40]);
+        // The next goes at the start, before the oldest packet.
+        assert!(link.send(&[3; 40]));
+        assert!(!link.send(&[0; 1]), "the ring is full again");
+        take(&mut link, &[2; 40]);
+        take(&mut link, &[3; 40]);
+        assert!(!link.pending());
+        // Empty, it has all its room again.
+        assert!(link.send(&[4; 40]) && link.send(&[5; 40]));
+        take(&mut link, &[4; 40]);
+        take(&mut link, &[5; 40]);
+    }
+    // Slots that wrapped fill the ring up to where the last packet before
+    // the end was: the room after it, past the wrap, is free all the same.
+    let mut link = Loopback::new(leak(0u8, 128), 40);
+    assert!(link.send(&[1; 40]) && link.send(&[2; 40]));
+    take(&mut link, &[1; 40]);
+    assert!(link.send(&[3; 40]));
+    take(&mut link, &[2; 40]);
+    assert!(link.send(&[4; 40]), "after the packet that wrapped");
+    assert!(link.send(&[5; 16]), "after the wrap");
+    for (fill, len) in [(3, 40), (4, 40), (5, 16)] {
+        take(&mut link, &std::vec![fill; len]);
+    }
+    assert_eq!(Loopback::ring_for(2, 40), 96);
+    assert_eq!(Loopback::ring_for(2, 65_535), 2 * (8 + 65_536));
+}
+
+#[test]
+fn an_answer_goes_in_place_beside_the_packet_it_answers() {
+    // Slots of 48 bytes for packets of 40.
+    let mut link = Loopback::new(leak(0u8, 128), 40);
+    let mut spare = [0u8; 40];
+    // After the packet answered, at the tail.
+    assert!(link.send(&[1; 40]));
+    let (oldest, answer) = link.oldest().unwrap();
+    answer.send_with(40, &mut spare, |slot| slot.fill(9));
+    oldest.read(|packet| assert_eq!(packet, &[1; 40], "the answer is beside it"));
+    take(&mut link, &[9; 40]);
+    // Before it, at the start, when the tail is too near the end.
+    assert!(link.send(&[1; 40]) && link.send(&[2; 40]));
+    take(&mut link, &[1; 40]);
+    let (oldest, answer) = link.oldest().unwrap();
+    answer.send_with(40, &mut spare, |slot| slot.fill(8));
+    oldest.read(|packet| assert_eq!(packet, &[2; 40]));
+    take(&mut link, &[8; 40]);
+    assert!(!link.pending());
+    // With no room, it is written to the spare buffer, and lost.
+    assert!(link.send(&[1; 40]) && link.send(&[2; 40]));
+    let (oldest, answer) = link.oldest().unwrap();
+    answer.send_with(40, &mut spare, |slot| slot.fill(5));
+    oldest.read(|packet| assert_eq!(packet, &[1; 40]));
+    assert_eq!(spare, [5; 40]);
+    take(&mut link, &[2; 40]);
+    assert!(!link.pending(), "the answer that had no room is lost");
+
+    // At a tail that came round already, before the packet answered: a
+    // ring of two slots, the second taken, whose first holds a packet of
+    // 16 bytes and has room for one of 8 after it.
+    let mut link = Loopback::new(leak(0u8, 96), 40);
+    assert!(link.send(&[1; 40]) && link.send(&[2; 40]));
+    take(&mut link, &[1; 40]);
+    assert!(link.send(&[3; 16]));
+    let (oldest, answer) = link.oldest().unwrap();
+    answer.send_with(8, &mut spare, |slot| slot.fill(4));
+    oldest.read(|packet| assert_eq!(packet, &[2; 40]));
+    take(&mut link, &[3; 16]);
+    take(&mut link, &[4; 8]);
+    assert!(!link.pending());
+}
+
+#[test]
+fn the_loopback_ring_keeps_packets_whole_and_in_order() {
+    // Packets and answers of random lengths, against a queue: each comes
+    // back whole and in order, and an empty ring always has room.
+    let mut link = Loopback::new(leak(0u8, 200), 60);
+    let mut queue = VecDeque::new();
+    let mut spare = [0u8; 60];
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut random = |below: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        usize::try_from(seed % below).unwrap()
+    };
+    for round in 0..100_000usize {
+        let fill = u8::try_from(round % 251).unwrap();
+        let len = 1 + random(60);
+        match random(3) {
+            0 => {
+                let empty = queue.is_empty();
+                if link.send(&std::vec![fill; len]) {
+                    queue.push_back(std::vec![fill; len]);
+                } else {
+                    assert!(!empty, "an empty ring has room for any packet");
+                }
+            }
+            1 => {
+                let Some((oldest, answer)) = link.oldest() else {
+                    assert!(queue.is_empty());
+                    continue;
+                };
+                spare.fill(0);
+                answer.send_with(len, &mut spare, |slot| slot.fill(fill.wrapping_add(1)));
+                let expected = queue.pop_front().unwrap();
+                oldest.read(|packet| assert_eq!(packet, &expected[..]));
+                if spare[0] == 0 {
+                    queue.push_back(std::vec![fill.wrapping_add(1); len]);
+                }
+            }
+            _ => match queue.pop_front() {
+                Some(expected) => take(&mut link, &expected),
+                None => assert!(link.oldest().is_none()),
+            },
+        }
+        assert_eq!(link.pending(), !queue.is_empty());
+    }
 }
 
 #[test]
@@ -441,4 +575,263 @@ fn tcp_and_udp_go_through_the_loopback_link_in_one_poll() {
     let socket = lo.socket_mut::<udp::Socket<'static>>(udp).unwrap();
     assert_eq!(socket.recv().unwrap().0, b"to myself");
     assert!(!lo.link().pending());
+}
+
+#[test]
+fn a_connection_on_the_loopback_link_ends_without_waiting() {
+    let mut lo = loopback();
+    let local = Ipv4Address::new(127, 0, 0, 1);
+    let server = lo.add_socket(tcp_memory().socket()).ok().unwrap();
+    lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(80).unwrap();
+    let client = lo.add_socket(tcp_memory().socket()).ok().unwrap();
+    lo.connect(client, (local, 80), None, 49152).unwrap();
+    lo.poll(1_000_000);
+    // The client closes first; the server sends its last bytes, which the
+    // client's delayed-ACK timer waits to acknowledge, then closes. Its FIN
+    // is acknowledged at once all the same, as Linux does, so the server is
+    // not left in LAST-ACK for the delay and the client's TIME-WAIT owes
+    // nothing.
+    lo.socket_mut::<tcp::Socket<'static>>(client).unwrap().close();
+    lo.poll(1_000_000);
+    lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().send_slice(b"bye").unwrap();
+    lo.poll(1_000_000);
+    lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().close();
+    lo.poll(1_000_000);
+    assert_eq!(
+        lo.socket_mut::<tcp::Socket<'static>>(client).unwrap().state(),
+        tcp::State::TimeWait
+    );
+    assert_eq!(lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().state(), tcp::State::Closed);
+    assert!(!lo.link().pending());
+}
+
+/// A loopback stack with a connection from 127.0.0.1:49152 to a server
+/// at port 80, made: the stack, the client's handle and the server's.
+fn connected() -> (Stack<Loopback>, SocketHandle, SocketHandle) {
+    let mut lo = loopback();
+    let local = Ipv4Address::new(127, 0, 0, 1);
+    let server = lo.add_socket(tcp_memory().socket()).ok().unwrap();
+    lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(80).unwrap();
+    let client = lo.add_socket(tcp_memory().socket()).ok().unwrap();
+    lo.connect(client, (local, 80), None, 49152).unwrap();
+    lo.poll(1_000_000);
+    for handle in [client, server] {
+        let state = lo.socket_mut::<tcp::Socket<'static>>(handle).unwrap().state();
+        assert_eq!(state, tcp::State::Established);
+    }
+    (lo, client, server)
+}
+
+/// Passes `bytes` across from `from`, all of them, or fails.
+fn across(lo: &mut Stack<Loopback>, from: SocketHandle, other: &mut OtherEnd, bytes: &[u8]) {
+    let passed = lo.send_across(from, other, 2_000_000, |room| {
+        room[..bytes.len()].copy_from_slice(bytes);
+        (bytes.len(), ())
+    });
+    assert_eq!(passed, Across::Passed((), bytes.len()));
+}
+
+/// Receives what `on` has, up to `len` bytes.
+fn take_tcp(lo: &mut Stack<Loopback>, on: SocketHandle, len: usize) -> Vec<u8> {
+    let mut got = std::vec![0u8; len];
+    let len = lo.socket_mut::<tcp::Socket<'static>>(on).unwrap().recv_slice(&mut got).unwrap();
+    got.truncate(len);
+    got
+}
+
+#[test]
+fn a_loopback_connection_passes_its_bytes_straight_across() {
+    let (mut lo, client, server) = connected();
+    let (mut client_end, mut server_end) = (OtherEnd::default(), OtherEnd::default());
+    across(&mut lo, client, &mut client_end, b"hello");
+    // No packet went, and none is due: both ends count the bytes as sent,
+    // received and acknowledged.
+    assert!(!lo.link().pending());
+    assert_eq!(lo.poll_delay(2_000_000), None);
+    assert_eq!(take_tcp(&mut lo, server, 64), b"hello");
+    // Packets go between them as before, each way, their sequence numbers
+    // and acknowledgements in step with what went across.
+    lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().send_slice(b"world").unwrap();
+    lo.poll(3_000_000);
+    assert_eq!(take_tcp(&mut lo, client, 64), b"world");
+    lo.socket_mut::<tcp::Socket<'static>>(client).unwrap().send_slice(b"again").unwrap();
+    lo.poll(4_000_000);
+    assert_eq!(take_tcp(&mut lo, server, 64), b"again");
+    // Bytes go across again once what went in packets is acknowledged:
+    // the server's ACK waits for its delayed-ACK timer.
+    assert_eq!(lo.room_across(server, &mut server_end), Some(4096));
+    assert_eq!(lo.room_across(client, &mut client_end), None);
+    lo.poll(20_000_000);
+    across(&mut lo, server, &mut server_end, b"back");
+    across(&mut lo, client, &mut client_end, b"more");
+    assert_eq!(take_tcp(&mut lo, client, 64), b"back");
+    assert_eq!(take_tcp(&mut lo, server, 64), b"more");
+    // The connection ends as any does, with nothing reset.
+    lo.socket_mut::<tcp::Socket<'static>>(client).unwrap().close();
+    lo.poll(5_000_000);
+    let server_socket = lo.socket_mut::<tcp::Socket<'static>>(server).unwrap();
+    assert_eq!(server_socket.recv_slice(&mut [0; 8]), Err(tcp::RecvError::Finished));
+    server_socket.close();
+    lo.poll(6_000_000);
+    let client_state = lo.socket_mut::<tcp::Socket<'static>>(client).unwrap().state();
+    assert_eq!(client_state, tcp::State::TimeWait);
+    assert_eq!(lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().state(), tcp::State::Closed);
+    // Neither end of a closed connection takes bytes across.
+    assert_eq!(lo.room_across(client, &mut client_end), None);
+}
+
+#[test]
+fn bytes_wait_for_room_across_and_the_window_goes_across_too() {
+    let (mut lo, client, server) = connected();
+    let (mut client_end, mut server_end) = (OtherEnd::default(), OtherEnd::default());
+    assert_eq!(lo.room_across(client, &mut client_end), Some(4096));
+    across(&mut lo, client, &mut client_end, &[1; 4096]);
+    assert_eq!(lo.room_across(client, &mut client_end), Some(0));
+    let full = lo.send_across(client, &mut client_end, 2_000_000, |_| -> (usize, ()) {
+        unreachable!("no room")
+    });
+    assert_eq!(full, Across::Full);
+    assert!(take_tcp(&mut lo, server, 1000) == [1; 1000]);
+    // The window the read opened goes across, in no packet.
+    assert_eq!(lo.window_across(server, &mut server_end, 3_000_000), Some(false));
+    assert_eq!(lo.poll_delay(3_000_000), None);
+    assert_eq!(lo.room_across(client, &mut client_end), Some(1000));
+    // The room is at the buffer's start now, as the buffer is a ring.
+    across(&mut lo, client, &mut client_end, &[2; 1000]);
+    let mut expected = std::vec![1; 3096];
+    expected.extend([2; 1000]);
+    assert!(take_tcp(&mut lo, server, 4096) == expected);
+    // Bytes sent in packets while the window was shut go once it opens:
+    // the other end's window, told across, says so.
+    across(&mut lo, client, &mut client_end, &[3; 4096]);
+    let client_socket = lo.socket_mut::<tcp::Socket<'static>>(client).unwrap();
+    assert_eq!(client_socket.send_slice(&[4; 100]), Ok(100));
+    lo.poll(4_000_000);
+    assert!(take_tcp(&mut lo, server, 4096) == [3; 4096]);
+    assert_eq!(lo.window_across(server, &mut server_end, 5_000_000), Some(true));
+    lo.poll(5_000_000);
+    assert!(take_tcp(&mut lo, server, 4096) == [4; 100]);
+}
+
+#[test]
+fn bytes_go_in_packets_while_others_are_on_their_way() {
+    let (mut lo, client, server) = connected();
+    let mut client_end = OtherEnd::default();
+    let client_socket = lo.socket_mut::<tcp::Socket<'static>>(client).unwrap();
+    client_socket.send_slice(b"first").unwrap();
+    // The bytes queued for packets go first.
+    assert_eq!(lo.room_across(client, &mut client_end), None);
+    let packets = lo.send_across(client, &mut client_end, 2_000_000, |_| -> (usize, ()) {
+        unreachable!("bytes are waiting")
+    });
+    assert_eq!(packets, Across::Packets);
+    lo.poll(2_000_000);
+    // And bytes go across again once those are acknowledged, after the
+    // server's delayed-ACK timer, and while no packet is in the ring.
+    assert_eq!(lo.room_across(client, &mut client_end), None);
+    lo.poll(20_000_000);
+    assert!(lo.link().send(&[0; 20]));
+    assert_eq!(lo.room_across(client, &mut client_end), None);
+    lo.poll(21_000_000);
+    across(&mut lo, client, &mut client_end, b"second");
+    assert_eq!(take_tcp(&mut lo, server, 64), b"firstsecond");
+}
+
+#[test]
+fn a_loopback_connection_keeps_its_bytes_in_order_across_and_in_packets() {
+    let (mut lo, client, server) = connected();
+    let mut ends = [OtherEnd::default(), OtherEnd::default()];
+    let handles = [client, server];
+    // What each end has sent and received of its stream, counted, and
+    // how much of what it sent went across.
+    let (mut sent, mut received, mut passed) = ([0usize; 2], [0usize; 2], [0usize; 2]);
+    let byte = |at: usize| (at % 251) as u8;
+    let mut random = 0x2545_f491_4f6c_dd1du64;
+    let mut now = 2_000_000;
+    for _ in 0..20_000 {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        let side = (random & 1) as usize;
+        let len = (random >> 8) as usize % 3000 + 1;
+        // Up to 4 ms between steps: an ACK the delayed-ACK timer holds
+        // goes within a few.
+        now += (random >> 32) % 4_000_000;
+        let from = handles[side];
+        match (random >> 4) % 4 {
+            0 => {
+                let start = sent[side];
+                let done = lo.send_across(from, &mut ends[side], now, |room| {
+                    let len = len.min(room.len());
+                    for (at, slot) in room[..len].iter_mut().enumerate() {
+                        *slot = byte(start + at);
+                    }
+                    (len, ())
+                });
+                if let Across::Passed((), len) = done {
+                    sent[side] += len;
+                    passed[side] += len;
+                }
+            }
+            1 => {
+                let bytes: Vec<u8> = (sent[side]..sent[side] + len).map(byte).collect();
+                let socket = lo.socket_mut::<tcp::Socket<'static>>(from).unwrap();
+                sent[side] += socket.send_slice(&bytes).unwrap();
+                lo.poll(now);
+            }
+            2 => {
+                let got = take_tcp(&mut lo, from, len);
+                for (at, &got) in got.iter().enumerate() {
+                    assert_eq!(got, byte(received[side] + at));
+                }
+                received[side] += got.len();
+                if random & 0x100 != 0 && lo.window_across(from, &mut ends[side], now) == Some(true)
+                {
+                    lo.poll(now);
+                }
+            }
+            _ => {
+                lo.poll(now);
+            }
+        }
+        for handle in handles {
+            let state = lo.socket_mut::<tcp::Socket<'static>>(handle).unwrap().state();
+            assert_eq!(state, tcp::State::Established);
+        }
+    }
+    // Everything sent comes, in order, and nothing more.
+    for _ in 0..100 {
+        now += 1_000_000;
+        lo.poll(now);
+        for side in 0..2 {
+            let got = take_tcp(&mut lo, handles[side], 4096);
+            for (at, &got) in got.iter().enumerate() {
+                assert_eq!(got, byte(received[side] + at));
+            }
+            received[side] += got.len();
+        }
+    }
+    assert_eq!(received, [sent[1], sent[0]]);
+    for side in 0..2 {
+        assert!(
+            passed[side] > 100_000 && sent[side] - passed[side] > 100_000,
+            "{sent:?} {passed:?}"
+        );
+    }
+}
+
+#[test]
+fn bytes_go_across_only_to_the_next_byte_expected() {
+    let (mut lo, client, server) = connected();
+    let next = lo.socket_mut::<tcp::Socket<'static>>(client).unwrap().next_across().unwrap();
+    let (ack, window) =
+        lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().window_across().unwrap();
+    let server_socket = lo.socket_mut::<tcp::Socket<'static>>(server).unwrap();
+    assert_eq!(server_socket.room_across(next), Some(4096));
+    // An end out of step with the other, as after a lost packet, takes
+    // nothing across, and its window is not taken.
+    assert_eq!(server_socket.room_across(next + 1), None);
+    let client_socket = lo.socket_mut::<tcp::Socket<'static>>(client).unwrap();
+    assert!(!client_socket.heard_window_across(ack + 1, window, smoltcp::time::Instant::ZERO));
+    assert!(client_socket.heard_window_across(ack, window, smoltcp::time::Instant::ZERO));
 }

@@ -9,8 +9,10 @@
 
 # The TCP/IP stack (ADR 0180). The patch lets a socket and its buffers be
 # taken apart again, so that the memory the kernel lent them comes back
-# when a socket closes (`into_buffers` and `into_storage`), and gives the
-# socket set ways to add, find and remove sockets that do not panic.
+# when a socket closes (`into_buffers` and `into_storage`), gives the
+# socket set ways to add, find and remove sockets that do not panic and
+# has it iterate only up to its last socket, and acknowledges a FIN in
+# FIN-WAIT at once, as Linux does (ADR 0185).
 [[crate]]
 name = "smoltcp"
 version = "0.14.0"

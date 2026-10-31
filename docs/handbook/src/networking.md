@@ -24,7 +24,16 @@ WireGuard. This page grows with each.
   and send datagrams through it.
 - **The loopback interface, `lo`**, at 127.0.0.1 and every card's own
   address: what a program sends to the machine itself goes through it,
-  without touching a card.
+  without touching a card. As on Linux, the program that sends a packet
+  over it delivers it too, before its call returns, with no switch to
+  another thread, and a program may connect to itself as often as it
+  likes
+  ([ADR 0185](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0185-loopback-runs-in-the-senders-thread-and-the-network-joins-the-gate.md)).
+  A TCP connection over `lo` passes its bytes straight from the sender
+  into the receiver's buffer, in no packet, as Solaris's TCP fusion
+  does, so a byte is copied twice, as on Linux
+  ([ADR 0186](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0186-a-loopback-connection-passes-its-bytes-straight-across.md)).
+  `ob bench` holds TCP and UDP over `lo` to Linux's speed.
 - **Sockets for programs, through network capabilities**
   ([ADR 0183](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0183-programs-reach-the-network-through-capabilities-of-its-ports.md)).
   A program uses the network only if it was given a network

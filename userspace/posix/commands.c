@@ -24,6 +24,9 @@ static const char *const ELSEWHERE[][2] = {
 		{"log", "the logging boot test's: it reads the log through logd"},
 		{"journalctl", "the logging boot test's: it reads the log through logd"},
 		{"logtrim", "the logging boot test's: it asks logd to trim the log"},
+		{"notifyd", "the logging and consoles boot tests' service: consoled shows its notifications"},
+		{"notify-send", "the logging and consoles boot tests': it sends notifyd a notification"},
+		{"notifications", "the logging and consoles boot tests': it lists notifyd's notifications"},
 };
 
 enum { ELSEWHERE_COUNT = sizeof(ELSEWHERE) / sizeof(ELSEWHERE[0]) };

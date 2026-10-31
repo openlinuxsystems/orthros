@@ -313,8 +313,11 @@ it is made and *SO_ERROR* says how it went; connecting again says
 EALREADY until then, and EISCONN once connected. A connection to a port
 no one listens on fails with ECONNREFUSED. A listening socket takes up
 to four handshakes at once on each interface, whatever its backlog.
-Each TCP socket has 64 KiB each way, and each UDP socket 32 KiB and 16
-datagrams each way. A datagram is sent and received whole: *sendmsg*
+Each TCP socket has 64 KiB each way, and each UDP socket 64 KiB and 16
+datagrams each way. A TCP connection over the loopback interface passes
+its bytes straight into the other end's buffer, so while it does, it
+holds 64 KiB each way, the receiver's, and a writer waits for the
+reader once that is full. A datagram is sent and received whole: *sendmsg*
 gathers its buffers into one, *recvmsg* spreads one over its buffers,
 and what has no room is lost. *recvfrom* and *recvmsg* give a datagram's
 sender, and no address for a stream.
@@ -507,7 +510,8 @@ foreground. The tests are:
 
 *hello*, *fork*, *exec*, *signal*, *pipe*, *socket*, *inet*, *poll*, *tty*, *job*, *time*, *files*, *locks*, *thread*, *cancel*, *spawn*, *limits*, *format*
 	C programs in _userspace/posix_, one per area. *inet* runs TCP and
-	UDP over the loopback interface, and checks that a child with no
+	UDP over the loopback interface, makes 300 connections in a row, more
+	than the interface has sockets, and checks that a child with no
 	network capability cannot make a network socket (EACCES), one that
 	may only connect out cannot bind or listen, and one that may only
 	listen on a range of ports cannot connect out. *format* holds

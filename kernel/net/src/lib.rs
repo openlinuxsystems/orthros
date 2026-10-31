@@ -17,7 +17,11 @@
 //! kernel's patch to smoltcp (ADR 0182), so that the kernel can take
 //! their memory back. A frame is copied once on the way in, from the
 //! card's slot to the stack's receive buffer, and once on the way out,
-//! from the transmit buffer to a slot.
+//! from the transmit buffer to a slot. The loopback link's packets are
+//! not copied at all: the stack writes and reads them in place, in the
+//! link's ring (ADR 0185). And a TCP connection with both its ends on the
+//! loopback link passes its bytes straight across, in no packet at all,
+//! when it can ([`Stack::send_across`], ADR 0186).
 //!
 //! [`Pinger`] sends ICMP echo requests and matches their replies, for
 //! the kernel's own checks of a link (`selftest=net`). The stack itself
@@ -35,11 +39,13 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+mod across;
 mod loopback;
 mod sockets;
 #[cfg(test)]
 mod tests;
 
+pub use across::{Across, OtherEnd};
 pub use loopback::Loopback;
 pub use smoltcp;
 pub use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};
@@ -94,6 +100,18 @@ pub trait Link {
     /// Tells the card about the frames sent and taken since the last
     /// time (its doorbells).
     fn flush(&mut self);
+    /// Whether a frame can be damaged on its way, so that the stack makes
+    /// and checks checksums: a card's can; the loopback link's packets
+    /// never leave memory, and Linux's loopback skips them too.
+    fn needs_checksums(&self) -> bool {
+        true
+    }
+    /// The loopback link, if this is one: the stack writes and reads its
+    /// packets in place, in its ring, rather than through
+    /// [`Link::send`] and [`Link::receive`].
+    fn loopback(&mut self) -> Option<&mut Loopback> {
+        None
+    }
 }
 
 /// The memory a stack works in, lent to it for as long as it lives.
@@ -122,38 +140,64 @@ pub struct Stack<L: Link> {
 /// The card as smoltcp's device, while the stack polls.
 struct Phy<'a, L: Link> {
     link: &'a mut L,
+    /// Whether the link is the loopback link, whose packets are written
+    /// and read in place.
+    in_place: bool,
     receive: &'a mut [u8],
     transmit: &'a mut [u8],
 }
 
-/// A frame received.
-struct Received<'a>(&'a [u8]);
+impl<'a, L: Link> Phy<'a, L> {
+    fn new(link: &'a mut L, receive: &'a mut [u8], transmit: &'a mut [u8]) -> Phy<'a, L> {
+        let in_place = link.loopback().is_some();
+        Phy { link, in_place, receive, transmit }
+    }
+}
 
-/// A frame to send.
-struct Sending<'a, L: Link> {
-    link: &'a mut L,
-    buffer: &'a mut [u8],
+/// A frame received: copied from the card, or a loopback packet in place.
+enum Received<'a> {
+    Copied(&'a [u8]),
+    InPlace(loopback::Oldest<'a>),
+}
+
+/// A frame to send: written to the stack's buffer for the card to copy, or
+/// in place in the loopback link's ring, there or as the answer to the
+/// packet received. `spare` takes a loopback packet with no room.
+enum Sending<'a, L: Link> {
+    Copied { link: &'a mut L, buffer: &'a mut [u8] },
+    InPlace { link: &'a mut Loopback, spare: &'a mut [u8] },
+    Answer { answer: loopback::Answer<'a>, spare: &'a mut [u8] },
 }
 
 impl phy::RxToken for Received<'_> {
     fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
-        f(self.0)
+        match self {
+            Received::Copied(frame) => f(frame),
+            Received::InPlace(packet) => packet.read(f),
+        }
     }
 }
 
 impl<L: Link> phy::TxToken for Sending<'_, L> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        // smoltcp asks for no more than the capabilities' largest frame,
-        // which is no longer than the buffer. Were it to ask for more, a
-        // frame cut short would be wrong: it is written, but not sent.
-        let room = self.buffer.len();
-        let fits = len <= room;
-        let frame = &mut self.buffer[..len.min(room)];
-        let result = f(frame);
-        if fits {
-            self.link.send(frame);
+        match self {
+            Sending::Copied { link, buffer } => {
+                // smoltcp asks for no more than the capabilities' largest
+                // frame, which is no longer than the buffer. Were it to ask
+                // for more, a frame cut short would be wrong: it is
+                // written, but not sent.
+                let room = buffer.len();
+                let fits = len <= room;
+                let frame = &mut buffer[..len.min(room)];
+                let result = f(frame);
+                if fits {
+                    link.send(frame);
+                }
+                result
+            }
+            Sending::InPlace { link, spare } => link.send_with(len, spare, f),
+            Sending::Answer { answer, spare } => answer.send_with(len, spare, f),
         }
-        result
     }
 }
 
@@ -168,14 +212,24 @@ impl<L: Link> phy::Device for Phy<'_, L> {
         Self: 'b;
 
     fn receive(&mut self, _now: Instant) -> Option<(Received<'_>, Sending<'_, L>)> {
+        if self.in_place {
+            let (packet, answer) = self.link.loopback()?.oldest()?;
+            let answer = Sending::Answer { answer, spare: self.transmit };
+            return Some((Received::InPlace(packet), answer));
+        }
         let len = self.link.receive(self.receive)?;
         let len = len.min(self.receive.len());
-        Some((Received(&self.receive[..len]), Sending { link: self.link, buffer: self.transmit }))
+        let sending = Sending::Copied { link: self.link, buffer: self.transmit };
+        Some((Received::Copied(&self.receive[..len]), sending))
     }
 
     fn transmit(&mut self, _now: Instant) -> Option<Sending<'_, L>> {
+        if self.in_place {
+            let link = self.link.loopback()?;
+            return link.can_send().then_some(Sending::InPlace { link, spare: self.transmit });
+        }
         if self.link.can_send() {
-            Some(Sending { link: self.link, buffer: self.transmit })
+            Some(Sending::Copied { link: self.link, buffer: self.transmit })
         } else {
             None
         }
@@ -196,12 +250,14 @@ impl<L: Link> phy::Device for Phy<'_, L> {
             }
         }
         // Every checksum is made and checked here, in software: the card
-        // is asked for no offloads.
+        // is asked for no offloads. A link that cannot damage a frame
+        // needs none.
+        let both = if self.link.needs_checksums() { Checksum::Both } else { Checksum::None };
         let mut checksum = ChecksumCapabilities::default();
-        checksum.ipv4 = Checksum::Both;
-        checksum.icmpv4 = Checksum::Both;
-        checksum.udp = Checksum::Both;
-        checksum.tcp = Checksum::Both;
+        checksum.ipv4 = both;
+        checksum.icmpv4 = both;
+        checksum.udp = both;
+        checksum.tcp = both;
         caps.checksum = checksum;
         caps
     }
@@ -235,7 +291,7 @@ impl<L: Link> Stack<L> {
         };
         let mut config = Config::new(hardware);
         config.random_seed = seed;
-        let mut phy = Phy { link: &mut link, receive: &mut *receive, transmit: &mut *transmit };
+        let mut phy = Phy::new(&mut link, &mut *receive, &mut *transmit);
         let iface = Interface::new(config, &mut phy, instant(now_ns));
         Stack { link, iface, sockets: SocketSet::new(sockets), receive, transmit, gateway: None }
     }
@@ -317,11 +373,7 @@ impl<L: Link> Stack<L> {
     pub fn poll(&mut self, now_ns: u64) -> bool {
         let mut changed = false;
         for _ in 0..POLL_ROUNDS {
-            let mut phy = Phy {
-                link: &mut self.link,
-                receive: &mut *self.receive,
-                transmit: &mut *self.transmit,
-            };
+            let mut phy = Phy::new(&mut self.link, &mut *self.receive, &mut *self.transmit);
             let result = self.iface.poll(instant(now_ns), &mut phy, &mut self.sockets);
             self.link.flush();
             changed |= result == PollResult::SocketStateChanged;
