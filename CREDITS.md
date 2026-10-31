@@ -399,6 +399,12 @@ We implement these from their published descriptions. No code is copied.
   `drivers/hwmon/cros_ec_hwmon.c` (GPL-2.0)
   ([ADR 0207](docs/adr/0207-framework-embedded-controller.md)).
   No code is taken from them.
+- `ectool`: its commands' words, help and output follow those of the
+  Chromium EC's `util/ectool.cc` (BSD-3-Clause, The ChromiumOS Authors),
+  and what the kernel checks before a fan curve reaches the EC follows
+  how Framework's fork uses one
+  ([ADR 0208](docs/adr/0208-programs-set-the-fans-leds-and-argb-header-through-the-platform-capability.md)).
+  No code is taken from them.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,

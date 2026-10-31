@@ -105,6 +105,12 @@ rights listed, plus *copy* and *transfer*, which every kind has.
 	to connect out to any address and send datagrams; *receive*, to bind
 	to and listen on the ports in the range.
 
+*platform*
+	The machine's platform controls, which its embedded controller
+	keeps: its fans' duties and curves, its LEDs and its ARGB header
+	(see *radix-platform*(2)). Rights: *read*, to ask what they are;
+	*control*, to change them.
+
 # RIGHTS
 
 The twelve rights are *read*, *write*, *execute*, *send*, *receive*,
@@ -244,7 +250,7 @@ Operations on capabilities fail with one of these, and change nothing:
 At boot the kernel reports its store:
 
 ```
-Capabilities: ready; 19 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
+Capabilities: ready; 20 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
 ```
 
 The *kdb* command *caps* counts the spaces, capabilities and objects by

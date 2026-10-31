@@ -55,6 +55,10 @@ enum ObjectKind: u8 {
     /// A range of the network's ports, to connect out through and listen
     /// on (radix-network(2)).
     network = 18;
+    /// The machine's platform controls, which its embedded controller
+    /// keeps: its fans, their curves, its LEDs and its ARGB header
+    /// (radix-platform(2)).
+    platform = 19;
 }
 
 /// What a capability lets its holder do.

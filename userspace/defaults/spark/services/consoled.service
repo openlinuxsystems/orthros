@@ -16,3 +16,7 @@ restart = on-failure
 # are busy.
 weight = 200
 memory = none
+# Root's shells may set the fans, the LEDs and the ARGB header with
+# ectool(8), as root may on Linux; from Phase 13 an administrator's do,
+# once elevated.
+admin.hardware = yes
