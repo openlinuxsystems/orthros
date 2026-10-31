@@ -148,8 +148,9 @@ _/system/resources/licenses/_
   _/kernel/bus/pci/devices_ (*radix-sysfs*(5)).
 . Unless *aml=off*, uACPI then runs the firmware's AML, and the kernel
   hears the power button through it; see *ACPI*. The kernel then drives
-  the chipset's SMBus controller, if it has one, and Framework's embedded
-  controller; see *SMBUS* and *EMBEDDED CONTROLLER*.
+  the chipset's GPIO controllers, its SMBus controller, if it has one,
+  and Framework's embedded controller; see *GPIO*, *SMBUS* and
+  *EMBEDDED CONTROLLER*.
 . Each CPU then picks its own speed where it can; see *CPU FREQUENCY*.
   The firmware's thermal zones are watched from then on; see *ACPI*.
   The kernel then looks for the CPUs' temperature sensors; see
@@ -761,6 +762,32 @@ A device with no EC behind it is a warning:
 
 The fans and sensors are in _/kernel/class/hwmon_ as *cros_ec*
 (*radix-sysfs*(5)).
+
+# GPIO
+
+A GPIO controller's pins are the lines a laptop's touchpad and other
+small devices signal on, and the firmware's own events, as a lid or a
+dock. The kernel drives AMD's controller (ACPI _AMDI0030_) and Intel
+Sunrise Point-LP's (_INT344B_), once the firmware's AML runs (ADR 0233).
+It turns every pin's interrupt off, routes the controller's own, and
+logs it:
+
+```
+GPIO: AMD's controller \_SB_.GPIO: 184 pins, interrupt 7 (level, low)
+GPIO: Intel Sunrise Point-LP's controller \_SB_.PCI0.GPI0: 152 pins, interrupt 14 (level, low)
+```
+
+The pins the controller's _\_AEI_ lists then run the firmware's methods
+when they interrupt: _\_Exx_ for an edge on pin _xx_ (in hexadecimal),
+_\_Lxx_ for a level, else _\_EVT_, in the thread _gpio-events_:
+
+```
+GPIO: the firmware's events on \_SB_.GPIO: pins 9 (_E09), 42 (_EVT)
+```
+
+A controller the kernel cannot use is a warning that says why: its
+registers read all ones, or are not laid out as the driver knows them,
+or its interrupt cannot be routed.
 
 # SMBUS
 

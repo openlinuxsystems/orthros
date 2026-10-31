@@ -59,6 +59,7 @@ mod debug_console;
 mod dmi;
 mod domains;
 mod fs;
+mod gpio;
 mod hwmon;
 mod i2c;
 mod iommutest;
@@ -256,6 +257,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     user::power::start();
     acpi::finish_events();
     watchdog::find();
+    gpio::find();
     i2c::find();
     crosec::find();
     mce::start(flags.value("mce-poll"));

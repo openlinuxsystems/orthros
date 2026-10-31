@@ -39,9 +39,10 @@
 //!
 //! Only byte and word transfers are done: what reading an SPD EEPROM or
 //! a sensor chip needs, with Send Byte and Receive Byte, by which a DDR4
-//! module's EE1004 picks its page (ADR 0232). The crate has no `unsafe` code; the kernel gives
-//! it bus 0's configuration space and reaches I/O ports and device memory
-//! for it ([`Platform`]). Its tests run it against simulated controllers.
+//! module's EE1004 picks its page (ADR 0232). The crate has no `unsafe`
+//! code; the kernel gives it bus 0's configuration space and reaches I/O
+//! ports and device memory for it ([`Platform`]). Its tests run it
+//! against simulated controllers.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]

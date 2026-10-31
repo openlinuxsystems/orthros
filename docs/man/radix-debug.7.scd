@@ -605,6 +605,17 @@ boots.
 	fastest once the socket's memory has come back to the heap (ADR
 	0182).
 
+*gpio*
+	Needs QEMU's _pc-testdev_ and the SSDT of the *gpio* case of *ob
+	test*, whose AMD and Intel GPIO controllers have their registers in
+	the test device's memory (ADR 0233). Runs each controller's AML
+	method _FIRE_, which plays the hardware: it sets a pin's interrupt
+	status and pulses the controller's interrupt. The firmware's events
+	on the AMD controller's pins 9 and 42 and the Intel one's pad 53
+	must each run their method (_\_E09_, _\_EVT_ and _\_L35_) once
+	within a second, and the level-triggered pins be unmasked after.
+	Reports *selftest gpio: passed*.
+
 # TRACE POINTS
 
 A trace point is a named place in the kernel code that records an event
