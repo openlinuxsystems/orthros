@@ -1215,8 +1215,9 @@ _target/userspace/_).
 		Boot an image with a generated microcode file on an emulated
 		Intel CPU, and check that the kernel finds the matching update.
 
-	The boot tests that Phases 11, 12 and 13 add from now on are
-	described below, each under its phase, which are built in parallel.
+	The boot tests that Phases 11, 12 and 13 added next are described
+	below, each under its phase. Newer ones have a file each, and
+	*dukovo-boot-tests*(7) describes them.
 
 	_Phase 11: hardware support_
 
