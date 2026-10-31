@@ -41,6 +41,7 @@ use radix_sync::{Once, SpinLock};
 use radix_usbhc::intel;
 
 use crate::Arch;
+use crate::ioports::IoWindow;
 use crate::sched::{self, Options, Policy, ThreadRef};
 
 mod controller;
@@ -130,45 +131,6 @@ impl Window {
     }
 }
 
-/// A controller's I/O BAR: the only ports it reaches.
-#[derive(Clone, Copy)]
-pub(super) struct IoWindow {
-    base: u16,
-    len: u16,
-}
-
-impl IoWindow {
-    fn port(&self, offset: u16, size: u16) -> Option<u16> {
-        (offset.checked_add(size)? <= self.len).then(|| self.base + offset)
-    }
-}
-
-impl radix_usbhc::uhci::Ports for IoWindow {
-    fn len(&self) -> u16 {
-        self.len
-    }
-
-    fn read16(&self, offset: u16) -> u16 {
-        self.port(offset, 2).map_or(u16::MAX, |port| Arch::device_port_read(port, 2) as u16)
-    }
-
-    fn write16(&self, offset: u16, value: u16) {
-        if let Some(port) = self.port(offset, 2) {
-            Arch::device_port_write(port, 2, u32::from(value));
-        }
-    }
-
-    fn read32(&self, offset: u16) -> u32 {
-        self.port(offset, 4).map_or(u32::MAX, |port| Arch::device_port_read(port, 4))
-    }
-
-    fn write32(&self, offset: u16, value: u32) {
-        if let Some(port) = self.port(offset, 4) {
-            Arch::device_port_write(port, 4, value);
-        }
-    }
-}
-
 /// What a controller's thread starts from.
 struct Start {
     kind: Kind,
@@ -193,7 +155,8 @@ static STARTS: [Once<Start>; MAX_CONTROLLERS] = [const { Once::new() }; MAX_CONT
 /// Each controller's thread, which its interrupt wakes.
 static THREADS: [Once<ThreadRef>; MAX_CONTROLLERS] = [const { Once::new() }; MAX_CONTROLLERS];
 /// Each controller's kind and registers, for [`shutdown`].
-static REGISTERS: [Once<(Kind, Window)>; MAX_CONTROLLERS] = [const { Once::new() }; MAX_CONTROLLERS];
+static REGISTERS: [Once<(Kind, Window)>; MAX_CONTROLLERS] =
+    [const { Once::new() }; MAX_CONTROLLERS];
 
 /// Reads the `usb` flag: `usb=off` drives no controller.
 pub fn init(off: bool) {
@@ -290,7 +253,7 @@ fn bind(function: &Function, kind: Kind) {
             Window::Memory(regs)
         }
         Some(Bar::Io { port, size }) if kind == Kind::Uhci && port + size <= 0x1_0000 => {
-            Window::Ports(IoWindow { base: port as u16, len: size.min(0x100) as u16 })
+            Window::Ports(IoWindow::new(port as u16, size.min(0x100) as u16))
         }
         _ => {
             warn!("USB: the {name} controller at {} has no registers", function.address());
@@ -303,13 +266,10 @@ fn bind(function: &Function, kind: Kind) {
         function.set_command(function.command() | radix_hw::pci::command::IO);
     }
     // The older controllers are polled: the kernel routes no INTx yet.
-    let interrupt = if kind != Kind::Xhci {
-        None
-    } else {
-        interrupt(function, index)
-    };
+    let interrupt = if kind != Kind::Xhci { None } else { interrupt(function, index) };
     let _ = REGISTERS[index].set((kind, regs.clone()));
-    let start = Start { kind, regs, function: function.clone(), address: function.address(), interrupt };
+    let start =
+        Start { kind, regs, function: function.clone(), address: function.address(), interrupt };
     let _ = STARTS[index].set(start);
     let mut thread_name = radix_klog::TextBuf::<8>::new();
     let _ = core::fmt::Write::write_fmt(&mut thread_name, format_args!("usb{}", index + 1));
@@ -399,9 +359,8 @@ pub fn shutdown() {
         let mut delay = |us: u32| Arch::delay_us(u64::from(us));
         let halted = match (kind, regs) {
             (Kind::Xhci, Window::Memory(regs)) => radix_xhci::stop(regs, &mut delay),
-            (Kind::Ehci, Window::Memory(regs)) => {
-                radix_usbhc::ehci::operational(regs).is_some_and(|op| radix_usbhc::ehci::stop(&op, &mut delay))
-            }
+            (Kind::Ehci, Window::Memory(regs)) => radix_usbhc::ehci::operational(regs)
+                .is_some_and(|op| radix_usbhc::ehci::stop(&op, &mut delay)),
             (Kind::Ohci, Window::Memory(regs)) => radix_usbhc::ohci::stop(regs),
             (Kind::Uhci, Window::Ports(io)) => radix_usbhc::uhci::stop(io, &mut delay),
             _ => true,

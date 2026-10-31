@@ -129,10 +129,9 @@ impl State {
             let first = r32(self.hcca + 4 * (self.fm_number & 31));
             self.run_list(first);
         }
-        if self.control & 1 << 4 != 0 && self.command & 2 != 0 {
-            if !self.run_list(self.control_head) {
-                self.command &= !2;
-            }
+        if self.control & 1 << 4 != 0 && self.command & 2 != 0 && !self.run_list(self.control_head)
+        {
+            self.command &= !2;
         }
     }
 
@@ -376,7 +375,10 @@ fn a_silent_device_does_not_answer_and_the_pipe_goes_on() {
     rig.sim.0.lock().unwrap().devices[0].as_mut().unwrap().silent = true;
     let get = Setup::get_descriptor(descriptor::DEVICE, 0, 0, 18);
     let mut bytes = [0u8; 18];
-    assert_eq!(rig.ohci.control(target, 8, get, &mut bytes, 20, &mut rig.clock), Err(Error::NoAnswer));
+    assert_eq!(
+        rig.ohci.control(target, 8, get, &mut bytes, 20, &mut rig.clock),
+        Err(Error::NoAnswer)
+    );
     rig.sim.0.lock().unwrap().devices[0].as_mut().unwrap().silent = false;
     assert_eq!(rig.ohci.control(target, 8, get, &mut bytes, 20, &mut rig.clock), Ok(18));
 }

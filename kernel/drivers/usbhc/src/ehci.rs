@@ -314,7 +314,7 @@ impl<T: DerefMut<Target = Tables>> Ehci<T> {
     /// below 4 GiB); `tables`, empty, keeps the pipes.
     pub fn new(
         function: &Function,
-        regs: Mmio,
+        regs: &Mmio,
         waiter: &mut dyn Waiter,
         alloc: &mut dyn FnMut(usize, bool) -> Option<Dma>,
         tables: T,
@@ -472,7 +472,7 @@ impl<T: DerefMut<Target = Tables>> Ehci<T> {
 
     /// Hands the device on `port` to the companion controller, if there
     /// is one.
-    fn to_companion(&mut self, port: u8) -> Result<Option<Speed>, Error> {
+    fn hand_to_companion(&mut self, port: u8) -> Result<Option<Speed>, Error> {
         if self.info.companions == 0 {
             return Err(Error::NoCompanion);
         }
@@ -553,8 +553,8 @@ impl<T: DerefMut<Target = Tables>> Ehci<T> {
         }
         let mut caps = 1 << qh::MULT_SHIFT;
         if let Some(tt) = target.tt.filter(|_| target.speed != Speed::High) {
-            caps |=
-                u32::from(tt.hub & 0x7f) << qh::HUB_SHIFT | u32::from(tt.port & 0x7f) << qh::PORT_SHIFT;
+            caps |= u32::from(tt.hub & 0x7f) << qh::HUB_SHIFT
+                | u32::from(tt.port & 0x7f) << qh::PORT_SHIFT;
         }
         (chars, caps)
     }
@@ -568,7 +568,8 @@ impl<T: DerefMut<Target = Tables>> Ehci<T> {
         max_packet: u16,
         waiter: &mut dyn Waiter,
     ) -> Result<Slot, Error> {
-        if let Some(found) = self.tables.defaults.iter().flatten().find(|d| d.target.address == target.address)
+        if let Some(found) =
+            self.tables.defaults.iter().flatten().find(|d| d.target.address == target.address)
         {
             if found.target == target && found.max_packet == max_packet {
                 return Ok(found.qh);
@@ -652,7 +653,7 @@ impl<T: DerefMut<Target = Tables>> Ehci<T> {
         let Some(pipe) = &self.tables.pipes[index] else { return };
         let target = self.pool.phys(pipe.qh);
         let mut at = self.tree[pipe.node];
-        for _ in 0..MAX_PIPES + 1 {
+        for _ in 0..=MAX_PIPES {
             let next = self.pool.read32(at, qh::LINK);
             if next & link::TERMINATE != 0 {
                 return;
@@ -750,7 +751,7 @@ impl<T: DerefMut<Target = Tables>> Hcd for Ehci<T> {
         }
         // A low-speed device pulls its lines to the K state (4.2.2).
         if (status >> portsc::LINE_SHIFT) & 0b11 == portsc::LINE_K {
-            return self.to_companion(port);
+            return self.hand_to_companion(port);
         }
         // Reset, with the port disabled, for 50 ms; then the reset ends.
         self.write_port(port, (status | portsc::RESET) & !portsc::ENABLED);
@@ -770,7 +771,7 @@ impl<T: DerefMut<Target = Tables>> Hcd for Ehci<T> {
         if status & portsc::ENABLED != 0 {
             return Ok(Some(Speed::High));
         }
-        self.to_companion(port)
+        self.hand_to_companion(port)
     }
 
     fn disable(&mut self, port: u8) {
@@ -806,7 +807,13 @@ impl<T: DerefMut<Target = Tables>> Hcd for Ehci<T> {
         let data_pid = if into_host { qtd::PID_IN } else { qtd::PID_OUT };
         if length > 0 {
             let token = base | data_pid | qtd::TOGGLE;
-            self.fill_qtd(middle, phys(last), token, self.control.phys() + PAGE_SIZE as u64, length);
+            self.fill_qtd(
+                middle,
+                phys(last),
+                token,
+                self.control.phys() + PAGE_SIZE as u64,
+                length,
+            );
         }
         // The status stage goes the other way, or in without data.
         let status_pid = if into_host && length > 0 { qtd::PID_OUT } else { qtd::PID_IN };
@@ -833,7 +840,8 @@ impl<T: DerefMut<Target = Tables>> Hcd for Ehci<T> {
         for &slot in used {
             Self::outcome(self.pool.read32(slot, qtd::TOKEN))?;
         }
-        let came = if length > 0 { Self::moved(self.pool.read32(middle, qtd::TOKEN), length) } else { 0 };
+        let came =
+            if length > 0 { Self::moved(self.pool.read32(middle, qtd::TOKEN), length) } else { 0 };
         if into_host {
             self.control.read(PAGE_SIZE, &mut data[..came]);
         }
@@ -867,11 +875,11 @@ impl<T: DerefMut<Target = Tables>> Hcd for Ehci<T> {
             if high { (level, 0x01, 0) } else { (level, 0x01, 0x1c) }
         };
         let level = level.min(LEVELS - 1);
-        let phase =
-            (0..1 << level).min_by_key(|&phase| self.load[node(level, phase)]).unwrap_or(0);
+        let phase = (0..1 << level).min_by_key(|&phase| self.load[node(level, phase)]).unwrap_or(0);
         let node = node(level, phase);
         self.load[node] = self.load[node].saturating_add(1);
-        let (chars, mut caps) = Self::words(endpoint.target, endpoint.number, endpoint.max_packet, false);
+        let (chars, mut caps) =
+            Self::words(endpoint.target, endpoint.number, endpoint.max_packet, false);
         if high {
             caps = caps & !(3 << qh::MULT_SHIFT)
                 | u32::from(endpoint.transactions.clamp(1, 3)) << qh::MULT_SHIFT;
@@ -985,8 +993,11 @@ impl<T: DerefMut<Target = Tables>> Hcd for Ehci<T> {
     }
 
     fn forget(&mut self, address: u8, waiter: &mut dyn Waiter) {
-        let Some(at) =
-            self.tables.defaults.iter().position(|d| d.is_some_and(|d| d.target.address == address))
+        let Some(at) = self
+            .tables
+            .defaults
+            .iter()
+            .position(|d| d.is_some_and(|d| d.target.address == address))
         else {
             return;
         };

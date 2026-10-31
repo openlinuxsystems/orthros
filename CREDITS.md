@@ -442,6 +442,20 @@ We implement these from their published descriptions. No code is copied.
   `Documentation/ABI/stable/sysfs-bus-usb`
   ([ADR 0230](docs/adr/0230-sensors-and-lsusb-with-the-usb-id-database.md)).
   No code is taken from them.
+- Intel's "Enhanced Host Controller Interface Specification for
+  Universal Serial Bus", revision 1.0 (2002), the "OpenHCI: Open Host
+  Controller Interface Specification for USB" of Compaq, Microsoft and
+  National Semiconductor, release 1.0a (1999), and Intel's "Universal
+  Host Controller Interface (UHCI) Design Guide", revision 1.1 (1996),
+  from which `radix-usbhc` drives USB 2.0 and 1.1 controllers; the port
+  switch of Intel's 7, 8 and 9 Series chipsets, from their PCH
+  datasheets. The layout of the periodic schedule as a tree of empty
+  heads follows FreeBSD's `sys/dev/usb/controller/ehci.c`, `ohci.c` and
+  `uhci.c` (BSD-2-Clause), and switching Intel's ports to xHCI only
+  beside an Intel EHCI controller follows Linux's
+  `drivers/usb/host/pci-quirks.c` (GPL-2.0)
+  ([ADR 0243](docs/adr/0243-usb-2-and-1-1-controllers-are-polled-by-a-kernel-thread-each.md)).
+  No code is taken from them.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,

@@ -7,7 +7,7 @@
 //! only USB controller of their older chipsets.
 //!
 //! A UHCI controller is one PCI function with its registers in I/O port
-//! space, BAR 4, which the driver reaches through [`Ports`]. Each
+//! space, BAR 4, which the driver reaches through [`IoPorts`]. Each
 //! millisecond it reads an entry of a 1024-entry frame list, which leads
 //! to queue heads (QHs) and the transfer descriptors (TDs) hung from
 //! them, one packet each:
@@ -30,7 +30,7 @@
 use core::ops::DerefMut;
 
 use radix_hw::pci::Function;
-use radix_hw::{Dma, PAGE_SIZE, device_barrier};
+use radix_hw::{Dma, IoPorts, PAGE_SIZE, device_barrier};
 use radix_usb::host::{Data, Endpoint, Error, Hcd, PipeId, Port, Target, Waiter};
 use radix_usb::{Setup, Speed, TransferType};
 
@@ -41,21 +41,6 @@ use crate::{Handoff, Pool, Slot, wait_for};
 pub const PCI_CLASS: (u8, u8, u8) = (0x0c, 0x03, 0x00);
 /// The BAR that holds its registers, in I/O space.
 pub const BAR: usize = 4;
-
-/// A controller's registers in I/O port space, as UHCI's are: offsets
-/// into its window, which the kernel keeps accesses within.
-pub trait Ports: Send {
-    /// The window's length.
-    fn len(&self) -> u16;
-    /// Reads 16 bits at `offset`.
-    fn read16(&self, offset: u16) -> u16;
-    /// Writes 16 bits at `offset`.
-    fn write16(&self, offset: u16, value: u16);
-    /// Reads 32 bits at `offset`.
-    fn read32(&self, offset: u16) -> u32;
-    /// Writes 32 bits at `offset`.
-    fn write32(&self, offset: u16, value: u32);
-}
 
 /// The registers (2.1).
 mod reg {
@@ -217,7 +202,7 @@ impl Tables {
 
 /// A UHCI controller, taken from the firmware and running, reached
 /// through `P`, with its pipes' records in `T`.
-pub struct Uhci<P: Ports, T: DerefMut<Target = Tables>> {
+pub struct Uhci<P: IoPorts, T: DerefMut<Target = Tables>> {
     io: P,
     info: Info,
     frames: Dma,
@@ -281,7 +266,7 @@ fn fresh(target: Target, into_host: bool) -> u32 {
     status
 }
 
-impl<P: Ports, T: DerefMut<Target = Tables>> Uhci<P, T> {
+impl<P: IoPorts, T: DerefMut<Target = Tables>> Uhci<P, T> {
     /// Takes the controller of `function`, whose registers `io` reaches,
     /// from the firmware, resets it and runs it. Memory comes from `alloc`
     /// (pages, below 4 GiB); `tables`, empty, keeps the pipes.
@@ -447,7 +432,8 @@ impl<P: Ports, T: DerefMut<Target = Tables>> Uhci<P, T> {
     /// `last`.
     fn write_control_td(&self, index: usize, status: u32, token: u32, buffer: u32, last: bool) {
         let at = index * td::SIZE;
-        let link = if last { link::TERMINATE } else { self.control_td_phys(index + 1) | link::DEPTH };
+        let link =
+            if last { link::TERMINATE } else { self.control_td_phys(index + 1) | link::DEPTH };
         self.control_tds.write32(at + td::LINK, link);
         self.control_tds.write32(at + td::STATUS, status);
         self.control_tds.write32(at + td::TOKEN, token);
@@ -524,7 +510,7 @@ impl<P: Ports, T: DerefMut<Target = Tables>> Uhci<P, T> {
         let Some(pipe) = &self.tables.pipes[index] else { return };
         let target = self.pool.phys(pipe.slot);
         let mut at = self.tree[usize::from(pipe.node)];
-        for _ in 0..MAX_PIPES + 1 {
+        for _ in 0..=MAX_PIPES {
             let next = self.pool.read32(at, qh::HEAD) & !0xf;
             if next == target {
                 self.pool.write32(at, qh::HEAD, self.pool.read32(pipe.slot, qh::HEAD));
@@ -540,7 +526,7 @@ impl<P: Ports, T: DerefMut<Target = Tables>> Uhci<P, T> {
     }
 }
 
-impl<P: Ports, T: DerefMut<Target = Tables>> Hcd for Uhci<P, T> {
+impl<P: IoPorts, T: DerefMut<Target = Tables>> Hcd for Uhci<P, T> {
     fn kind(&self) -> &'static str {
         "UHCI"
     }
@@ -587,8 +573,7 @@ impl<P: Ports, T: DerefMut<Target = Tables>> Hcd for Uhci<P, T> {
             if status & port::ENABLED == 0 {
                 io.write16(offset, status | port::ENABLED);
             }
-            io.read16(offset) & (port::ENABLED | port::CONNECTED)
-                == port::ENABLED | port::CONNECTED
+            io.read16(offset) & (port::ENABLED | port::CONNECTED) == port::ENABLED | port::CONNECTED
         };
         if !wait_for(waiter, PORT_ENABLE_US, enabled) {
             return Err(if io.read16(offset) & port::CONNECTED == 0 {
@@ -633,16 +618,34 @@ impl<P: Ports, T: DerefMut<Target = Tables>> Hcd for Uhci<P, T> {
         let data_phys = setup_phys + PAGE_SIZE as u32;
         let packets = length.div_ceil(packet);
         let count = packets + 2;
-        self.write_control_td(0, fresh(target, false), token(td::PID_SETUP, target, 0, false, 8), setup_phys, false);
+        self.write_control_td(
+            0,
+            fresh(target, false),
+            token(td::PID_SETUP, target, 0, false, 8),
+            setup_phys,
+            false,
+        );
         let pid = if into_host { td::PID_IN } else { td::PID_OUT };
         for i in 0..packets {
             let len = packet.min(length - i * packet);
             let toggle = i % 2 == 0;
             let buffer = data_phys + (i * packet) as u32;
-            self.write_control_td(1 + i, fresh(target, into_host), token(pid, target, 0, toggle, len), buffer, false);
+            self.write_control_td(
+                1 + i,
+                fresh(target, into_host),
+                token(pid, target, 0, toggle, len),
+                buffer,
+                false,
+            );
         }
         let status_pid = if into_host && length > 0 { td::PID_OUT } else { td::PID_IN };
-        self.write_control_td(count - 1, fresh(target, false), token(status_pid, target, 0, true, 0), 0, true);
+        self.write_control_td(
+            count - 1,
+            fresh(target, false),
+            token(status_pid, target, 0, true, 0),
+            0,
+            true,
+        );
         device_barrier();
         self.pool.write32(qh, qh::ELEMENT, self.control_td_phys(0));
         let deadline = waiter.now_us().saturating_add(u64::from(timeout_ms) * 1000);
@@ -742,11 +745,15 @@ impl<P: Ports, T: DerefMut<Target = Tables>> Hcd for Uhci<P, T> {
             let link = if i + 1 == tds {
                 link::TERMINATE
             } else {
-                base + 32 * (i as u32 + 2) | link::DEPTH
+                (base + 32 * (i as u32 + 2)) | link::DEPTH
             };
             let token = token(pid, endpoint.target, endpoint.number, toggle ^ (i % 2 == 1), len);
             self.pool.write32(slot, offset + td::LINK, link);
-            self.pool.write32(slot, offset + td::STATUS, fresh(endpoint.target, endpoint.into_host));
+            self.pool.write32(
+                slot,
+                offset + td::STATUS,
+                fresh(endpoint.target, endpoint.into_host),
+            );
             self.pool.write32(slot, offset + td::TOKEN, token);
             let buffer = self.chunk_phys(chunk) + (i * packet) as u32;
             self.pool.write32(slot, offset + td::BUFFER, buffer);
@@ -800,10 +807,10 @@ impl<P: Ports, T: DerefMut<Target = Tables>> Hcd for Uhci<P, T> {
     }
 
     fn reset_pipe(&mut self, pipe: PipeId) {
-        if let Some(Some(p)) = self.tables.pipes.get_mut(usize::from(pipe)) {
-            if p.asked.is_none() {
-                p.toggle = false;
-            }
+        if let Some(Some(p)) = self.tables.pipes.get_mut(usize::from(pipe))
+            && p.asked.is_none()
+        {
+            p.toggle = false;
         }
     }
 
@@ -822,15 +829,18 @@ impl<P: Ports, T: DerefMut<Target = Tables>> Hcd for Uhci<P, T> {
     }
 
     fn forget(&mut self, address: u8, waiter: &mut dyn Waiter) {
-        let Some(at) =
-            self.tables.defaults.iter().position(|d| d.is_some_and(|d| d.target.address == address))
+        let Some(at) = self
+            .tables
+            .defaults
+            .iter()
+            .position(|d| d.is_some_and(|d| d.target.address == address))
         else {
             return;
         };
         let Some(pipe) = self.tables.defaults[at].take() else { return };
         let target = self.pool.phys(pipe.qh);
         let mut at = self.head;
-        for _ in 0..MAX_DEFAULT_PIPES + 1 {
+        for _ in 0..=MAX_DEFAULT_PIPES {
             let next = self.pool.read32(at, qh::HEAD);
             if next & link::TERMINATE != 0 {
                 break;
@@ -870,7 +880,7 @@ impl<P: Ports, T: DerefMut<Target = Tables>> Hcd for Uhci<P, T> {
 /// Stops the controller `io` reaches, so that it reads and writes no
 /// memory: before the machine is powered off or restarted. Whether it
 /// halted.
-pub fn stop(io: &dyn Ports, delay: &mut dyn FnMut(u32)) -> bool {
+pub fn stop(io: &dyn IoPorts, delay: &mut dyn FnMut(u32)) -> bool {
     io.write16(reg::USBINTR, 0);
     io.write16(reg::USBCMD, 0);
     for _ in 0..20 {

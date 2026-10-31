@@ -94,7 +94,7 @@ impl Endpoint {
         } else {
             // Frames: the largest power of two not above it.
             let frames = u32::from(self.interval.max(1));
-            8 << (31 - frames.leading_zeros())
+            8 << frames.ilog2()
         };
         asked.min(32 * 8)
     }

@@ -733,8 +733,7 @@ impl Controller {
             .and_then(|d| d.max_packet0(speed))
             .ok_or(Why::Device("it says a packet size its speed does not allow"))?;
         device.set_max_packet(xhci, host, max)?;
-        let mut control =
-            |setup, out: &mut [u8]| Ok(device.control_in(xhci, host, setup, out)?);
+        let mut control = |setup, out: &mut [u8]| Ok(device.control_in(xhci, host, setup, out)?);
         read_device(&mut control, buffer, (*bus, path, speed), name, shown)
     }
 }
@@ -745,9 +744,12 @@ impl Controller {
 /// in `name`, and what the sysfs shows of it in `shown`. Returns what its
 /// first configuration holds. Every controller's thread sets its devices
 /// up with it.
+/// A control transfer in on a device's default pipe: what it read.
+pub(super) type ControlIn<'a> = dyn FnMut(Setup, &mut [u8]) -> Result<usize, Why> + 'a;
+
 #[inline(never)]
 pub(super) fn read_device(
-    control: &mut dyn FnMut(Setup, &mut [u8]) -> Result<usize, Why>,
+    control: &mut ControlIn<'_>,
     buffer: &mut [u8],
     (bus, path, speed): (usize, Path, Speed),
     name: &mut TextBuf<64>,
@@ -756,8 +758,8 @@ pub(super) fn read_device(
     let mut bytes = [0u8; radix_usb::DEVICE_DESCRIPTOR_SIZE];
     let whole = Setup::get_descriptor(descriptor::DEVICE, 0, 0, bytes.len() as u16);
     let came = control(whole, &mut bytes)?;
-    let found =
-        DeviceDescriptor::parse(&bytes[..came]).ok_or(Why::Device("it sent no device descriptor"))?;
+    let found = DeviceDescriptor::parse(&bytes[..came])
+        .ok_or(Why::Device("it sent no device descriptor"))?;
     // Strings, if it has them; a device may refuse them.
     let language = {
         let setup = Setup::get_descriptor(descriptor::STRING, 0, 0, 255);
@@ -847,7 +849,10 @@ pub(super) fn read_device(
             }
         }
         for endpoint in interface.endpoints() {
-            if found.class == class::HUB && d.class == class::HUB && endpoint.is_in() && plan.hub.is_none()
+            if found.class == class::HUB
+                && d.class == class::HUB
+                && endpoint.is_in()
+                && plan.hub.is_none()
             {
                 plan.hub = Some(endpoint);
             }
@@ -880,7 +885,11 @@ pub(super) fn read_device(
         found.product
     );
     if endpoints > plan.count {
-        warn!("USB: {}: only {} of its {endpoints} endpoints are used", Name(bus, path), plan.count);
+        warn!(
+            "USB: {}: only {} of its {endpoints} endpoints are used",
+            Name(bus, path),
+            plan.count
+        );
     }
     // bMaxPower counts 8 mA at a time at USB 3's speeds, else 2.
     let unit = if speed.is_super() { 8 } else { 2 };

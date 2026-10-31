@@ -406,7 +406,8 @@ impl<T: DerefMut<Target = Tables>> Ohci<T> {
         max_packet: u16,
         waiter: &mut dyn Waiter,
     ) -> Result<Queue, Error> {
-        if let Some(found) = self.tables.defaults.iter().flatten().find(|d| d.target.address == target.address)
+        if let Some(found) =
+            self.tables.defaults.iter().flatten().find(|d| d.target.address == target.address)
         {
             if found.target == target && found.max_packet == max_packet {
                 return Ok(found.queue);
@@ -428,7 +429,8 @@ impl<T: DerefMut<Target = Tables>> Ohci<T> {
     fn fill_td(&self, slot: Slot, info: u32, phys: u64, len: usize, next: Slot) {
         let pool = &self.pool;
         pool.write32(slot, td::INFO, info | td::NOT_ACCESSED | td::NO_INTERRUPT);
-        let (start, end) = if len == 0 { (0, 0) } else { (phys as u32, (phys + len as u64 - 1) as u32) };
+        let (start, end) =
+            if len == 0 { (0, 0) } else { (phys as u32, (phys + len as u64 - 1) as u32) };
         pool.write32(slot, td::BUFFER, start);
         pool.write32(slot, td::END, end);
         pool.write32(slot, td::NEXT, pool.phys(next));
@@ -482,7 +484,7 @@ impl<T: DerefMut<Target = Tables>> Ohci<T> {
         let Some(pipe) = &self.tables.pipes[index] else { return };
         let target = self.pool.phys(pipe.queue.ed);
         let mut at = self.tree[pipe.node];
-        for _ in 0..MAX_PIPES + 1 {
+        for _ in 0..=MAX_PIPES {
             let next = self.pool.read32(at, ed::NEXT) & ed::ADDRESS;
             if next == target {
                 self.pool.write32(at, ed::NEXT, self.pool.read32(pipe.queue.ed, ed::NEXT));
@@ -572,7 +574,8 @@ impl<T: DerefMut<Target = Tables>> Hcd for Ohci<T> {
             return Err(Error::Gone);
         }
         regs.write32(offset, port::SET_RESET);
-        let done = || regs.read32(offset) & (port::RESET_CHANGE | port::RESETTING) == port::RESET_CHANGE;
+        let done =
+            || regs.read32(offset) & (port::RESET_CHANGE | port::RESETTING) == port::RESET_CHANGE;
         if !wait_for(waiter, PORT_RESET_US, done) {
             return Err(Error::TimedOut);
         }
@@ -635,7 +638,8 @@ impl<T: DerefMut<Target = Tables>> Hcd for Ohci<T> {
         let status_pid = if into_host && length > 0 { td::OUT } else { td::IN };
         self.fill_td(last, status_pid | td::DATA1, 0, 0, tail);
         let queue = Queue { ed: queue.ed, tail };
-        if let Some(d) = self.tables.defaults.iter_mut().flatten().find(|d| d.target.address == target.address)
+        if let Some(d) =
+            self.tables.defaults.iter_mut().flatten().find(|d| d.target.address == target.address)
         {
             d.queue = queue;
         }
@@ -698,7 +702,8 @@ impl<T: DerefMut<Target = Tables>> Hcd for Ohci<T> {
                 return Err(err);
             }
         };
-        let level = ((endpoint.period_microframes() / 8).max(1).trailing_zeros() as usize).min(LEVELS - 1);
+        let level =
+            ((endpoint.period_microframes() / 8).max(1).trailing_zeros() as usize).min(LEVELS - 1);
         let phase = (0..1 << level).min_by_key(|&p| self.load[node(level, p)]).unwrap_or(0);
         let node = node(level, phase);
         self.load[node] = self.load[node].saturating_add(1);
@@ -820,8 +825,11 @@ impl<T: DerefMut<Target = Tables>> Hcd for Ohci<T> {
     }
 
     fn forget(&mut self, address: u8, waiter: &mut dyn Waiter) {
-        let Some(at) =
-            self.tables.defaults.iter().position(|d| d.is_some_and(|d| d.target.address == address))
+        let Some(at) = self
+            .tables
+            .defaults
+            .iter()
+            .position(|d| d.is_some_and(|d| d.target.address == address))
         else {
             return;
         };
@@ -833,7 +841,7 @@ impl<T: DerefMut<Target = Tables>> Hcd for Ohci<T> {
         self.wait_frame(waiter);
         let target = self.pool.phys(pipe.queue.ed);
         let mut at = self.head;
-        for _ in 0..MAX_DEFAULT_PIPES + 1 {
+        for _ in 0..=MAX_DEFAULT_PIPES {
             let next = self.pool.read32(at, ed::NEXT) & ed::ADDRESS;
             if next == target {
                 self.pool.write32(at, ed::NEXT, self.pool.read32(pipe.queue.ed, ed::NEXT));

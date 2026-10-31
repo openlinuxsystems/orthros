@@ -265,7 +265,6 @@ impl State {
         w32(qh + 0x18, done);
         w32(qtd + 8, done);
     }
-
 }
 
 /// The test's clock: each wait runs the controller a frame.
@@ -341,7 +340,8 @@ fn rig(devices: [Option<SimDevice>; PORTS], companions: u32) -> Rig {
     let regs = Mmio::fake(sim.clone(), 0x100);
     let (function, _) = function(false, false);
     let mut clock = Clock { sim: sim.clone(), now: 0 };
-    let ehci = Ehci::new(&function, regs, &mut clock, &mut alloc, Box::new(Tables::EMPTY)).unwrap();
+    let ehci =
+        Ehci::new(&function, &regs, &mut clock, &mut alloc, Box::new(Tables::EMPTY)).unwrap();
     Rig { sim, clock, ehci }
 }
 
@@ -376,16 +376,15 @@ fn starts_with_every_port_routed_and_powered() {
 
 #[test]
 fn takes_the_controller_from_the_firmware() {
-    for (owns, stubborn, expected) in [
-        (false, false, Handoff::Free),
-        (true, false, Handoff::Given),
-        (true, true, Handoff::Taken),
-    ] {
+    for (owns, stubborn, expected) in
+        [(false, false, Handoff::Free), (true, false, Handoff::Given), (true, true, Handoff::Taken)]
+    {
         let sim = Arc::new(Sim(Mutex::new(State::default())));
         let regs = Mmio::fake(sim.clone(), 0x100);
         let (function, config) = function(owns, stubborn);
         let mut clock = Clock { sim: sim.clone(), now: 0 };
-        let ehci = Ehci::new(&function, regs, &mut clock, &mut alloc, Box::new(Tables::EMPTY)).unwrap();
+        let ehci =
+            Ehci::new(&function, &regs, &mut clock, &mut alloc, Box::new(Tables::EMPTY)).unwrap();
         assert_eq!(ehci.info().handoff, expected);
         let b = config.bytes.lock().unwrap();
         assert_eq!(b[EECP + 3], 1, "the system's semaphore is set");
@@ -484,7 +483,10 @@ fn an_unplugged_device_does_not_answer() {
     let zero = Target { address: 0, speed: Speed::High, tt: None };
     let get = Setup::get_descriptor(descriptor::DEVICE, 0, 0, 8);
     let mut bytes = [0u8; 8];
-    assert_eq!(rig.ehci.control(zero, 64, get, &mut bytes, 100, &mut rig.clock), Err(Error::NoAnswer));
+    assert_eq!(
+        rig.ehci.control(zero, 64, get, &mut bytes, 100, &mut rig.clock),
+        Err(Error::NoAnswer)
+    );
 }
 
 fn interrupt(target: Target, interval: u8) -> Endpoint {

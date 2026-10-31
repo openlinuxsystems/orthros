@@ -11,13 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
 use radix_hw::pci::{Address, Function};
-use radix_hw::{Mmio, Registers};
+use radix_hw::{IoPorts, Mmio, Registers};
 use radix_usb::host::{Data, Endpoint, Error, Hcd, Target, Waiter};
 use radix_usb::{Setup, Speed, TransferType, descriptor};
 
 use super::sim::{self, Answer, Pid, SimDevice, alloc, keyboard, r32, w32, write};
 use crate::Handoff;
-use crate::uhci::{Ports, Tables, Uhci};
+use crate::uhci::{Tables, Uhci};
 
 const PORTS: usize = 2;
 const HALTED: u16 = 1 << 5;
@@ -37,10 +37,16 @@ struct State {
 #[derive(Clone)]
 struct Sim(Arc<Mutex<State>>);
 
-impl Ports for Sim {
+impl IoPorts for Sim {
     fn len(&self) -> u16 {
         0x20
     }
+
+    fn read8(&self, _offset: u16) -> u8 {
+        0
+    }
+
+    fn write8(&self, _offset: u16, _value: u8) {}
 
     fn read16(&self, offset: u16) -> u16 {
         let s = self.0.lock().unwrap();
@@ -63,10 +69,10 @@ impl Ports for Sim {
                 if value & 2 != 0 {
                     s.cmd = 0;
                     s.sts = HALTED;
-                    for port in 0..PORTS {
-                        s.ports[port] &= 1 | 1 << 8;
-                        if s.ports[port] & 1 != 0 {
-                            s.ports[port] |= 2;
+                    for status in &mut s.ports {
+                        *status &= 1 | 1 << 8;
+                        if *status & 1 != 0 {
+                            *status |= 2;
                         }
                     }
                     return;
@@ -403,7 +409,10 @@ fn a_silent_device_does_not_answer_and_the_pipe_goes_on() {
     rig.sim.0.lock().unwrap().devices[0].as_mut().unwrap().silent = true;
     let get = Setup::get_descriptor(descriptor::DEVICE, 0, 0, 18);
     let mut bytes = [0u8; 18];
-    assert_eq!(rig.uhci.control(target, 8, get, &mut bytes, 20, &mut rig.clock), Err(Error::NoAnswer));
+    assert_eq!(
+        rig.uhci.control(target, 8, get, &mut bytes, 20, &mut rig.clock),
+        Err(Error::NoAnswer)
+    );
     rig.sim.0.lock().unwrap().devices[0].as_mut().unwrap().silent = false;
     assert_eq!(rig.uhci.control(target, 8, get, &mut bytes, 20, &mut rig.clock), Ok(18));
 }

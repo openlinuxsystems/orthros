@@ -14,9 +14,12 @@ Phase 11a brings USB: the host controller first, then hubs, keyboards and
 mice, and a console over the controller's debug port. Every PC sold since
 about 2012 has an xHCI controller (Intel's eXtensible Host Controller
 Interface, PCI class 0c/03/30), which drives USB 3 and USB 2 devices on
-the same ports; the older EHCI, OHCI and UHCI controllers survive only on
-machines too old to boot Dukovo, or behind an xHCI as companions the
-firmware routes away. QEMU's `qemu-xhci` is the controller the boot tests
+the same ports. (Corrected by ADR 0243: this said that the older EHCI,
+OHCI and UHCI controllers survive only on machines too old to boot
+Dukovo. They do not: Intel's 6 and 7 Series chipsets and AMD's of the
+same years carry their USB 2.0 ports on EHCI controllers, with OHCI or
+UHCI companions, beside or without an xHCI, on machines that boot
+Dukovo; Phase 11g drives them.) QEMU's `qemu-xhci` is the controller the boot tests
 already boot from, through the firmware's own driver.
 
 An xHCI controller is driven through rings in memory: the driver puts

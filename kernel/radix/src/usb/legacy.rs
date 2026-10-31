@@ -158,7 +158,8 @@ pub fn run(index: usize) {
             // The machine goes down: what the ports say now is not news.
             return;
         }
-        let busy = controller.ports() | controller.pipes() | controller.work() | controller.lights();
+        let busy =
+            controller.ports() | controller.pipes() | controller.work() | controller.lights();
         if super::halted() {
             return;
         }
@@ -213,7 +214,7 @@ fn start_ehci(start: &Start, waiter: &mut KernelWaiter) -> Result<Started, radix
     let regs = start.regs.memory().ok_or(radix_usbhc::Error::Unsupported("no registers"))?;
     let ehci = radix_usbhc::ehci::Ehci::new(
         &start.function,
-        regs.clone(),
+        regs,
         waiter,
         &mut alloc(start.address),
         tables,
@@ -478,7 +479,8 @@ impl Legacy {
         if let Some(status) = plan.hub {
             match self.start_hub(path, status) {
                 Ok(()) => {
-                    let hubs = shown.interfaces().iter().filter(|i| i.descriptor.class == class::HUB);
+                    let hubs =
+                        shown.interfaces().iter().filter(|i| i.descriptor.class == class::HUB);
                     for i in hubs {
                         shown::set_driver(self.bus, path, i.descriptor.number, "hub");
                     }
@@ -520,9 +522,8 @@ impl Legacy {
         name: &mut TextBuf<64>,
     ) -> Result<(super::controller::Plan, Shown), Why> {
         let Legacy { hcd, waiter, buffer, bus, .. } = self;
-        let mut control = |setup, out: &mut [u8]| {
-            Ok(hcd.control(target, max, setup, out, CONTROL_MS, waiter)?)
-        };
+        let mut control =
+            |setup, out: &mut [u8]| Ok(hcd.control(target, max, setup, out, CONTROL_MS, waiter)?);
         let mut shown = None;
         let plan = read_device(&mut control, buffer, (*bus, path, target.speed), name, &mut shown)?;
         control(Setup::set_configuration(plan.value), &mut [])?;
@@ -612,7 +613,10 @@ impl Legacy {
                 *errors += 1;
                 if *errors > PIPE_ERRORS {
                     let path = self.devices[at].path;
-                    warn!("USB: {}: its endpoint {endpoint:#04x} stopped: {err}", Name(self.bus, path));
+                    warn!(
+                        "USB: {}: its endpoint {endpoint:#04x} stopped: {err}",
+                        Name(self.bus, path)
+                    );
                     return false;
                 }
                 if err == host::Error::Stall {
@@ -668,7 +672,8 @@ impl Legacy {
         let (target, max) = (self.devices[at].target, self.devices[at].max_packet);
         let size = usize::from(HubDescriptor::MAX_SIZE);
         let mut bytes = [0u8; HubDescriptor::MAX_SIZE as usize];
-        let came = self.control(target, max, Setup::hub_descriptor(false, size as u16), &mut bytes)?;
+        let came =
+            self.control(target, max, Setup::hub_descriptor(false, size as u16), &mut bytes)?;
         let descriptor = HubDescriptor::parse(&bytes[..came.min(size)], false)
             .ok_or(Why::Device("it sent no hub descriptor"))?;
         let ports = descriptor.usable_ports();
@@ -701,7 +706,8 @@ impl Legacy {
         };
         let pipe = self.listen(endpoint, report)?;
         let address = status.address;
-        self.devices[at].hub = Some(Hub { ports, pipe, endpoint: address, report, failed: 0, errors: 0 });
+        self.devices[at].hub =
+            Some(Hub { ports, pipe, endpoint: address, report, failed: 0, errors: 0 });
         for port in 1..=ports {
             self.queue(target.address, port);
         }
@@ -739,7 +745,8 @@ impl Legacy {
         let (target, max) = (self.devices[at].target, self.devices[at].max_packet);
         let mut bytes = [0u8; PortStatus::SIZE as usize];
         let came = self.control(target, max, Setup::port_status(port), &mut bytes)?;
-        PortStatus::parse(&bytes[..came], false).ok_or(Why::Device("its hub's port status is short"))
+        PortStatus::parse(&bytes[..came], false)
+            .ok_or(Why::Device("its hub's port status is short"))
     }
 
     /// Port `port` of the hub at address `hub` may have changed.
@@ -861,7 +868,8 @@ impl Legacy {
             .then(|| {
                 let Legacy { hcd, waiter, buffer, .. } = &mut *self;
                 let setup = Setup::report_descriptor(interface, length as u16);
-                let came = hcd.control(target, max, setup, &mut buffer[..length], CONTROL_MS, waiter);
+                let came =
+                    hcd.control(target, max, setup, &mut buffer[..length], CONTROL_MS, waiter);
                 came.ok().map(|came| Layout::parse(&buffer[..came], heap))
             })
             .flatten();
@@ -901,8 +909,7 @@ impl Legacy {
         if !layout.has_keys() && !layout.is_pointer() {
             return Ok(());
         }
-        if self.devices[at].hids.len() >= MAX_HIDS
-            || self.devices[at].hids.try_reserve(1).is_err()
+        if self.devices[at].hids.len() >= MAX_HIDS || self.devices[at].hids.try_reserve(1).is_err()
         {
             return Err(Why::Device("out of memory"));
         }

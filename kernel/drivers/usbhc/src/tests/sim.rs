@@ -117,10 +117,10 @@ pub fn answer(
         }
         Pid::Out => {
             // The status stage of a transfer in, or data out.
-            if bytes == 0 {
-                if let Some(a) = device.new_address.take() {
-                    device.address = a;
-                }
+            if bytes == 0
+                && let Some(a) = device.new_address.take()
+            {
+                device.address = a;
             }
             Answer::Data(Vec::new())
         }
