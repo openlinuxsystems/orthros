@@ -7,9 +7,9 @@
 // disks, subvolumes, scrubs and replaced disks, swap areas, priorities, CPU affinity and I/O
 // classes, held files, traces, the kernel log, the dump and layout tools,
 // script, watch and pidstat, shutdown and service through Spark, the
-// hardware tools, and ip and ss. With them, what the kernel tells them: /processes
-// (radix-proc(5)), /devices/kmsg, /kernel (radix-sysfs(5)), getloadavg,
-// and the priorities a child inherits.
+// hardware tools, ip and ss, and bundle. With them, what the kernel tells
+// them: /processes (radix-proc(5)), /devices/kmsg, /kernel
+// (radix-sysfs(5)), getloadavg, and the priorities a child inherits.
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -745,6 +745,27 @@ static void storage(void) {
 	STATUS(0, "/bin/iostat", "-d", "-z");
 }
 
+// bundle(1): a new bundle's manifest, checked in its folder before and
+// after its program is there, one for a later Dukovo, and the schema.
+static void bundles(void) {
+	STATUS(0, "/bin/mkdir", "-p", DIR);
+	CONTAINS("wrote " DIR "/notes/manifest.json\n", "/bin/bundle", "new", "org.example.notes",
+			DIR "/notes", "--publisher", "Example");
+	STATUS(1, "/bin/bundle", "new", "org.example.notes", DIR "/notes");
+	STATUS(1, "/bin/bundle", "check", DIR "/notes");
+	write_file(DIR "/notes/bin/notes", "#!/bin/sh\necho notes\n");
+	STATUS(0, "/bin/chmod", "755", DIR "/notes/bin/notes");
+	OUTPUT("", DIR "/notes/manifest.json: ok: org.example.notes 0.1.0, manifest version 1\n",
+			"/bin/bundle", "check", DIR "/notes");
+	OUTPUT("", DIR "/notes/manifest.json: manifest version 1, the newest this Dukovo reads: "
+			   "nothing to upgrade\n",
+			"/bin/bundle", "upgrade-manifest", DIR "/notes/manifest.json");
+	write_file(DIR "/later.json", "{\n  \"manifest_version\": 2,\n  \"entries\": {}\n}\n");
+	STATUS(1, "/bin/bundle", "check", DIR "/later.json");
+	CONTAINS("  \"title\": \"Manifest\",\n", "/bin/sh", "-c", "/bin/bundle schema | /bin/head -n 5");
+	STATUS(0, "/bin/rm", "-r", DIR "/notes", DIR "/later.json");
+}
+
 // The program behind the links.
 static void links(void) {
 	CONTAINS("\nxxd\n", "/system/commands/systools", "--list");
@@ -772,6 +793,7 @@ int main(void) {
 	RUN(hardware);
 	RUN(network);
 	RUN(storage);
+	RUN(bundles);
 	RUN(links);
 	return check_end();
 }

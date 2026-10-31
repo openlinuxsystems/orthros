@@ -1,0 +1,34 @@
+{
+  "manifest_version": 1,
+  "id": "org.postgresql.postgresql",
+  "name": "PostgreSQL",
+  "version": "17.2",
+  "summary": "Relational database",
+  "publisher": { "name": "Dukovo catalog" },
+  "license": "PostgreSQL",
+  "requires_os": "1.0",
+  "architectures": ["x86_64"],
+  "programs": {
+    "postgres": { "path": { "x86_64": "bin/postgres" } },
+    "psql": { "path": { "x86_64": "bin/psql" } },
+    "pg_dump": { "path": { "x86_64": "bin/pg_dump" } }
+  },
+  "commands": [
+    { "name": "psql", "program": "psql", "runs_with": "your-access" },
+    { "name": "pg_dump", "program": "pg_dump", "runs_with": "your-access" }
+  ],
+  "services": [ {
+    "name": "postgresql",
+    "program": "postgres",
+    "arguments": ["-D", "data"],
+    "account": "postgres",
+    "restart": "on-failure",
+    "limits": { "memory": "4G" },
+    "health": { "socket": "postgresql" }
+  } ],
+  "permissions": {
+    "network.listen": { "ports": [5432], "need": "optional", "why": "Accepts connections from other machines" }
+  },
+  "provides": [ { "socket": "postgresql", "to": "approved" } ],
+  "data": { "settings": true, "data": true }
+}

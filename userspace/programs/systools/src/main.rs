@@ -26,6 +26,7 @@ mod args;
 mod authd;
 mod balance;
 mod blkid;
+mod bundles;
 mod column;
 mod device;
 mod df;
@@ -106,6 +107,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("authd", authd::main),
     ("balance", balance::main),
     ("blkid", blkid::main),
+    ("bundle", bundles::main),
     ("chgrp", modes::chgrp),
     ("chmod", modes::chmod),
     ("chown", modes::chown),

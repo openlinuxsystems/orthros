@@ -3,8 +3,9 @@
 
 //! Dukovo's files that describe programs, read the same way by everything
 //! that reads them (ADR 0216): service files (service.toml(5)), which
-//! Spark and the service command read, and from Phase 13d the manifests
-//! of bundles, whose services section is the same schema.
+//! Spark and the service command read, and the manifests of bundles
+//! (manifest.json(5), feature `bundle`), whose services take the same
+//! settings.
 //!
 //! People write TOML, with comments; tools write JSON. Both come through
 //! the same types, so the two can never drift apart. An error says which
@@ -14,6 +15,8 @@
 
 extern crate alloc;
 
+#[cfg(feature = "bundle")]
+pub mod bundle;
 pub mod legacy;
 pub mod service;
 #[cfg(test)]

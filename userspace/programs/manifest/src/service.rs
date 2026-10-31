@@ -86,7 +86,7 @@ pub enum Restart {
 }
 
 impl Restart {
-    const WORDS: &[&str] = &["always", "on-failure", "never"];
+    pub(crate) const WORDS: &[&str] = &["always", "on-failure", "never"];
 
     /// The word a file says it with.
     pub fn name(self) -> &'static str {
@@ -105,7 +105,7 @@ pub enum Oom {
 }
 
 impl Oom {
-    const WORDS: &[&str] = &["service", "app"];
+    pub(crate) const WORDS: &[&str] = &["service", "app"];
 
     /// The word a file says it with.
     pub fn name(self) -> &'static str {
@@ -557,7 +557,7 @@ fn yes() -> bool {
     true
 }
 
-fn weight_default() -> u32 {
+pub(crate) fn weight_default() -> u32 {
     WEIGHT_DEFAULT
 }
 
@@ -596,7 +596,7 @@ impl<'de> Deserialize<'de> for Program {
 /// `environment`: a table of names and values, in the order of their
 /// names.
 #[derive(Default)]
-struct Environment(Vec<(String, String)>);
+pub(crate) struct Environment(pub(crate) Vec<(String, String)>);
 
 impl<'de> Deserialize<'de> for Environment {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Environment, D::Error> {
@@ -640,7 +640,7 @@ impl<'de> Deserialize<'de> for Variable {
 }
 
 /// A whole number, for `key`.
-fn whole<'de, D: Deserializer<'de>>(d: D, key: &'static str) -> Result<u64, D::Error> {
+pub(crate) fn whole<'de, D: Deserializer<'de>>(d: D, key: &'static str) -> Result<u64, D::Error> {
     struct Whole(&'static str);
     impl Visitor<'_> for Whole {
         type Value = u64;
@@ -661,7 +661,7 @@ fn whole<'de, D: Deserializer<'de>>(d: D, key: &'static str) -> Result<u64, D::E
 }
 
 /// One of `words`, for `key`: its index.
-fn word<'de, D: Deserializer<'de>>(
+pub(crate) fn word<'de, D: Deserializer<'de>>(
     d: D,
     key: &'static str,
     words: &'static [&'static str],
@@ -692,15 +692,15 @@ fn word<'de, D: Deserializer<'de>>(
     d.deserialize_str(Word(key, words))
 }
 
-fn restart<'de, D: Deserializer<'de>>(d: D) -> Result<Restart, D::Error> {
+pub(crate) fn restart<'de, D: Deserializer<'de>>(d: D) -> Result<Restart, D::Error> {
     Ok([Restart::Always, Restart::OnFailure, Restart::Never][word(d, "restart", Restart::WORDS)?])
 }
 
-fn oom<'de, D: Deserializer<'de>>(d: D) -> Result<Oom, D::Error> {
+pub(crate) fn oom<'de, D: Deserializer<'de>>(d: D) -> Result<Oom, D::Error> {
     Ok([Oom::Service, Oom::App][word(d, "oom", Oom::WORDS)?])
 }
 
-fn weight<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+pub(crate) fn weight<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
     match whole(d, "cpu_weight")? {
         n @ 1.. if n <= u64::from(WEIGHT_MAX) => Ok(n as u32),
         n => Err(de::Error::custom(format!("cpu_weight is from 1 to {WEIGHT_MAX}, not {n}"))),
@@ -708,7 +708,7 @@ fn weight<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
 }
 
 /// `memory`: a size such as `"64M"`, a number of bytes, or `"none"`.
-fn memory<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+pub(crate) fn memory<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
     struct Memory;
     impl Visitor<'_> for Memory {
         type Value = Option<u64>;
@@ -787,7 +787,7 @@ fn folders<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
 
 /// `secrets`: names of secrets, each as a service's name is written,
 /// and each once.
-fn secret_names<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+pub(crate) fn secret_names<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
     let names = Vec::<String>::deserialize(d)?;
     for (i, name) in names.iter().enumerate() {
         check_secret(name).map_err(de::Error::custom)?;

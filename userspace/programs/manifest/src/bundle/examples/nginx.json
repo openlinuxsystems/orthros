@@ -1,0 +1,29 @@
+{
+  "manifest_version": 1,
+  "id": "org.nginx.nginx",
+  "name": "nginx",
+  "version": "1.27.3",
+  "summary": "Web server and reverse proxy",
+  "publisher": { "name": "Dukovo catalog", "url": "https://dukovo.org" },
+  "license": "BSD-2-Clause",
+  "requires_os": "1.0",
+  "architectures": ["x86_64"],
+  "programs": { "nginx": { "path": { "x86_64": "bin/nginx" } } },
+  "commands": [ { "name": "nginx", "program": "nginx", "runs_with": "your-access" } ],
+  "services": [ {
+    "name": "nginx",
+    "program": "nginx",
+    "arguments": ["-g", "daemon off;"],
+    "account": "nginx",
+    "restart": "on-failure",
+    "limits": { "memory": "512M", "open_files": 65536 },
+    "start": "when-enabled"
+  } ],
+  "permissions": {
+    "network.listen": { "ports": [80, 443], "need": "required", "why": "Serves websites" },
+    "network.outbound": { "need": "optional", "why": "Passes requests on to other servers" },
+    "files.shared": { "folders": { "www": "read" }, "need": "required", "why": "Reads the sites it serves" }
+  },
+  "uses": [ { "interface": "dukovo.certificates/1", "need": "optional" } ],
+  "data": { "settings": true, "cache": true }
+}
