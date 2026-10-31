@@ -258,6 +258,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    changing her own
   signin           sign-in on the consoles: the owner's account at the first
                    boot, two people side by side, neither in the other's home
+  elevate          elevate and sudo: alice runs commands as root after her
+                   password, once a pane for 15 minutes; bob may not
   spark-network    Spark gives each service the network its file asks for
   page-fault       a page fault's panic report, on serial and on screen
   crash-log-uefi   the panic report survives a restart (UEFI)

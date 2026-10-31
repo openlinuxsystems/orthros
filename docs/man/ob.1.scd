@@ -565,6 +565,20 @@ _target/userspace/_).
 		in on tty1, cannot list bob's home. The power button ends it
 		(ADR 0250).
 
+	*elevate*
+		Boot 2 CPUs under BIOS from USB with the shipped services and
+		_/system/tests/posix/signintest_ as root, and sign alice, the
+		owner, in on tty1 and bob on tty2, as *signin* does. Bob, no
+		administrator, cannot *elevate*(8), and *authd*(8)'s audit line
+		says so. Alice types her password once on tty1 and runs commands
+		as root: *id*(1), *sudo*(8), *env*(1), which shows root's
+		environment with the fixed *PATH* and *SUDO_USER*, and the hashes'
+		file, which she cannot read herself. Ctrl+C stops an elevated
+		*sleep*(1) through its own terminal; *elevate -s* gives root's
+		shell on a terminal of its own; *elevate -k* locks the pane
+		again, *-n* then will not ask, and a wrong password is asked
+		again. The power button ends it (ADR 0219).
+
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test
 		services that run _/system/tests/posix/netgrant_: _granted_ asks

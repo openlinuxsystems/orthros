@@ -24,8 +24,8 @@ shorter than 8 characters, gets a warning, and at a terminal the
 question whether to keep it.
 
 A wrong current password is answered only after a wait, which grows
-with each wrong one in a row (*authd*(8)). Only you and root, and from
-Phase 13b.6 an administrator inside *elevate*, change your password.
+with each wrong one in a row (*authd*(8)). Only you and root, which an
+administrator is inside *elevate*(8), change your password.
 
 # EXAMPLES
 

@@ -6,6 +6,7 @@
 //! the terminal's echo back first.
 
 use std::io::{self, Write};
+use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::util;
@@ -53,14 +54,14 @@ fn restore_signals(before: &[libc::sigaction; 3]) {
     }
 }
 
-/// Reads the standard input a byte at a time into `line` up to its
-/// newline, which it leaves out, or its end; stops early when a signal
-/// came. Whether a newline or the end came.
-pub fn read_line(line: &mut Vec<u8>) -> io::Result<bool> {
+/// Reads descriptor `fd` a byte at a time into `line` up to its newline,
+/// which it leaves out, or its end; stops early when a signal came.
+/// Whether a newline or the end came.
+fn read_line(fd: RawFd, line: &mut Vec<u8>) -> io::Result<bool> {
     let mut byte = 0u8;
     while !STOPPED.load(Ordering::Relaxed) {
         // SAFETY: `byte` is one writable byte.
-        match unsafe { libc::read(0, (&raw mut byte).cast(), 1) } {
+        match unsafe { libc::read(fd, (&raw mut byte).cast(), 1) } {
             0 => return Ok(!line.is_empty()),
             1 if byte == b'\n' => return Ok(true),
             1 => line.push(byte),
@@ -84,26 +85,39 @@ pub enum Answer {
 /// Shows `prompt` on the standard error and reads a line from the
 /// standard input, with the terminal's echo off unless `shown`.
 pub fn ask(prompt: &str, shown: bool) -> io::Result<Answer> {
+    ask_on(0, 2, prompt, shown)
+}
+
+/// Shows `prompt` on descriptor `out` and reads a line from descriptor
+/// `fd`, with the terminal's echo off unless `shown`: [`ask`] on other
+/// descriptors, as elevate(8) asks on its terminal whatever its input
+/// and output are.
+pub fn ask_on(fd: RawFd, out: RawFd, prompt: &str, shown: bool) -> io::Result<Answer> {
     STOPPED.store(false, Ordering::Relaxed);
-    eprint!("{prompt}");
+    let say = |text: &[u8]| {
+        // SAFETY: writes from a valid buffer; a short write only loses
+        // some of the prompt.
+        unsafe { libc::write(out, text.as_ptr().cast(), text.len()) };
+    };
     let _ = io::stderr().flush();
+    say(prompt.as_bytes());
     let before = catch_signals();
     // SAFETY: all zeros is a valid termios: numbers.
     let mut saved: libc::termios = unsafe { util::zeroed() };
     // SAFETY: tcgetattr fills `saved`.
-    let quiet = !shown && unsafe { libc::tcgetattr(0, &raw mut saved) } == 0;
+    let quiet = !shown && unsafe { libc::tcgetattr(fd, &raw mut saved) } == 0;
     if quiet {
         let mut off = saved;
         off.c_lflag &= !libc::ECHO;
         // SAFETY: `off` is a valid termios.
-        unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw const off) };
+        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw const off) };
     }
     let mut line = Vec::new();
-    let read = read_line(&mut line);
+    let read = read_line(fd, &mut line);
     if quiet {
         // SAFETY: `saved` is the termios read above.
-        unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw const saved) };
-        eprintln!();
+        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw const saved) };
+        say(b"\n");
     }
     restore_signals(&before);
     match read {
@@ -111,7 +125,7 @@ pub fn ask(prompt: &str, shown: bool) -> io::Result<Answer> {
         Ok(_) => {
             accounts::wipe(&mut line);
             if shown {
-                eprintln!();
+                say(b"\n");
             }
             Ok(Answer::Stopped)
         }

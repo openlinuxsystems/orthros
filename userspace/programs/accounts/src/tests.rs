@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use super::request::{Answer, REQUEST_MAX, Request, ended, ended_status};
+use super::request::{
+    Answer, CONTINUE, Mode, REQUEST_MAX, Relay, Request, ended, ended_status, signal, stopped,
+    stopped_signal,
+};
 use super::*;
 
 const PASSWD_TEXT: &str = "root:x:0:0:root:/:/system/commands/nukesh
@@ -135,6 +138,25 @@ fn requests_go_and_come_back() {
             password: b"s3cret".to_vec(),
             term: "linux".into(),
         },
+        Request::Elevate {
+            mode: Mode::Command,
+            password: None,
+            term: "linux".into(),
+            directory: b"/users/alice".to_vec(),
+            language: vec!["LANG=C.UTF-8".into()],
+            command: vec![b"dmesg".to_vec(), b"--".to_vec(), b"\xff".to_vec()],
+        },
+        Request::Elevate {
+            mode: Mode::Login,
+            password: Some(Vec::new()),
+            term: String::new(),
+            directory: b"/".to_vec(),
+            language: Vec::new(),
+            command: Vec::new(),
+        },
+        Request::Unlock { password: Some(b"s3cret".to_vec()) },
+        Request::Unlock { password: None },
+        Request::Forget,
     ];
     for request in requests {
         assert_eq!(Request::decode(&request.encode()), Ok(request));
@@ -144,6 +166,15 @@ fn requests_go_and_come_back() {
         b"check\0a\0b\0"
     );
     assert_eq!(Request::NeedsOwner.encode(), b"needs-owner\0");
+    let elevate = Request::Elevate {
+        mode: Mode::Shell,
+        password: Some(b"pw".to_vec()),
+        term: "linux".into(),
+        directory: b"/x".to_vec(),
+        language: vec!["LANG=C".into()],
+        command: vec![b"id".to_vec()],
+    };
+    assert_eq!(elevate.encode(), b"elevate\0shell\0password\0pw\0linux\0/x\0LANG=C\0--\0id\0");
     for bad in [
         &b"check\0a\0"[..],
         b"check\0a\0b",
@@ -152,6 +183,17 @@ fn requests_go_and_come_back() {
         b"session\0a\0b\0",
         b"needs-owner\0x\0",
         b"",
+        // A command, with nothing to run; no `--`; an unknown kind of
+        // password; a password with `none`; a language setting that is
+        // not one.
+        b"elevate\0command\0none\0\0linux\0/\0--\0",
+        b"elevate\0command\0none\0\0linux\0/\0id\0",
+        b"elevate\0command\0maybe\0\0linux\0/\0--\0id\0",
+        b"elevate\0command\0none\0x\0linux\0/\0--\0id\0",
+        b"elevate\0command\0none\0\0linux\0/\0LANG\0--\0id\0",
+        b"elevate\0root\0none\0\0linux\0/\0--\0id\0",
+        b"unlock\0none\0",
+        b"forget\0now\0",
     ] {
         assert!(Request::decode(bad).is_err(), "{bad:?}");
     }
@@ -168,6 +210,31 @@ fn debug_leaves_out_passwords() {
         term: "linux".into(),
     };
     assert!(!format!("{session:?}").contains("hunter2"));
+    let elevate = Request::Elevate {
+        mode: Mode::Command,
+        password: Some(b"hunter2".to_vec()),
+        term: "linux".into(),
+        directory: b"/".to_vec(),
+        language: Vec::new(),
+        command: vec![b"id".to_vec()],
+    };
+    assert!(!format!("{elevate:?}").contains("hunter2"));
+    assert!(
+        !format!("{:?}", Request::Unlock { password: Some(b"hunter2".to_vec()) })
+            .contains("hunter2")
+    );
+}
+
+#[test]
+fn elevate_s_lines() {
+    assert_eq!(stopped(20), "stopped 20\n");
+    assert_eq!(stopped_signal(&stopped(20)), Some(20));
+    assert_eq!(stopped_signal(&ended(0)), None);
+    assert_eq!(Relay::decode(signal(2).trim_end()), Some(Relay::Signal(2)));
+    assert_eq!(Relay::decode(CONTINUE.trim_end()), Some(Relay::Continue));
+    for bad in ["signal 0", "signal 65", "signal -9", "signal", "go on", ""] {
+        assert_eq!(Relay::decode(bad), None, "{bad}");
+    }
 }
 
 #[test]

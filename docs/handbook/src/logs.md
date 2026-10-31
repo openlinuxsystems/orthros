@@ -64,8 +64,10 @@ keeps them for a year in `/system/state/log/audit`. Today they are
 Spark's answers to requests that change something (a service started,
 stopped or restarted, the machine powered off), each with the process
 that asked; the power button; the kernel log cleared; records the
-kernel's ring lost before logd read them; and the log trimmed. Signing
-in, `elevate` and permissions will be, as they come.
+kernel's ring lost before logd read them; the log trimmed; accounts
+made, passwords changed and wrong passwords; signing in and out; and
+each command run with `elevate`, and each refusal. Permissions will be,
+as they come.
 
 ```
 $ log --audit

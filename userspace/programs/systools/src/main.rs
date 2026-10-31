@@ -15,8 +15,9 @@
 //! log, which `log` and `journalctl` read and `logtrim` trims (ADRs 0210
 //! and 0211); `notifyd` passes notifications from `notify-send` and other
 //! programs to the console, and `notifications` lists them (ADR 0212).
-//! Every process is root's until users come
-//! (Phase 13), so the user columns all say root.
+//! `authd` keeps the accounts, which `user` and `passwd` change, `login`
+//! signs people in through it, and `elevate`, and `sudo` in front of it,
+//! run a command as an administrator (ADRs 0218, 0250 and 0219).
 
 mod account;
 mod args;
@@ -30,6 +31,7 @@ mod diskhealth;
 mod dmesg;
 mod ectool;
 mod eject;
+mod elevate;
 mod findmnt;
 mod fstrim;
 mod hexdump;
@@ -107,6 +109,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("dmesg", dmesg::main),
     ("ectool", ectool::main),
     ("eject", eject::main),
+    ("elevate", elevate::main),
     ("findmnt", findmnt::main),
     ("fstrim", fstrim::main),
     ("free", memory::free),
@@ -153,6 +156,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("shutdown", power::shutdown),
     ("ss", ss::main),
     ("subvolume", subvolume::main),
+    ("sudo", elevate::main),
     ("swapoff", swap::swapoff),
     ("swapon", swap::swapon),
     ("taskset", priority::taskset),

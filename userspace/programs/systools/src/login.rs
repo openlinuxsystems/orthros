@@ -18,7 +18,6 @@
 use std::ffi::CString;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::Shutdown;
-use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
@@ -27,8 +26,8 @@ use accounts::wipe;
 
 use crate::account::Input;
 use crate::args::{Arg, Args};
-use crate::prompt;
 use crate::util::{self, Fail, fail};
+use crate::{prompt, signin};
 
 /// How long login waits for authd to answer at all, as at boot, when
 /// the consoles may come up before it.
@@ -64,42 +63,15 @@ fn connect() -> Result<UnixStream, Fail> {
 fn send(request: &Request, terminal: bool) -> Result<UnixStream, Fail> {
     let stream = connect()?;
     let mut bytes = request.encode();
-    let sent =
-        if terminal { send_with_terminal(&stream, &bytes) } else { (&stream).write_all(&bytes) };
+    let sent = if terminal {
+        signin::send_with_fds(&stream, &bytes, &[0])
+    } else {
+        (&stream).write_all(&bytes)
+    };
     wipe(&mut bytes);
     sent.and_then(|()| stream.shutdown(Shutdown::Write))
         .map_err(|err| fail(format!("cannot ask authd: {}", util::strip_os_error(&err))))?;
     Ok(stream)
-}
-
-/// Sends `bytes` on `stream` with descriptor 0 (SCM_RIGHTS) in the first
-/// message.
-fn send_with_terminal(stream: &UnixStream, bytes: &[u8]) -> io::Result<()> {
-    let mut iov = libc::iovec { iov_base: bytes.as_ptr().cast_mut().cast(), iov_len: bytes.len() };
-    let mut control = [0u64; 4];
-    // SAFETY: all zeros is a valid msghdr: numbers and null pointers.
-    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
-    message.msg_iov = &raw mut iov;
-    message.msg_iovlen = 1;
-    message.msg_control = control.as_mut_ptr().cast();
-    // SAFETY: CMSG_SPACE only computes a size.
-    message.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as _;
-    // SAFETY: the control space holds one header and one descriptor, as
-    // CMSG_SPACE said; the macros point into it.
-    let sent = unsafe {
-        let header = libc::CMSG_FIRSTHDR(&raw const message);
-        (*header).cmsg_level = libc::SOL_SOCKET;
-        (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as _;
-        libc::CMSG_DATA(header).cast::<libc::c_int>().write_unaligned(0);
-        libc::sendmsg(stream.as_raw_fd(), &raw const message, 0)
-    };
-    if sent < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // What the first message did not take goes after it, as a write.
-    let rest = &bytes[sent as usize..];
-    if rest.is_empty() { Ok(()) } else { (&mut &*stream).write_all(rest) }
 }
 
 /// Reads authd's first line on `stream`.

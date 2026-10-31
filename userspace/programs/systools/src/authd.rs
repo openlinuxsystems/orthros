@@ -23,6 +23,12 @@
 //!
 //! authd answers on one thread: each connection sends one request and
 //! has [`REQUEST_TIME`] to send it, and gets one answer.
+//!
+//! It also runs commands as an administrator for elevate(8) (ADR 0219):
+//! for an administrator, after their password unless their terminal
+//! pane typed it in the last 15 minutes, it starts the command as its
+//! own child with the admin set (`elevate::start`), passes it the
+//! signals elevate sends, and tells elevate when it stops and ends.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -35,12 +41,13 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use accounts::hash::{self, Cost};
-use accounts::request::{self, Answer, REQUEST_MAX, Request};
+use accounts::request::{self, Answer, Mode, REQUEST_MAX, Relay, Request};
 use accounts::{Group, Password, Table, User};
 
 use crate::args::Args;
+use crate::elevate::{self, Plan};
 use crate::util::{self, Fail};
-use crate::{signin, sys};
+use crate::{proc, signin, sys};
 
 /// How long a connection has to send its request.
 const REQUEST_TIME: Duration = Duration::from_secs(10);
@@ -113,12 +120,47 @@ struct Client {
     waiting: Option<(Request, Instant)>,
     /// Its answer, and when to send it.
     answer: Option<(Vec<u8>, Instant)>,
-    /// The terminal sent with its request, for a session.
-    terminal: Option<OwnedFd>,
-    /// The first process of the session started for it, whose end it
-    /// waits for.
+    /// The descriptors sent with its request: a session's terminal, or
+    /// an elevated command's three and its pipe.
+    descriptors: Vec<OwnedFd>,
+    /// The first process of the session started for it, or the elevated
+    /// command, whose end it waits for.
     session: Option<i32>,
+    /// The pipe elevate passes signals on through, while its command
+    /// runs, and what came of a line not whole yet.
+    relay: Option<(OwnedFd, Vec<u8>)>,
     done: bool,
+}
+
+/// A terminal pane, as elevate unlocks it: a session's terminal, by the
+/// user who asks, the session, and when its leader started, so that a
+/// later session that gets the same numbers is another pane.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Pane {
+    user: u32,
+    terminal: String,
+    session: u64,
+    leader_started_ns: u64,
+}
+
+impl Pane {
+    /// The pane of the process at the other end of a connection: its
+    /// session's terminal, if it has one, and acts for the user the
+    /// connection gives.
+    fn of(peer: Peer) -> Option<Pane> {
+        let process = proc::process(peer.process).ok()?;
+        let terminal = process.terminal.filter(|t| t != "none")?;
+        if process.user != peer.user {
+            return None;
+        }
+        let leader = proc::process(process.session).ok()?;
+        Some(Pane {
+            user: peer.user,
+            terminal,
+            session: process.session,
+            leader_started_ns: leader.started_ns,
+        })
+    }
 }
 
 /// authd's state.
@@ -128,8 +170,11 @@ struct Authd {
     wrong: HashMap<(String, String), Wrong>,
     /// The names capability Spark gave it, to start sessions with.
     names: Option<u32>,
-    /// The sessions it started that run, by their first process.
+    /// The sessions it started that run, by their first process, and
+    /// the elevated commands.
     sessions: HashMap<i32, Session>,
+    /// The panes elevate is unlocked in, and until when.
+    unlocked: HashMap<Pane, Instant>,
     /// The pipe's read end that SIGCHLD wakes it with.
     children: File,
 }
@@ -150,11 +195,13 @@ extern "C" fn on_child(_: libc::c_int) {
     unsafe { libc::write(CHILDREN.load(Ordering::Relaxed), (&raw const byte).cast(), 1) };
 }
 
-/// A session authd started: whose it is, and on what terminal, for the
-/// audit log.
+/// A session authd started, or an elevated command: whose it is, and on
+/// what terminal, for the audit log.
 struct Session {
     name: String,
     terminal: String,
+    /// Whether it is an elevated command.
+    elevated: bool,
 }
 
 /// How long a connection whose session runs may wait: as long as it
@@ -327,8 +374,9 @@ impl Authd {
                 deadline: now + REQUEST_TIME,
                 waiting: None,
                 answer: None,
-                terminal: None,
+                descriptors: Vec::new(),
                 session: None,
+                relay: None,
                 done: false,
             };
             if held >= CLIENTS_PER_PROCESS {
@@ -352,7 +400,7 @@ impl Authd {
                 client.done = true;
                 return;
             }
-            match signin::receive(&client.stream, &mut buffer, &mut client.terminal) {
+            match signin::receive(&client.stream, &mut buffer, &mut client.descriptors) {
                 Ok(0) => {
                     client.ended = true;
                     let mut bytes = std::mem::take(&mut client.request);
@@ -388,9 +436,14 @@ impl Authd {
     /// before for the account it checks let it.
     fn take(&mut self, i: usize, request: Request, now: Instant) {
         let peer = self.clients[i].peer;
+        let own;
         let checks = match &request {
             Request::Check { name, .. } | Request::Session { name, .. } => Some(name),
             Request::Passwd { name, .. } if !peer.is_root() => Some(name),
+            Request::Elevate { password: Some(_), .. } | Request::Unlock { password: Some(_) } => {
+                own = util::user_name(peer.user);
+                Some(&own)
+            }
             _ => None,
         };
         let turn = checks
@@ -449,6 +502,17 @@ impl Authd {
                     }
                     (answer, at)
                 }
+                Request::Elevate { mode, password, term, directory, language, command } => {
+                    let asked = Elevation { mode: *mode, term, directory, language, command };
+                    self.elevate(i, &files, &asked, password.as_deref(), peer, now)
+                }
+                Request::Unlock { password } => self.unlock(&files, password.as_deref(), peer, now),
+                Request::Forget => {
+                    if let Some(pane) = Pane::of(peer) {
+                        self.unlocked.remove(&pane);
+                    }
+                    (Answer::Done(String::new()), now)
+                }
             },
         };
         request.wipe();
@@ -492,7 +556,7 @@ impl Authd {
                     peer.user,
                     wrong.count
                 );
-                Err((Answer::Refused("the name or the password is wrong".into()), wrong.next))
+                Err((Answer::Refused(request::WRONG_PASSWORD.into()), wrong.next))
             }
             Err(why) => Err((Answer::Refused(why), now)),
         }
@@ -512,11 +576,12 @@ impl Authd {
         peer: Peer,
         now: Instant,
     ) -> (Answer, Instant) {
-        let terminal = self.clients[i].terminal.take();
+        let mut descriptors = std::mem::take(&mut self.clients[i].descriptors);
         if !peer.is_root() {
             let why = "only a sign-in program, which runs as root, starts sessions";
             return (Answer::Refused(why.into()), now);
         }
+        let terminal = (descriptors.len() == 1).then(|| descriptors.remove(0));
         let Some(terminal) = terminal.filter(signin::is_terminal) else {
             return (Answer::Refused("a session request comes with its terminal".into()), now);
         };
@@ -543,7 +608,8 @@ impl Authd {
                     peer.user
                 );
                 let process = process as i32;
-                self.sessions.insert(process, Session { name: name.into(), terminal: tty });
+                let session = Session { name: name.into(), terminal: tty, elevated: false };
+                self.sessions.insert(process, session);
                 self.clients[i].session = Some(process);
                 (Answer::Done(process.to_string()), now)
             }
@@ -559,23 +625,227 @@ impl Authd {
         loop {
             let mut status = 0;
             // SAFETY: waitpid writes the status.
-            let process = unsafe { libc::waitpid(-1, &raw mut status, libc::WNOHANG) };
+            let process =
+                unsafe { libc::waitpid(-1, &raw mut status, libc::WNOHANG | libc::WUNTRACED) };
             if process <= 0 {
                 return;
             }
+            // An elevated command stopped, as Ctrl+Z stops it: elevate
+            // stops too, and asks for it to go on when it does.
+            if libc::WIFSTOPPED(status) {
+                if self.sessions.get(&process).is_some_and(|s| s.elevated) {
+                    let line = request::stopped(libc::WSTOPSIG(status));
+                    for client in self.clients.iter_mut().filter(|c| c.session == Some(process)) {
+                        client.tell(line.as_bytes(), now);
+                    }
+                }
+                continue;
+            }
             if let Some(session) = self.sessions.remove(&process) {
-                audit!(
-                    "{} signed out on {}: session process {process} ended with status {status:#x}",
-                    session.name,
-                    session.terminal
-                );
+                if session.elevated {
+                    audit!(
+                        "{}'s elevated process {process} on {} ended with status {status:#x}",
+                        session.name,
+                        session.terminal
+                    );
+                } else {
+                    audit!(
+                        "{} signed out on {}: session process {process} ended with status \
+                         {status:#x}",
+                        session.name,
+                        session.terminal
+                    );
+                }
             }
             for client in &mut self.clients {
                 if client.session == Some(process) {
                     client.session = None;
-                    client.answer = Some((request::ended(status).into_bytes(), now));
+                    client.relay = None;
+                    client.tell(request::ended(status).as_bytes(), now);
                     client.deadline = now + REQUEST_TIME;
                 }
+            }
+        }
+    }
+
+    /// Checks the password of an elevate or unlock request from `peer`,
+    /// `user`, in `pane`: none is needed in a pane unlocked, or from root;
+    /// otherwise one must come, and be `user`'s. Whether one was typed, or
+    /// the answer to give: `ok password` when one is needed and none came.
+    fn authorize(
+        &mut self,
+        files: &Files,
+        user: &User,
+        pane: Option<&Pane>,
+        password: Option<&[u8]>,
+        peer: Peer,
+        now: Instant,
+    ) -> Result<bool, (Answer, Instant)> {
+        let open = pane.and_then(|p| self.unlocked.get(p)).is_some_and(|&until| until > now);
+        if open || peer.is_root() {
+            return Ok(false);
+        }
+        let Some(password) = password else {
+            return Err((Answer::Done(request::NEEDS_PASSWORD.into()), now));
+        };
+        self.check_password(files, &user.name, password, peer, now)?;
+        Ok(true)
+    }
+
+    /// Runs `asked` as an administrator for `peer`, client `i`, with the
+    /// descriptors it sent: an administrator's to ask, with their
+    /// password unless their pane is unlocked. The client then waits for
+    /// the command's end, and passes signals on through its pipe.
+    fn elevate(
+        &mut self,
+        i: usize,
+        files: &Files,
+        asked: &Elevation<'_>,
+        password: Option<&[u8]>,
+        peer: Peer,
+        now: Instant,
+    ) -> (Answer, Instant) {
+        let mut descriptors = std::mem::take(&mut self.clients[i].descriptors);
+        let pane = Pane::of(peer);
+        let terminal = pane.as_ref().map_or_else(|| "no terminal".into(), |p| p.terminal.clone());
+        let user = match administrator(files, peer) {
+            Ok(user) => user.clone(),
+            Err(why) => {
+                audit!(
+                    "{}, not an administrator, asked to elevate on {terminal}: {}, for process {}",
+                    util::user_name(peer.user),
+                    elevate::shown_command(asked.command),
+                    peer.process
+                );
+                return (Answer::Refused(why), now);
+            }
+        };
+        let root = elevate::root_account(files.users.entries().cloned());
+        let plan: Plan = match elevate::plan(asked.mode, asked.command, asked.directory, &root) {
+            Ok(plan) => plan,
+            Err(why) => return (Answer::Refused(why), now),
+        };
+        if descriptors.len() != 4 {
+            let why = "an elevate request comes with the command's three descriptors and a pipe";
+            return (Answer::Refused(why.into()), now);
+        }
+        let typed = match self.authorize(files, &user, pane.as_ref(), password, peer, now) {
+            Ok(typed) => typed,
+            Err(answer) => return answer,
+        };
+        let relay = descriptors.pop();
+        let env = elevate::environment(&root, &user, asked.term, asked.language, &plan.shown);
+        let process = match elevate::start(&descriptors, &plan, &env) {
+            Ok(process) => process as i32,
+            Err(why) => return (Answer::Refused(why), now),
+        };
+        if let Some(pane) = pane {
+            self.unlocked.insert(pane, now + elevate::UNLOCKED_FOR);
+        }
+        let how = if typed { "password typed" } else { "unlocked" };
+        audit!(
+            "{} elevated on {terminal} ({how}): process {process} runs {}, for process {}",
+            user.name,
+            plan.shown,
+            peer.process
+        );
+        let session = Session { name: user.name, terminal, elevated: true };
+        self.sessions.insert(process, session);
+        let client = &mut self.clients[i];
+        client.session = Some(process);
+        client.relay = relay.map(|fd| {
+            // SAFETY: making our own descriptor not wait.
+            unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+            (fd, Vec::new())
+        });
+        (Answer::Done(process.to_string()), now)
+    }
+
+    /// Unlocks elevate in `peer`'s pane for 15 minutes, or 15 more.
+    fn unlock(
+        &mut self,
+        files: &Files,
+        password: Option<&[u8]>,
+        peer: Peer,
+        now: Instant,
+    ) -> (Answer, Instant) {
+        let user = match administrator(files, peer) {
+            Ok(user) => user.clone(),
+            Err(why) => return (Answer::Refused(why), now),
+        };
+        let Some(pane) = Pane::of(peer) else {
+            let why = "elevate unlocks a terminal pane, and this program has no terminal";
+            return (Answer::Refused(why.into()), now);
+        };
+        match self.authorize(files, &user, Some(&pane), password, peer, now) {
+            Ok(typed) => {
+                if typed {
+                    audit!(
+                        "{} unlocked elevate on {} for 15 minutes, for process {}",
+                        user.name,
+                        pane.terminal,
+                        peer.process
+                    );
+                }
+                self.unlocked.insert(pane, now + elevate::UNLOCKED_FOR);
+                (Answer::Done(String::new()), now)
+            }
+            Err(answer) => answer,
+        }
+    }
+
+    /// Reads what elevate wrote to client `i`'s pipe, and passes on the
+    /// signals it asks for to the command and those it started, its
+    /// process group. The pipe's end is elevate's end: the command is
+    /// then hung up.
+    fn relay(&mut self, i: usize) {
+        let client = &mut self.clients[i];
+        let Some(process) = client.session else { return };
+        let Some((fd, pending)) = &mut client.relay else { return };
+        let mut buffer = [0u8; 256];
+        let mut gone = false;
+        loop {
+            // SAFETY: reads into our buffer.
+            let n = unsafe { libc::read(fd.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
+            if n > 0 {
+                pending.extend_from_slice(&buffer[..n as usize]);
+                // Nothing elevate writes is this long without a newline.
+                if pending.len() > 1024 {
+                    pending.clear();
+                }
+                continue;
+            }
+            let error = io::Error::last_os_error();
+            match error.kind() {
+                _ if n == 0 => gone = true,
+                io::ErrorKind::Interrupted => continue,
+                io::ErrorKind::WouldBlock => {}
+                _ => gone = true,
+            }
+            break;
+        }
+        while let Some(end) = pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = pending.drain(..=end).collect();
+            match Relay::decode(&String::from_utf8_lossy(&line[..end])) {
+                Some(Relay::Signal(signal)) => signal_command(process, signal),
+                Some(Relay::Continue) => signal_command(process, libc::SIGCONT),
+                None => {}
+            }
+        }
+        if gone {
+            client.relay = None;
+            signal_command(process, libc::SIGHUP);
+        }
+    }
+
+    /// Hangs up the elevated commands whose elevate went away before they
+    /// ended, as a closed terminal would.
+    fn hang_up_orphans(&self) {
+        for client in self.clients.iter().filter(|c| c.done) {
+            if let Some(process) = client.session
+                && self.sessions.get(&process).is_some_and(|s| s.elevated)
+            {
+                signal_command(process, libc::SIGHUP);
             }
         }
     }
@@ -646,6 +916,44 @@ impl Authd {
     }
 }
 
+/// What an `elevate` request asks to run.
+struct Elevation<'a> {
+    mode: Mode,
+    term: &'a str,
+    directory: &'a [u8],
+    language: &'a [String],
+    command: &'a [Vec<u8>],
+}
+
+/// The account of `peer`, if it is an administrator's, or why not.
+fn administrator(files: &Files, peer: Peer) -> Result<&User, String> {
+    let user = files
+        .users
+        .entries()
+        .find(|u| u.uid == peer.user)
+        .ok_or_else(|| format!("user {} has no account", peer.user))?;
+    if !accounts::is_admin(user, &files.groups) {
+        return Err(format!(
+            "{} is not an administrator: only members of the {} group may elevate",
+            user.name,
+            accounts::ADMINS
+        ));
+    }
+    Ok(user)
+}
+
+/// Sends `signal` to the elevated command `process` and those it
+/// started, its process group, as a terminal does; to it alone if it
+/// left its group.
+fn signal_command(process: i32, signal: libc::c_int) {
+    // SAFETY: kill only sends a signal, to authd's own child's group.
+    unsafe {
+        if libc::kill(-process, signal) != 0 {
+            libc::kill(process, signal);
+        }
+    }
+}
+
 /// A hash of nothing anyone types, at the cost of every password's,
 /// checked for a name with no account: `"\0no account"` with a salt of
 /// sixteen 0x5a bytes, at `Cost::DEFAULT`, which a test checks.
@@ -698,6 +1006,15 @@ fn add(
 }
 
 impl Client {
+    /// Has it get `line` after what it is to get already, as soon as it
+    /// can.
+    fn tell(&mut self, line: &[u8], now: Instant) {
+        match &mut self.answer {
+            Some((bytes, _)) => bytes.extend_from_slice(line),
+            None => self.answer = Some((line.to_vec(), now)),
+        }
+    }
+
     /// Has it get `answer` at `at`, then close.
     fn answer(&mut self, answer: &Answer, at: Instant, now: Instant) {
         self.waiting = None;
@@ -758,11 +1075,13 @@ impl Authd {
                 client.send(now);
             }
             self.wrong.retain(|_, wrong| now.saturating_duration_since(wrong.next) < FORGET);
+            self.unlocked.retain(|_, until| *until > now);
             for client in &mut self.clients {
                 if client.deadline <= now {
                     client.done = true;
                 }
             }
+            self.hang_up_orphans();
             self.clients.retain(|c| !c.done);
             let listening = self.clients.len() < CLIENTS_MAX;
             let mut fds = vec![
@@ -783,6 +1102,13 @@ impl Authd {
                     events: read | if due { libc::POLLOUT } else { 0 },
                     revents: 0,
                 });
+            }
+            // Then the pipes of the elevated commands' elevates.
+            let relays: Vec<usize> =
+                (0..self.clients.len()).filter(|&i| self.clients[i].relay.is_some()).collect();
+            for &i in &relays {
+                let fd = self.clients[i].relay.as_ref().map_or(-1, |(fd, _)| fd.as_raw_fd());
+                fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
             }
             let next = self
                 .clients
@@ -812,12 +1138,18 @@ impl Authd {
             if fds[1].revents != 0 {
                 self.reap(now);
             }
-            for (i, entry) in fds[2..].iter().enumerate() {
+            let count = self.clients.len();
+            for (i, entry) in fds[2..2 + count].iter().enumerate() {
                 if entry.revents & libc::POLLOUT != 0 {
                     self.clients[i].send(now);
                 }
                 if entry.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
                     self.read(i, now);
+                }
+            }
+            for (&i, entry) in relays.iter().zip(&fds[2 + count..]) {
+                if entry.revents != 0 {
+                    self.relay(i);
                 }
             }
             if fds[0].revents != 0 {
@@ -828,7 +1160,8 @@ impl Authd {
 }
 
 /// Has SIGCHLD write to a pipe, whose read end it returns, so that the
-/// loop wakes when a session's first process ends.
+/// loop wakes when a session's first process or an elevated command ends
+/// or stops.
 fn watch_children() -> io::Result<File> {
     let mut fds = [0; 2];
     // SAFETY: pipe2 writes two descriptors.
@@ -841,7 +1174,9 @@ fn watch_children() -> io::Result<File> {
     unsafe {
         let mut action: libc::sigaction = util::zeroed();
         action.sa_sigaction = on_child as extern "C" fn(libc::c_int) as *const () as usize;
-        action.sa_flags = libc::SA_RESTART | libc::SA_NOCLDSTOP;
+        // A stopped child wakes it too: an elevated command's elevate is
+        // told.
+        action.sa_flags = libc::SA_RESTART;
         libc::sigaction(libc::SIGCHLD, &raw const action, std::ptr::null_mut());
         Ok(File::from_raw_fd(fds[0]))
     }
@@ -915,6 +1250,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         wrong: HashMap::new(),
         names,
         sessions: HashMap::new(),
+        unlocked: HashMap::new(),
         children,
     };
     authd.run_loop().map_err(|e| util::failed(&"authd", e))?;

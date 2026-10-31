@@ -41,9 +41,10 @@ interfaces and sockets from *radix-sysfs*(5) and *radix-proc*(5), and
 *shutdown*(8), *reboot*(8), *poweroff*(8), *halt*(8) and *service*(8)
 ask Spark over its control socket (*spark*(8)); *authd*(8) keeps the
 accounts, which *user*(8) makes and lists and whose passwords
-*passwd*(1) changes, and starts the sessions of those who sign in with
-*login*(1). The user columns show the user each process acts
-for (*radix-names*(2)).
+*passwd*(1) changes, starts the sessions of those who sign in with
+*login*(1), and runs the commands an administrator runs with
+*elevate*(8), or *sudo*(8), as root. The user columns show the user each
+process acts for (*radix-names*(2)).
 
 A mistake in the command line makes a tool fail with exit status 2 (1
 for those whose Linux versions use 1), after a message on standard
@@ -75,6 +76,8 @@ error that starts with the tool's name.
 :  set the embedded controller's fans, fan curves, LEDs and ARGB header
 |  *eject*(1)
 :  unmount a volume so that its disk can be pulled out
+|  *elevate*(8)
+:  run a command as an administrator
 |  *findmnt*(8)
 :  the mounts, as a tree, or the one sought
 |  *fstrim*(8)
@@ -157,6 +160,8 @@ error that starts with the tool's name.
 :  read and check every block of a Btrfs filesystem
 |  *subvolume*(8)
 :  make, snapshot and remove Btrfs subvolumes
+|  *sudo*(8)
+:  *elevate*(8) by sudo's name
 |  *swapon*(8), *swapoff*(8)
 :  turn swap areas on and off, and list them
 |  *taskset*(1)
