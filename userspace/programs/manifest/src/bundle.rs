@@ -939,7 +939,10 @@ fn check_url(url: &str) -> Result<(), String> {
     }
 }
 
-fn check_bundle_path(path: &str) -> Result<(), String> {
+/// Checks that `path` names a file inside a bundle: relative, without `.`,
+/// `..`, empty parts, backslashes or control characters, so that it cannot
+/// climb out of the folder a bundle is unpacked into.
+pub fn check_bundle_path(path: &str) -> Result<(), String> {
     let fits = !path.is_empty()
         && !path.starts_with('/')
         && !path.contains('\\')
