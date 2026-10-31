@@ -192,7 +192,7 @@ const NTFS_WRITE_DISKS: &[Disk] = &[
 /// clusters in use, `ntfsfix -n` finds `$MFTMirr` matching `$MFT`, and
 /// the volume is not left marked dirty, since the program syncs what it
 /// wrote (ADR 0237).
-fn ntfs_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
+pub(super) fn ntfs_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
     let image = disk.path.display();
     let mut resize = std::process::Command::new(fat_tool("ntfsresize"));
     let info = host_tool(resize.env("LC_ALL", "C").args(["-i", "-f", "-n"]).arg(&disk.path))
