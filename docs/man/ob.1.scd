@@ -448,10 +448,11 @@ _target/userspace/_).
 		on twice and that the disk refuses writes, fill 384 MiB with a
 		pattern and read it all back, fork a child that checks half of
 		it and changes a quarter while the parent's stays, and turn the
-		area off with *swapoff*(8) while some of the 64 MiB it keeps is
-		still on it, all without the out-of-memory policy stopping a
-		domain. The area's header must be as *mkswap* made it after the
-		boot.
+		area off with *swapoff*(8) while some of what it keeps is still
+		on it: the first 16 MiB, or as much of them as half the memory
+		left free has room for. All without the out-of-memory policy
+		stopping a domain. The area's header must be as *mkswap* made
+		it after the boot.
 
 	*spark-stop*
 		Point Spark at three test services: _stubborn_ ignores SIGTERM,
