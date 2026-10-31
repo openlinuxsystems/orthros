@@ -9,6 +9,13 @@ Each file records one decision: its context, what was decided and what
 follows from it. See [0001](0001-record-architecture-decisions.md) for why,
 and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 
+The table below stops at the records made before 2026-11-01. A new record
+gets no row here: the files' names list every record in order, and
+`./ob docs` writes the whole table, from the files' titles and statuses,
+to `out/docs/adr/index.md` (and fails if two records take one number).
+Phases built in parallel added rows at the same place in this table, and
+their pull requests conflicted.
+
 | Number | Decision | Status |
 | --- | --- | --- |
 | [0000](0000-template.md) | Template | |
