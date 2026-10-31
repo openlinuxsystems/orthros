@@ -172,6 +172,46 @@ impl Runs {
         Ok(freed)
     }
 
+    /// Replaces clusters `vcn..vcn + len`, which the runs cover, with
+    /// `with`: runs of `(lcn, clusters)` ([`HOLE`] for a hole) that cover
+    /// `len` clusters between them. Returns those of the old runs there
+    /// that were on the disk, whose clusters are free now.
+    pub fn replace(&mut self, vcn: u64, len: u64, with: &[(u64, u64)]) -> Result<KVec<Run>> {
+        let end = vcn.checked_add(len).ok_or(Error::Corrupt)?;
+        if end > self.clusters() || with.iter().map(|&(_, n)| n).sum::<u64>() != len {
+            return Err(Error::Corrupt);
+        }
+        let mut out = Runs { runs: mem::vec_with_capacity(self.runs.len() + with.len() + 1)? };
+        let mut freed = mem::vec();
+        for run in &self.runs {
+            if run.vcn >= vcn {
+                break;
+            }
+            out.push(Run { vcn: run.vcn, len: run.len.min(vcn - run.vcn), lcn: run.lcn })?;
+        }
+        let mut at = vcn;
+        for &(lcn, n) in with {
+            if n != 0 {
+                out.push(Run { vcn: at, len: n, lcn })?;
+                at += n;
+            }
+        }
+        for run in &self.runs {
+            let run_end = run.vcn + run.len;
+            let (from, to) = (run.vcn.max(vcn), run_end.min(end));
+            if from < to && run.lcn != HOLE {
+                mem::push(&mut freed, Run { vcn: from, len: to - from, lcn: run.lcn + (from - run.vcn) })?;
+            }
+            if run_end > end {
+                let skip = end.saturating_sub(run.vcn);
+                let lcn = if run.lcn == HOLE { HOLE } else { run.lcn + skip };
+                out.push(Run { vcn: run.vcn + skip, len: run.len - skip, lcn })?;
+            }
+        }
+        *self = out;
+        Ok(freed)
+    }
+
     /// The packed run list of the runs from VCN `from` to `to` (not
     /// included), which must start and end on runs' edges or within
     /// them, as a record holds it, with its end byte.

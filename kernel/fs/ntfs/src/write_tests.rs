@@ -23,6 +23,7 @@ use radix_vfs::mem::{self, KArc};
 use radix_vfs::{Access, Error, FileSystem, Kind, NodeRef, Slice};
 
 use crate::NtfsFs;
+use crate::node::NtfsNode;
 use crate::tests::{
     Image, SIZES, VOLUMES, names, pattern, read_all, run, scratch, test_names, tool, walk,
 };
@@ -485,28 +486,83 @@ fn what_radix_must_not_change_mounts_read_only() {
     assert!(kept.fs.kept_from_writing().is_some_and(|why| why.contains("journal")));
 }
 
+/// Writes `data` at `at` into the file at `path` under `root`, and checks
+/// that it reads back so; `expected` keeps what each file holds.
+fn changed(
+    root: &NodeRef,
+    expected: &mut BTreeMap<String, Vec<u8>>,
+    path: &str,
+    at: usize,
+    data: &[u8],
+) -> NodeRef {
+    let node = walk(root, path).unwrap();
+    let mut now = expected.remove(path).unwrap_or_else(|| read_all(&node));
+    write_all(&node, at as u64, data);
+    if now.len() < at + data.len() {
+        now.resize(at + data.len(), 0);
+    }
+    now[at..at + data.len()].copy_from_slice(data);
+    assert!(read_all(&node) == now, "{path}: reads back otherwise");
+    expected.insert(String::from(path), now);
+    node
+}
+
 #[test]
 fn what_ntfs_3g_wrote_is_written_to() {
     let image = crate::tests::ntfs_3g();
     let volume = Volume::new_in(512, &image);
     let root = volume.root();
-    // Compressed files are not written yet (ADR 0237); plain ones are,
-    // in the same directories.
-    let compressed = walk(&root, "compressed/text.txt").unwrap();
-    assert_eq!(compressed.write(0, &Slice(b"x")).err(), Some(Error::NotSupported));
-    // Nor files whose record overflows into others.
+    let mut expected: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut change = |path: &str, at: usize, data: &[u8]| {
+        changed(&root, &mut expected, path, at, data)
+    };
+    // Compressed files, a unit (8 KiB here) at a time: into the middle of
+    // text that compresses, over noise that does not, and into the zeros
+    // of a unit left a hole; and past their ends.
+    let text = change("compressed/text.txt", 50_000, b"changed in the middle of a unit");
+    change("compressed/text.txt", 8192, &pattern(9, 8192));
+    let size = read_all(&text).len();
+    change("compressed/text.txt", size + 3000, b"past the end, after zeros");
+    change("compressed/random.bin", 100, &[0u8; 3000]);
+    change("compressed/mixed.bin", 12_000, b"in the hole");
+    change("compressed/mixed.bin", 40_000, &crate::tests::text()[..5000]);
+    // A sparse file: into its hole, and past its end, where a hole grows.
+    change("sparse.bin", 1 << 20, b"in the hole");
+    change("sparse.bin", (8 << 20) + 5, b"far past the end");
+    drop(change);
+    // Cut inside a unit, and grown again: what was past the cut is zeros.
+    let mixed = walk(&root, "compressed/mixed.bin").unwrap();
+    mixed.set_size(12_005).unwrap();
+    mixed.set_size(30_000).unwrap();
+    let mut now = expected["compressed/mixed.bin"][..12_005].to_vec();
+    now.resize(30_000, 0);
+    assert!(read_all(&mixed) == now);
+    expected.insert(String::from("compressed/mixed.bin"), now);
+    // What is made in the directory marked compressed is compressed.
+    let dir = walk(&root, "compressed").unwrap();
+    let made = crate::tests::text();
+    let new = make_file(&dir, "new.txt", &made, 3000);
+    let small = make_file(&dir, "small.txt", b"small, in its record", usize::MAX);
+    expected.insert(String::from("compressed/new.txt"), made.clone());
+    expected.insert(String::from("compressed/small.txt"), b"small, in its record".to_vec());
+    // Files whose record overflows into others are not written yet.
     let linked = walk(&root, "linked.txt").unwrap();
     assert_eq!(linked.write(0, &Slice(b"x")).err(), Some(Error::NotSupported));
-    drop(linked);
-    let data = pattern(5, 20_000);
-    let dir = walk(&root, "compressed").unwrap();
-    make_file(&dir, "plain.bin", &data, usize::MAX);
-    drop((root, dir, compressed));
+    drop((root, dir, text, mixed, new, small, linked));
+    let volume = volume.remount();
+    let new = walk(&volume.root(), "compressed/new.txt").unwrap();
+    assert!(read_all(&new) == made);
+    assert!(new.stat().allocated < made.len() as u64 / 4, "new.txt is not compressed");
+    let sparse = walk(&volume.root(), "sparse.bin").unwrap();
+    assert!(sparse.stat().allocated < 1 << 20, "sparse.bin lost its holes");
+    drop((new, sparse));
     let written = volume.image();
     ntfs_3g_check(&written);
     let seen = sleuthkit_files(&written);
-    assert!(seen["compressed/plain.bin"] == data);
-    assert!(seen.contains_key("compressed/text.txt"));
+    for (path, data) in &expected {
+        assert!(seen[path] == *data, "{path}: The Sleuth Kit reads other bytes");
+        assert!(ntfscat(&written, &format!("/{path}")) == *data, "{path}: ntfs-3g reads other bytes");
+    }
 }
 
 /// What a step of [`random_changes_read_back`] does.
@@ -542,11 +598,20 @@ fn step() -> impl Strategy<Value = Step> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 12, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
     #[test]
-    fn random_changes_read_back(steps in proptest::collection::vec(step(), 1..60)) {
+    fn random_changes_read_back(
+        steps in proptest::collection::vec(step(), 1..60),
+        compressed: bool,
+    ) {
         let image = Image::mkntfs(16, 512, 1024);
         let volume = Volume::new_in(512, &image.bytes());
+        // Half the time, in a root marked compressed: what is made in it is
+        // compressed, 16 clusters at a time.
+        if compressed {
+            let root = volume.root();
+            radix_vfs::downcast::<NtfsNode>(&*root).unwrap().mark_compressed().unwrap();
+        }
         // The directories made, by path ("" the root), and the files, by
         // path, with what they hold.
         let mut dirs = vec![String::new()];

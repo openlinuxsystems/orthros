@@ -408,6 +408,44 @@ fn run_lists_pack_as_they_read() {
     assert_eq!(&runs.pack(0, 137).unwrap()[..], &[0x12, 0x89, 0x00, 0x10, 0x00][..]);
 }
 
+#[test]
+fn runs_are_replaced_in_place() {
+    use crate::runs::{HOLE, Run, Runs};
+    let mut runs = Runs::new();
+    runs.append(100, 16).unwrap();
+    runs.append(HOLE, 16).unwrap();
+    runs.append(500, 16).unwrap();
+    // A unit stored in fewer clusters, across the first run's end.
+    let freed = runs.replace(8, 16, &[(900, 4), (HOLE, 12)]).unwrap();
+    assert_eq!(&freed[..], &[Run { vcn: 8, len: 8, lcn: 108 }][..]);
+    assert_eq!(
+        runs.as_slice(),
+        &[
+            Run { vcn: 0, len: 8, lcn: 100 },
+            Run { vcn: 8, len: 4, lcn: 900 },
+            Run { vcn: 12, len: 20, lcn: HOLE },
+            Run { vcn: 32, len: 16, lcn: 500 },
+        ][..]
+    );
+    // A hole filled where its neighbours are on the disk joins them.
+    let mut runs = Runs::new();
+    runs.append(100, 4).unwrap();
+    runs.append(HOLE, 4).unwrap();
+    runs.append(108, 4).unwrap();
+    assert!(runs.replace(4, 4, &[(104, 4)]).unwrap().is_empty());
+    assert_eq!(runs.as_slice(), &[Run { vcn: 0, len: 12, lcn: 100 }][..]);
+    // The middle of a run, and the whole list.
+    let freed = runs.replace(5, 2, &[(HOLE, 2)]).unwrap();
+    assert_eq!(&freed[..], &[Run { vcn: 5, len: 2, lcn: 105 }][..]);
+    assert_eq!(runs.allocated_in(0, 12), 10);
+    let freed = runs.replace(0, 12, &[(7, 12)]).unwrap();
+    assert_eq!(freed.iter().map(|r| r.len).sum::<u64>(), 10);
+    assert_eq!(runs.as_slice(), &[Run { vcn: 0, len: 12, lcn: 7 }][..]);
+    // Past the end, or not covering what it replaces.
+    assert!(runs.replace(8, 8, &[(HOLE, 8)]).is_err());
+    assert!(runs.replace(0, 4, &[(HOLE, 3)]).is_err());
+}
+
 proptest! {
     #[test]
     fn any_names_in_and_out(

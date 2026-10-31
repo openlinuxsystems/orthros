@@ -23,7 +23,7 @@
 use radix_vfs::mem::{self, KVec};
 use radix_vfs::{Error, Result};
 
-use crate::record::{STRIDE, kind, u16_at, u32_at};
+use crate::record::{STRIDE, attr_flags, kind, u16_at, u32_at};
 
 pub(crate) fn put_u16(b: &mut [u8], at: usize, v: u16) {
     b[at..at + 2].copy_from_slice(&v.to_le_bytes());
@@ -269,13 +269,24 @@ pub struct Sizes {
     pub size: u64,
     /// How much of it was written.
     pub initialized: u64,
+    /// For compressed or sparse data: the bytes of its clusters on the
+    /// disk, holes left out.
+    pub compressed: u64,
+    /// For compressed or sparse data: its compression unit, the log2 of
+    /// its clusters.
+    pub unit: u8,
+    /// Whether it is compressed or sparse
+    /// ([`crate::record::attr_flags`]), which data that was resident did
+    /// not say.
+    pub packed: u16,
 }
 
 /// The bytes of a non-resident attribute of type `kind`, named `name`
 /// (UTF-16 bytes), instance `instance` and flags `flags`, from VCN
 /// `lowest` to `highest`, whose packed run list is `runs`
 /// ([`crate::runs::Runs::pack`]); its sizes are `sizes` in a first piece
-/// (`lowest` 0) and 0 in the others, as Windows writes them.
+/// (`lowest` 0) and 0 in the others, as Windows writes them. Compressed
+/// or sparse data's header is 8 bytes longer, for the bytes on the disk.
 #[allow(clippy::too_many_arguments)]
 pub fn non_resident(
     kind: u32,
@@ -287,25 +298,33 @@ pub fn non_resident(
     runs: &[u8],
     sizes: Sizes,
 ) -> Result<KVec<u8>> {
-    let runs_at = (0x40 + name.len()).next_multiple_of(8);
+    let packed = flags & (attr_flags::COMPRESSED | attr_flags::SPARSE) != 0;
+    let header = if packed { 0x48 } else { 0x40 };
+    let runs_at = (header + name.len()).next_multiple_of(8);
     let len = (runs_at + runs.len()).next_multiple_of(8);
     let mut a = crate::fs::zeroed(len)?;
     put_u32(&mut a, 0, kind);
     put_u32(&mut a, 4, len as u32);
     a[8] = 1;
     a[9] = (name.len() / 2) as u8;
-    put_u16(&mut a, 0x0a, 0x40);
+    put_u16(&mut a, 0x0a, header as u16);
     put_u16(&mut a, 0x0c, flags);
     put_u16(&mut a, 0x0e, instance);
     put_u64(&mut a, 0x10, lowest);
     put_u64(&mut a, 0x18, highest);
     put_u16(&mut a, 0x20, runs_at as u16);
+    if packed {
+        a[0x22] = sizes.unit;
+    }
     if lowest == 0 {
         put_u64(&mut a, 0x28, sizes.allocated);
         put_u64(&mut a, 0x30, sizes.size);
         put_u64(&mut a, 0x38, sizes.initialized);
+        if packed {
+            put_u64(&mut a, 0x40, sizes.compressed);
+        }
     }
-    a[0x40..0x40 + name.len()].copy_from_slice(name);
+    a[header..header + name.len()].copy_from_slice(name);
     a[runs_at..runs_at + runs.len()].copy_from_slice(runs);
     Ok(a)
 }

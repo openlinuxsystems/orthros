@@ -79,6 +79,14 @@ const MAX_INTERIX: u64 = 4096;
 /// Windows makes.
 const MAX_UNIT: u64 = 64 << 10;
 
+/// The largest cluster of a compressed file Radix writes: Windows
+/// compresses only on volumes of clusters of 4 KiB or less.
+const MAX_COMPRESS_CLUSTER: u64 = 4096;
+
+/// The compression unit of the files Radix compresses, as Windows'
+/// are: 16 clusters.
+const UNIT: u8 = 4;
+
 /// The deepest a link's directory may be below the root.
 const MAX_DEPTH: usize = 256;
 
@@ -269,7 +277,10 @@ impl NtfsNode {
                             return Err(Error::Corrupt);
                         }
                         allocated = stream.runs.allocated_in(0, stream.runs.clusters()) * cs;
-                        if stream.flags != 0 {
+                        // Compressed and sparse data are written a unit
+                        // at a time; encrypted data is not.
+                        let known = attr_flags::COMPRESSED | attr_flags::SPARSE;
+                        if stream.flags & !known != 0 || (compressed && cs > MAX_COMPRESS_CLUSTER) {
                             fixed = Some(Error::NotSupported);
                         }
                         if stream.flags & attr_flags::ENCRYPTED != 0 {
@@ -433,6 +444,17 @@ impl NtfsNode {
         }
     }
 
+    /// Marks this directory compressed, as Windows' Properties do, so
+    /// that what is made in it is compressed.
+    #[cfg(test)]
+    pub(crate) fn mark_compressed(&self) -> Result<()> {
+        self.writable()?;
+        self.fs.changing()?;
+        self.state.lock().info.attributes |= attributes::COMPRESSED;
+        self.changed();
+        Ok(())
+    }
+
     /// Notes that its data changed: Windows' archive bit goes on.
     fn data_changed(&self) {
         {
@@ -484,6 +506,11 @@ impl NtfsNode {
     fn dup(&self, st: &State, size: u64) -> Dup {
         let cs = u64::from(self.fs.vol.geo.cluster_size);
         let (allocated, size) = match (&st.data, &st.fixed) {
+            // Compressed and sparse data: what its clusters on the disk
+            // hold, as ntfs-3g puts it.
+            (Some(Data::Clusters(s)), None) if s.packed() => {
+                (s.runs.allocated_in(0, s.runs.clusters()) * cs, size)
+            }
             (Some(Data::Clusters(s)), None) => (s.runs.clusters() * cs, size),
             (Some(Data::Resident(b)), None) => ((b.len() as u64).next_multiple_of(8), size),
             (Some(_), _) => (st.allocated, size),
@@ -520,6 +547,9 @@ impl NtfsNode {
                     allocated: clusters * cs,
                     size,
                     initialized: stream.initialized.min(size),
+                    compressed: stream.runs.allocated_in(0, clusters) * cs,
+                    unit: stream.unit,
+                    packed: stream.flags,
                 };
                 replace_stream(buf, kind::DATA, &stream.runs, clusters, sizes)
             }
@@ -602,6 +632,9 @@ impl NtfsNode {
         let geo = &self.fs.vol.geo;
         let cs = u64::from(geo.cluster_size);
         let Some(Data::Resident(bytes)) = &st.data else { return Err(Error::Corrupt) };
+        if st.info.attributes & attributes::COMPRESSED != 0 && cs <= MAX_COMPRESS_CLUSTER {
+            return self.to_units(st, size);
+        }
         let need = size.max(bytes.len() as u64).div_ceil(cs);
         let got = self.fs.take_clusters(need, None)?;
         let mut runs = Runs::new();
@@ -630,6 +663,89 @@ impl NtfsNode {
                 Err(err)
             }
         }
+    }
+
+    /// Fails with [`Error::NoSpace`] if its record has no room for where
+    /// the clusters of its data `stream` are.
+    fn runs_fit(&self, stream: &Stream) -> Result<()> {
+        let buf = self.read_rec()?;
+        let at = edit::find(&buf, kind::DATA, &[]).ok_or(Error::Corrupt)?;
+        let packed = stream.runs.pack(0, stream.runs.clusters())?;
+        let header = if stream.packed() { 0x48 } else { 0x40 };
+        let len = (header + packed.len()).next_multiple_of(8);
+        let old = u32_at(&buf, at + 4) as usize;
+        if edit::used(&buf) - old + len > buf.len() { Err(Error::NoSpace) } else { Ok(()) }
+    }
+
+    /// Gives the holes of the sparse `stream` that bytes `from..to` fall
+    /// in clusters, of zeros, a compression unit's at a time as Windows
+    /// fills them.
+    fn fill_holes(&self, stream: &mut Stream, from: u64, to: u64) -> Result<()> {
+        let cs = u64::from(self.fs.vol.geo.cluster_size);
+        let grain = stream.grain();
+        let end = to.div_ceil(cs).next_multiple_of(grain).min(stream.runs.clusters());
+        let mut vcn = from / cs / grain * grain;
+        while vcn < end {
+            let (lcn, n) = stream.runs.map(vcn).ok_or(Error::Corrupt)?;
+            let n = n.min(end - vcn);
+            if lcn != HOLE {
+                vcn += n;
+                continue;
+            }
+            let near = vcn.checked_sub(1).and_then(|v| stream.runs.map(v));
+            let near = near.and_then(|(l, _)| (l != HOLE).then(|| l + 1));
+            let got = self.fs.take_clusters(n, near)?;
+            let give_back = |got: &[(u64, u64)]| {
+                for &(lcn, n) in got {
+                    let _ = self.fs.give_clusters(lcn, n, false);
+                }
+            };
+            let filled = (|| {
+                write_clusters(&self.fs, &got, &zeroed((n * cs) as usize)?)?;
+                stream.runs.replace(vcn, n, &got)?;
+                Ok(())
+            })();
+            if let Err(err) = filled {
+                give_back(&got);
+                return Err(err);
+            }
+            if let Err(err) = self.runs_fit(stream) {
+                let _ = stream.runs.replace(vcn, n, &[(HOLE, n)]);
+                give_back(&got);
+                return Err(err);
+            }
+            vcn += n;
+        }
+        Ok(())
+    }
+
+    /// [`Self::to_clusters`] for a file marked compressed: its data becomes
+    /// compressed, a unit of holes at a time, and its bytes are written to
+    /// the first.
+    fn to_units(&self, st: &mut State, size: u64) -> Result<()> {
+        let cs = u64::from(self.fs.vol.geo.cluster_size);
+        let Some(Data::Resident(bytes)) = &st.data else { return Err(Error::Corrupt) };
+        let per_unit = 1u64 << UNIT;
+        let clusters = size.max(bytes.len() as u64).div_ceil(cs).next_multiple_of(per_unit);
+        let mut stream = Stream {
+            runs: Runs::new(),
+            size: bytes.len() as u64,
+            initialized: 0,
+            flags: attr_flags::COMPRESSED,
+            unit: UNIT,
+        };
+        stream.runs.append(HOLE, clusters)?;
+        if !bytes.is_empty() {
+            let mut plain = zeroed((per_unit * cs) as usize)?;
+            plain[..bytes.len()].copy_from_slice(bytes);
+            let mut packed = zeroed((per_unit * cs) as usize)?;
+            let mut matcher = lznt1::Matcher::new()?;
+            FileBacking(self).store_unit(&mut stream, 0, &plain, &mut packed, &mut matcher)?;
+        }
+        stream.initialized = stream.size;
+        st.data = Some(Data::Clusters(stream));
+        st.behind();
+        Ok(())
     }
 
     /// Makes room for `need` more bytes in its record `buf`, for a name:
@@ -695,6 +811,26 @@ fn write_bytes(fs: &Inner, stream: &Stream, bytes: &[u8]) -> Result<()> {
         at += n;
     }
     Ok(())
+}
+
+/// Writes `bytes` to the clusters `got` (runs of `(lcn, clusters)`), in
+/// order, straight to the disk.
+fn write_clusters(fs: &Inner, got: &[(u64, u64)], bytes: &[u8]) -> Result<()> {
+    let mut runs = Runs::new();
+    for &(lcn, n) in got {
+        runs.append(lcn, n)?;
+    }
+    write_bytes(fs, &Stream { runs, ..Stream::new() }, bytes)
+}
+
+/// Reads `buf.len()` bytes of a file's data from cluster `lcn` on, through
+/// the block cache, which keeps none of it: data is written straight to
+/// the disk, past the cache.
+fn read_data(vol: &crate::fs::Volume, lcn: u64, buf: &mut [u8]) -> Result<()> {
+    let at = vol.geo.cluster_offset(lcn);
+    let read = vol.cache.read(at, buf);
+    vol.cache.discard(at, buf.len());
+    Ok(read?)
 }
 
 /// The most pieces a page is in: one per cluster, at 512 bytes.
@@ -1030,7 +1166,7 @@ impl NtfsNode {
                 mem::push(&mut dir.bitmap, 0)?;
             }
             let clusters = blocks.runs.clusters();
-            let sizes = edit::Sizes { allocated: clusters * cs, size, initialized: size };
+            let sizes = edit::Sizes { allocated: clusters * cs, size, initialized: size, ..edit::Sizes::default() };
             replace_named(buf, kind::INDEX_ALLOCATION, &I30, &blocks.runs, clusters, sizes)?;
             match edit::find(buf, kind::BITMAP, &I30) {
                 Some(at) => edit::set_value(buf, at, &dir.bitmap)?,
@@ -1181,12 +1317,16 @@ impl NtfsNode {
     /// its `$FILE_NAME`. The caller holds `ns`.
     #[inline(never)]
     fn new_record(&self, kind: Kind, units: &[u16], ns: u8) -> Result<(u64, KVec<u8>)> {
-        let (parent, security, mut fields) = {
+        let (parent, security, mut fields, compress) = {
             let st = self.state.lock();
             let dir = st.dir.as_ref().ok_or(Error::NotDirectory)?;
             let mut fields = [0u8; 8];
             fields.copy_from_slice(dir.root.get(8..16).ok_or(Error::Corrupt)?);
-            (self.record | (u64::from(st.sequence) << 48), st.info.security, fields)
+            // What is made in a directory marked compressed is, as in
+            // Windows, on volumes whose clusters Windows compresses.
+            let compress = st.info.attributes & attributes::COMPRESSED != 0
+                && u64::from(self.fs.vol.geo.cluster_size) <= MAX_COMPRESS_CLUSTER;
+            (self.record | (u64::from(st.sequence) << 48), st.info.security, fields, compress)
         };
         let fs = &self.fs;
         let number = fs.take_record()?;
@@ -1203,7 +1343,8 @@ impl NtfsNode {
             };
             let is_dir = kind == Kind::Directory;
             let t = names::to_nt(now());
-            let file_attributes = if is_dir { 0 } else { attributes::ARCHIVE };
+            let file_attributes = if is_dir { 0 } else { attributes::ARCHIVE }
+                | if compress { attributes::COMPRESSED } else { 0 };
             let dup = Dup {
                 created: t,
                 modified: t,
@@ -1886,7 +2027,7 @@ impl FileBacking<'_> {
             }
             let n = n.min(first + stored - vcn);
             let at = ((vcn - first) * cs) as usize;
-            vol.cache.read(vol.geo.cluster_offset(lcn), &mut packed[at..at + (n * cs) as usize])?;
+            read_data(vol, lcn, &mut packed[at..at + (n * cs) as usize])?;
             vcn += n;
         }
         let mut plain = zeroed(unit_bytes as usize)?;
@@ -1912,6 +2053,215 @@ impl FileBacking<'_> {
         Ok(())
     }
 
+    /// Reads compression unit `unit` of the compressed `stream` into
+    /// `plain`, uncompressed, with `packed` to read it in: what lies past
+    /// the data written is zeros.
+    fn unit_plain(
+        &self,
+        stream: &Stream,
+        unit: u64,
+        plain: &mut [u8],
+        packed: &mut [u8],
+    ) -> Result<()> {
+        let vol = &self.0.fs.vol;
+        let cs = u64::from(vol.geo.cluster_size);
+        let per_unit = stream.grain();
+        let first = unit * per_unit;
+        let stored = stream.runs.allocated_in(first, per_unit);
+        if stored == 0 {
+            plain.fill(0);
+            return Ok(());
+        }
+        // A unit all on the disk is not compressed; one in fewer clusters
+        // is, in its first ones.
+        let into: &mut [u8] = if stored == per_unit { plain } else { &mut *packed };
+        let mut vcn = first;
+        while vcn < first + stored {
+            let (lcn, n) = stream.runs.map(vcn).ok_or(Error::Corrupt)?;
+            if lcn == HOLE {
+                return Err(Error::Corrupt);
+            }
+            let n = n.min(first + stored - vcn);
+            let at = ((vcn - first) * cs) as usize;
+            read_data(vol, lcn, &mut into[at..at + (n * cs) as usize])?;
+            vcn += n;
+        }
+        if stored < per_unit {
+            packed[(stored * cs) as usize..].fill(0);
+            lznt1::decompress(&packed[..(stored * cs) as usize], plain)?;
+        }
+        let start = unit * cs * per_unit;
+        let keep = stream.initialized.saturating_sub(start).min(plain.len() as u64);
+        plain[keep as usize..].fill(0);
+        Ok(())
+    }
+
+    /// Writes compression unit `unit` of the compressed `stream` as
+    /// `plain` holds it: holes if it is all zeros, compressed in fewer
+    /// clusters if it compresses into them and the record has room for
+    /// where they are, else as it is. It goes to clusters taken for it,
+    /// before those it had are given back.
+    fn store_unit(
+        &self,
+        stream: &mut Stream,
+        unit: u64,
+        plain: &[u8],
+        packed: &mut [u8],
+        matcher: &mut lznt1::Matcher,
+    ) -> Result<()> {
+        let node = self.0;
+        let cs = u64::from(node.fs.vol.geo.cluster_size);
+        let per_unit = stream.grain();
+        let first = unit * per_unit;
+        // Where the unit is now, to put back if the new one does not fit.
+        let mut old: KVec<(u64, u64)> = mem::vec();
+        let mut vcn = first;
+        while vcn < first + per_unit {
+            let (lcn, n) = stream.runs.map(vcn).ok_or(Error::Corrupt)?;
+            let n = n.min(first + per_unit - vcn);
+            mem::push(&mut old, (lcn, n))?;
+            vcn += n;
+        }
+        let near = old.iter().find(|(l, _)| *l != HOLE).map(|&(l, _)| l).or_else(|| {
+            first.checked_sub(1).and_then(|v| stream.runs.map(v)).and_then(|(l, _)| {
+                (l != HOLE).then(|| l + 1)
+            })
+        });
+        let room = ((per_unit - 1) * cs) as usize;
+        let zeros = plain.iter().all(|&b| b == 0);
+        let compressed = if zeros { Some(0) } else { lznt1::compress(plain, &mut packed[..room], matcher) };
+        for try_packed in [true, false] {
+            let (bytes, k): (&[u8], u64) = match compressed {
+                Some(n) if try_packed => {
+                    let k = (n as u64).div_ceil(cs);
+                    packed[n..(k * cs) as usize].fill(0);
+                    (&packed[..(k * cs) as usize], k)
+                }
+                None if try_packed => continue,
+                _ => (plain, per_unit),
+            };
+            let got = if k == 0 { mem::vec() } else { node.fs.take_clusters(k, near)? };
+            let mut with = mem::vec_with_capacity(got.len() + 1)?;
+            for &run in &got {
+                let _ = with.push_within_capacity(run);
+            }
+            if k < per_unit {
+                let _ = with.push_within_capacity((HOLE, per_unit - k));
+            }
+            let give_back = |got: &[(u64, u64)]| {
+                for &(lcn, n) in got {
+                    let _ = node.fs.give_clusters(lcn, n, false);
+                }
+            };
+            if let Err(err) = write_clusters(&node.fs, &got, bytes) {
+                give_back(&got);
+                return Err(err);
+            }
+            let freed = match stream.runs.replace(first, per_unit, &with) {
+                Ok(freed) => freed,
+                Err(err) => {
+                    give_back(&got);
+                    return Err(err);
+                }
+            };
+            match node.runs_fit(stream) {
+                Ok(()) => {
+                    for run in &freed {
+                        let _ = node.fs.give_clusters(run.lcn, run.len, false);
+                    }
+                    return Ok(());
+                }
+                Err(err) => {
+                    // Put the unit back as it was; stored as it is, it may
+                    // join its neighbours' runs.
+                    stream.runs.replace(first, per_unit, &old)?;
+                    give_back(&got);
+                    if !try_packed {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+        Err(Error::NoSpace)
+    }
+
+    /// Rewrites the compression units of the compressed `stream` that
+    /// bytes `from..to` fall in, each read, changed by `change` (given the
+    /// unit's first byte and its bytes) and stored again; one the change
+    /// covers whole is not read.
+    fn rewrite_units(
+        &self,
+        stream: &mut Stream,
+        from: u64,
+        to: u64,
+        change: &mut dyn FnMut(u64, &mut [u8]),
+    ) -> Result<()> {
+        let cs = u64::from(self.0.fs.vol.geo.cluster_size);
+        let unit_bytes = cs * stream.grain();
+        let mut plain = zeroed(unit_bytes as usize)?;
+        let mut packed = zeroed(unit_bytes as usize)?;
+        let mut matcher = lznt1::Matcher::new()?;
+        let mut unit = from / unit_bytes;
+        while unit * unit_bytes < to {
+            let start = unit * unit_bytes;
+            if from <= start && to >= start + unit_bytes {
+                plain.fill(0);
+            } else {
+                self.unit_plain(stream, unit, &mut plain, &mut packed)?;
+            }
+            change(start, &mut plain);
+            self.store_unit(stream, unit, &plain, &mut packed, &mut matcher)?;
+            unit += 1;
+        }
+        Ok(())
+    }
+
+    /// Writes pages from byte `pos` on of the compressed `stream`, the
+    /// last `len` bytes long, a compression unit at a time.
+    fn write_units(&self, stream: &mut Stream, pos: u64, pages: &[&Page], len: usize) -> Result<()> {
+        let cs = u64::from(self.0.fs.vol.geo.cluster_size);
+        let unit_bytes = cs * stream.grain();
+        let last = pages.len() - 1;
+        let end = pos + last as u64 * PAGE + len as u64;
+        // What lies between the data written and these pages reads as
+        // zeros: the units it is in must hold zeros there, or none.
+        if pos > stream.initialized {
+            let from = stream.initialized;
+            let gap_end = (pos / unit_bytes * unit_bytes).max(from);
+            let whole_from = from.next_multiple_of(unit_bytes);
+            if from < gap_end && from % unit_bytes != 0 {
+                let unit_end = whole_from.min(gap_end);
+                self.rewrite_units(stream, from, unit_end, &mut |_, _| {})?;
+            }
+            // The units past it, before these pages', are holes.
+            let mut unit = whole_from / unit_bytes;
+            while (unit + 1) * unit_bytes <= gap_end {
+                if stream.runs.allocated_in(unit * stream.grain(), stream.grain()) != 0 {
+                    let mut packed = zeroed(unit_bytes as usize)?;
+                    let mut matcher = lznt1::Matcher::new()?;
+                    let plain = zeroed(unit_bytes as usize)?;
+                    self.store_unit(stream, unit, &plain, &mut packed, &mut matcher)?;
+                }
+                unit += 1;
+            }
+        }
+        self.rewrite_units(stream, pos, end, &mut |start, plain| {
+            for (i, page) in pages.iter().enumerate() {
+                let at = pos + i as u64 * PAGE;
+                let n = if i == last { len } else { PAGE_SIZE } as u64;
+                let (a, b) = (at.max(start), (at + n).min(start + plain.len() as u64));
+                if a < b {
+                    plain[(a - start) as usize..(b - start) as usize]
+                        .copy_from_slice(&page.bytes()[(a - at) as usize..(b - at) as usize]);
+                }
+            }
+        })?;
+        if end > stream.initialized {
+            stream.initialized = end;
+        }
+        Ok(())
+    }
+
     /// Writes the first `len` bytes of page `index` alone, through its
     /// pieces.
     fn write_one(&self, stream: &Stream, index: u64, page: &Page, len: usize) -> Result<()> {
@@ -1933,7 +2283,13 @@ impl FileBacking<'_> {
         let ss = u64::from(geo.sector_size);
         let mut page = CachePage::new()?;
         let mut at = from - from % ss;
-        if at != from {
+        let in_hole = |at: u64| {
+            let cs = u64::from(geo.cluster_size);
+            stream.runs.map(at / cs).is_some_and(|(lcn, _)| lcn == HOLE)
+        };
+        if at != from && in_hole(at) {
+            at += ss;
+        } else if at != from {
             // The sector the data ends in keeps the data.
             let within = (from - at) as usize;
             let pieces = pieces(geo, stream, at, ss as usize)?;
@@ -1948,8 +2304,16 @@ impl FileBacking<'_> {
             page.bytes_mut().fill(0);
             at += ss;
         }
+        let cs = u64::from(geo.cluster_size);
         while at < to {
-            let n = (to - at).min(PAGE - at % PAGE) as usize;
+            // A sparse file's holes read as zeros already.
+            let (lcn, run) = stream.runs.map(at / cs).ok_or(Error::Corrupt)?;
+            let run_end = (at / cs + run) * cs;
+            if lcn == HOLE {
+                at = run_end.min(to);
+                continue;
+            }
+            let n = (to - at).min(PAGE - at % PAGE).min(run_end - at) as usize;
             for (sector, offset, len) in pieces(geo, stream, at, n)?.iter() {
                 device.write(sector, &[Segment { page: &page, offset, len }])?;
             }
@@ -2079,11 +2443,20 @@ impl Backing for FileBacking<'_> {
             Some(Data::Clusters(stream)) => stream,
             _ => return Err(Error::Corrupt),
         };
+        if stream.compressed() {
+            self.write_units(stream, pos, pages, len)?;
+            st.behind();
+            return Ok(());
+        }
         // What lies between the data written and these pages reads as
         // zeros: it must be zeros on the disk before the data written
         // reaches past it.
         if pos > stream.initialized {
             self.zero_disk(stream, stream.initialized, pos)?;
+        }
+        // A sparse file's holes the pages fall in get clusters first.
+        if stream.packed() {
+            node.fill_holes(stream, pos, end)?;
         }
         let geo = &node.fs.vol.geo;
         let cs = u64::from(geo.cluster_size);
@@ -2154,8 +2527,21 @@ impl Backing for FileBacking<'_> {
         }
         let Some(Data::Clusters(stream)) = &mut st.data else { return Err(Error::Corrupt) };
         let have = stream.runs.clusters();
-        let need = size.div_ceil(cs);
+        let need = size.div_ceil(cs).next_multiple_of(stream.grain());
         if need <= have {
+            stream.size = stream.size.max(size);
+            return Ok(());
+        }
+        // Compressed and sparse data grows by a hole, which takes clusters
+        // as it is written.
+        if stream.packed() {
+            stream.runs.append(HOLE, need - have)?;
+            if let Err(err) = node.runs_fit(stream) {
+                let _ = stream.runs.truncate(have);
+                return Err(err);
+            }
+            stream.size = stream.size.max(size);
+            st.behind();
             return Ok(());
         }
         let near = stream.runs.as_slice().last().map(|r| r.lcn + r.len);
@@ -2165,12 +2551,7 @@ impl Backing for FileBacking<'_> {
                 stream.runs.append(lcn, n)?;
             }
             // Its record must have room for where they are.
-            let buf = node.read_rec()?;
-            let at = edit::find(&buf, kind::DATA, &[]).ok_or(Error::Corrupt)?;
-            let packed = stream.runs.pack(0, stream.runs.clusters())?;
-            let len = (0x40 + packed.len()).next_multiple_of(8);
-            let old = u32_at(&buf, at + 4) as usize;
-            if edit::used(&buf) - old + len > buf.len() { Err(Error::NoSpace) } else { Ok(()) }
+            node.runs_fit(stream)
         })();
         if let Err(err) = fits {
             let _ = stream.runs.truncate(have);
@@ -2179,6 +2560,7 @@ impl Backing for FileBacking<'_> {
             }
             return Err(err);
         }
+        stream.size = stream.size.max(size);
         st.behind();
         Ok(())
     }
@@ -2192,6 +2574,14 @@ impl Backing for FileBacking<'_> {
                 Ok(())
             }
             // What lies past the data written reads as zeros already.
+            Some(Data::Clusters(stream)) if from < stream.initialized && stream.compressed() => {
+                let to = to.min(stream.initialized);
+                self.rewrite_units(stream, from, to, &mut |start, plain| {
+                    let a = from.saturating_sub(start).min(plain.len() as u64) as usize;
+                    let b = to.saturating_sub(start).min(plain.len() as u64) as usize;
+                    plain[a..b].fill(0);
+                })
+            }
             Some(Data::Clusters(stream)) if from < stream.initialized => {
                 let to = to.min(stream.initialized.next_multiple_of(PAGE));
                 self.zero_disk(stream, from, to)
@@ -2214,11 +2604,14 @@ impl Backing for FileBacking<'_> {
         match &mut st.data {
             Some(Data::Resident(bytes)) => bytes.truncate(size as usize),
             Some(Data::Clusters(stream)) => {
-                let freed = stream.runs.truncate(size.div_ceil(cs))?;
+                // Compressed data keeps the unit its end is in whole.
+                let keep = size.div_ceil(cs).next_multiple_of(stream.grain());
+                let freed = stream.runs.truncate(keep)?;
                 for run in &freed {
                     let _ = node.fs.give_clusters(run.lcn, run.len, false);
                 }
                 stream.initialized = stream.initialized.min(size);
+                stream.size = size;
             }
             _ => return Err(Error::Corrupt),
         }
@@ -2226,8 +2619,10 @@ impl Backing for FileBacking<'_> {
         Ok(())
     }
 
+    /// As on Windows, a file has fewer than 2^32 clusters: a sparse or
+    /// compressed one may be larger than its volume, and a plain one
+    /// runs out of room first.
     fn max_size(&self) -> u64 {
-        let geo = &self.0.fs.vol.geo;
-        geo.clusters * u64::from(geo.cluster_size)
+        u64::from(u32::MAX) * u64::from(self.0.fs.vol.geo.cluster_size)
     }
 }

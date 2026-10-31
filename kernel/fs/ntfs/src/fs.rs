@@ -133,6 +133,22 @@ pub(crate) struct Stream {
 }
 
 impl Stream {
+    /// Whether its data is compressed or sparse: its clusters are a unit's
+    /// at a time, and it may have holes.
+    pub(crate) fn packed(&self) -> bool {
+        self.flags & (record::attr_flags::COMPRESSED | record::attr_flags::SPARSE) != 0
+    }
+
+    /// Whether its data is compressed.
+    pub(crate) fn compressed(&self) -> bool {
+        self.flags & record::attr_flags::COMPRESSED != 0
+    }
+
+    /// The clusters of its compression unit; 1 for data that has none.
+    pub(crate) fn grain(&self) -> u64 {
+        if self.packed() { 1 << self.unit } else { 1 }
+    }
+
     /// An empty one.
     pub(crate) fn new() -> Stream {
         Stream { runs: Runs::new(), size: 0, initialized: 0, flags: 0, unit: 0 }
@@ -783,11 +799,11 @@ impl Inner {
             }
             let clusters = runs.clusters();
             let sizes =
-                Sizes { allocated: clusters * cs, size: target * rs, initialized: target * rs };
+                Sizes { allocated: clusters * cs, size: target * rs, initialized: target * rs, ..Sizes::default() };
             replace_stream(&mut first, kind::DATA, &runs, clusters, sizes)?;
             let bits = stream.runs.clusters();
             let sizes =
-                Sizes { allocated: bits * cs, size: stream.size, initialized: stream.initialized };
+                Sizes { allocated: bits * cs, size: stream.size, initialized: stream.initialized, ..Sizes::default() };
             replace_stream(&mut first, kind::BITMAP, &stream.runs, bits, sizes)?;
             Ok(first)
         })();
@@ -954,6 +970,8 @@ pub(crate) fn replace_named(
         Some(at) => (u16_at(buf, at + 0x0e), u16_at(buf, at + 0x0c), u32_at(buf, at + 4) as usize),
         None => (u16_at(buf, 0x28), 0, 0),
     };
+    let either = attr_flags::COMPRESSED | attr_flags::SPARSE;
+    let flags = flags & !either | sizes.packed & either;
     let highest = clusters.wrapping_sub(1);
     let attr = edit::non_resident(kind, name, instance, flags, 0, highest, &packed, sizes)?;
     if edit::room(buf) + old_len < attr.len() {

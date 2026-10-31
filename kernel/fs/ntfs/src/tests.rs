@@ -406,7 +406,7 @@ pub(crate) fn ntfs_3g() -> Vec<u8> {
 }
 
 /// The text `ob fixture ntfs-3g` writes compressed.
-fn text() -> Vec<u8> {
+pub(crate) fn text() -> Vec<u8> {
     (0..4000)
         .flat_map(|i| {
             format!("line {} of a text that compresses well, again and again\n", i % 50)
