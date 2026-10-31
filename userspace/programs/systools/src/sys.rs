@@ -138,7 +138,7 @@ pub fn open_control(path: &Path) -> std::io::Result<std::fs::File> {
     };
     let _ = capability::delete(&SYS, slot);
     let rights = Rights::READ.union(Rights::CONTROL);
-    directory::open(&SYS, startup::SLOT_ROOT, text, OpenFlags::DIRECTORY, rights, slot)
+    directory::open(&SYS, startup::SLOT_ROOT, text, OpenFlags::DIRECTORY, rights, slot, 0)
         .map_err(io_error)?;
     Ok(dir)
 }

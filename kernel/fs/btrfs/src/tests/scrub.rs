@@ -11,6 +11,7 @@ use radix_vfs::{Error, FileSystem, Kind, Scrub};
 use super::files::{mount, noise};
 use super::rw::{Model, Thing, mount_rw, put, synced};
 use super::write::{btrfs_check, image_of, mkfs_empty, mkfs_sized, writable};
+use super::{DIR, FILE};
 use crate::tree::HEADER_SIZE;
 
 /// The errors a scrub found.
@@ -37,7 +38,7 @@ fn scrub_finds_damaged_copies_and_mends_them_from_good_ones() {
     let fs = mount_rw(&disk);
     let mut model = Model::new();
     let data = noise(7, 300_000);
-    let file = fs.root().create("file", Kind::File).unwrap();
+    let file = fs.root().create("file", Kind::File, FILE).unwrap();
     put(&file, 0, &data);
     model.insert("/file".into(), Thing::File(data.clone()));
     synced(&fs, &disk, &model, "written");
@@ -86,14 +87,14 @@ fn scrub_counts_what_no_copy_mends() {
     let fs = mount_rw(&disk);
     let mut model = Model::new();
     let data = noise(8, 100_000);
-    let file = fs.root().create("file", Kind::File).unwrap();
+    let file = fs.root().create("file", Kind::File, FILE).unwrap();
     put(&file, 0, &data);
     model.insert("/file".into(), Thing::File(data.clone()));
-    let dir = fs.root().create("dir", Kind::Directory).unwrap();
+    let dir = fs.root().create("dir", Kind::Directory, DIR).unwrap();
     model.insert("/dir".into(), Thing::Dir);
     for i in 0..50 {
         let name = format!("a file with a long name, {i}");
-        dir.create(&name, Kind::File).unwrap();
+        dir.create(&name, Kind::File, FILE).unwrap();
         model.insert(format!("/dir/{name}"), Thing::File(Vec::new()));
     }
     synced(&fs, &disk, &model, "written");
@@ -124,7 +125,7 @@ fn scrub_counts_what_no_copy_mends() {
     assert_eq!(found.super_errors, 1, "{found:?}");
     // The next commit writes the superblock's copies again, and the top
     // subvolume's block anew; the file's sector stays bad.
-    fs.root().create("after", Kind::File).unwrap();
+    fs.root().create("after", Kind::File, FILE).unwrap();
     fs.sync().unwrap();
     let after = fs.scrub(false).unwrap();
     assert_eq!(after.super_errors, 0, "{after:?}");
@@ -135,7 +136,7 @@ fn scrub_counts_what_no_copy_mends() {
 fn a_read_only_mount_scrubs_without_mending() {
     let disk = writable(&mkfs_empty(&["-m", "dup"]));
     let fs = mount_rw(&disk);
-    let file = fs.root().create("file", Kind::File).unwrap();
+    let file = fs.root().create("file", Kind::File, FILE).unwrap();
     put(&file, 0, &noise(9, 50_000));
     fs.sync().unwrap();
     let image = image_of(&disk, (disk.info().sectors * radix_block::SECTOR) as usize);

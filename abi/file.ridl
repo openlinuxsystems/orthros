@@ -177,7 +177,7 @@ const BACKLOG_MAX: u64 = 4096;
 const SOCKET_NAME_MAX: u64 = 107;
 
 /// A file.
-interface file = 0x000c version 6 {
+interface file = 0x000c version 7 {
     kind = file;
     /// Reads from byte `offset` into `buffer`; returns how many bytes it
     /// read, fewer than asked at the end of the file. Needs the read right.
@@ -394,4 +394,11 @@ interface file = 0x000c version 6 {
     /// network one with not_supported.
     method socket_option = 25 (option: SocketOption, set: bool, value: u64) -> (value: u64)
         raises [no_such_slot, empty_slot, invalid_argument, not_socket, not_supported];
+    /// Changes the file's owner, group or permission bits, as
+    /// radix-directory(2)'s `set_access` does, each that is its KEEP
+    /// staying (ADR 0213). Pipes, sockets and devices keep none, and
+    /// fail with not_permitted. Needs the write right.
+    method set_access = 26 (owner: u32, group: u32, mode: u32) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, not_permitted,
+                read_only, no_space, quota_exceeded, io, corrupt];
 }

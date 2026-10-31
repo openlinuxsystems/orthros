@@ -18,7 +18,7 @@ use radix_bootfs::{Archive, Entry, Kind as EntryKind};
 use crate::mem::{self, Alloc, KArc, KVec};
 use crate::synthetic::read_bytes;
 use crate::{
-    Error, FileSystem, FsInfo, FsKind, In, Kind, ListFn, Node, NodeRef, Out, Result, Stat,
+    Access, Error, FileSystem, FsInfo, FsKind, In, Kind, ListFn, Node, NodeRef, Out, Result, Stat,
 };
 
 /// What the nodes of one archive share.
@@ -241,11 +241,21 @@ impl Node for BootNode {
         found.ok_or(Error::NotFound)
     }
 
-    fn create(&self, _name: &str, _kind: Kind) -> Result<NodeRef> {
+    // Everything in the archive is user 0's, with the modes `ob` wrote:
+    // the archive keeps no other owners.
+    fn access(&self) -> Access {
+        let mode = match self.entry {
+            Some(e) => (e.mode & 0o7777) as u16,
+            None => 0o755,
+        };
+        Access { owner: 0, group: 0, mode }
+    }
+
+    fn create(&self, _name: &str, _kind: Kind, _access: Access) -> Result<NodeRef> {
         if self.is_dir() { Err(Error::ReadOnly) } else { Err(Error::NotDirectory) }
     }
 
-    fn make_link(&self, _name: &str, _target: &str) -> Result<NodeRef> {
+    fn make_link(&self, _name: &str, _target: &str, _access: Access) -> Result<NodeRef> {
         if self.is_dir() { Err(Error::ReadOnly) } else { Err(Error::NotDirectory) }
     }
 

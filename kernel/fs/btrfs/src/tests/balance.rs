@@ -18,6 +18,7 @@ use super::files::noise;
 use super::raid::{assert_checks, disks_of, images_of, mkfs_disks, mount_all, write_file};
 use super::rw::{Model, mkfs_with, mount_rw, put, snapshot as model_of, synced};
 use super::write::{image_of, writable};
+use super::{DIR, FILE};
 use crate::BtrfsFs;
 use crate::chunk::kind;
 
@@ -56,14 +57,14 @@ fn a_balance_moves_every_chunk_with_snapshots_and_clones() {
     write_file(&fs, &mut model, "small", 1, 5000);
     write_file(&fs, &mut model, "big", 2, 3 << 20);
     // Enough files for a tree of two levels.
-    fs.root().create("many", Kind::Directory).unwrap();
+    fs.root().create("many", Kind::Directory, DIR).unwrap();
     let many = fs.root().lookup("many").unwrap();
     for n in 0..300 {
-        put(&many.create(&format!("f{n}"), Kind::File).unwrap(), 0, &noise(10 + n, 3000));
+        put(&many.create(&format!("f{n}"), Kind::File, FILE).unwrap(), 0, &noise(10 + n, 3000));
     }
     // Part of `big` twice more: a clone in another file and in itself.
     let big = fs.root().lookup("big").unwrap();
-    let copy = fs.root().create("copy", Kind::File).unwrap();
+    let copy = fs.root().create("copy", Kind::File, FILE).unwrap();
     copy.clone_range(&big, 1 << 20, 1 << 20, 0).unwrap();
     big.clone_range(&big, 0, 256 << 10, 2 << 20).unwrap();
     fs.sync().unwrap();

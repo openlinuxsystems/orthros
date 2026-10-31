@@ -338,7 +338,8 @@ static void priorities(void) {
 	STATUS(1, "/bin/taskset", "-c", "x", "/bin/true");
 }
 
-// lsof, chmod, chown, chgrp and which.
+// lsof, chmod, chown, chgrp and which; stat and ls show what they changed
+// (ADR 0213).
 static void files(void) {
 	STATUS(0, "/bin/mkdir", "-p", DIR);
 	write_file(DIR "/held", "held\n");
@@ -355,12 +356,18 @@ static void files(void) {
 	close(fd);
 	STATUS(1, "/bin/lsof", DIR "/held");
 
-	STATUS(0, "/bin/chmod", "644", DIR "/held");
-	STATUS(0, "/bin/chmod", "-R", "u+rwX,go-w", DIR);
+	STATUS(0, "/bin/chmod", "640", DIR "/held");
+	OUTPUT("", "640 0 0\n", "/bin/stat", "-c", "%a %u %g", DIR "/held");
+	STATUS(0, "/bin/chmod", "-R", "u+rwX,go-w,o+r", DIR);
+	OUTPUT("", "644\n", "/bin/stat", "-c", "%a", DIR "/held");
 	STATUS(1, "/bin/chmod", "999", DIR "/held");
 	STATUS(1, "/bin/chmod", "644", DIR "/nowhere");
+	STATUS(0, "/bin/chown", "1000:100", DIR "/held");
+	CONTAINS("-rw-r--r-- 1 1000 100 5 ", "/bin/ls", "-ln", DIR "/held");
 	STATUS(0, "/bin/chown", "root:root", DIR "/held");
 	STATUS(1, "/bin/chown", "nosuchuser", DIR "/held");
+	STATUS(0, "/bin/chgrp", "100", DIR "/held");
+	OUTPUT("", "0 100\n", "/bin/stat", "-c", "%u %g", DIR "/held");
 	STATUS(0, "/bin/chgrp", "root", DIR "/held");
 
 	OUTPUT("", "/system/commands/ps\n", "/bin/which", "ps");

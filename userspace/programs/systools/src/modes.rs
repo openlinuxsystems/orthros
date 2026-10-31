@@ -3,11 +3,9 @@
 
 //! chmod(1), chown(1) and chgrp(1), with POSIX's modes and GNU's options.
 //!
-//! Until users come (Phase 13) Radix's files have no owners or
-//! permission bits to change: the C library's chmod and chown check that
-//! the file is there and change nothing (radix-posix(7)). These tools
-//! still read their arguments as Linux's do and fail as they would, so
-//! that scripts that use them run.
+//! tmpfs, Btrfs and ext4 keep owners, groups and permission bits (ADR
+//! 0213); FAT and exFAT keep none, and as on Linux take a change that
+//! changes nothing and refuse any other with EPERM.
 
 use std::ffi::{CString, OsString};
 use std::io;

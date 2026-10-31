@@ -107,15 +107,28 @@ pub struct Stat {
     pub links: u32,
     /// The device a device node stands for (FileStatus's `device`).
     pub device: u64,
+    /// Its permission bits (ADR 0213).
+    pub mode: u16,
+    /// The number of the user it belongs to.
+    pub owner: u32,
+    /// The number of its group.
+    pub group: u32,
 }
+
+/// The modes [`Dir`] asks for what it makes, less the program's file mode
+/// mask, as Linux programs ask: read and write for all for a file, and
+/// search too for a directory.
+const FILE_MODE: u32 = 0o666;
+const DIR_MODE: u32 = 0o777;
 
 impl From<&[u8; FileStatus::SIZE]> for Stat {
     /// What a FileStatus `stat` wrote says.
     fn from(bytes: &[u8; FileStatus::SIZE]) -> Stat {
         let word = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap_or([0; 8]));
-        let links = bytes[FileStatus::OFFSET_LINKS..FileStatus::OFFSET_LINKS + 4]
+        let half = |at: usize| bytes[at..at + 4].try_into().map_or(0, u32::from_le_bytes);
+        let mode = bytes[FileStatus::OFFSET_MODE..FileStatus::OFFSET_MODE + 2]
             .try_into()
-            .map_or(1, u32::from_le_bytes);
+            .map_or(0, u16::from_le_bytes);
         Stat {
             kind: FileKind::from_raw(bytes[FileStatus::OFFSET_KIND]).unwrap_or(FileKind::File),
             size: word(FileStatus::OFFSET_SIZE),
@@ -126,8 +139,11 @@ impl From<&[u8; FileStatus::SIZE]> for Stat {
             accessed: word(FileStatus::OFFSET_ACCESSED),
             mount: word(FileStatus::OFFSET_MOUNT),
             changed: word(FileStatus::OFFSET_CHANGED),
-            links,
+            links: half(FileStatus::OFFSET_LINKS),
             device: word(FileStatus::OFFSET_DEVICE),
+            mode,
+            owner: half(FileStatus::OFFSET_OWNER),
+            group: half(FileStatus::OFFSET_GROUP),
         }
     }
 }
@@ -257,8 +273,9 @@ impl Dir {
 
     fn open_raw(&self, path: &str, flags: OpenFlags, rights: Rights) -> Result<(Held, FileKind)> {
         let held = Held::take()?;
+        let slot = self.held.slot;
         let opened =
-            directory::open(&SYS, self.held.slot, path.as_bytes(), flags, rights, held.slot)?;
+            directory::open(&SYS, slot, path.as_bytes(), flags, rights, held.slot, FILE_MODE)?;
         Ok((held, opened.kind))
     }
 
@@ -302,7 +319,24 @@ impl Dir {
 
     /// Makes an empty directory at `path`.
     pub fn make_dir(&self, path: &str) -> Result<()> {
-        Ok(directory::make_directory(&SYS, self.held.slot, path.as_bytes())?)
+        Ok(directory::make_directory(&SYS, self.held.slot, path.as_bytes(), DIR_MODE)?)
+    }
+
+    /// Changes the owner, group or permission bits of the file or
+    /// directory at `path` (`.` for this one), each that is `None` staying
+    /// (ADR 0213). Without a mode, it is a chown(2), which takes a file's
+    /// set-user-ID bit away.
+    pub fn set_access(
+        &self,
+        path: &str,
+        owner: Option<u32>,
+        group: Option<u32>,
+        mode: Option<u16>,
+    ) -> Result<()> {
+        let keep = |value: Option<u32>| value.unwrap_or(directory::KEEP);
+        let (owner, group, mode) = (keep(owner), keep(group), keep(mode.map(u32::from)));
+        let (slot, path) = (self.held.slot, path.as_bytes());
+        Ok(directory::set_access(&SYS, slot, path, PathFlags::NONE, owner, group, mode)?)
     }
 
     /// Removes the file or empty directory at `path`.
@@ -333,7 +367,8 @@ impl Dir {
     /// stands for `device` (its major number in the high 32 bits), an
     /// empty file or a socket's name.
     pub fn make_node(&self, path: &str, kind: FileKind, device: u64) -> Result<()> {
-        Ok(directory::make_node(&SYS, self.held.slot, path.as_bytes(), kind, device)?)
+        let (slot, path) = (self.held.slot, path.as_bytes());
+        Ok(directory::make_node(&SYS, slot, path, kind, device, FILE_MODE)?)
     }
 
     /// Makes a new, empty Btrfs subvolume at `path`.

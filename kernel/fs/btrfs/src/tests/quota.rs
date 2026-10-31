@@ -12,6 +12,7 @@ use std::vec::Vec;
 
 use radix_vfs::{Balance, BalanceArgs, Error, FileSystem, Kind, Qgroup, Slice};
 
+use super::FILE;
 use super::files::noise;
 use super::rw::{Model, mount_rw, put, snapshot as model_of, synced};
 use super::write::{btrfs_check, image_of, mkfs_empty, writable};
@@ -36,7 +37,7 @@ fn each_subvolume_counts_what_it_wrote() {
     let image = mkfs_empty(&[]);
     let disk = writable(&image);
     let fs = mount_rw(&disk);
-    put(&fs.root().create("before", Kind::File).unwrap(), 0, &noise(1, 100_000));
+    put(&fs.root().create("before", Kind::File, FILE).unwrap(), 0, &noise(1, 100_000));
     fs.quota(true).unwrap();
     // A second time does nothing.
     fs.quota(true).unwrap();
@@ -44,10 +45,10 @@ fn each_subvolume_counts_what_it_wrote() {
     assert_eq!(groups.iter().map(|g| g.id).collect::<Vec<_>>(), [5]);
     assert_eq!((groups[0].referenced, groups[0].max_referenced), (0, u64::MAX));
     let root = fs.root();
-    put(&root.create("a", Kind::File).unwrap(), 0, &noise(2, 300_000));
+    put(&root.create("a", Kind::File, FILE).unwrap(), 0, &noise(2, 300_000));
     root.make_subvolume("sub").unwrap();
     let sub = root.lookup("sub").unwrap();
-    put(&sub.create("b", Kind::File).unwrap(), 0, &noise(3, 200_000));
+    put(&sub.create("b", Kind::File, FILE).unwrap(), 0, &noise(3, 200_000));
     counts_check(&fs, &disk, image.len(), "files in two subvolumes");
     let top = group(&fs, 5);
     assert!(top.referenced >= 300 << 10 && top.referenced == top.exclusive, "{top:?}");
@@ -60,7 +61,7 @@ fn each_subvolume_counts_what_it_wrote() {
     assert!(snap.referenced < 64 << 10, "{snap:?}");
     let a = root.lookup("a").unwrap();
     put(&a, 4096, &noise(4, 8192));
-    let copy = sub.create("copy", Kind::File).unwrap();
+    let copy = sub.create("copy", Kind::File, FILE).unwrap();
     copy.clone_range(&a, 0, 128 << 10, 0).unwrap();
     counts_check(&fs, &disk, image.len(), "a snapshot, a change and a clone");
     // What only the snapshot still refers to stays counted to the top.
@@ -92,11 +93,11 @@ fn a_limit_stops_writes_past_it_and_removing_frees_room() {
     fs.limit_qgroup(5, 1 << 20, u64::MAX).unwrap();
     assert_eq!(fs.limit_qgroup(300, 1, 1), Err(Error::NotFound));
     let root = fs.root();
-    let small = root.create("small", Kind::File).unwrap();
+    let small = root.create("small", Kind::File, FILE).unwrap();
     put(&small, 0, &noise(1, 512 << 10));
     // A write stops short at the limit, and the next one fails, as
     // Linux's do.
-    let big = root.create("big", Kind::File).unwrap();
+    let big = root.create("big", Kind::File, FILE).unwrap();
     let data = noise(2, 1 << 20);
     let wrote = big.write(0, &Slice(&data)).unwrap();
     assert!(wrote > 0 && wrote < 512 << 10, "{wrote}");
@@ -113,7 +114,7 @@ fn a_limit_stops_writes_past_it_and_removing_frees_room() {
     assert!(top.referenced <= 1 << 20, "{top:?}");
     // No limit again.
     fs.limit_qgroup(5, u64::MAX, u64::MAX).unwrap();
-    put(&root.create("more", Kind::File).unwrap(), 0, &noise(4, 1 << 20));
+    put(&root.create("more", Kind::File, FILE).unwrap(), 0, &noise(4, 1 << 20));
     counts_check(&fs, &disk, image.len(), "the limit gone");
     assert_eq!(group(&fs, 5).max_referenced, u64::MAX);
 }
@@ -125,7 +126,7 @@ fn quotas_turned_off_leave_nothing_to_count() {
     let fs = mount_rw(&disk);
     let mut model = Model::new();
     fs.quota(true).unwrap();
-    put(&fs.root().create("a", Kind::File).unwrap(), 0, &noise(1, 200_000));
+    put(&fs.root().create("a", Kind::File, FILE).unwrap(), 0, &noise(1, 200_000));
     fs.sync().unwrap();
     fs.quota(false).unwrap();
     assert_eq!(fs.qgroups(), Err(Error::NotSupported));
@@ -144,7 +145,7 @@ fn simple_quotas_mkfs_made_count_on() {
     let disk = writable(&image);
     let fs = mount_rw(&disk);
     let before = group(&fs, 5);
-    put(&fs.root().create("a", Kind::File).unwrap(), 0, &noise(1, 300_000));
+    put(&fs.root().create("a", Kind::File, FILE).unwrap(), 0, &noise(1, 300_000));
     counts_check(&fs, &disk, image.len(), "a file on mkfs's simple quotas");
     let after = group(&fs, 5);
     assert!(after.referenced >= before.referenced + 300_000, "{before:?} {after:?}");
@@ -159,7 +160,7 @@ fn full_quota_groups_are_marked_inconsistent() {
     assert_eq!(fs.quota(false), Err(Error::NotSupported));
     assert_eq!(fs.limit_qgroup(5, 1 << 20, u64::MAX), Err(Error::NotSupported));
     assert!(fs.qgroups().unwrap().iter().any(|g| g.id == 5));
-    put(&fs.root().create("a", Kind::File).unwrap(), 0, &noise(1, 300_000));
+    put(&fs.root().create("a", Kind::File, FILE).unwrap(), 0, &noise(1, 300_000));
     fs.sync().unwrap();
     let (whole, text) = btrfs_check(&image_of(&disk, image.len()));
     assert!(whole && text.contains("difference in qgroup accounting is expected"), "{text}");

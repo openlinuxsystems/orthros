@@ -20,11 +20,13 @@ use crate::{le16, le32, put16, put32};
 /// Byte offsets of an inode's fields.
 pub mod at {
     pub const MODE: usize = 0x00;
+    pub const UID: usize = 0x02;
     pub const SIZE_LO: usize = 0x04;
     pub const ATIME: usize = 0x08;
     pub const CTIME: usize = 0x0c;
     pub const MTIME: usize = 0x10;
     pub const DTIME: usize = 0x14;
+    pub const GID: usize = 0x18;
     pub const LINKS: usize = 0x1a;
     pub const BLOCKS_LO: usize = 0x1c;
     pub const FLAGS: usize = 0x20;
@@ -34,6 +36,8 @@ pub mod at {
     pub const SIZE_HIGH: usize = 0x6c;
     pub const BLOCKS_HIGH: usize = 0x74;
     pub const FILE_ACL_HIGH: usize = 0x76;
+    pub const UID_HIGH: usize = 0x78;
+    pub const GID_HIGH: usize = 0x7a;
     pub const CHECKSUM_LO: usize = 0x7c;
     pub const EXTRA_ISIZE: usize = 0x80;
     pub const CHECKSUM_HI: usize = 0x82;
@@ -123,7 +127,12 @@ const NS: u64 = 1_000_000_000;
 /// An inode as Radix uses it: its fields, and the raw bytes it was read
 /// from, which [`Inode::encode`] writes them into.
 pub struct Inode {
+    /// Its type and permissions, as POSIX's `st_mode`.
     pub mode: u16,
+    /// Its owner and group, both halves of each, as Linux keeps them
+    /// unless mounted with `no_uid32`.
+    pub uid: u32,
+    pub gid: u32,
     pub links: u16,
     pub size: u64,
     /// The space it takes, in 512-byte sectors.
@@ -238,6 +247,8 @@ impl Inode {
         block.copy_from_slice(&raw[at::BLOCK..at::BLOCK + BLOCK_LEN]);
         Ok(Inode {
             mode,
+            uid: u32::from(le16(raw, at::UID)) | u32::from(le16(raw, at::UID_HIGH)) << 16,
+            gid: u32::from(le16(raw, at::GID)) | u32::from(le16(raw, at::GID_HIGH)) << 16,
             links: le16(raw, at::LINKS),
             size,
             sectors,
@@ -257,6 +268,10 @@ impl Inode {
     pub fn encode(&self, geo: &Geometry, ino: u32, raw: &mut [u8]) {
         let extra = if raw.len() > 128 { le16(raw, at::EXTRA_ISIZE) } else { 0 };
         put16(raw, at::MODE, self.mode);
+        put16(raw, at::UID, self.uid as u16);
+        put16(raw, at::UID_HIGH, (self.uid >> 16) as u16);
+        put16(raw, at::GID, self.gid as u16);
+        put16(raw, at::GID_HIGH, (self.gid >> 16) as u16);
         put16(raw, at::LINKS, self.links);
         put32(raw, at::SIZE_LO, self.size as u32);
         put32(raw, at::SIZE_HIGH, (self.size >> 32) as u32);

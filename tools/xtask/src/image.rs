@@ -391,8 +391,16 @@ pub fn make_root(ctx: &Ctx, bootfs: &Path, staging: &Path, output: &Path) -> Res
     if staging.exists() {
         std::fs::remove_dir_all(staging).context(|| format!("removing {}", staging.display()))?;
     }
+    // Each directory gets its mode whatever the umask ob runs with: a
+    // user's is often 002.
+    let mode = |path: &Path, mode: u32| {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777))
+            .context(|| format!("setting the mode of {}", path.display()))
+    };
     for name in SUBVOLUMES {
         process::create_dir(&staging.join(name))?;
+        mode(&staging.join(name), 0o755)?;
     }
     let bytes = std::fs::read(bootfs).context(|| format!("reading {}", bootfs.display()))?;
     let archive = radix_bootfs::open(&bytes)
@@ -406,6 +414,7 @@ pub fn make_root(ctx: &Ctx, bootfs: &Path, staging: &Path, output: &Path) -> Res
         let path = names.fold(system.clone(), |path, name| path.join(name));
         if entry.kind == radix_bootfs::Kind::Directory {
             process::create_dir(&path)?;
+            mode(&path, entry.mode)?;
             continue;
         }
         process::create_dir(path.parent().expect("an entry is inside the system"))?;
@@ -442,7 +451,10 @@ pub fn make_root(ctx: &Ctx, bootfs: &Path, staging: &Path, output: &Path) -> Res
     }
     let made = process::run(ctx, cmd.arg(output).stdin(std::process::Stdio::null()));
     let _ = std::fs::remove_dir_all(staging);
-    made
+    made?;
+    // mkfs.btrfs gave each file the owner of its staging copy, whoever
+    // runs ob; a system's files are root's (ADR 0213).
+    btrfs::give_to_root(output).map(drop)
 }
 
 /// Puts the Dukovo root partition, holding the filesystem in the file

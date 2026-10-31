@@ -29,12 +29,13 @@ itself is changed. With *-v* each file gets a line in GNU's words, such
 as *changed ownership of 'f' from root to nobody* or *ownership of 'f'
 retained as root:root*.
 
-Until users come, in Phase 13 of the roadmap, Radix's files have no
-owners to change: the C library's *chown*(2) checks that the file is
-there and changes nothing (*radix-posix*(7)). Every user and group but
-root's is unknown, so naming another fails as it would on Linux for a
-user who does not exist. These tools still read their arguments as
-Linux's do, so that scripts that use them run.
+tmpfs, Btrfs and ext4 keep owners and groups (ADR 0213); FAT and exFAT
+keep none, and as on Linux, a chown there to root, the owner they show,
+changes nothing and any other fails with *Operation not permitted*. A change of owner or group takes a file's set-user-ID bit away,
+and its set-group-ID bit if its group may run it. Until users come,
+later in Phase 13 of the roadmap, every user and group but root's is
+unknown by name, so naming another fails as it would on Linux for a user
+who does not exist; a number names anyone.
 
 # OPTIONS
 

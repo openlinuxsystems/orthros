@@ -33,7 +33,9 @@ use radix_sync::Mutex;
 
 use crate::mem::{self, KArc, KVec};
 use crate::path::{self, Component};
-use crate::{Error, FsRef, Kind, ListFn, MAX_LINKS, NodeRef, PATH_MAX, Result, Stat, address};
+use crate::{
+    Access, Error, FsRef, Kind, ListFn, MAX_LINKS, NodeRef, PATH_MAX, Result, Stat, address, mode,
+};
 
 /// A filesystem mounted on a directory.
 pub struct Mount {
@@ -149,12 +151,26 @@ impl Location {
     }
 }
 
+/// What a node of `kind` made in directory `dir` with `access` gets: in
+/// a directory with the set-group-ID bit, as POSIX lets Linux have it,
+/// the directory's group, and for a directory that bit too, so that a
+/// shared folder's files all take its group.
+pub fn made_with(dir: &Location, access: Access, kind: Kind) -> Access {
+    let parent = dir.node.access();
+    if parent.mode & mode::SET_GROUP == 0 {
+        return access;
+    }
+    let extra = if kind == Kind::Directory { mode::SET_GROUP } else { 0 };
+    Access { group: parent.group, mode: access.mode | extra, ..access }
+}
+
 /// How `open` opens.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct OpenFlags {
-    /// Make the file if it is not there; a directory there fails with
+    /// Make the file if it is not there, with this owner, group and mode
+    /// ([`made_with`]); a directory there fails with
     /// [`Error::IsDirectory`].
-    pub create: bool,
+    pub create: Option<Access>,
     /// With `create`: fail if it is there.
     pub exclusive: bool,
     /// Cut the file to nothing; a directory fails with
@@ -388,7 +404,7 @@ impl Vfs {
     /// file made through a symbolic link is made where the link points,
     /// as POSIX has it.
     pub fn open(&self, base: &Location, path: &str, flags: OpenFlags) -> Result<Location> {
-        let at = if flags.create {
+        let at = if let Some(access) = flags.create {
             // The path again with the link's target for its last name,
             // once a link stood there.
             let mut owned: Option<KVec<u8>> = None;
@@ -412,7 +428,8 @@ impl Vfs {
                     Ok(node) => break self.cross(Location { mount: dir.mount.clone(), node }),
                     Err(Error::NotFound) => {
                         dir.writable()?;
-                        let node = dir.node.create(name, Kind::File)?;
+                        let access = made_with(&dir, access, Kind::File);
+                        let node = dir.node.create(name, Kind::File, access)?;
                         break Location { mount: dir.mount.clone(), node };
                     }
                     Err(err) => return Err(err),
@@ -426,7 +443,7 @@ impl Vfs {
             return Err(Error::Loop);
         }
         // Open neither makes nor cuts a directory, as POSIX has it.
-        if kind == Kind::Directory && (flags.create || flags.truncate) {
+        if kind == Kind::Directory && (flags.create.is_some() || flags.truncate) {
             return Err(Error::IsDirectory);
         }
         if flags.directory && kind != Kind::Directory {
@@ -442,8 +459,15 @@ impl Vfs {
 
     /// Makes a symbolic link `path` beneath `base` that points to
     /// `target`: any text of at most [`PATH_MAX`] bytes but the empty one,
-    /// which is not looked at until the link is followed.
-    pub fn make_link(&self, base: &Location, path: &str, target: &str) -> Result<()> {
+    /// which is not looked at until the link is followed. It belongs to
+    /// `access`'s owner and group, and its mode is 0777.
+    pub fn make_link(
+        &self,
+        base: &Location,
+        path: &str,
+        target: &str,
+        access: Access,
+    ) -> Result<()> {
         if target.is_empty() || target.contains('\0') {
             return Err(Error::BadName);
         }
@@ -455,7 +479,8 @@ impl Vfs {
         if dir.node.lookup(name).is_ok() {
             return Err(Error::Exists);
         }
-        dir.node.make_link(name, target).map(drop)
+        let access = made_with(&dir, Access { mode: 0o777, ..access }, Kind::Symlink);
+        dir.node.make_link(name, target, access).map(drop)
     }
 
     /// Makes `to` beneath `to_base` another name of the file `path`
@@ -486,30 +511,40 @@ impl Vfs {
     }
 
     /// Makes `path` beneath `base` a node of `kind` that stands for
-    /// device number `device` ([`crate::Node::make_node`]).
-    pub fn make_node(&self, base: &Location, path: &str, kind: Kind, device: u64) -> Result<()> {
-        let (dir, name) = self.resolve_parent(base, path)?;
-        dir.writable()?;
-        if dir.node.lookup(name).is_ok() {
-            return Err(Error::Exists);
-        }
-        dir.node.make_node(name, kind, device).map(drop)
-    }
-
-    /// Makes a socket's name `path` beneath `base`, which holds `binding`
-    /// ([`crate::Node::make_socket`]).
-    pub fn make_socket(
+    /// device number `device` ([`crate::Node::make_node`]), with `access`.
+    pub fn make_node(
         &self,
         base: &Location,
         path: &str,
-        binding: crate::SocketBinding,
+        kind: Kind,
+        device: u64,
+        access: Access,
     ) -> Result<()> {
         let (dir, name) = self.resolve_parent(base, path)?;
         dir.writable()?;
         if dir.node.lookup(name).is_ok() {
             return Err(Error::Exists);
         }
-        dir.node.make_socket(name, binding).map(drop)
+        let access = made_with(&dir, access, kind);
+        dir.node.make_node(name, kind, device, access).map(drop)
+    }
+
+    /// Makes a socket's name `path` beneath `base`, which holds `binding`
+    /// ([`crate::Node::make_socket`]), with `access`.
+    pub fn make_socket(
+        &self,
+        base: &Location,
+        path: &str,
+        binding: crate::SocketBinding,
+        access: Access,
+    ) -> Result<()> {
+        let (dir, name) = self.resolve_parent(base, path)?;
+        dir.writable()?;
+        if dir.node.lookup(name).is_ok() {
+            return Err(Error::Exists);
+        }
+        let access = made_with(&dir, access, Kind::Socket);
+        dir.node.make_socket(name, binding, access).map(drop)
     }
 
     /// Reads where the symbolic link `path` beneath `base` points into
@@ -554,11 +589,12 @@ impl Vfs {
         })
     }
 
-    /// Makes the directory `path` beneath `base`.
-    pub fn make_directory(&self, base: &Location, path: &str) -> Result<()> {
+    /// Makes the directory `path` beneath `base`, with `access`.
+    pub fn make_directory(&self, base: &Location, path: &str, access: Access) -> Result<()> {
         let (dir, name) = self.resolve_parent(base, path)?;
         dir.writable()?;
-        dir.node.create(name, Kind::Directory).map(drop)
+        let access = made_with(&dir, access, Kind::Directory);
+        dir.node.create(name, Kind::Directory, access).map(drop)
     }
 
     /// Removes the file or empty directory `path` beneath `base`.

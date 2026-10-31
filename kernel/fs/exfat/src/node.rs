@@ -36,7 +36,9 @@ use radix_sync::{Mutex, Once};
 use radix_vfs::cache::{Backing, FileCache, page_len};
 use radix_vfs::mem::{self, Alloc, KArc, KVec};
 use radix_vfs::path::check_name;
-use radix_vfs::{Error, In, Kind, ListFn, Node, NodeRef, Out, Result, Stat, now};
+use radix_vfs::{
+    Access, AccessChange, Error, In, Kind, ListFn, Node, NodeRef, Out, Result, Stat, now,
+};
 
 use crate::dir::{Found, Names, Runs};
 use crate::entry::{
@@ -900,7 +902,22 @@ impl Node for ExfatNode {
         Ok(Inner::node_for(&self.fs, &me, &found, ns.runs())?)
     }
 
-    fn create(&self, name: &str, kind: Kind) -> Result<NodeRef> {
+    // exFAT keeps no owners or modes: everything is user 0's, and as
+    // Linux's exfat shows it with its default umask of 022, 0755 (ADR
+    // 0213).
+    fn access(&self) -> Access {
+        Access { owner: 0, group: 0, mode: 0o755 }
+    }
+
+    // As Linux's exfat: a change that keeps the owner and group shown
+    // and sets permission bits alone is taken and changes nothing; any
+    // other fails, shown as EPERM.
+    fn set_access(&self, change: &AccessChange) -> Result<()> {
+        self.writable()?;
+        if change.fits_none_kept(self.access()) { Ok(()) } else { Err(Error::NotSupported) }
+    }
+
+    fn create(&self, name: &str, kind: Kind, _access: Access) -> Result<NodeRef> {
         self.writable()?;
         check_name(name)?;
         self.is_dir()?;

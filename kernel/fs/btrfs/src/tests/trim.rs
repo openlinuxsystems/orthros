@@ -10,6 +10,7 @@ use std::vec::Vec;
 
 use radix_vfs::{Error, FileSystem, Kind};
 
+use super::FILE;
 use super::files::noise;
 use super::raid::{
     assert_checks, assert_reads, disks_of, images_of, mkfs_disks, mount_all, write_file,
@@ -41,7 +42,7 @@ fn a_trim_discards_free_space_and_every_file_reads_and_checks_after() {
     for n in 0..12u64 {
         let name = format!("f{n}");
         let data = noise(n + 1, (n as usize + 1) * 300_000);
-        let file = root.create(&name, Kind::File).unwrap();
+        let file = root.create(&name, Kind::File, FILE).unwrap();
         put(&file, 0, &data);
         model.insert(format!("/{name}"), Thing::File(data));
     }
@@ -116,7 +117,7 @@ fn a_trim_while_files_change_takes_nothing_they_hold() {
                 model.remove(&format!("/{name}"));
             }
             let data = noise(round + 7, 200_000 + (round as usize % 5) * 150_000);
-            let file = root.create(&name, Kind::File).unwrap();
+            let file = root.create(&name, Kind::File, FILE).unwrap();
             put(&file, 0, &data);
             model.insert(format!("/{name}"), Thing::File(data));
             if round % 4 == 3 {

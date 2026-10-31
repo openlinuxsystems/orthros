@@ -35,6 +35,12 @@ module directory;
 const NAME_MAX: u64 = 255;
 /// The longest path a call takes, in bytes.
 const PATH_MAX: u64 = 4096;
+/// An owner, group or mode `set_access` leaves as it is.
+const KEEP: u32 = 0xffff_ffff;
+/// The bits a mode may have, 07777: read, write and execute for the
+/// owner, the group and the others, with set-user-ID, set-group-ID and
+/// sticky.
+const MODE_BITS: u32 = 0xfff;
 
 /// What a file is.
 enum FileKind: u8 {
@@ -107,7 +113,7 @@ flags OpenFlags: u32 {
     no_follow = 8;
 }
 
-/// How `stat` and `set_times` find what they look at.
+/// How `stat`, `set_times` and `set_access` find what they look at.
 flags PathFlags: u32 {
     /// A symbolic link that is the last name is taken itself, not what it
     /// points to, as AT_SYMLINK_NOFOLLOW has it.
@@ -214,8 +220,16 @@ struct FileStatus {
     kind: u8;
     /// Zero.
     pad: u8;
-    /// Zero.
-    reserved: u16;
+    /// Its permission bits, as POSIX's `st_mode & 07777` (ADR 0213): what
+    /// its filesystem keeps, or for one that keeps none (FAT, exFAT, and
+    /// the kernel's own trees) 0755 for a directory, 0644 for a file,
+    /// and as Linux shows them for the rest.
+    mode: u16;
+    /// The number of the user it belongs to; 0 where its filesystem keeps
+    /// none.
+    owner: u32;
+    /// The number of its group, likewise.
+    group: u32;
 }
 
 /// What `scrub` read and found, counted as Linux's
@@ -259,19 +273,26 @@ struct ScrubProgress {
 }
 
 /// A directory.
-interface directory = 0x000b version 5 {
+interface directory = 0x000b version 6 {
     kind = directory;
     /// Opens the file or directory at `path` (`.` for this one) and puts
     /// a capability to it with `rights` in slot `to`. Returns what it is.
-    /// Needs the read right, and the write right to create or truncate or
-    /// to ask for it.
-    method open = 1 (path: in bytes, flags: OpenFlags, rights: Rights, to: slot) -> (kind: FileKind)
+    /// A file it makes has the permission bits `mode` (MODE_BITS at most,
+    /// or invalid_argument) less those of the caller's file mode mask
+    /// (radix-process(2)'s `file_mask`), and belongs to the caller's user
+    /// and group, or to the directory's group if it has the set-group-ID
+    /// bit; `mode` is not looked at otherwise. Needs the read right, and
+    /// the write right to create or truncate or to ask for it.
+    method open = 1 (path: in bytes, flags: OpenFlags, rights: Rights, to: slot, mode: u32)
+        -> (kind: FileKind)
         raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument, no_memory,
                 bad_address, not_found, exists, not_directory, is_directory, read_only, no_space,
                 quota_exceeded, name_too_long, bad_name, outside, io, corrupt, no_device,
                 too_many_links];
-    /// Makes an empty directory at `path`. Needs the write right.
-    method make_directory = 2 (path: in bytes) -> ()
+    /// Makes an empty directory at `path`, with the mode and owners `open`
+    /// gives a file it makes, and the set-group-ID bit too if this
+    /// directory has it. Needs the write right.
+    method make_directory = 2 (path: in bytes, mode: u32) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory, bad_address,
                 not_found, exists, not_directory, read_only, no_space, quota_exceeded,
                 name_too_long, bad_name, outside, io, corrupt, too_many_links];
@@ -380,7 +401,8 @@ interface directory = 0x000b version 5 {
     /// program gave it. A socket takes one name, before it listens or
     /// connects; the name stays until it is removed, and once the socket
     /// is gone, connecting through it fails with refused. Opening it fails
-    /// with no_device. FAT has no such files (not_permitted). Needs the
+    /// with no_device. Its mode is 0777 less the caller's file mode mask,
+    /// as on Linux. FAT has no such files (not_permitted). Needs the
     /// write right, and the write right on the socket.
     method bind_socket = 15 (path: in bytes, socket: slot, name: in bytes) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument, no_memory,
@@ -420,9 +442,10 @@ interface directory = 0x000b version 5 {
     /// FileStatus has it, which opening opens that device through
     /// (radix-files(7)); an empty file (file); or a socket's name that
     /// no socket listens at (socket). Any other kind fails with
-    /// invalid_argument. A filesystem that keeps none, as FAT keeps
-    /// none, refuses with not_permitted. Needs the write right.
-    method make_node = 18 (path: in bytes, kind: FileKind, device: u64) -> ()
+    /// invalid_argument. It has `mode` and owners as `open` gives a file
+    /// it makes. A filesystem that keeps none, as FAT keeps none, refuses
+    /// with not_permitted. Needs the write right.
+    method make_node = 18 (path: in bytes, kind: FileKind, device: u64, mode: u32) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory, bad_address,
                 not_found, exists, not_directory, read_only, no_space, quota_exceeded,
                 name_too_long, bad_name, outside, io, corrupt, not_permitted, too_many_links];
@@ -570,4 +593,21 @@ interface directory = 0x000b version 5 {
     method limit_qgroup = 30 (id: u64, max_referenced: u64, max_exclusive: u64) -> ()
         raises [no_such_slot, empty_slot, missing_rights, no_memory, not_found, not_supported,
                 read_only, no_space, io, corrupt];
+    /// Changes the owner, group or permission bits of the file or
+    /// directory at `path` (`.` for this one), as chown(2) and chmod(2)
+    /// do (ADR 0213); each that is KEEP stays. A change of owner or group,
+    /// even to the same, takes a file's set-user-ID bit away, and its
+    /// set-group-ID bit if its group may run it, as Linux does; a new
+    /// `mode` (MODE_BITS at most, or invalid_argument) is set after that.
+    /// A symbolic link's mode cannot change (not_supported, with
+    /// no_follow). A filesystem that keeps no owners or modes, as FAT
+    /// keeps none, takes a change of permission bits alone, or to owner
+    /// and group 0, and changes nothing, as Linux's vfat does, and refuses
+    /// any other with not_permitted. Needs the write right.
+    method set_access = 31 (path: in bytes, flags: PathFlags, owner: u32, group: u32, mode: u32)
+        -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside,
+                not_permitted, not_supported, read_only, no_space, quota_exceeded, io, corrupt,
+                too_many_links];
 }

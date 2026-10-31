@@ -39,7 +39,7 @@ use radix_hal::UserMode;
 use radix_klog::info;
 use radix_mm::{Flags, HEAP};
 use radix_vfs::mount::{Location, OpenFlags as VfsOpen};
-use radix_vfs::{FsKind, In, Kind, NodeRef, Out, PATH_MAX};
+use radix_vfs::{Access, AccessChange, FsKind, In, Kind, NodeRef, Out, PATH_MAX};
 
 use super::account::Account;
 use super::memory::cap_rights;
@@ -371,8 +371,13 @@ pub fn directory_method(
             }
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
+            let create = if a.flags.contains(OpenFlags::CREATE) {
+                Some(made_access(user, a.mode)?)
+            } else {
+                None
+            };
             let flags = VfsOpen {
-                create: a.flags.contains(OpenFlags::CREATE),
+                create,
                 exclusive: a.flags.contains(OpenFlags::EXCLUSIVE),
                 truncate: a.flags.contains(OpenFlags::TRUNCATE),
                 directory: a.flags.contains(OpenFlags::DIRECTORY),
@@ -421,7 +426,11 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            vfs()?.make_directory(&dir.at, path.as_str()?).map_err(fs::status)?;
+            // As Linux, mkdir takes no set-user-ID or set-group-ID bit
+            // from its mode; the directory's own comes from its parent.
+            let mut access = made_access(user, a.mode)?;
+            access.mode &= !(radix_vfs::mode::SET_USER | radix_vfs::mode::SET_GROUP);
+            vfs()?.make_directory(&dir.at, path.as_str()?, access).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::REMOVE => {
@@ -454,7 +463,7 @@ pub fn directory_method(
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
             let at = resolve(&dir.at, path.as_str()?, a.flags)?;
-            put_status(&at.node.stat(), at.mount.id, a.buffer)?;
+            put_status(&at, a.buffer)?;
             answer(label, 0, [0; 8])
         }
         directory::SET_TIMES => {
@@ -466,13 +475,23 @@ pub fn directory_method(
             set_times(&at, a.accessed, a.modified)?;
             answer(label, 0, [0; 8])
         }
+        directory::SET_ACCESS => {
+            let a = directory::SetAccessArgs::decode(args)?;
+            let dir = directory_of(found, Rights::WRITE)?;
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
+            let at = resolve(&dir.at, path.as_str()?, a.flags)?;
+            set_access(&at, a.owner, a.group, a.mode)?;
+            answer(label, 0, [0; 8])
+        }
         directory::MAKE_LINK => {
             let a = directory::MakeLinkArgs::decode(args)?;
             let dir = directory_of(found, Rights::WRITE)?;
             let (mut path, mut target) = (Path::Empty, Path::Empty);
             let (path, target) = (path.copy(a.path)?, target.copy(a.target)?);
+            let access = made_access(user, 0o777)?;
             vfs()?
-                .make_link(&dir.at, path.as_str()?, target.as_target()?)
+                .make_link(&dir.at, path.as_str()?, target.as_target()?, access)
                 .map_err(refused_as_not_permitted)?;
             answer(label, 0, [0; 8])
         }
@@ -501,8 +520,9 @@ pub fn directory_method(
             };
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
+            let access = made_access(user, a.mode)?;
             vfs()?
-                .make_node(&dir.at, path.as_str()?, kind, a.device)
+                .make_node(&dir.at, path.as_str()?, kind, a.device, access)
                 .map_err(refused_as_not_permitted)?;
             answer(label, 0, [0; 8])
         }
@@ -721,70 +741,7 @@ pub fn directory_method(
             let results = directory::RealPathResults { len: len as u64 };
             answer(label, directory::RealPathResults::WORDS, results.encode())
         }
-        directory::MOUNT => {
-            let a = directory::MountArgs::decode(args)?;
-            let dir = directory_of(found, Rights::CONTROL)?;
-            let read_only = a.flags.contains(MountFlags::READ_ONLY);
-            let compress = a.flags.contains(MountFlags::COMPRESS);
-            let mut path = Path::Empty;
-            let path = path.copy(a.path)?;
-            let mut kind = Path::Empty;
-            let kind = kind.copy(a.filesystem)?;
-            let kind = kind.as_str()?;
-            let rw = if read_only { Rights::READ } else { Rights::READ.union(Rights::WRITE) };
-            // A bind mount: the directory in slot `source`, mounted again.
-            if kind == "bind" {
-                if compress {
-                    return Err(Kernel::InvalidArgument.status(3));
-                }
-                let (_, from) = objects::directory(cspace, a.source, rw)?;
-                let mount = vfs()?
-                    .bind(&dir.at, path.as_str()?, &from.at, read_only)
-                    .map_err(fs::status)?;
-                info!(
-                    "Files: mounted a directory of {} from {} on /{}{}",
-                    mount.fs.kind().name(),
-                    mount.source(),
-                    mount.path(),
-                    if mount.read_only() { ", read-only" } else { "" },
-                );
-                return answer(label, 0, [0; 8]);
-            }
-            let source = if matches!(kind, "fat" | "exfat" | "btrfs" | "ext4") {
-                Some(objects::file(cspace, a.source, rw)?.1)
-            } else if a.source != 0 {
-                return Err(Kernel::InvalidArgument.status(2));
-            } else {
-                None
-            };
-            if compress && kind != "btrfs" {
-                return Err(Kernel::InvalidArgument.status(3));
-            }
-            let flags = fs::Flags { read_only, compress };
-            let made =
-                fs::make(kind, source.as_ref().map(|s| &s.at.node), flags).map_err(fs::status)?;
-            let mount = vfs()?
-                .mount(&dir.at, path.as_str()?, made.fs, made.source.as_str(), read_only)
-                .map_err(fs::status)?;
-            let mut labelled = radix_klog::TextBuf::<40>::new();
-            {
-                use core::fmt::Write;
-                let mut name = radix_klog::TextBuf::<32>::new();
-                let _ = mount.fs.label(&mut name);
-                if !name.as_str().is_empty() {
-                    let _ = write!(labelled, ", labelled {}", name.as_str());
-                }
-            }
-            info!(
-                "Files: mounted {} from {} on /{}{}{}",
-                mount.fs.kind().name(),
-                mount.source(),
-                mount.path(),
-                if mount.read_only() { ", read-only" } else { "" },
-                labelled.as_str()
-            );
-            answer(label, 0, [0; 8])
-        }
+        directory::MOUNT => mount_method(user, found, label, args),
         directory::UNMOUNT => {
             let a = directory::UnmountArgs::decode(args)?;
             let dir = directory_of(found, Rights::CONTROL)?;
@@ -825,7 +782,8 @@ pub fn directory_method(
             let mut name = Path::Empty;
             let name = name.copy(a.name)?;
             let name = socket::Name::of(name.bytes()).ok_or(Kernel::InvalidArgument.status(2))?;
-            socket::bind(socket, vfs()?, &dir.at, path.as_str()?, name)?;
+            let access = made_access(user, 0o777)?;
+            socket::bind(socket, vfs()?, &dir.at, path.as_str()?, name, access)?;
             answer(label, 0, [0; 8])
         }
         directory::CONNECT_SOCKET => {
@@ -845,6 +803,74 @@ pub fn directory_method(
         }
         _ => Err(error(Kernel::NoSuchMethod)),
     }
+}
+
+/// `mount`, out of [`directory_method`]: Spark's mount of a Btrfs root is
+/// the deepest path of the kernel's stack, and it then has this frame
+/// instead of the one every directory method shares.
+#[inline(never)]
+fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> Result<Answer> {
+    let cspace = user.cspace;
+    let a = directory::MountArgs::decode(args)?;
+    let dir = directory_of(found, Rights::CONTROL)?;
+    let read_only = a.flags.contains(MountFlags::READ_ONLY);
+    let compress = a.flags.contains(MountFlags::COMPRESS);
+    let mut path = Path::Empty;
+    let path = path.copy(a.path)?;
+    let mut kind = Path::Empty;
+    let kind = kind.copy(a.filesystem)?;
+    let kind = kind.as_str()?;
+    let rw = if read_only { Rights::READ } else { Rights::READ.union(Rights::WRITE) };
+    // A bind mount: the directory in slot `source`, mounted again.
+    if kind == "bind" {
+        if compress {
+            return Err(Kernel::InvalidArgument.status(3));
+        }
+        let (_, from) = objects::directory(cspace, a.source, rw)?;
+        let mount =
+            vfs()?.bind(&dir.at, path.as_str()?, &from.at, read_only).map_err(fs::status)?;
+        info!(
+            "Files: mounted a directory of {} from {} on /{}{}",
+            mount.fs.kind().name(),
+            mount.source(),
+            mount.path(),
+            if mount.read_only() { ", read-only" } else { "" },
+        );
+        return answer(label, 0, [0; 8]);
+    }
+    let source = if matches!(kind, "fat" | "exfat" | "btrfs" | "ext4") {
+        Some(objects::file(cspace, a.source, rw)?.1)
+    } else if a.source != 0 {
+        return Err(Kernel::InvalidArgument.status(2));
+    } else {
+        None
+    };
+    if compress && kind != "btrfs" {
+        return Err(Kernel::InvalidArgument.status(3));
+    }
+    let flags = fs::Flags { read_only, compress };
+    let made = fs::make(kind, source.as_ref().map(|s| &s.at.node), flags).map_err(fs::status)?;
+    let mount = vfs()?
+        .mount(&dir.at, path.as_str()?, made.fs, made.source.as_str(), read_only)
+        .map_err(fs::status)?;
+    let mut labelled = radix_klog::TextBuf::<40>::new();
+    {
+        use core::fmt::Write;
+        let mut name = radix_klog::TextBuf::<32>::new();
+        let _ = mount.fs.label(&mut name);
+        if !name.as_str().is_empty() {
+            let _ = write!(labelled, ", labelled {}", name.as_str());
+        }
+    }
+    info!(
+        "Files: mounted {} from {} on /{}{}{}",
+        mount.fs.kind().name(),
+        mount.source(),
+        mount.path(),
+        if mount.read_only() { ", read-only" } else { "" },
+        labelled.as_str()
+    );
+    answer(label, 0, [0; 8])
 }
 
 /// Puts a capability with `rights` to `object`, a file or directory
@@ -950,13 +976,19 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
         file::STAT => {
             let a = file::StatArgs::decode(args)?;
             let file = file_of(found, Rights::NONE)?;
-            put_status(&file.at.node.stat(), file.at.mount.id, a.buffer)?;
+            put_status(&file.at, a.buffer)?;
             answer(label, 0, [0; 8])
         }
         file::SET_TIMES => {
             let a = file::SetTimesArgs::decode(args)?;
             let file = file_of(found, Rights::WRITE)?;
             set_times(&file.at, a.accessed, a.modified)?;
+            answer(label, 0, [0; 8])
+        }
+        file::SET_ACCESS => {
+            let a = file::SetAccessArgs::decode(args)?;
+            let file = file_of(found, Rights::WRITE)?;
+            set_access(&file.at, a.owner, a.group, a.mode)?;
             answer(label, 0, [0; 8])
         }
         file::SET_SIZE => {
@@ -1791,10 +1823,11 @@ fn refused_as_not_permitted(err: radix_vfs::Error) -> radix_abi::Status {
     }
 }
 
-/// Writes `stat`, of a file on the mount numbered `mount`, to the
-/// caller's `buffer` as a FileStatus.
-fn put_status(stat: &radix_vfs::Stat, mount: u64, buffer: UserBuffer) -> Result<()> {
+/// Writes what the node at `at` is to the caller's `buffer` as a
+/// FileStatus.
+fn put_status(at: &Location, buffer: UserBuffer) -> Result<()> {
     use directory::FileStatus as S;
+    let (stat, access, mount) = (at.node.stat(), at.node.access(), at.mount.id);
     let (address, len) = user_range(buffer)?;
     if len < S::SIZE {
         return Err(error(Kernel::InvalidArgument));
@@ -1813,7 +1846,14 @@ fn put_status(stat: &radix_vfs::Stat, mount: u64, buffer: UserBuffer) -> Result<
     ] {
         bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
     }
-    bytes[S::OFFSET_LINKS..S::OFFSET_LINKS + 4].copy_from_slice(&stat.links.to_le_bytes());
+    for (at, value) in [
+        (S::OFFSET_LINKS, stat.links),
+        (S::OFFSET_OWNER, access.owner),
+        (S::OFFSET_GROUP, access.group),
+    ] {
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes[S::OFFSET_MODE..S::OFFSET_MODE + 2].copy_from_slice(&access.mode.to_le_bytes());
     bytes[S::OFFSET_KIND] = file_kind(stat.kind).raw();
     UserOut { address, len }.put(0, &bytes).map_err(fs::status)
 }
@@ -1875,6 +1915,44 @@ fn set_times(at: &Location, accessed: u64, modified: u64) -> Result<()> {
         radix_vfs::Error::NotSupported => error(Kernel::NotPermitted),
         err => fs::status(err),
     })
+}
+
+/// What a file the caller makes with the permission bits `mode` gets
+/// (ADR 0213): `mode` less those of the caller's file mode mask, and the
+/// caller's user and group, which are user 0's until users come (13b.2).
+/// A mode past MODE_BITS fails with invalid_argument.
+fn made_access(user: &UserThread, mode: u32) -> Result<Access> {
+    if mode & !directory::MODE_BITS != 0 {
+        return Err(error(Kernel::InvalidArgument));
+    }
+    let mask = user.process.posix.lock().file_mask;
+    Ok(Access { owner: 0, group: 0, mode: (mode & !mask) as u16 })
+}
+
+/// `set_access`: changes the owner, group or mode of the node at `at`,
+/// each that is KEEP staying. A call that changes no mode is a chown(2),
+/// which takes a file's set-user-ID bit away (and its set-group-ID bit
+/// if its group may run it) even when its owner and group stay, as
+/// Linux does; a new mode is set after that. A filesystem that keeps no
+/// owners or modes refuses with not_permitted, as Linux's FAT does.
+fn set_access(at: &Location, owner: u32, group: u32, mode: u32) -> Result<()> {
+    let keep = |value: u32| (value != directory::KEEP).then_some(value);
+    let (owner, group, mode) = (keep(owner), keep(group), keep(mode));
+    if mode.is_some_and(|mode| mode & !directory::MODE_BITS != 0) {
+        return Err(error(Kernel::InvalidArgument));
+    }
+    let node = &at.node;
+    let kind = node.kind();
+    // lchmod(2): Linux has no mode for a link to change.
+    if kind == Kind::Symlink && mode.is_some() {
+        return Err(error(Kernel::NotSupported));
+    }
+    let change = match mode {
+        Some(mode) => AccessChange { owner, group, mode: Some(mode as u16), drop_set_ids: false },
+        None => AccessChange::chown(kind, owner, group),
+    };
+    at.writable().map_err(fs::status)?;
+    node.set_access(&change).map_err(refused_as_not_permitted)
 }
 
 /// Makes `file`'s changes durable, as its node's filesystem does: FAT,

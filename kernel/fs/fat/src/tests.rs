@@ -20,11 +20,16 @@ use proptest::prelude::*;
 use radix_block::ram::RamDisk;
 use radix_block::{BlockDevice, DeviceRef};
 use radix_vfs::mem::{self, KArc};
-use radix_vfs::{Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
+use radix_vfs::{Access, AccessChange, Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
 
 use crate::FatFs;
 use crate::bpb::Geometry;
 use crate::table::Width;
+
+/// The owner, group and mode of the directories and files the tests
+/// make: user 0's, with Linux's usual modes.
+const DIR: Access = Access::default_for(Kind::Directory);
+const FILE: Access = Access::default_for(Kind::File);
 
 /// 2026-10-22 00:42:22 UTC, for files' times.
 fn clock() -> u64 {
@@ -195,7 +200,7 @@ fn read_all(node: &NodeRef) -> Vec<u8> {
 
 /// A file `name` in `dir` holding `data`.
 fn make_file(dir: &NodeRef, name: &str, data: &[u8]) -> NodeRef {
-    let node = dir.create(name, Kind::File).unwrap();
+    let node = dir.create(name, Kind::File, FILE).unwrap();
     if !data.is_empty() {
         write_all(&node, 0, data);
     }
@@ -258,7 +263,7 @@ fn volumes_of_4k_sectors_on_disks_of_4k_sectors() {
         let image = mkfs_in(4096, bits, kib, 1);
         let volume = Volume::new_in(4096, &image);
         let root = volume.root();
-        let dir = root.create("Sub directory", Kind::Directory).unwrap();
+        let dir = root.create("Sub directory", Kind::Directory, DIR).unwrap();
         let mut expected = Vec::new();
         for (i, &size) in SIZES.iter().enumerate() {
             let name = format!("file {i}.bin");
@@ -288,8 +293,8 @@ fn files_written_are_read_back_by_radix_fsck_and_mtools() {
     for (bits, kib, per_cluster) in VOLUMES {
         let volume = Volume::new(&mkfs(bits, kib, per_cluster));
         let root = volume.root();
-        let dir = root.create("Documents and Settings", Kind::Directory).unwrap();
-        let sub = dir.create("sub", Kind::Directory).unwrap();
+        let dir = root.create("Documents and Settings", Kind::Directory, DIR).unwrap();
+        let sub = dir.create("sub", Kind::Directory, DIR).unwrap();
         let mut expected = Vec::new();
         for (i, name) in NAMES.iter().enumerate() {
             let size = SIZES[i % SIZES.len()];
@@ -371,8 +376,8 @@ fn remove_rename_and_replace() {
     for (bits, kib, per_cluster) in VOLUMES {
         let volume = Volume::new(&mkfs(bits, kib, per_cluster));
         let root = volume.root();
-        let a = root.create("a", Kind::Directory).unwrap();
-        let b = a.create("b", Kind::Directory).unwrap();
+        let a = root.create("a", Kind::Directory, DIR).unwrap();
+        let b = a.create("b", Kind::Directory, DIR).unwrap();
         make_file(&root, "one.txt", &pattern(1, 3000));
         make_file(&root, "two.txt", &pattern(2, 9000));
         make_file(&b, "deep file.txt", &pattern(3, 100));
@@ -389,7 +394,7 @@ fn remove_rename_and_replace() {
         // A directory under itself, and over a non-empty one.
         assert_eq!(root.rename("a", &*b, "a").err(), Some(Error::BadName));
         assert_eq!(root.rename("a", &*a, "x").err(), Some(Error::BadName));
-        root.create("full", Kind::Directory).unwrap().create("f", Kind::File).unwrap();
+        root.create("full", Kind::Directory, DIR).unwrap().create("f", Kind::File, FILE).unwrap();
         assert_eq!(a.rename("b", &*root, "full").err(), Some(Error::NotEmpty));
         assert_eq!(root.rename("full", &*a, "the first file.txt").err(), Some(Error::NotDirectory));
         // A directory moves up: its `..` follows (fsck checks it).
@@ -398,10 +403,10 @@ fn remove_rename_and_replace() {
         assert_eq!(root.remove("a").err(), Some(Error::NotEmpty));
         a.remove("the first file.txt").unwrap();
         root.remove("a").unwrap();
-        assert_eq!(root.create("full", Kind::File).err(), Some(Error::Exists));
-        assert_eq!(root.create("FULL", Kind::Directory).err(), Some(Error::Exists));
-        assert_eq!(root.create("bad:name", Kind::File).err(), Some(Error::BadName));
-        assert_eq!(root.create("dot.", Kind::File).err(), Some(Error::BadName));
+        assert_eq!(root.create("full", Kind::File, FILE).err(), Some(Error::Exists));
+        assert_eq!(root.create("FULL", Kind::Directory, DIR).err(), Some(Error::Exists));
+        assert_eq!(root.create("bad:name", Kind::File, FILE).err(), Some(Error::BadName));
+        assert_eq!(root.create("dot.", Kind::File, FILE).err(), Some(Error::BadName));
         drop((a, b));
         fsck(&volume.image());
         let volume = volume.remount();
@@ -445,7 +450,7 @@ fn growth_reads_zeros_and_cuts_free_clusters() {
         let junk = make_file(&root, "junk", &vec![0xee; 64 * 1024]);
         drop(junk);
         root.remove("junk").unwrap();
-        let file = root.create("sparse", Kind::File).unwrap();
+        let file = root.create("sparse", Kind::File, FILE).unwrap();
         write_all(&file, 0, b"start");
         write_all(&file, 20_000, b"end");
         file.set_size(30_000).unwrap();
@@ -473,7 +478,7 @@ fn full_volumes_and_directories() {
     // A floppy fills up; what was written is still whole.
     let volume = Volume::new(&mkfs(12, 1440, 1));
     let root = volume.root();
-    let big = root.create("big", Kind::File).unwrap();
+    let big = root.create("big", Kind::File, FILE).unwrap();
     let mut written = 0u64;
     // Big writes until one does not fit, then a cluster at a time.
     for len in [64 * 1024, 512] {
@@ -489,7 +494,7 @@ fn full_volumes_and_directories() {
         }
     }
     assert_eq!(volume.fs.info().free, 0);
-    assert_eq!(root.create("more", Kind::Directory).err(), Some(Error::NoSpace));
+    assert_eq!(root.create("more", Kind::Directory, DIR).err(), Some(Error::NoSpace));
     big.set_size(1000).unwrap();
     drop(big);
     fsck(&volume.image());
@@ -498,7 +503,7 @@ fn full_volumes_and_directories() {
     let root = volume.root();
     let mut made = 0;
     let full = loop {
-        match root.create(&format!("f{made}"), Kind::File) {
+        match root.create(&format!("f{made}"), Kind::File, FILE) {
             Ok(_) => made += 1,
             Err(err) => break err,
         }
@@ -507,9 +512,9 @@ fn full_volumes_and_directories() {
     // 224 entries, one of them the volume label.
     assert_eq!(made, 223);
     root.remove("f0").unwrap();
-    let dir = root.create("dir", Kind::Directory).unwrap();
+    let dir = root.create("dir", Kind::Directory, DIR).unwrap();
     for i in 0..300 {
-        dir.create(&format!("A rather long file name, number {i}"), Kind::File).unwrap();
+        dir.create(&format!("A rather long file name, number {i}"), Kind::File, FILE).unwrap();
     }
     assert_eq!(names(&dir).len(), 300);
     // Their short names all differ (fsck checks), past the numeric tails.
@@ -539,21 +544,21 @@ fn read_only_volumes_refuse_changes() {
     let file = root.lookup("hello.txt").unwrap();
     assert_eq!(read_all(&file), b"hello");
     assert_eq!(file.write(0, &Slice(b"x")).err(), Some(Error::ReadOnly));
-    assert_eq!(root.create("new", Kind::File).err(), Some(Error::ReadOnly));
+    assert_eq!(root.create("new", Kind::File, FILE).err(), Some(Error::ReadOnly));
     assert_eq!(root.remove("hello.txt").err(), Some(Error::ReadOnly));
     assert_eq!(file.set_times(Some(0), None).err(), Some(Error::ReadOnly));
     fs.sync().unwrap();
 }
 
 #[test]
-fn times_set_are_kept_as_fat_keeps_them() {
+fn times_set_are_kept_as_fat_keeps_them_and_owners_none() {
     const S: u64 = 1_000_000_000;
     // 2026-10-22 12:34:57.5 UTC, and 2001-02-03 04:05:06 UTC.
     let (modified, accessed) = (1_792_672_497 * S + S / 2, 981_173_106 * S);
     let volume = Volume::new(&mkfs(16, 32768, 4));
     let root = volume.root();
     let file = make_file(&root, "file", b"data");
-    let dir = root.create("dir", Kind::Directory).unwrap();
+    let dir = root.create("dir", Kind::Directory, DIR).unwrap();
     let made = file.stat();
     assert_eq!(made.accessed, made.modified - made.modified % (86_400 * S));
     file.set_times(Some(accessed), Some(modified)).unwrap();
@@ -566,6 +571,20 @@ fn times_set_are_kept_as_fat_keeps_them() {
     // Only what was asked for changes.
     file.set_times(None, None).unwrap();
     assert_eq!(file.stat(), stat);
+    // FAT keeps no owners or modes: everything is user 0's, 0755, as
+    // Linux's vfat shows it. As there, a chmod of permission bits and a
+    // chown to user 0 are taken and change nothing; others are refused.
+    let shown = Access { owner: 0, group: 0, mode: 0o755 };
+    for node in [&root, &file, &dir] {
+        assert_eq!(node.access(), shown);
+    }
+    let chmod = |mode| AccessChange { mode: Some(mode), ..AccessChange::default() };
+    file.set_access(&chmod(0o600)).unwrap();
+    dir.set_access(&AccessChange::chown(Kind::Directory, Some(0), Some(0))).unwrap();
+    assert_eq!((file.access(), dir.access()), (shown, shown));
+    assert_eq!(file.set_access(&chmod(0o4755)), Err(Error::NotSupported));
+    let chown = AccessChange::chown(Kind::File, None, Some(100));
+    assert_eq!(file.set_access(&chown), Err(Error::NotSupported));
     drop((file, dir, root));
     let volume = volume.remount();
     let root = volume.root();
@@ -677,7 +696,7 @@ proptest! {
                     let path = join(dir, name);
                     let parent_ok = dir.is_empty() || model.get(dir) == Some(&Model::Dir);
                     let kind = if kind { Kind::Directory } else { Kind::File };
-                    let got = walk(&root, dir).and_then(|d| d.create(name, kind).map(|_| ()));
+                    let got = walk(&root, dir).and_then(|d| d.create(name, kind, Access::default_for(kind)).map(|_| ()));
                     if !parent_ok {
                         prop_assert!(got.is_err());
                     } else {
@@ -848,8 +867,8 @@ fn populated() -> &'static [Vec<u8>] {
             .map(|(bits, kib, per_cluster)| {
                 let volume = Volume::new(&mkfs(bits, kib, per_cluster));
                 let root = volume.root();
-                let dir = root.create("A long directory name", Kind::Directory).unwrap();
-                let inner = dir.create("inner", Kind::Directory).unwrap();
+                let dir = root.create("A long directory name", Kind::Directory, DIR).unwrap();
+                let inner = dir.create("inner", Kind::Directory, DIR).unwrap();
                 for (i, (name, size)) in NAMES.iter().zip(SIZES).enumerate() {
                     let parent = [&root, &dir, &inner][i % 3];
                     make_file(parent, name, &pattern(u32::try_from(i).unwrap(), size));
@@ -912,7 +931,7 @@ proptest! {
         if let Ok(fs) = FatFs::mount(device, false) {
             let root = fs.root();
             read_everything(&root, 0, &mut 200);
-            if let Ok(file) = root.create("new file.txt", Kind::File) {
+            if let Ok(file) = root.create("new file.txt", Kind::File, FILE) {
                 let _ = file.write(0, &Slice(&pattern(99, 5000)));
             }
             for name in names_or_none(&root).iter().take(3) {

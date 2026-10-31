@@ -1619,7 +1619,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "storage",
-        about: "Spark mounts four FAT disks; what is written reads back after a reboot and on the host",
+        about: "Spark mounts four FAT disks; what is written reads back after a reboot and on the host, and a chown to another user is refused, as FAT keeps no owners",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage write",
@@ -1755,7 +1755,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "exfat-write",
-        about: "The storage test on two exFAT disks Linux's mkfs.exfat made, with clusters of a sector and of 32 KiB: fsck.exfat passes after each boot, and The Sleuth Kit reads back what was written",
+        about: "The storage test on two exFAT disks Linux's mkfs.exfat made, with clusters of a sector and of 32 KiB: fsck.exfat passes after each boot, and The Sleuth Kit reads back what was written; a chown to another user is refused",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage write",
@@ -1925,7 +1925,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "btrfs-write",
-        about: "The storage test on two Btrfs disks Linux's mkfs.btrfs made, past their first data chunk, one compressing with zstd: Linux's btrfs check passes after each boot, and btrfs restore reads back what was written",
+        about: "The storage test on two Btrfs disks Linux's mkfs.btrfs made, past their first data chunk, one compressing with zstd: Linux's btrfs check passes after each boot, and btrfs restore reads back what was written, and dump-tree the owners and modes given",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- --compress nvme0n1 /system/tests/storage write",
@@ -2044,7 +2044,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "ext4-write",
-        about: "The storage test on two ext4 disks Linux's mkfs.ext4 made, with blocks of 4 KiB and 1 KiB: e2fsck passes after each boot, with the journal as Radix left it and replayed, and debugfs reads back what was written",
+        about: "The storage test on two ext4 disks Linux's mkfs.ext4 made, with blocks of 4 KiB and 1 KiB: e2fsck passes after each boot, with the journal as Radix left it and replayed, and debugfs reads back what was written and the owners and modes given",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage write",
@@ -2084,7 +2084,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "root",
-        about: "Dukovo's root on a copy of the test image as a virtio disk: Spark mounts the subvolumes of its Btrfs, /system read-only, and what is written to the others is there after a reboot, as is a read-only snapshot of /users, and a scrub finds no errors; Linux's btrfs check passes after each boot",
+        about: "Dukovo's root on a copy of the test image as a virtio disk: Spark mounts the subvolumes of its Btrfs, /system read-only, and what is written to the others is there after a reboot, as is a read-only snapshot of /users, and a scrub finds no errors; the system's files are root's; Linux's btrfs check passes after each boot",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "lockdep -- /system/tests/storage root",
@@ -5386,10 +5386,120 @@ fn ext4_written(disk: &DiskImage, name: &str) -> Result<(), String> {
                 return Err(format!("{image}: {gone} is still there"));
             }
         }
-        Ok(())
+        storage_access(&image, &ext4_access(disk)?)
     })();
     let _ = std::fs::remove_dir_all(&restored);
     result
+}
+
+/// The mode, owner and group of each file the storage program gives one
+/// (ADR 0213), as Linux's tools read them, and as the program set them:
+/// its set-user-ID bit gone after the chown, and the set-group-ID
+/// directory's group on what is made in it.
+const STORAGE_ACCESS: [(&str, u32, u32, u32); 5] = [
+    ("hello.txt", 0o644, 0, 0),
+    ("notes/final.txt", 0o640, 1000, 100),
+    ("cut.txt", 0o755, 1000, 0),
+    ("many", 0o2755, 0, 100),
+    ("many/file-07.txt", 0o644, 0, 100),
+];
+
+/// Checks that `found` has each of [`STORAGE_ACCESS`]'s files with its
+/// mode, owner and group; `image` names the disk.
+fn storage_access(image: &str, found: &BTreeMap<String, (u32, u32, u32)>) -> Result<(), String> {
+    for (path, mode, owner, group) in STORAGE_ACCESS {
+        match found.get(path) {
+            Some(&got) if got == (mode, owner, group) => {}
+            Some((m, o, g)) => {
+                return Err(format!(
+                    "{image}: {path} has mode {m:o}, owner {o} and group {g}, not {mode:o}, \
+                     {owner} and {group}"
+                ));
+            }
+            None => return Err(format!("{image}: Linux's tools find no {path}")),
+        }
+    }
+    Ok(())
+}
+
+/// The permission bits, owner and group of each of [`STORAGE_ACCESS`]'s
+/// files on an ext4 disk, as `debugfs`'s `stat` reads them once its
+/// journal is replayed: `Mode:  0640` and `User:  1000   Group:   100`.
+fn ext4_access(disk: &DiskImage) -> Result<BTreeMap<String, (u32, u32, u32)>, String> {
+    let replayed = ext4_replayed(disk)?;
+    let result = STORAGE_ACCESS
+        .iter()
+        .map(|&(path, ..)| {
+            let mut debugfs = std::process::Command::new(fat_tool("debugfs"));
+            debugfs.arg("-R").arg(format!("stat /{path}")).arg(&replayed);
+            let said = host_tool(debugfs.stdin(Stdio::null()))?;
+            let said = String::from_utf8_lossy(&said);
+            let words: Vec<&str> = said.split_whitespace().collect();
+            let after = |label: &str, radix: u32| {
+                let at = words.iter().position(|word| *word == label)?;
+                u32::from_str_radix(words.get(at + 1)?, radix).ok()
+            };
+            match (after("Mode:", 8), after("User:", 10), after("Group:", 10)) {
+                (Some(mode), Some(owner), Some(group)) => {
+                    Ok((path.to_string(), (mode, owner, group)))
+                }
+                _ => Err(format!("{}: debugfs's stat of {path} says {said}", disk.path.display())),
+            }
+        })
+        .collect();
+    let _ = std::fs::remove_file(&replayed);
+    result
+}
+
+/// The permission bits, owner and group of the files on a Btrfs disk's
+/// top subvolume, by name (a path for [`STORAGE_ACCESS`]'s), as `btrfs
+/// inspect-internal dump-tree` prints its inode items and their names:
+/// `key (258 INODE_ITEM 0)`, then `... mode 100640 links 1 uid 1000 gid
+/// 100 ...`, and `key (258 INODE_REF 257)`, then `... name: final.txt`.
+fn btrfs_access(disk: &DiskImage) -> Result<BTreeMap<String, (u32, u32, u32)>, String> {
+    let tool = disk.btrfs.as_ref().ok_or("a Btrfs disk was made without the btrfs tool")?;
+    let mut cmd = std::process::Command::new(tool);
+    cmd.args(["inspect-internal", "dump-tree", "-t", "fs"]).arg(&disk.path);
+    let dump = host_tool(cmd.stdin(Stdio::null()))?;
+    let dump = String::from_utf8_lossy(&dump);
+    let mut inodes: BTreeMap<u64, (u32, u32, u32)> = BTreeMap::new();
+    let mut names: BTreeMap<String, u64> = BTreeMap::new();
+    let mut key: Option<(u64, &str)> = None;
+    for line in dump.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if let Some(at) = words.iter().position(|word| *word == "key") {
+            let number = words.get(at + 1).and_then(|w| w.trim_start_matches('(').parse().ok());
+            key = number.zip(words.get(at + 2).copied());
+            continue;
+        }
+        let after = |label: &str, radix: u32| {
+            let at = words.iter().position(|word| *word == label)?;
+            u32::from_str_radix(words.get(at + 1)?, radix).ok()
+        };
+        match key {
+            Some((ino, "INODE_ITEM")) => {
+                if let (Some(mode), Some(uid), Some(gid)) =
+                    (after("mode", 8), after("uid", 10), after("gid", 10))
+                {
+                    inodes.insert(ino, (mode & 0o7777, uid, gid));
+                }
+            }
+            Some((ino, "INODE_REF")) => {
+                if let Some(at) = line.find("name: ") {
+                    names.insert(line[at + 6..].to_string(), ino);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Each of the program's files by its last name, which is unique.
+    Ok(STORAGE_ACCESS
+        .iter()
+        .filter_map(|&(path, ..)| {
+            let name = path.rsplit('/').next()?;
+            Some((path.to_string(), *inodes.get(names.get(name)?)?))
+        })
+        .collect())
 }
 
 /// [`storage_host`] for a Btrfs disk: its files as `btrfs restore` copies
@@ -5443,7 +5553,7 @@ fn btrfs_written(disk: &DiskImage, name: &str) -> Result<(), String> {
                 return Err(format!("{image}: {gone} is still there"));
             }
         }
-        Ok(())
+        storage_access(&image, &btrfs_access(disk)?)
     })();
     let _ = std::fs::remove_dir_all(&restored);
     result

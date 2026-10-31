@@ -158,7 +158,7 @@ pub fn files(argument: Argument) -> u64 {
     // SAFETY: only this function, on this program's one thread, touches
     // the buffer, and the kernel only while a call below runs.
     let buffer = unsafe { &mut *core::ptr::addr_of_mut!(BUFFER) };
-    let made = directory::open(&SYS, SLOT_DIRECTORY, FILE_NAME, create, rw, SLOT_FILE)
+    let made = directory::open(&SYS, SLOT_DIRECTORY, FILE_NAME, create, rw, SLOT_FILE, 0o644)
         .and_then(|_| file::write(&SYS, SLOT_FILE, 0, buffer));
     if ok!(made, "the file to benchmark").is_none() {
         return checks::failures();
@@ -166,7 +166,7 @@ pub fn files(argument: Argument) -> u64 {
     let rounds = argument.rounds;
     measure("file_open_close", rounds, || {
         let none = directory::OpenFlags::NONE;
-        directory::open(&SYS, SLOT_DIRECTORY, FILE_NAME, none, Rights::READ, SLOT_OPENED).is_ok()
+        directory::open(&SYS, SLOT_DIRECTORY, FILE_NAME, none, Rights::READ, SLOT_OPENED, 0).is_ok()
             && capability::delete(&SYS, SLOT_OPENED).is_ok()
     });
     let mut status = [0u8; directory::FileStatus::SIZE];
