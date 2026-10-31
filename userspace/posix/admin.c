@@ -457,7 +457,7 @@ static void kernel_log(void) {
 	// A program's line is of the user facility (ADR 0210).
 	CONTAINS("<12>", "/bin/dmesg", "-r", "-l", "warn");
 	CONTAINS("user  :warn  : ", "/bin/dmesg", "-x", "-l", "warn");
-	CONTAINS("a line for dmesg", "/bin/dmesg", "-u");
+	CONTAINS("a line for dmesg", "/bin/sh", "-c", "/bin/dmesg -u | /bin/tail -n 3");
 	CHECK(run_program((const char *const[]){"/bin/dmesg", "-k", NULL}, "", 0) == 0);
 	CHECK(strstr(output, "a line for dmesg") == NULL);
 	STATUS(0, "/bin/dmesg", "-C");
