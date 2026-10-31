@@ -3,7 +3,7 @@
 
 //! What a capability designates: kernel objects and hardware resources.
 //!
-//! Sixteen kinds are kernel objects with an entry in the store's object
+//! Seventeen kinds are kernel objects with an entry in the store's object
 //! table, named by an [`ObjectId`]: memory, frames, DMA buffers, address
 //! spaces, threads, processes, endpoints, notifications, resource domains
 //! (Phase 4: a CPU weight and a memory limit that threads and their memory
