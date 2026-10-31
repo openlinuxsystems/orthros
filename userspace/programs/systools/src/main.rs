@@ -65,6 +65,7 @@ mod proc;
 mod prompt;
 mod ps;
 mod quota;
+mod remount;
 mod replace;
 mod rtrace;
 mod script;
@@ -152,6 +153,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("ps", ps::main),
     ("quota", quota::main),
     ("reboot", power::reboot),
+    ("remount", remount::main),
     ("renice", priority::renice),
     ("replace", replace::main),
     ("rtrace", rtrace::main),

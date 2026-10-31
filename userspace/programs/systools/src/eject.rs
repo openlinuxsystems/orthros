@@ -18,7 +18,7 @@ use crate::volumed;
 
 /// The volumes `what` names: a label or name under `/volumes`, a path
 /// there, or a disk or partition by its name or its path in `/devices`.
-fn named<'a>(mounts: &'a [Mount], what: &str) -> Vec<&'a Mount> {
+pub fn named<'a>(mounts: &'a [Mount], what: &str) -> Vec<&'a Mount> {
     let device = what.strip_prefix("/devices/").unwrap_or(what);
     let path =
         if what.starts_with('/') { PathBuf::from(what) } else { Path::new("/volumes").join(what) };

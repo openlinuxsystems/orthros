@@ -23,6 +23,7 @@ use radix_vfs::mem::{self, KArc};
 use radix_vfs::{Access, Error, FileSystem, Kind, NodeRef, Slice};
 
 use crate::NtfsFs;
+use crate::fs::Options;
 use crate::node::NtfsNode;
 use crate::tests::{
     Image, SIZES, VOLUMES, names, pattern, read_all, read_link, run, scratch, test_names, tool, walk,
@@ -44,12 +45,16 @@ struct Volume {
 
 impl Volume {
     fn mount_in(block: u32, image: &[u8], read_only: bool) -> Result<Volume, Error> {
+        Volume::mount_with(block, image, Options { read_only, ..Options::default() })
+    }
+
+    fn mount_with(block: u32, image: &[u8], options: Options) -> Result<Volume, Error> {
         radix_vfs::set_clock(clock);
         let sectors = image.len() as u64 / 512;
         let disk = mem::arc(RamDisk::with_blocks(sectors, false, block)).unwrap();
         disk.load(0, image).unwrap();
         let device: DeviceRef = disk.clone();
-        let fs = NtfsFs::mount(device, read_only)?;
+        let fs = NtfsFs::mount_with(device, options)?;
         Ok(Volume { disk, fs })
     }
 
@@ -443,6 +448,62 @@ fn a_full_volume_says_so_and_empties() {
     let image = volume.image();
     check(&image, 512, &BTreeMap::new());
     assert_eq!(volume.fs.info().free, free);
+}
+
+#[test]
+fn a_hibernation_is_discarded_when_asked() {
+    let discard = Options { discard_hibernation: true, ..Options::default() };
+    let image = Image::mkntfs(16, 512, 4096);
+    let mut hiberfil = b"wake".to_vec();
+    hiberfil.extend(pattern(5, 20_000));
+    image.copy_in("hiberfil.sys", &hiberfil);
+    hiberfil[..4].copy_from_slice(b"HIBR");
+    // Hibernated, and left dirty, as a hibernated Windows leaves it.
+    let dirty = {
+        let volume = Volume::new_in(512, &image.bytes());
+        write_all(&walk(&volume.root(), "hiberfil.sys").unwrap(), 0, b"HIBR");
+        volume.fs.sync().unwrap();
+        make_file(&volume.root(), "dirty", b"x", usize::MAX);
+        volume.raw()
+    };
+    // Not asked, it is only read.
+    assert_eq!(Volume::mount_in(512, &dirty, false).err(), Some(Error::NotSupported));
+    let volume = Volume::mount_with(512, &dirty, discard).unwrap();
+    assert!(volume.fs.hibernated() && volume.fs.discarded_hibernation());
+    make_file(&volume.root(), "written.txt", b"written over a hibernation", usize::MAX);
+    let written = volume.image();
+    drop(volume);
+    // The hibernation is gone, the rest of the file is as it was, and the
+    // volume stays marked for Windows to check.
+    // ntfs-3g reads a volume marked for checking only when forced to.
+    let forced_cat = |path: &str| {
+        let file = Scratch::new(&written);
+        run(Command::new(tool("ntfscat")).arg("-f").arg(&file.0).arg(path))
+    };
+    let after = forced_cat("/hiberfil.sys");
+    assert!(after[..4096].iter().all(|&b| b == 0) && after[4096..] == hiberfil[4096..]);
+    let again = Volume::mount_in(512, &written, true).unwrap();
+    assert!(again.fs.dirty() && !again.fs.hibernated());
+    assert_eq!(read_all(&walk(&again.root(), "written.txt").unwrap()), b"written over a hibernation");
+    drop(again);
+    assert_eq!(forced_cat("/written.txt"), b"written over a hibernation");
+    let file = Scratch::new(&written);
+    let out =
+        Command::new(tool("ntfsresize")).args(["-i", "-f", "-n"]).arg(&file.0).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    // Asked of a volume Windows did not hibernate with: a clean one
+    // mounts as any does, and one left dirty is still only read.
+    let clean = Volume::mount_with(512, &image.bytes(), Options::default()).unwrap().image();
+    let volume = Volume::mount_with(512, &clean, discard).unwrap();
+    assert!(!volume.fs.hibernated() && !volume.fs.discarded_hibernation());
+    drop(volume);
+    let plain = Image::mkntfs(16, 512, 4096);
+    let left = {
+        let volume = Volume::new_in(512, &plain.bytes());
+        make_file(&volume.root(), "x", b"x", usize::MAX);
+        volume.raw()
+    };
+    assert_eq!(Volume::mount_with(512, &left, discard).err(), Some(Error::NotSupported));
 }
 
 #[test]

@@ -41,6 +41,7 @@
 
 use alloc::sync::Weak;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use radix_block::cache::BlockCache;
 use radix_block::mem::CachePage;
@@ -604,6 +605,9 @@ pub(crate) struct Inner {
     log: Option<Stream>,
     /// The volume's flags as the mount found them.
     flags: u16,
+    /// Whether the volume stays marked dirty, for Windows to check at
+    /// its next start: one written although Windows hibernated with it.
+    keep_dirty: AtomicBool,
 }
 
 impl Inner {
@@ -938,7 +942,11 @@ impl Inner {
         // a clean cache and no pinned node mean the disk has it all.
         let _ns = self.ns.lock();
         let mut space = self.space.lock();
-        if space.marked && !self.vol.cache.is_dirty() && self.dirty.lock().is_empty() {
+        if space.marked
+            && !self.keep_dirty.load(Ordering::Relaxed)
+            && !self.vol.cache.is_dirty()
+            && self.dirty.lock().is_empty()
+        {
             self.write_flags(self.flags & !volume_flags::DIRTY)?;
             space.marked = false;
         }
@@ -1005,8 +1013,25 @@ pub struct NtfsFs {
     flags: u16,
     /// Whether Windows hibernated with it mounted.
     hibernated: bool,
+    /// Whether the mount threw Windows' hibernation away, to write it.
+    discarded: bool,
     /// Why a writable mount of it would be refused, mounted read-only.
     kept: Option<&'static str>,
+}
+
+/// How an NTFS is mounted ([`NtfsFs::mount_with`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Options {
+    /// Refusing every change.
+    pub read_only: bool,
+    /// Written although Windows hibernated with it, or shut down with
+    /// Fast Startup, as its owner asked, as ntfs-3g's `remove_hiberfile`
+    /// does: the hibernation is thrown away, and with it what Windows
+    /// held in memory, its programs and what it had not written of the
+    /// volume. Windows then starts afresh, and checks the volume, which
+    /// stays marked dirty (ADR 0238). It changes nothing of a volume
+    /// Windows did not hibernate with.
+    pub discard_hibernation: bool,
 }
 
 impl NtfsFs {
@@ -1018,24 +1043,40 @@ impl NtfsFs {
     /// write does (ADR 0130), and Radix's mount makes it read-only (ADRs
     /// 0236 and 0237).
     pub fn mount(device: DeviceRef, read_only: bool) -> Result<KArc<NtfsFs>> {
-        let (inner, About { label, version, flags }, kept) = open(device, read_only)?;
+        NtfsFs::mount_with(device, Options { read_only, ..Options::default() })
+    }
+
+    /// [`NtfsFs::mount`], as `options` say.
+    pub fn mount_with(device: DeviceRef, options: Options) -> Result<KArc<NtfsFs>> {
+        let read_only = options.read_only;
+        let forced = options.discard_hibernation && !read_only;
+        let Opened { inner, about, kept, unclean } = open(device, read_only, forced)?;
+        let About { label, version, flags } = about;
         let root = Inner::node_for(&inner, records::ROOT)?;
         if root.kind != Kind::Directory {
             return Err(Error::Corrupt);
         }
         let hibernated = hibernated(&root);
-        if hibernated && !read_only {
+        // Only a hibernation is written past, and what it left.
+        if hibernated && !read_only && !forced || forced && !hibernated && unclean {
             return Err(Error::NotSupported);
+        }
+        let discarded = forced && hibernated;
+        if discarded {
+            inner.keep_dirty.store(true, Ordering::Relaxed);
+            discard_hibernation(&root)?;
+            inner.sync_all()?;
         }
         let kept = if hibernated {
             Some(
                 "Windows hibernated with it, or shut down with Fast Startup; shut Windows down \
-                 fully (Shift with Shut down) to write it",
+                 fully (Shift with Shut down) to write it, or remount it with \
+                 --discard-hibernation to write it anyway, losing what Windows left open",
             )
         } else {
             kept
         };
-        Ok(mem::arc(NtfsFs { inner, root, label, version, flags, hibernated, kept })?)
+        Ok(mem::arc(NtfsFs { inner, root, label, version, flags, hibernated, discarded, kept })?)
     }
 
     /// Where the volume's parts are.
@@ -1059,6 +1100,12 @@ impl NtfsFs {
     /// another system wrote.
     pub fn hibernated(&self) -> bool {
         self.hibernated
+    }
+
+    /// Whether the mount threw Windows' hibernation away, to write it
+    /// ([`Options::discard_hibernation`]).
+    pub fn discarded_hibernation(&self) -> bool {
+        self.discarded
     }
 
     /// Why a writable mount of it would be refused, if it would, for a
@@ -1093,12 +1140,15 @@ struct Writable {
     mirror: Mirror,
     log: Stream,
     records: Stream,
+    /// Whether Windows left it dirty, or changes in its log, which a mount
+    /// that discards its hibernation writes over.
+    unclean: bool,
 }
 
 /// The volume on `device`, but for its root: its geometry, master file
 /// table and up-case table, and what `$Volume` says of it ([`NtfsFs::mount`]).
 #[inline(never)]
-fn open(device: DeviceRef, read_only: bool) -> Result<(KArc<Inner>, About, Option<&'static str>)> {
+fn open(device: DeviceRef, read_only: bool, forced: bool) -> Result<Opened> {
     let info = device.info();
     let cache = BlockCache::new(device);
     let geo = read_geometry(&cache, info.sectors * radix_block::SECTOR)?;
@@ -1112,22 +1162,35 @@ fn open(device: DeviceRef, read_only: bool) -> Result<(KArc<Inner>, About, Optio
     let upcase = load_upcase(&vol)?;
     let about = about(&vol)?;
     let bitmap = load_bitmap(&vol)?;
-    let (writable, kept) = write_state(&vol, &about, growable, read_only)?;
+    let (writable, kept) = write_state(&vol, &about, growable, read_only, forced)?;
+    let unclean = writable.as_ref().is_some_and(|w| w.unclean);
     let inner = assemble(vol, read_only, upcase, bitmap, writable, about.flags)?;
-    Ok((inner, about, kept))
+    Ok(Opened { inner, about, kept, unclean })
 }
 
-/// What a mount of `vol` writes with ([`writable`]), if it is not
-/// `read_only`; mounted read-only, why it could not be written instead.
+/// What [`open`] found.
+struct Opened {
+    inner: KArc<Inner>,
+    about: About,
+    /// Why it could not be written, mounted read-only.
+    kept: Option<&'static str>,
+    /// Whether it was written past a dirty flag or a log to replay.
+    unclean: bool,
+}
+
+/// What a mount of `vol` writes with ([`writable`]; `forced` past a
+/// dirty flag and a log to replay), if it is not `read_only`; mounted
+/// read-only, why it could not be written instead.
 #[inline(never)]
 fn write_state(
     vol: &Volume,
     about: &About,
     growable: bool,
     read_only: bool,
+    forced: bool,
 ) -> Result<(Option<Writable>, Option<&'static str>)> {
     if !read_only {
-        return Ok((Some(writable(vol, about, growable)?), None));
+        return Ok((Some(writable(vol, about, growable, forced)?), None));
     }
     let kept = if about.version.0 != 3 {
         Some("it is of an NTFS before 3.0, which Dukovo only reads")
@@ -1135,7 +1198,7 @@ fn write_state(
         Some("it is marked to be checked; let Windows check it to write it")
     } else if !growable {
         Some("Dukovo cannot grow its file table yet")
-    } else if writable(vol, about, growable).is_err() {
+    } else if writable(vol, about, growable, false).is_err() {
         Some(
             "Windows left changes in its journal to replay; start Windows and shut it down \
              fully to write it",
@@ -1159,7 +1222,7 @@ fn assemble(
 ) -> Result<KArc<Inner>> {
     let geo = vol.geo;
     let (log, records) = match writable {
-        Some(Writable { mirror, log, records }) => {
+        Some(Writable { mirror, log, records, .. }) => {
             vol.mirror = Some(mirror);
             (Some(log), Some(records))
         }
@@ -1179,6 +1242,7 @@ fn assemble(
         dirty: Mutex::new(mem::vec()),
         log,
         flags,
+        keep_dirty: AtomicBool::new(false),
     })?)
 }
 
@@ -1212,8 +1276,9 @@ fn load_bitmap(vol: &Volume) -> Result<Runs> {
 /// What a writable mount of `vol` needs ([`Writable`]); `growable` says
 /// whether Radix can grow its master file table.
 #[inline(never)]
-fn writable(vol: &Volume, about: &About, growable: bool) -> Result<Writable> {
-    if about.version.0 != 3 || about.flags & volume_flags::DIRTY != 0 || !growable {
+fn writable(vol: &Volume, about: &About, growable: bool, forced: bool) -> Result<Writable> {
+    let dirty = about.flags & volume_flags::DIRTY != 0;
+    if about.version.0 != 3 || dirty && !forced || !growable {
         return Err(Error::NotSupported);
     }
     let rs = u64::from(vol.geo.record_size);
@@ -1225,14 +1290,16 @@ fn writable(vol: &Volume, about: &About, growable: bool) -> Result<Writable> {
         return Err(Error::NotSupported);
     }
     let log = plain_stream(vol, records::LOG, false)?;
-    if !log_clean(vol, &log)? {
+    let clean = log_clean(vol, &log)?;
+    if !clean && !forced {
         return Err(Error::NotSupported);
     }
     let records = plain_stream(vol, records::MFT, true)?;
     if records.size * 8 < vol.records() {
         return Err(Error::Corrupt);
     }
-    Ok(Writable { mirror: Mirror { runs: mirror.runs, records: count }, log, records })
+    let unclean = dirty || !clean;
+    Ok(Writable { mirror: Mirror { runs: mirror.runs, records: count }, log, records, unclean })
 }
 
 /// Record `number`'s data, or its own `$BITMAP` if `bitmap`, if it is a
@@ -1318,6 +1385,18 @@ fn load_upcase(vol: &Volume) -> Result<Upcase> {
     let loaded = vol.load(records::UPCASE)?;
     let data = loaded.data.ok_or(Error::Corrupt)?;
     Upcase::load(data.size().min(upcase::BYTES), |at, buf| vol.read_value(&data, at, buf))
+}
+
+/// Throws away the hibernation in the root's `hiberfil.sys`: its first
+/// page becomes zeros, which Windows takes as no hibernation, as it does
+/// once it has resumed.
+#[inline(never)]
+fn discard_hibernation(root: &NtfsNode) -> Result<()> {
+    let file = root.lookup("hiberfil.sys")?;
+    let len = file.stat().size.min(PAGE_SIZE as u64) as usize;
+    let zeros = zeroed(len)?;
+    file.write(0, &radix_vfs::Slice(&zeros))?;
+    Ok(())
 }
 
 /// Whether the root's `hiberfil.sys` starts as a hibernated system's does

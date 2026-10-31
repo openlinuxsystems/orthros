@@ -922,6 +922,7 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
     }
     let read_only = a.flags.contains(MountFlags::READ_ONLY);
     let compress = a.flags.contains(MountFlags::COMPRESS);
+    let discard_hibernation = a.flags.contains(MountFlags::DISCARD_HIBERNATION);
     let mut path = Path::Empty;
     let path = path.copy(a.path)?;
     let mut kind = Path::Empty;
@@ -931,7 +932,7 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
     let who = who(found.cap.rights(), dir);
     // A bind mount: the directory in slot `source`, mounted again.
     if kind == "bind" {
-        if compress {
+        if compress || discard_hibernation {
             return Err(Kernel::InvalidArgument.status(3));
         }
         let (_, from) = objects::directory(cspace, a.source, rw)?;
@@ -953,10 +954,10 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
     } else {
         None
     };
-    if compress && kind != "btrfs" {
+    if compress && kind != "btrfs" || discard_hibernation && kind != "ntfs" {
         return Err(Kernel::InvalidArgument.status(3));
     }
-    let flags = fs::Flags { read_only, compress };
+    let flags = fs::Flags { read_only, compress, discard_hibernation };
     let made = fs::make(kind, source.as_ref().map(|s| &s.at.node), flags).map_err(fs::status)?;
     let mount = vfs()?
         .mount(&who, &dir.at, path.as_str()?, made.fs, made.source.as_str(), read_only)
