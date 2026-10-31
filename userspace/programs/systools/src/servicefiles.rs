@@ -14,10 +14,10 @@ use std::io::{self, BufRead, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use manifest::service;
 
+use crate::prompt;
 use crate::util::{self, Fail, fail, usage};
 
 /// Where Spark reads the service files.
@@ -280,87 +280,30 @@ pub fn secret(operands: &[String]) -> Result<i32, Fail> {
     Ok(0)
 }
 
-/// Set by SIGINT, SIGTERM or SIGHUP while a secret is typed, so that the
-/// terminal's echo comes back before `service` ends.
-static STOPPED: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn on_signal(_: libc::c_int) {
-    STOPPED.store(true, Ordering::Relaxed);
-}
-
 /// The value of `name`'s secret `secret`, from the standard input: a line
 /// typed at the terminal, which is not shown, or else everything there,
 /// with one newline at its end taken off, as `echo` adds one.
 fn read_secret(name: &str, secret: &str) -> Result<Vec<u8>, Fail> {
     let mut value = Vec::new();
-    // SAFETY: isatty only looks at the descriptor.
-    if unsafe { libc::isatty(0) } == 1 {
-        eprint!("{name}'s secret {secret}: ");
-        let _ = io::stderr().flush();
-        // Ctrl+C stops the read, not `service`, which puts the echo back
-        // first; without SA_RESTART, read(2) ends with EINTR.
-        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-            // SAFETY: all zeros is a valid sigaction: numbers, a signal
-            // set and a function address.
-            let mut action: libc::sigaction = unsafe { util::zeroed() };
-            action.sa_sigaction = on_signal as *const () as usize;
-            // SAFETY: the handler only stores to an atomic.
-            unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) };
+    if prompt::interactive() {
+        match prompt::ask(&format!("{name}'s secret {secret}: "), false) {
+            Ok(prompt::Answer::Line(line)) => value = line,
+            Ok(prompt::Answer::Stopped) => {
+                return Err(fail(format!("stopped: {name}'s secret {secret} is as it was")));
+            }
+            Err(err) => return Err(util::failed(&"the terminal", err)),
         }
-        // SAFETY: all zeros is a valid termios: numbers.
-        let mut saved: libc::termios = unsafe { util::zeroed() };
-        // SAFETY: tcgetattr fills `saved`.
-        let got = unsafe { libc::tcgetattr(0, &raw mut saved) } == 0;
-        if got {
-            let mut quiet = saved;
-            quiet.c_lflag &= !libc::ECHO;
-            // SAFETY: `quiet` is a valid termios.
-            unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw const quiet) };
-        }
-        let read = read_line(&mut value);
-        if got {
-            // SAFETY: `saved` is the termios read above.
-            unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw const saved) };
-        }
-        eprintln!();
-        if STOPPED.load(Ordering::Relaxed) {
-            return Err(fail(format!("stopped: {name}'s secret {secret} is as it was")));
-        }
-        read.map_err(|e| util::failed(&"the terminal", e))?;
     } else {
         io::stdin()
             .lock()
             .read_to_end(&mut value)
             .map_err(|e| util::failed(&"standard input", e))?;
-    }
-    if value.ends_with(b"\n") {
-        value.pop();
+        if value.ends_with(b"\n") {
+            value.pop();
+        }
     }
     if value.is_empty() {
         return Err(fail(format!("{name}'s secret {secret} cannot be empty")));
     }
     Ok(value)
-}
-
-/// Reads the standard input a byte at a time into `line` up to its
-/// newline, which it keeps, or its end; stops early when a signal came.
-fn read_line(line: &mut Vec<u8>) -> io::Result<()> {
-    let mut byte = 0u8;
-    while !STOPPED.load(Ordering::Relaxed) {
-        // SAFETY: `byte` is one writable byte.
-        match unsafe { libc::read(0, (&raw mut byte).cast(), 1) } {
-            0 => break,
-            1 => {
-                line.push(byte);
-                if byte == b'\n' {
-                    break;
-                }
-            }
-            _ => match io::Error::last_os_error() {
-                err if err.kind() == io::ErrorKind::Interrupted => {}
-                err => return Err(err),
-            },
-        }
-    }
-    Ok(())
 }

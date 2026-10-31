@@ -21,6 +21,7 @@ const SHIPPED: &[(&str, &str)] = &[
     ("driver", include_str!("../../../spark/tests/services/stop/driver.toml")),
     ("leaver", include_str!("../../../spark/tests/services/stop/leaver.toml")),
     ("stubborn", include_str!("../../../spark/tests/services/stop/stubborn.toml")),
+    ("authd", include_str!("../../../defaults/spark/services/authd.toml")),
     ("netd", include_str!("../../../defaults/spark/services/netd.toml")),
     ("netd", include_str!("../../../spark/tests/services/dhcp/netd.toml")),
 ];
@@ -63,6 +64,20 @@ fn every_shipped_file_reads() {
         service::from_toml(SHIPPED[SHIPPED.len() - 1].1).unwrap().permissions,
         netd.permissions
     );
+}
+
+#[test]
+fn only_authd_holds_the_names_capability() {
+    // The names capability lets its holder act for anyone: authd needs it
+    // to start the sessions of those who sign in (ADR 0250), and no other
+    // shipped service may ask for it.
+    for (name, text) in SHIPPED {
+        let service = service::from_toml(text).unwrap();
+        assert_eq!(service.permissions.names, *name == "authd", "{name}");
+    }
+    assert!(!service::from_toml(&file("")).unwrap().permissions.names);
+    let asked = service::from_toml(&file("[permissions]\nnames = true\n")).unwrap();
+    assert!(asked.permissions.names);
 }
 
 #[test]

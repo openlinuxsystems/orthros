@@ -3,7 +3,7 @@
 
 //! who(1), w(1), users(1) and uptime(1). Radix keeps no utmp: a session
 //! is a session leader with a controlling terminal, as `/processes` shows it,
-//! logged in when its leader started.
+//! logged in when its leader started, by the user it acts for.
 
 use std::ffi::CStr;
 use std::io::{self, Write};
@@ -17,6 +17,8 @@ use crate::util::{self, Fail};
 struct Session {
     leader: Process,
     terminal: String,
+    /// The name of the user its leader acts for.
+    user: String,
 }
 
 /// The sessions with a terminal, by terminal.
@@ -24,7 +26,10 @@ fn sessions(processes: &[Process]) -> Vec<Session> {
     let mut sessions: Vec<Session> = processes
         .iter()
         .filter(|p| p.number == p.session && !p.zombie())
-        .filter_map(|p| Some(Session { leader: p.clone(), terminal: p.terminal.clone()? }))
+        .filter_map(|p| {
+            let terminal = p.terminal.clone()?;
+            Some(Session { leader: p.clone(), terminal, user: util::user_name(p.user) })
+        })
         .collect();
     sessions.sort_by(|a, b| a.terminal.cmp(&b.terminal));
     sessions
@@ -129,7 +134,9 @@ pub fn users(args: &mut Args) -> Result<i32, Fail> {
         return Err(args.unknown(&arg));
     }
     let processes = proc::processes().map_err(|e| util::failed(&proc::PROC, e))?;
-    let names: Vec<String> = sessions(&processes).iter().map(|_| util::user_name(0)).collect();
+    // Sorted, as users(1) on Linux lists them.
+    let mut names: Vec<String> = sessions(&processes).into_iter().map(|s| s.user).collect();
+    names.sort();
     println!("{}", names.join(" "));
     Ok(0)
 }
@@ -184,9 +191,8 @@ pub fn who(args: &mut Args) -> Result<i32, Fail> {
         list.retain(|s| Some(&s.terminal) == mine.as_ref());
     }
     let mut out = io::stdout().lock();
-    let user = util::user_name(0);
     if count {
-        let names: Vec<&str> = list.iter().map(|_| user.as_str()).collect();
+        let names: Vec<&str> = list.iter().map(|s| s.user.as_str()).collect();
         writeln!(out, "{}", names.join(" "))?;
         writeln!(out, "# users={}", list.len())?;
         return Ok(0);
@@ -226,11 +232,11 @@ pub fn who(args: &mut Args) -> Result<i32, Fail> {
                 };
                 writeln!(
                     out,
-                    "{user:<8} {:<12} {when} {idle:<5} {:>10}",
-                    s.terminal, s.leader.number
+                    "{:<8} {:<12} {when} {idle:<5} {:>10}",
+                    s.user, s.terminal, s.leader.number
                 )?;
             } else {
-                writeln!(out, "{user:<8} {:<12} {when}", s.terminal)?;
+                writeln!(out, "{:<8} {:<12} {when}", s.user, s.terminal)?;
             }
         }
     }
@@ -279,9 +285,8 @@ pub fn w(args: &mut Args) -> Result<i32, Fail> {
     }
     let processes = proc::processes().map_err(|e| util::failed(&proc::PROC, e))?;
     let mut list = sessions(&processes);
-    let user = util::user_name(0);
-    if user_filter.as_ref().is_some_and(|u| *u != user && u != "0") {
-        list.clear();
+    if let Some(wanted) = &user_filter {
+        list.retain(|s| s.user == *wanted || s.leader.user.to_string() == *wanted);
     }
     let mut out = io::stdout().lock();
     if header {
@@ -322,7 +327,7 @@ pub fn w(args: &mut Args) -> Result<i32, Fail> {
         } else {
             util::local_time(login, "%d%b%y")
         };
-        let mut line = format!("{user:<8} {:<8} ", s.terminal);
+        let mut line = format!("{:<8} {:<8} ", s.user, s.terminal);
         if from {
             line += &format!("{:<16}", "-");
         }

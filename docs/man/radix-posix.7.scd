@@ -278,8 +278,9 @@ connection that has waited longest. *getsockname*, *getpeername*,
 *recvfrom* and *accept* give a socket's name as it was bound, or an
 unnamed *AF_UNIX* address. *getsockopt* answers *SO_TYPE*, *SO_DOMAIN*,
 *SO_PROTOCOL*, *SO_ERROR*, *SO_ACCEPTCONN*, *SO_RCVBUF*, *SO_SNDBUF* and
-*SO_PEERCRED*, which gives the process at the other end as it was when
-the connection was made, with user and group 0.
+*SO_PEERCRED*, which gives the process at the other end, and the user
+and group it acted for, as they were when the connection was made: for
+the connecting end, when the other began to listen.
 
 *sendmsg* passes up to 253 descriptors of files and directories with
 *SCM_RIGHTS*, which ride on the first byte it sends; one with no bytes

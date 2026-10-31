@@ -127,7 +127,7 @@ static int editor(const char *how, const char *file) {
 
 // Every shipped file reads, and `service check` says so.
 static void shipped(void) {
-	const char *names[] = {"consoled", "diskhealth", "logd", "netd", "notifyd", "volumed"};
+	const char *names[] = {"authd", "consoled", "diskhealth", "logd", "netd", "notifyd", "volumed"};
 	CONTAINS(DIR "/logd.toml: ok\n", SERVICE, "check");
 	for(size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
 		char line[128];

@@ -19,128 +19,22 @@
 #include <grp.h>
 #include <radix/radix.h>
 #include <stdint.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 
 #include "check.h"
+#include "names.h"
 
 #define TREE "/tmp/principals"
+// Where root listens, and alice connects.
+#define SOCKET TREE "/socket"
 // This program, beneath the root.
 #define PROGRAM "system/tests/posix/principals"
 #define ALICE 1000
 #define BOB 1001
 // A group alice is in besides her own.
 #define STAFF 100
-// The descriptor Spark gives the names capability as.
-#define NAMES (RADIX_STARTUP_SLOT_FD_BASE + 3)
-
-extern char **environ;
-
-// The errno a status of the kernel's or of a file maps to.
-static int status_errno(uint64_t status) {
-	if(RADIX_STATUS_DOMAIN(status) == RADIX_FILE_ERROR_DOMAIN)
-		return radix_file_errno(status);
-	return radix_kernel_errno(status);
-}
-
-// Checks that `call`, a Radix call, failed with `error`, an errno.
-#define CHECK_STATUS(call, error) \
-	do { \
-		uint64_t check_status_ = (call); \
-		if(check_status_ == 0 || status_errno(check_status_) != (error)) \
-			check_failed(__FILE__, __LINE__, #call " fails with " #error, \
-					check_status_ ? status_errno(check_status_) : 0); \
-	} while(0)
-
-// Puts `count` empty slots in `slots`: those of descriptors that are free
-// now, which nothing else takes while the test holds them.
-static void spare(uint32_t *slots, int count) {
-	int fds[8];
-	for(int i = 0; i < count; i++) {
-		fds[i] = dup(0);
-		CHECK(fds[i] >= 0);
-		slots[i] = RADIX_STARTUP_SLOT_FD_BASE + (uint32_t)fds[i];
-	}
-	for(int i = 0; i < count; i++)
-		close(fds[i]);
-}
-
-// The rights of the capability in `slot` (0 if it holds none).
-static uint64_t rights_of(uint32_t slot) {
-	struct radix_capability_info_results info;
-	return radix_capability_info(slot, &info) ? 0 : info.rights;
-}
-
-// Appends `text` and its NUL to the block of `*at` bytes.
-static int append(char *block, size_t *at, const char *text) {
-	size_t len = strlen(text) + 1;
-	if(*at + len > RADIX_PROCESS_EXEC_MAX)
-		return 0;
-	memcpy(block + *at, text, len);
-	*at += len;
-	return 1;
-}
-
-// The block `exec` takes to run this program with `argv` and this
-// environment, in `/`, as Spark makes it; returns its length.
-static size_t exec_block(char *block, char *const argv[]) {
-	struct radix_exec_header header = {RADIX_PROCESS_EXEC_VERSION, 0, 0, 2};
-	size_t at = sizeof(header);
-	int fits = 1;
-	for(; argv[header.args]; header.args++)
-		fits &= append(block, &at, argv[header.args]);
-	for(; environ[header.env]; header.env++)
-		fits &= append(block, &at, environ[header.env]);
-	fits &= append(block, &at, "/");
-	fits &= append(block, &at, "/" PROGRAM);
-	CHECK(fits);
-	memcpy(block, &header, sizeof(header));
-	return at;
-}
-
-// Starts this program with `argv` as `user` in `group` and `groups`, as
-// Spark starts a POSIX program, with the test's descriptors 0 to 2, but
-// with a root that acts for that name and has no bypass right: made with
-// `stamp`, then derived without it. Returns its number.
-static pid_t start_as(uint32_t user, uint32_t group, const uint32_t *groups, size_t count,
-		char *const argv[]) {
-	uint32_t s[4];
-	spare(s, 4);
-	uint32_t stamped = s[0], root = s[1], program = s[2], child = s[3];
-	uint64_t rights = rights_of(RADIX_STARTUP_SLOT_ROOT);
-	CHECK(rights & RADIX_RIGHTS_BYPASS);
-	CHECK(radix_names_stamp(NAMES, RADIX_STARTUP_SLOT_ROOT, stamped, user, group, groups,
-				  count * sizeof(*groups)) == 0);
-	CHECK(rights_of(stamped) == rights);
-	CHECK(radix_capability_derive(stamped, root, rights & ~RADIX_RIGHTS_BYPASS, 0) == 0);
-	struct radix_directory_open_results opened;
-	CHECK(radix_directory_open(RADIX_STARTUP_SLOT_ROOT, PROGRAM, strlen(PROGRAM), 0,
-				  RADIX_RIGHTS_READ, program, 0, &opened) == 0);
-	CHECK(radix_process_create(RADIX_STARTUP_SLOT_PROCESS, RADIX_OBJECT_KIND_PROCESS, 128,
-				  child) == 0);
-	CHECK(radix_names_name_process(NAMES, child, user, group, groups, count * sizeof(*groups)) ==
-			0);
-	const uint32_t shares[][2] = {
-			{root, RADIX_STARTUP_SLOT_ROOT},
-			{RADIX_STARTUP_SLOT_RANDOM, RADIX_STARTUP_SLOT_RANDOM},
-			{RADIX_STARTUP_SLOT_LOG, RADIX_STARTUP_SLOT_LOG},
-			{RADIX_STARTUP_SLOT_FD_BASE, RADIX_STARTUP_SLOT_FD_BASE},
-			{RADIX_STARTUP_SLOT_FD_BASE + 1, RADIX_STARTUP_SLOT_FD_BASE + 1},
-			{RADIX_STARTUP_SLOT_FD_BASE + 2, RADIX_STARTUP_SLOT_FD_BASE + 2},
-	};
-	for(size_t i = 0; i < sizeof(shares) / sizeof(shares[0]); i++)
-		CHECK(radix_process_share(child, shares[i][0], shares[i][1], rights_of(shares[i][0]),
-					  0) == 0);
-	static char block[RADIX_PROCESS_EXEC_MAX];
-	size_t len = exec_block(block, argv);
-	CHECK(radix_process_exec(child, program, block, len) == 0);
-	// A process that has started keeps its name.
-	CHECK_STATUS(radix_names_name_process(NAMES, child, 0, 0, NULL, 0), EINVAL);
-	struct radix_process_info_results info;
-	CHECK(radix_process_info(child, &info) == 0);
-	for(int i = 0; i < 4; i++)
-		radix_capability_delete(s[i]);
-	return (pid_t)info.number;
-}
 
 // Makes the file `path`, holding `text`, with `mode` and the owner and
 // group given.
@@ -212,6 +106,30 @@ static void setup(void) {
 	make(TREE "/noexec", 0644, 0, 0, "#!/bin/sh\nexit 0\n");
 	CHECK(has(TREE "/shared", 0, STAFF, 02775));
 	CHECK(has(TREE "/bob/secret", BOB, BOB, 0600));
+}
+
+// The address of SOCKET.
+static socklen_t socket_address(struct sockaddr_un *address) {
+	memset(address, 0, sizeof(*address));
+	address->sun_family = AF_UNIX;
+	strcpy(address->sun_path, SOCKET);
+	return (socklen_t)sizeof(*address);
+}
+
+// SO_PEERCRED gives the user each end acted for (ADR 0218): alice, who
+// connects, sees root, who listened, and root sees her.
+static void alice_peer(void) {
+	int s = socket(AF_UNIX, SOCK_STREAM, 0);
+	CHECK(s >= 0);
+	struct sockaddr_un address;
+	socklen_t len = socket_address(&address);
+	CHECK(connect(s, (struct sockaddr *)&address, len) == 0);
+	struct ucred cred;
+	socklen_t size = sizeof(cred);
+	CHECK(getsockopt(s, SOL_SOCKET, SO_PEERCRED, &cred, &size) == 0);
+	CHECK(cred.uid == 0 && cred.gid == 0 && cred.pid == getppid());
+	CHECK(write(s, "a", 1) == 1);
+	close(s);
 }
 
 // Alice's name: getuid and its kin, and that it cannot change.
@@ -391,6 +309,7 @@ static int alice(pid_t bob, pid_t root) {
 	RUN(alice_access);
 	RUN(alice_shared);
 	RUN(alice_running);
+	RUN(alice_peer);
 	alice_processes(bob, root);
 	fflush(stdout);
 	return check_failures > 125 ? 125 : check_failures;
@@ -474,7 +393,7 @@ int main(int argc, char **argv) {
 	RUN(setup);
 
 	char *bob_args[] = {"principals", "bob", NULL};
-	pid_t bob_pid = start_as(BOB, BOB, NULL, 0, bob_args);
+	pid_t bob_pid = start_as(PROGRAM, BOB, BOB, NULL, 0, bob_args);
 	// Bob is ready when his note is there.
 	for(int i = 0; i < 1000 && access(TREE "/bob/notes", F_OK) != 0; i++)
 		check_sleep_ms(10);
@@ -485,8 +404,22 @@ int main(int argc, char **argv) {
 	snprintf(root_number, sizeof(root_number), "%d", (int)getpid());
 	char *alice_args[] = {"principals", "alice", bob_number, root_number, NULL};
 	const uint32_t staff[] = {STAFF};
-	pid_t alice_pid = start_as(ALICE, ALICE, staff, 1, alice_args);
+	int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+	struct sockaddr_un address;
+	socklen_t len = socket_address(&address);
+	CHECK(listener >= 0 && bind(listener, (struct sockaddr *)&address, len) == 0);
+	CHECK(chmod(SOCKET, 0777) == 0 && listen(listener, 1) == 0);
+	pid_t alice_pid = start_as(PROGRAM, ALICE, ALICE, staff, 1, alice_args);
 	CHECK_CHILD(alice_pid);
+	// Her connection waited for the accept; it gives her name.
+	int from_alice = accept(listener, NULL, NULL);
+	CHECK(from_alice >= 0);
+	struct ucred cred;
+	socklen_t size = sizeof(cred);
+	CHECK(getsockopt(from_alice, SOL_SOCKET, SO_PEERCRED, &cred, &size) == 0);
+	CHECK(cred.uid == ALICE && cred.gid == ALICE && cred.pid == alice_pid);
+	close(from_alice);
+	close(listener);
 	// Bob was started by root, so root may stop him.
 	CHECK(kill(bob_pid, SIGTERM) == 0);
 	CHECK_CHILD(bob_pid);

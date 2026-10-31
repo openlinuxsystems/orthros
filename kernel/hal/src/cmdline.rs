@@ -140,6 +140,12 @@ pub const FLAGS: &[Flag] = &[
         value: None,
         summary: "leave QEMU through isa-debug-exit when boot finishes or the kernel panics",
     },
+    Flag {
+        name: "console-sign-in",
+        value: Some("off"),
+        summary: "for consoled, not the kernel: root's shell on each console with no sign-in, \
+                  as the boot tests run it",
+    },
 ];
 
 /// The self-tests `selftest=name` runs; radix-debug(7) describes them.

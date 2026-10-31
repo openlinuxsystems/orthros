@@ -27,6 +27,10 @@ static const char *const ELSEWHERE[][2] = {
 		{"notifyd", "the logging and consoles boot tests' service: consoled shows its notifications"},
 		{"notify-send", "the logging and consoles boot tests': it sends notifyd a notification"},
 		{"notifications", "the logging and consoles boot tests': it lists notifyd's notifications"},
+		{"authd", "the accounts boot test's service: it keeps the accounts and checks passwords"},
+		{"user", "the accounts boot test's: it makes and lists accounts through authd"},
+		{"passwd", "the accounts boot test's: it changes passwords through authd"},
+		{"login", "the signin boot test's: consoled runs it on each console to sign people in"},
 		{"netd", "the dhcp boot test's service: it sets a card up by DHCP, which only QEMU's network answers"},
 };
 

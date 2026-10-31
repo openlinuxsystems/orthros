@@ -24,6 +24,11 @@ const PAUSE: Duration = Duration::from_secs(10);
 pub struct Shell {
     /// The program's path.
     pub path: String,
+    /// Whether it is login(1), which signs people in: it gets the
+    /// terminal but not as its controlling terminal, which the session
+    /// it starts takes (ADR 0250). Otherwise it is a shell, root's, run
+    /// as a login shell with the terminal its own.
+    pub sign_in: bool,
     /// The environment it gets, as `NAME=value`.
     pub env: Vec<String>,
     /// The text shown before it starts: /system/settings/issue's.
@@ -115,9 +120,12 @@ impl Console {
         let (master, slave) =
             unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
         set_flags(master.as_raw_fd());
-        // The login shell's name starts with a dash (sh(1)).
+        // A login shell's name starts with a dash (sh(1)); login's does
+        // not.
         let name = shell.path.rsplit('/').next().unwrap_or("sh");
-        let argv_strings = [c_string(&shell.path), c_string(&format!("-{name}"))];
+        let argv0 = if shell.sign_in { name.to_string() } else { format!("-{name}") };
+        let argv_strings = [c_string(&shell.path), c_string(&argv0)];
+        let sign_in = shell.sign_in;
         let argv = [argv_strings[1].as_ptr(), std::ptr::null()];
         let env_strings: Vec<CString> = shell.env.iter().map(|e| c_string(e)).collect();
         let mut envp: Vec<*const libc::c_char> = env_strings.iter().map(|e| e.as_ptr()).collect();
@@ -134,7 +142,19 @@ impl Console {
             unsafe {
                 libc::signal(libc::SIGCHLD, libc::SIG_DFL);
                 libc::close(master.as_raw_fd());
-                libc::login_tty(slave.as_raw_fd());
+                if sign_in {
+                    // A session of its own, leaving consoled's, with the
+                    // terminal as 0 to 2 but not controlling it.
+                    libc::setsid();
+                    for fd in 0..3 {
+                        libc::dup2(slave.as_raw_fd(), fd);
+                    }
+                    if slave.as_raw_fd() > 2 {
+                        libc::close(slave.as_raw_fd());
+                    }
+                } else {
+                    libc::login_tty(slave.as_raw_fd());
+                }
                 libc::execve(argv_strings[0].as_ptr(), argv.as_ptr(), envp.as_ptr());
                 libc::_exit(127);
             }

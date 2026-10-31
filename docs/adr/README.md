@@ -9,6 +9,13 @@ Each file records one decision: its context, what was decided and what
 follows from it. See [0001](0001-record-architecture-decisions.md) for why,
 and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 
+The table below stops at the records made before 2026-11-01. A new record
+gets no row here: the files' names list every record in order, and
+`./ob docs` writes the whole table, from the files' titles and statuses,
+to `out/docs/adr/index.md` (and fails if two records take one number).
+Phases built in parallel added rows at the same place in this table, and
+their pull requests conflicted.
+
 | Number | Decision | Status |
 | --- | --- | --- |
 | [0000](0000-template.md) | Template | |
@@ -211,7 +218,9 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0215](0215-views-directories-made-of-attached-capabilities.md) | Views: directories made of attached capabilities, which a walk crosses onto as onto mounts | Accepted |
 | [0216](0216-service-files-in-toml.md) | Service files are TOML, read by one crate, and a file that does not read never takes a service down | Accepted |
 | [0217](0217-each-service-runs-in-a-view-of-what-its-file-declares.md) | Each service runs in a view of what its file declares, and gets its secrets as read-only files | Accepted |
+| [0218](0218-authd-keeps-the-accounts-and-passwords-are-argon2id-hashes.md) | authd keeps the accounts, and passwords are Argon2id hashes only it reads | Accepted |
 | [0230](0230-sensors-and-lsusb-with-the-usb-id-database.md) | sensors and lsusb are systools, with the USB ID database as a port | Accepted |
 | [0231](0231-the-firmwares-smbios-tables-and-hwinfo.md) | The firmware's SMBIOS tables show what the machine is, and hwinfo shows them | Accepted |
 | [0232](0232-memory-modules-spd-eeproms-over-the-smbus.md) | Memory modules' SPD EEPROMs are read over the SMBus, when first opened | Accepted |
 | [0233](0233-gpio-controllers-and-the-firmwares-gpio-events.md) | GPIO controllers are driven from their ACPI devices, and run the firmware's GPIO events | Accepted |
+| [0250](0250-sign-in-at-the-consoles-and-sessions-started-by-authd.md) | Sign-in at the consoles, and sessions started by authd | Accepted |

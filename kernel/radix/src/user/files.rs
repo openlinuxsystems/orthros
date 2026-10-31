@@ -865,7 +865,7 @@ pub fn directory_method(
             // socket's name.
             who.check(&*named.node, want::WRITE).map_err(fs::status)?;
             let non_blocking = file.description().non_blocking;
-            socket::connect(socket, &named.node, user.process.number(), non_blocking)?;
+            socket::connect(socket, &named.node, socket::Peer::of(&user.process), non_blocking)?;
             answer(label, 0, [0; 8])
         }
         directory::CHECK_ACCESS => {
@@ -1307,7 +1307,7 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
             let a = file::ListenArgs::decode(args)?;
             match any_socket_of(found, Rights::WRITE)?.1 {
                 AnySocket::Unix(socket) => {
-                    socket::listen(socket, a.backlog, user.process.number())?;
+                    socket::listen(socket, a.backlog, socket::Peer::of(&user.process))?;
                 }
                 AnySocket::Inet(socket) => socket.listen(a.backlog)?,
             }
@@ -1361,14 +1361,19 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
         file::SOCKET_STATE => {
             file::SocketStateArgs::decode(args)?;
             let results = match any_socket_of(found, Rights::NONE)?.1 {
-                AnySocket::Unix(socket) => file::SocketStateResults {
-                    listening: socket.listens(),
-                    connected: socket.end().is_some(),
-                    peer: socket.end().map_or(0, socket::End::peer_process),
-                },
+                AnySocket::Unix(socket) => {
+                    let peer = socket.end().map(socket::End::peer);
+                    file::SocketStateResults {
+                        listening: socket.listens(),
+                        connected: peer.is_some(),
+                        peer: peer.map_or(0, |p| p.process),
+                        user: peer.map_or(0, |p| p.user),
+                        group: peer.map_or(0, |p| p.group),
+                    }
+                }
                 AnySocket::Inet(socket) => {
                     let (listening, connected) = socket.listens_and_connected();
-                    file::SocketStateResults { listening, connected, peer: 0 }
+                    file::SocketStateResults { listening, connected, peer: 0, user: 0, group: 0 }
                 }
             };
             answer(label, file::SocketStateResults::WORDS, results.encode())

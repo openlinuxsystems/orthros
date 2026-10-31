@@ -39,9 +39,11 @@ interfaces and sockets from *radix-sysfs*(5) and *radix-proc*(5), and
 *ip*(8) sets the interfaces up through the network capability
 (*radix-network*(2)), as *netd*(8) does by DHCP or as *network*(5) says;
 *shutdown*(8), *reboot*(8), *poweroff*(8), *halt*(8) and *service*(8)
-ask Spark over its control socket (*spark*(8)). Until users come, in Phase 13 of the roadmap,
-every process is root's, so the user columns all say root and the
-options that select users select all or nothing.
+ask Spark over its control socket (*spark*(8)); *authd*(8) keeps the
+accounts, which *user*(8) makes and lists and whose passwords
+*passwd*(1) changes, and starts the sessions of those who sign in with
+*login*(1). The user columns show the user each process acts
+for (*radix-names*(2)).
 
 A mistake in the command line makes a tool fail with exit status 2 (1
 for those whose Linux versions use 1), after a message on standard
@@ -53,6 +55,8 @@ error that starts with the tool's name.
 :- *What it does*
 |  *balance*(8)
 :  move a Btrfs filesystem's chunks, converting them to another profile
+|  *authd*(8)
+:  keep the accounts and check passwords
 |  *blkid*(8)
 :  what each disk and partition holds: filesystems, labels and UUIDs
 |  *chgrp*(1), *chmod*(1), *chown*(1)
@@ -97,6 +101,8 @@ error that starts with the tool's name.
 :  send a signal
 |  *logd*(8)
 :  keep the system's log
+|  *login*(1)
+:  sign in at a console
 |  *logtrim*(8)
 :  trim the system's log
 |  *lsblk*(8)
@@ -123,6 +129,8 @@ error that starts with the tool's name.
 :  pass notifications to the screen
 |  *nvme*(8)
 :  the NVMe namespaces, and a drive's SMART / Health Information log
+|  *passwd*(1)
+:  change a password
 |  *pgrep*(1), *pkill*(1)
 :  find or signal processes by name
 |  *pidstat*(1)
@@ -161,6 +169,8 @@ error that starts with the tool's name.
 :  directories as a tree
 |  *uptime*(1)
 :  how long the system has been up
+|  *user*(8)
+:  make and list accounts
 |  *users*(1), *w*(1), *who*(1)
 :  who is logged in, and what they are doing
 |  *vmstat*(8)
