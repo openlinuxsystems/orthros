@@ -80,6 +80,10 @@ impl Cpu for Arch {
         0
     }
 
+    fn scalable_machine_checks() -> bool {
+        false
+    }
+
     fn poll_machine_checks(_found: &mut radix_hal::MachineCheckFound<'_>) {}
 
     fn corrected_error_interrupt() -> Option<&'static str> {
@@ -105,6 +109,16 @@ impl Cpu for Arch {
     }
 
     fn performance_scale(_levels: radix_pstate::Levels) -> Option<(radix_pstate::Scale, u8)> {
+        None
+    }
+
+    fn chipset_temperatures(_found: &mut dyn FnMut(radix_sensors::k10temp::Sensor)) {}
+
+    fn read_chipset_temperature(_sensor: radix_sensors::k10temp::Sensor) -> Option<i32> {
+        None
+    }
+
+    fn core_temperature() -> Option<radix_sensors::coretemp::Sample> {
         None
     }
 }
@@ -609,5 +623,9 @@ impl Platform for Arch {
 
     fn self_test_fault(_test: FaultTest) -> &'static str {
         "not available on aarch64"
+    }
+
+    fn self_test_msr() -> Option<Result<Option<u64>, &'static str>> {
+        None
     }
 }

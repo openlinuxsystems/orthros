@@ -240,6 +240,7 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   kdb              a breakpoint and every kdb command
   mm-stress        tens of millions of heap objects on 4 CPUs and 2 NUMA nodes
   tlb              TLB shootdowns and address-space switches
+  msr              a read of an MSR the CPU lacks faults and goes on
   caps             no capability forged or widened; revokes against 3 CPUs
   stack-overflow   a kernel stack overflow stops at its guard page
   smep, smap       the kernel cannot run or read a user page

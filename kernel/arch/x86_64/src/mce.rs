@@ -32,6 +32,13 @@
 //! the status's on Intel and the bank's counter on AMD, which it starts
 //! again.
 //!
+//! On AMD's Zen, whose banks have the scalable architecture's registers
+//! too ([`radix_mca::smca`], ADR 0204), [`init_cpu`] sets each bank's
+//! MCA_CONFIG to say the kernel reads them, and each error read names
+//! the block of the chip its bank belongs to (MCA_IPID) and its syndrome
+//! (MCA_SYND). A deferred error is also kept in MCA_DESTAT, which the
+//! poll clears with the status, and reads when the status lost it.
+//!
 //! [`VECTOR_CORRECTED_ERROR`]: crate::interrupts::VECTOR_CORRECTED_ERROR
 
 use core::fmt::Write;
@@ -39,9 +46,10 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering}
 
 use radix_klog::TextBuf;
 use radix_mca::corrected::{self, CAP_CMCI, Msrs};
+use radix_mca::smca::{self, CONFIG, DEADDR, DESTAT, IPID, SYND};
 use radix_mca::{
-    ADDRESS_VALID, BankError, CAP_COUNT, CAP_CTL, CAP_RECOVERY, MISC_VALID, Mca, RIPV, UNCORRECTED,
-    VALID, Verdict, bad_page, fatal,
+    ADDRESS_VALID, AMD_DEFERRED, BankError, CAP_COUNT, CAP_CTL, CAP_RECOVERY, MISC_VALID, Mca,
+    RIPV, UNCORRECTED, VALID, Verdict, bad_page, fatal,
 };
 use radix_sync::{Once, SpinLock};
 
@@ -70,6 +78,8 @@ static BANKS: AtomicUsize = AtomicUsize::new(0);
 static RECOVERY: AtomicBool = AtomicBool::new(false);
 /// The machine-check architecture is AMD's.
 static AMD: AtomicBool = AtomicBool::new(false);
+/// The banks have the scalable architecture's registers too (AMD's Zen).
+static SCALABLE: AtomicBool = AtomicBool::new(false);
 /// IA32_MCG_CAP's IA32_MCG_CTL.
 static HAS_CTL: AtomicBool = AtomicBool::new(false);
 /// Bank 0's control belongs to the firmware.
@@ -103,10 +113,12 @@ pub fn init_boot_cpu(off: bool) {
     let cap = unsafe { rdmsr(MCG_CAP) };
     let (family, model, _) = cpu::family_model_stepping();
     let amd = cpu::is_amd();
+    let ras =
+        if cpu::max_extended_leaf() >= 0x8000_0007 { cpu::cpuid(0x8000_0007, 0).ebx } else { 0 };
     // SUCCOR: CPUID 0x80000007's EBX bit 1.
-    let succor =
-        cpu::max_extended_leaf() >= 0x8000_0007 && cpu::cpuid(0x8000_0007, 0).ebx & (1 << 1) != 0;
+    let succor = ras & (1 << 1) != 0;
     AMD.store(amd, Ordering::Relaxed);
+    SCALABLE.store(amd && ras & smca::CPUID_SMCA != 0, Ordering::Relaxed);
     RECOVERY.store(if amd { succor } else { cap & CAP_RECOVERY != 0 }, Ordering::Relaxed);
     HAS_CTL.store(cap & CAP_CTL != 0, Ordering::Relaxed);
     SKIP_BANK0.store(cpu::is_intel() && family == 6 && model < 0x1a, Ordering::Relaxed);
@@ -132,6 +144,14 @@ pub fn init_cpu() {
         let first = usize::from(SKIP_BANK0.load(Ordering::Relaxed));
         for bank in first..banks {
             wrmsr(register(bank, 0), u64::MAX);
+        }
+        // Every scalable bank has MCA_CONFIG; McaX only says the kernel
+        // reads the scalable registers.
+        if SCALABLE.load(Ordering::Relaxed) {
+            for bank in 0..banks {
+                let config = smca::register(bank, CONFIG);
+                wrmsr(config, smca::configure(rdmsr(config)));
+            }
         }
         cpu::write_cr4(cpu::cr4() | CR4_MCE);
     }
@@ -222,6 +242,11 @@ pub fn banks() -> usize {
     BANKS.load(Ordering::Relaxed)
 }
 
+/// Whether the banks are AMD's scalable ones.
+pub fn scalable_banks() -> bool {
+    SCALABLE.load(Ordering::Relaxed)
+}
+
 fn mca() -> Mca {
     Mca { amd: AMD.load(Ordering::Relaxed), recovery: RECOVERY.load(Ordering::Relaxed) }
 }
@@ -237,41 +262,84 @@ fn read(bank: usize) -> Option<BankError> {
             status,
             address: (status & ADDRESS_VALID != 0).then(|| rdmsr(register(bank, 2))),
             misc: (status & MISC_VALID != 0).then(|| rdmsr(register(bank, 3))),
+            smca: scalable(bank, status),
+        })
+    }
+}
+
+/// What a scalable bank's own registers say about its error with
+/// `status`; `None` on banks without them.
+fn scalable(bank: usize, status: u64) -> Option<smca::Info> {
+    if !SCALABLE.load(Ordering::Relaxed) {
+        return None;
+    }
+    // SAFETY: CPUID says the banks are scalable, so each bank below
+    // IA32_MCG_CAP's count has these registers.
+    unsafe {
+        Some(smca::Info {
+            ipid: rdmsr(smca::register(bank, IPID)),
+            synd: (status & smca::STATUS_SYND_VALID != 0)
+                .then(|| rdmsr(smca::register(bank, SYND))),
+            lsb_in_status: rdmsr(smca::register(bank, CONFIG)) & smca::CONFIG_LSB_IN_STATUS != 0,
+        })
+    }
+}
+
+/// A scalable bank's deferred error in MCA_DESTAT, which the status lost,
+/// if it holds one.
+fn read_deferred(bank: usize) -> Option<BankError> {
+    // SAFETY: as in `scalable`; the address is read only when valid.
+    unsafe {
+        let status = rdmsr(smca::register(bank, DESTAT));
+        (status & VALID != 0 && status & AMD_DEFERRED != 0).then(|| BankError {
+            status,
+            address: (status & ADDRESS_VALID != 0).then(|| rdmsr(smca::register(bank, DEADDR))),
+            misc: None,
+            smca: scalable(bank, status),
         })
     }
 }
 
 /// Reads and clears this CPU's banks, then calls `found` with each error,
 /// how many it stands for, and the page it says went bad (not under the
-/// lock, so that it may log). On AMD each bank's counter starts again.
+/// lock, so that it may log). On AMD each bank's counter starts again; on
+/// Zen, a deferred error the status lost comes from MCA_DESTAT, after the
+/// status's. A bank at a time, so that only one bank's errors are on the
+/// stack.
 pub fn poll(found: &mut radix_hal::MachineCheckFound<'_>) {
-    let banks = banks();
-    let mut errors = [None; MAX_BANKS];
-    let mut counted = [0; MAX_BANKS];
     let amd = AMD.load(Ordering::Relaxed);
-    {
-        let _one = POLLING.lock();
-        for (bank, slot) in errors.iter_mut().enumerate().take(banks) {
-            *slot = read(bank);
-            if slot.is_some() {
+    let scalable = SCALABLE.load(Ordering::Relaxed);
+    let mca = mca();
+    let cmci = CMCI.load(Ordering::Relaxed);
+    for bank in 0..banks() {
+        let (error, deferred, counted) = {
+            let _one = POLLING.lock();
+            let error = read(bank);
+            if error.is_some() {
                 // SAFETY: writing 0 to a status register clears it.
                 unsafe { wrmsr(register(bank, 1), 0) };
             }
-            if amd {
-                counted[bank] = corrected::take_threshold(&mut Registers, bank);
+            let mut deferred = None;
+            if scalable {
+                let held = error.is_some_and(|error| error.status & AMD_DEFERRED != 0);
+                if !held {
+                    deferred = read_deferred(bank);
+                }
+                if held || deferred.is_some() {
+                    // SAFETY: as for the status.
+                    unsafe { wrmsr(smca::register(bank, DESTAT), 0) };
+                }
             }
-        }
-    }
-    let mca = mca();
-    let cmci = CMCI.load(Ordering::Relaxed);
-    for (bank, error) in errors.iter().enumerate() {
-        if let Some(error) = error {
+            let counted = if amd { corrected::take_threshold(&mut Registers, bank) } else { 0 };
+            (error, deferred, counted)
+        };
+        for error in [error, deferred].iter().flatten() {
             let count = corrected::errors(error, cmci);
             found(&radix_hal::MachineCheck {
                 bank,
                 corrected: error.corrected(),
-                count: if error.corrected() { count.max(counted[bank]) } else { count },
-                memory: corrected::memory_error(error.status).map(|memory| memory.channel),
+                count: if error.corrected() { count.max(counted) } else { count },
+                memory: corrected::memory(error).map(|memory| memory.channel),
                 page: bad_page(error, mca),
                 what: error,
             });

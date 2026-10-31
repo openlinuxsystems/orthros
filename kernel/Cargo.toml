@@ -54,6 +54,7 @@ members = [
     "lib/pstate",
     "lib/random",
     "lib/relocs",
+    "lib/sensors",
     "lib/sync",
     "lib/tty",
     "lib/uacpi",
