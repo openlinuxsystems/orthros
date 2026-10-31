@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! What a disk or partition holds, from its first sectors, as libblkid
-//! finds it: a filesystem's kind, label and UUID (FAT, exFAT, ext2 to
-//! ext4, Btrfs and Linux's swap areas), or a disk's partition table, and
+//! finds it: a filesystem's kind, label and UUID (FAT, exFAT, NTFS, ext2
+//! to ext4, Btrfs and Linux's swap areas), or a disk's partition table, and
 //! a partition's UUID and label in its disk's table. For blkid(8) and
 //! lsblk(8).
 
@@ -17,8 +17,8 @@ pub const BLOCKS: &str = "/kernel/block";
 /// A filesystem found on a device.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Filesystem {
-    /// libblkid's name for its kind: `vfat`, `exfat`, `ext4`, `btrfs`,
-    /// `swap`.
+    /// libblkid's name for its kind: `vfat`, `exfat`, `ntfs`, `ext4`,
+    /// `btrfs`, `swap`.
     pub kind: &'static str,
     /// Its version, as lsblk's FSVER shows it: `FAT32`, `1.0`.
     pub version: String,
@@ -144,6 +144,9 @@ pub fn filesystem(read: &mut Read<'_>) -> Option<Filesystem> {
     if &boot[3..11] == b"EXFAT   " {
         return Some(exfat(&boot, read));
     }
+    if &boot[3..11] == b"NTFS    " {
+        return Some(ntfs(&boot, read));
+    }
     fat(&boot)
 }
 
@@ -203,6 +206,64 @@ fn swap(s: &[u8]) -> Option<Filesystem> {
         uuid_sub: None,
         block_size: Some(4096),
     })
+}
+
+/// NTFS: its serial number from the boot sector, as libblkid prints it,
+/// and its label from the name (type 60h) of `$Volume`, the master file
+/// table's fourth record.
+fn ntfs(boot: &[u8], read: &mut Read<'_>) -> Filesystem {
+    let sector = u32::from(u16_at(boot, 11));
+    let label = (|| {
+        let per_cluster = match boot[13] {
+            n @ 1..=0x80 => u64::from(n),
+            n @ 0xf4.. => 1 << (256 - u32::from(n)),
+            _ => return None,
+        };
+        let cluster = u64::from(sector) * per_cluster;
+        // A record's size: in clusters, or 2^n bytes for a byte of -n.
+        let record = match boot[64] as i8 {
+            n @ 1..=16 => cluster * n as u64,
+            n @ -16..=-9 => 1 << -n,
+            _ => return None,
+        };
+        if !(512..=64 * 1024).contains(&record) || !(512..=4096).contains(&sector) {
+            return None;
+        }
+        let at = u64_at(boot, 48).checked_mul(cluster)?.checked_add(3 * record)?;
+        let mut rec = read(at, record as usize)?;
+        // The last two bytes of each 512 are in the update sequence.
+        let (usa, count) = (usize::from(u16_at(&rec, 4)), usize::from(u16_at(&rec, 6)));
+        if &rec[..4] != b"FILE" || count == 0 || usa + 2 * count > rec.len() {
+            return None;
+        }
+        for i in 1..count.min(rec.len() / 512 + 1) {
+            let kept = [rec[usa + 2 * i], rec[usa + 2 * i + 1]];
+            rec[i * 512 - 2..i * 512].copy_from_slice(&kept);
+        }
+        let mut at = usize::from(u16_at(&rec, 20));
+        while at + 24 <= rec.len() && u32_at(&rec, at) != 0xffff_ffff {
+            let len = u32_at(&rec, at + 4) as usize;
+            if len < 24 || at + len > rec.len() {
+                return None;
+            }
+            // Resident, as a name always is.
+            if u32_at(&rec, at) == 0x60 && rec[at + 8] == 0 {
+                let len = u32_at(&rec, at + 16) as usize;
+                let from = at + usize::from(u16_at(&rec, at + 20));
+                return utf16(rec.get(from..from.checked_add(len)?)?);
+            }
+            at += len;
+        }
+        None
+    })();
+    Filesystem {
+        kind: "ntfs",
+        version: String::new(),
+        label,
+        uuid: Some(format!("{:016X}", u64_at(boot, 72))),
+        uuid_sub: None,
+        block_size: Some(sector),
+    }
 }
 
 /// exFAT: its serial number from the boot sector, and its label from the
@@ -361,6 +422,43 @@ mod tests {
         assert_eq!((found.kind, found.uuid.as_str()), ("dos", "deadbeef"));
         let ids = partition_ids(&mut reading(&image), 512, 2);
         assert_eq!(ids.uuid.as_deref(), Some("deadbeef-02"));
+    }
+
+    #[test]
+    fn finds_ntfs_and_its_serial_and_label() {
+        let mut image = vec![0u8; 64 * 1024];
+        image[3..11].copy_from_slice(b"NTFS    ");
+        image[11..13].copy_from_slice(&512u16.to_le_bytes());
+        // Clusters of 4 KiB, the master file table at the third, and
+        // records of 1 KiB.
+        image[13] = 8;
+        image[48..56].copy_from_slice(&2u64.to_le_bytes());
+        image[64] = 0xf6;
+        image[72..80].copy_from_slice(&0x7139_9978_54d4_9d57u64.to_le_bytes());
+        image[510..512].copy_from_slice(&[0x55, 0xaa]);
+        let rec = &mut image[2 * 4096 + 3 * 1024..][..1024];
+        rec[..4].copy_from_slice(b"FILE");
+        rec[4..6].copy_from_slice(&0x30u16.to_le_bytes());
+        rec[6..8].copy_from_slice(&3u16.to_le_bytes());
+        rec[20..22].copy_from_slice(&0x38u16.to_le_bytes());
+        // The update sequence number at each 512 bytes' end; the zeros
+        // that were there are kept after it.
+        rec[0x30..0x32].copy_from_slice(&[7, 0]);
+        rec[510..512].copy_from_slice(&[7, 0]);
+        rec[1022..1024].copy_from_slice(&[7, 0]);
+        let mut name = vec![0x60, 0, 0, 0, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        name.extend_from_slice(&8u32.to_le_bytes());
+        name.extend_from_slice(&0x18u16.to_le_bytes());
+        name.extend_from_slice(&[0, 0]);
+        name.extend("data".encode_utf16().flat_map(u16::to_le_bytes));
+        rec[0x38..0x58].copy_from_slice(&name);
+        rec[0x58..0x5c].copy_from_slice(&[0xff; 4]);
+        let found = filesystem(&mut reading(&image)).unwrap();
+        assert_eq!((found.kind, found.version.as_str()), ("ntfs", ""));
+        assert_eq!((found.label.as_deref(), found.block_size), (Some("data"), Some(512)));
+        assert_eq!(found.uuid.as_deref(), Some("7139997854D49D57"));
+        // FAT takes it for none of its.
+        assert_eq!(fat(&image), None);
     }
 
     #[test]

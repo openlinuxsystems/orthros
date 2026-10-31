@@ -165,7 +165,12 @@ ext4 filesystem mounts too, read-write, and so do ext2 and ext3: Dukovo
 replays the journal Linux left, checks every checksum, and gives a file
 of an ext3 block map extents when it changes it. An ext4 that uses a
 feature Dukovo does not write yet (such as quotas, inline data or
-encryption) is mounted read-only. Anything else is left alone.
+encryption) is mounted read-only. NTFS, which Windows formats its disks
+with, is read, and mounted read-only for now: compressed and sparse
+files, hard links, and Windows' and WSL's links and junctions read as
+Windows wrote them, names are found whatever their case, and a file that
+is encrypted or kept in the cloud fails to read rather than reading as
+zeros. Anything else is left alone.
 
 Changes reach a FAT, exFAT or ext4 disk within five seconds, and a Btrfs
 disk within 30 seconds, as on Linux, or at once when a program asks for
@@ -376,3 +381,23 @@ writes two such disks, checks them with `e2fsck`, reads them back on the
 host with `debugfs` and after a reboot, and `ext4-power-cut` cuts the
 power while a disk is being written, then checks that `e2fsck`'s replay
 of the journal leaves a whole volume.
+
+An NTFS disk is made with ntfs-3g's tools, which copy files in without
+mounting it:
+
+```sh
+sudo apt install ntfs-3g
+truncate -s 64M ntfs.img
+mkntfs -q -F -Q -L MYNTFS ntfs.img
+echo "Hello from the host" > hello.txt && ntfscp ntfs.img hello.txt /hello.txt
+./ob run -- -drive file=ntfs.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0
+```
+
+```text
+Files: mounted ntfs from vda on /volumes/vda, read-only, labelled MYNTFS
+spark: mounted the NTFS filesystem of vda at /volumes/vda, read-only
+```
+
+The `ntfs` boot test reads two such disks back, one of them filled
+through ntfs-3g with links, junctions, hard links and compressed and
+sparse files.

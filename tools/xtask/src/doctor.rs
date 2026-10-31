@@ -336,6 +336,26 @@ fn requirements() -> Vec<Requirement> {
             fallback: None,
         },
         Requirement {
+            name: "ntfs-3g",
+            purpose: "makes the NTFS disks of the NTFS tests and reads back what they hold",
+            // `mkntfs` in /usr/sbin, as dosfstools is; Fedora has the tools
+            // apart from the FUSE driver, as ntfsprogs.
+            found: |_| {
+                ["/usr/sbin/mkntfs", "/sbin/mkntfs"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|path| path.exists())
+                    .or_else(|| process::find_program("mkntfs"))
+                    .map(|path| path.display().to_string())
+            },
+            packages: Packages {
+                apt: Some("ntfs-3g"),
+                dnf: Some("ntfsprogs"),
+                pacman: Some("ntfs-3g"),
+            },
+            fallback: None,
+        },
+        Requirement {
             name: "The Sleuth Kit",
             purpose: "reads back what the exFAT tests wrote, as an exFAT reader of its own",
             found: |_| program_version("fls", "-V"),

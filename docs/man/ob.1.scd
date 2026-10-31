@@ -1204,6 +1204,20 @@ _target/userspace/_).
 
 	_Phase 11: hardware support_
 
+	*ntfs*
+		Spark must mount two NTFS disks, read-only, as Radix does not
+		write NTFS yet: a 64 MiB NVMe namespace of 4 KiB sectors with
+		clusters of 4 KiB that *mkntfs* made and *ntfscp* wrote files to,
+		and an 8 MiB virtio disk of the volume *ob fixture ntfs-3g*
+		filled, with clusters of 512 bytes. _/system/tests/storage list_
+		must list every file, directory and link of both as the host
+		made them: links, a junction and absolute links read as on their
+		own volume, each hard link as the same file, compressed and
+		sparse files byte for byte, and the file marked offline failing
+		with *invalid_argument* rather than reading as zeros. Neither
+		disk may change. ntfs-3g must be installed (*ob doctor* says
+		how).
+
 ; Phase 11's boot tests go above this line.
 
 	_Phase 12: networking_
@@ -1334,7 +1348,7 @@ _target/userspace/_).
 	*--debug*, *--release*
 		As for *build*.
 
-*fixture* *btrfs-log*|*btrfs-radix-log* [*--linux-kernel* _file_]
+*fixture* *btrfs-log*|*btrfs-radix-log*|*ntfs-3g* [*--linux-kernel* _file_]
 	Make test data that only Linux makes, for the host tests of Radix's
 	filesystems. *btrfs-log* makes a 128 MiB Btrfs disk with
 	*mkfs.btrfs*, boots Linux in a virtual machine on it with
@@ -1357,6 +1371,17 @@ _target/userspace/_).
 	log, and *btrfs check* checks what the replay left. The disk and the
 	lists go to the fixtures, which the host tests check Radix's own
 	replay against.
+
+	*ntfs-3g* formats an 8 MiB NTFS volume of 512-byte clusters with
+	*mkntfs* and fills it through ntfs-3g's FUSE driver, which takes root
+	(or a FUSE that lets the user mount) and *setfattr*: directories deep
+	and wide, names of every kind, hard links enough to need an
+	attribute list, links of ntfs-3g's own, Windows' and WSL's and a
+	junction, compressed and sparse files, a file in pieces, an
+	alternate data stream, a short name, and files marked read-only and
+	offline. The volume, kept as its sectors that are not all zeros,
+	goes to _kernel/fs/ntfs/src/fixtures/_, which the NTFS host tests and
+	the *ntfs* boot test read (ADR 0236).
 
 	*--linux-kernel* _file_
 		As for *bench*; the kernel needs Btrfs, built in or as a module

@@ -567,7 +567,7 @@ fn seed(from: &Dir, to: &Dir, depth: usize, added: &mut usize) {
 /// a GPT, and in an MBR.
 const EFI_SYSTEM: [&str; 2] = ["c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "0xef"];
 
-/// Mounts the FAT, exFAT, Btrfs or ext4 filesystem of each disk
+/// Mounts the FAT, exFAT, NTFS, Btrfs or ext4 filesystem of each disk
 /// partition, or of each disk with no partitions, at `/volumes/<name>`:
 /// a Btrfs of several disks once, at the first of them. EFI system
 /// partitions are left alone: what boots the machine is no volume of the
@@ -614,14 +614,15 @@ fn mount_disks(root: &Dir, compress: &[&str]) -> Vec<(String, MountFlags)> {
 }
 
 /// Mounts the filesystem on `/devices/<name>` at `/volumes/<name>`: FAT,
-/// exFAT, Btrfs or ext4, read-only if the disk is. A filesystem that the
-/// disk or Radix cannot write (yet) mounts read-only, as Linux's `mount`
-/// does with a disk that refuses writes. FAT and exFAT are tried first:
-/// `mkfs.btrfs` and `mkfs.ext4` clear where they keep their boot sectors,
-/// but `mkfs.fat` and `mkfs.exfat` can leave an older Btrfs or ext4
-/// superblock behind, so theirs is the newer. FAT and exFAT each take the
-/// other's boot sector for none of theirs, and `mkfs.btrfs` and
-/// `mkfs.ext4` each clear the other's superblock. A Btrfs mounted to
+/// exFAT, NTFS, Btrfs or ext4, read-only if the disk is. A filesystem that
+/// the disk or Radix cannot write (yet) mounts read-only, as Linux's
+/// `mount` does with a disk that refuses writes, as NTFS does for now.
+/// FAT, exFAT and NTFS are tried first: `mkfs.btrfs` and `mkfs.ext4` clear
+/// where they keep their boot sectors, but `mkfs.fat`, `mkfs.exfat` and
+/// `mkntfs` can leave an older Btrfs or ext4 superblock behind, so theirs
+/// is the newer. FAT, exFAT and NTFS each take the others' boot sectors
+/// for none of theirs, and `mkfs.btrfs` and `mkfs.ext4` each clear the
+/// other's superblock. A Btrfs mounted to
 /// write compresses its data if `compress`. Returns how it mounted a
 /// Btrfs.
 fn mount_disk(root: &Dir, name: &str, compress: bool) -> Option<MountFlags> {
@@ -665,6 +666,7 @@ fn mount_disk(root: &Dir, name: &str, compress: bool) -> Option<MountFlags> {
     let mut mounted = mount(FilesystemKind::Fat, "FAT", flags);
     for (kind, said, flags) in [
         (FilesystemKind::Exfat, "exFAT", flags),
+        (FilesystemKind::Ntfs, "NTFS", flags),
         (FilesystemKind::Btrfs, "Btrfs", packed),
         (FilesystemKind::Ext4, "ext4", flags),
     ] {
@@ -683,7 +685,9 @@ fn mount_disk(root: &Dir, name: &str, compress: bool) -> Option<MountFlags> {
         Err(err) => {
             let _ = root.remove(&at);
             if err.is(FileError::UnknownFilesystem) {
-                println!("spark: {name} holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone");
+                println!(
+                    "spark: {name} holds no FAT, exFAT, NTFS, Btrfs or ext4 filesystem; left alone"
+                );
             } else if err.is(FileError::InUse) {
                 // A disk of a Btrfs mounted from another (ADR 0153), or
                 // swapped to.

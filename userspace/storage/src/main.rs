@@ -3,7 +3,7 @@
 
 //! storage: the test program of the `storage` boot test, from
 //! `/system/tests/storage` in the boot archive. Spark starts it with the
-//! root directory, after mounting each FAT, exFAT, Btrfs or ext4 disk at
+//! root directory, after mounting each FAT, exFAT, NTFS, Btrfs or ext4 disk at
 //! `/volumes/<name>`.
 //!
 //! - `storage write` writes a set of files to every volume (short and long

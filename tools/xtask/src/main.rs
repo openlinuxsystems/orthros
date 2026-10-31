@@ -406,7 +406,7 @@ and take minutes.
                       $GITHUB_STEP_SUMMARY)"
         }
         "fixture" => {
-            "Usage: ./ob fixture btrfs-log [--linux-kernel <file>]
+            "Usage: ./ob fixture btrfs-log|btrfs-radix-log|ntfs-3g [--linux-kernel <file>]
 
 Makes test data that only Linux makes. btrfs-log boots Linux in QEMU on a
 new Btrfs disk with tools/linux-bench as its only process, which commits
@@ -414,7 +414,11 @@ files, changes them with an fsync after each change and powers off, so the
 changes are in Btrfs's log tree alone; then boots it on a copy to list the
 disk before and after Linux replays the log. Writes the disk and the lists
 to kernel/fs/btrfs/src/tests/fixtures, which the Btrfs host tests check
-Radix's replay against.
+Radix's replay against. btrfs-radix-log has Linux replay a log Radix wrote.
+ntfs-3g fills an NTFS volume through ntfs-3g's FUSE driver (as root), with
+links, junctions, hard links and compressed and sparse files, and writes it
+to kernel/fs/ntfs/src/fixtures, which the NTFS host tests and the ntfs boot
+test read.
 
   --linux-kernel <file>
                       The Linux kernel to boot (else OB_LINUX_KERNEL or this
