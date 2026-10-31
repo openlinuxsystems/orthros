@@ -22,6 +22,9 @@
 //!   requests that drive them (Phase 11a, ADR 0147).
 //! - [`hid`]: what a HID interface says of itself, and the class's
 //!   requests (Phase 11a, ADR 0148).
+//! - [`host`]: what the kernel asks of the USB 2 and USB 1.1 host
+//!   controllers (EHCI, OHCI and UHCI), whose devices it addresses itself
+//!   (Phase 11g, ADR 0243).
 //! - [`storage`]: mass storage interfaces, the Bulk-Only Transport that
 //!   carries SCSI commands to USB sticks (Phase 11b, ADR 0161), and USB
 //!   Attached SCSI, which carries many at once to USB 3 disks (ADR 0162).
@@ -35,6 +38,7 @@
 use core::fmt;
 
 pub mod hid;
+pub mod host;
 pub mod hub;
 pub mod storage;
 #[cfg(test)]
@@ -94,6 +98,8 @@ pub mod request {
     pub const CLEAR_FEATURE: u8 = 1;
     /// SET_FEATURE.
     pub const SET_FEATURE: u8 = 3;
+    /// SET_ADDRESS.
+    pub const SET_ADDRESS: u8 = 5;
     /// GET_DESCRIPTOR.
     pub const GET_DESCRIPTOR: u8 = 6;
     /// GET_CONFIGURATION.
@@ -257,6 +263,18 @@ impl Setup {
             value: u16::from(kind) << 8 | u16::from(index),
             index: language,
             length,
+        }
+    }
+
+    /// SET_ADDRESS: gives the device at address 0 the address `address`
+    /// (1 to 127), which it answers at once its status stage is done.
+    pub fn set_address(address: u8) -> Setup {
+        Setup {
+            request_type: STANDARD | TO_DEVICE,
+            request: request::SET_ADDRESS,
+            value: u16::from(address),
+            index: 0,
+            length: 0,
         }
     }
 

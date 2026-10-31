@@ -100,8 +100,7 @@ fn root_hub(bus: &str) -> Result<NodeRef> {
     let bus: usize = bus.parse().map_err(|_| Error::NotFound)?;
     let hub = shown::root_hub(bus).ok_or(Error::NotFound)?;
     let dir = FixedDir::new(next_id())?;
-    let speed = if hub.usb3 { "5000" } else { "480" };
-    let version = if hub.usb3 { " 3.00" } else { " 2.00" };
+    let (speed, version, product) = (hub.speed, hub.version, hub.product);
     let ports = hub.ports;
     let address = hub.address;
     dir.add("busnum", value(move |text| writeln!(text, "{bus}"))?)?;
@@ -111,7 +110,7 @@ fn root_hub(bus: &str) -> Result<NodeRef> {
     dir.add("version", value(move |text| writeln!(text, "{version}"))?)?;
     dir.add("maxchild", value(move |text| writeln!(text, "{ports}"))?)?;
     dir.add("bDeviceClass", value(|text| writeln!(text, "09"))?)?;
-    dir.add("product", value(|text| writeln!(text, "xHCI Host Controller"))?)?;
+    dir.add("product", value(move |text| writeln!(text, "{product}"))?)?;
     dir.add("serial", value(move |text| writeln!(text, "{address}"))?)?;
     Ok(dir)
 }

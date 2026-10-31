@@ -47,6 +47,11 @@ pub(super) struct HidPlan {
     pub(super) report_length: u16,
     /// Its interrupt IN endpoint's address.
     pub(super) endpoint: u8,
+    /// That endpoint's packet size, transactions in a microframe and
+    /// bInterval.
+    pub(super) max_packet: u16,
+    pub(super) transactions: u8,
+    pub(super) interval: u8,
 }
 
 impl HidPlan {
@@ -56,14 +61,18 @@ impl HidPlan {
     pub(super) fn of(
         interface: radix_usb::InterfaceDescriptor,
         hid: Option<&[u8]>,
-        endpoint: Option<u8>,
+        endpoint: Option<radix_usb::EndpointDescriptor>,
     ) -> Option<HidPlan> {
         let report_length = hid.and_then(HidDescriptor::parse).map_or(0, |d| d.report_length);
+        let endpoint = endpoint?;
         Some(HidPlan {
             interface: interface.number,
             boot: (interface.subclass == hid::SUBCLASS_BOOT).then_some(interface.protocol),
             report_length,
-            endpoint: endpoint?,
+            endpoint: endpoint.address,
+            max_packet: endpoint.max_packet(),
+            transactions: endpoint.extra_transactions() + 1,
+            interval: endpoint.interval,
         })
     }
 }
@@ -240,7 +249,7 @@ pub(super) fn gone(hids: &mut [Hid]) {
 
 /// Tells what a report changed: keys to `/devices/kbd`, the pointer to
 /// `/devices/mouse`.
-fn tell(input: Input) {
+pub(super) fn tell(input: Input) {
     match input {
         Input::Key { code, down } => keyboard::usb_key(code, down),
         Input::Pointer(p) => mouse::motion(mouse::Motion {

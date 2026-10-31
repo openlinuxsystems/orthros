@@ -177,6 +177,7 @@ dependencies = [
  "radix-tty",
  "radix-uacpi",
  "radix-usb",
+ "radix-usbhc",
  "radix-vfs",
  "radix-virtio",
  "radix-xhci",
@@ -522,6 +523,14 @@ version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-scsi",
+]
+
+[[package]]
+name = "radix-usbhc"
+version = "0.10.4"
+dependencies = [
+ "radix-hw",
+ "radix-usb",
 ]
 
 [[package]]

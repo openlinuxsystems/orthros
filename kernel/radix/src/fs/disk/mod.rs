@@ -251,11 +251,12 @@ pub fn init() {
                 }
             } else if function.class() == radix_nvme::PCI_CLASS {
                 nvme::bind(&function, &mut controllers);
-            } else if function.class() == radix_xhci::PCI_CLASS {
-                crate::usb::bind(&function);
+            } else {
+                crate::usb::found(&function);
             }
         });
     }
+    crate::usb::bind_found();
     let plural = |n: usize, one: &'static str, many: &'static str| if n == 1 { one } else { many };
     info!(
         "PCI: {functions} {} on {count} {}; {disks} virtio {}, {sata} SATA {}, {controllers} NVMe {}",

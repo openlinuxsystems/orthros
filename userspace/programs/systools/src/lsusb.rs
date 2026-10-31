@@ -23,9 +23,20 @@ const DEVICES: &str = "/kernel/bus/usb/devices";
 /// name for /usr/share.
 const IDS: &str = "/system/resources/hwdata/usb.ids";
 
-/// The driver of every root hub's controller, as Linux names it: the
-/// kernel drives xHCI controllers only.
-const ROOT_DRIVER: &str = "xhci_hcd";
+/// The driver of a root hub's controller, as Linux names it, from what the
+/// root hub's `product` says the controller is: xHCI unless it says EHCI,
+/// OHCI or UHCI.
+fn root_driver(product: &str) -> &'static str {
+    if product.starts_with("EHCI") {
+        "ehci-pci"
+    } else if product.starts_with("OHCI") {
+        "ohci-pci"
+    } else if product.starts_with("UHCI") {
+        "uhci_hcd"
+    } else {
+        "xhci_hcd"
+    }
+}
 
 /// A controller's root hub.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +45,8 @@ struct RootHub {
     ports: u8,
     /// In Mb/s, as the kernel gives it: `5000`.
     speed: String,
+    /// Its controller's driver, as Linux names it.
+    driver: &'static str,
 }
 
 /// An interface of a device's configuration.
@@ -103,6 +116,7 @@ fn read_devices(dir: &Path) -> io::Result<(Vec<RootHub>, Vec<Device>)> {
                 bus,
                 ports: read_decimal(&path, "maxchild").unwrap_or(0),
                 speed: read(&path, "speed").unwrap_or_default(),
+                driver: root_driver(&read(&path, "product").unwrap_or_default()),
             });
         } else if let Some((device, _)) = name.split_once(':') {
             let (Some(number), Some(class)) =
@@ -247,8 +261,8 @@ fn tree(hubs: &[RootHub], devices: &[Device], names: &Names) -> Vec<String> {
     let mut out = Vec::new();
     for hub in hubs {
         out.push(format!(
-            "/:  Bus {:03}.Port 001: Dev 001, Class=root_hub, Driver={ROOT_DRIVER}/{}p, {}M",
-            hub.bus, hub.ports, hub.speed
+            "/:  Bus {:03}.Port 001: Dev 001, Class=root_hub, Driver={}/{}p, {}M",
+            hub.bus, hub.driver, hub.ports, hub.speed
         ));
         branch(&mut out, devices, names, hub.bus, &[]);
     }

@@ -108,6 +108,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-tty",
     "radix-uacpi",
     "radix-usb",
+    "radix-usbhc",
     "radix-vfs",
     "radix-virtio",
     "radix-vtd",
