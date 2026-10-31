@@ -4,9 +4,12 @@
 // What the volumes boot test runs (ADR 0163): `volumetest <label>` waits
 // for volumed(8) to mount the stick the host plugs in again after boot at
 // /volumes/<label>, checks volumed --list shows it, writes a file there,
-// ejects it with eject(1), and checks it is gone and eject finds it no
-// more. The host then reads the file from the stick's image.
+// mounts it again with remount(8) only to read, where the file reads and
+// writes are refused, and then to write, ejects it with eject(1), and
+// checks it is gone and eject finds it no more. The host then reads the
+// file from the stick's image.
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -43,6 +46,22 @@ int main(int argc, char **argv) {
 	close(fd);
 	printf("volumetest: wrote %s\n", file);
 	CONTAINS(path, "/system/commands/volumed", "--list");
+
+	STATUS(0, "/system/commands/remount", "-r", argv[1]);
+	char back[sizeof TEXT] = {0};
+	fd = open(file, O_RDONLY | O_CLOEXEC);
+	CHECK(fd >= 0 && read(fd, back, sizeof back) == (ssize_t)(sizeof TEXT - 1));
+	CHECK(!strcmp(back, TEXT));
+	if(fd >= 0)
+		close(fd);
+	errno = 0;
+	CHECK(open(file, O_WRONLY | O_APPEND | O_CLOEXEC) < 0 && errno == EROFS);
+	STATUS(0, "/system/commands/remount", "-w", argv[1]);
+	fd = open(file, O_WRONLY | O_APPEND | O_CLOEXEC);
+	CHECK(fd >= 0);
+	if(fd >= 0)
+		close(fd);
+	printf("volumetest: mounted %s again, only to read, then to write\n", path);
 
 	STATUS(0, "/system/commands/eject", argv[1]);
 	CHECK(stat(path, &st) != 0);
