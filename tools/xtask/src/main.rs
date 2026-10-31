@@ -7,6 +7,7 @@
 //! with the pinned toolchain and runs it. Every command is documented in
 //! ob(1); `docs/man/ob.1.scd` is the source of that page.
 
+mod account;
 mod bench;
 mod btrfs;
 mod config;
@@ -145,7 +146,8 @@ out/toolchain/meson. `./ob build` runs this first.
         }
         "image" => {
             "Usage: ./ob image [--iso] [--cmdline <flags>] [--microcode <path>]
-                  [--disk-check <serial>] [--debug | --release]
+                  [--disk-check <serial>] [--user <name> [--full-name <name>]
+                  [--password-file <path>] [--test-cost]] [--debug | --release]
 
 Builds the kernel, then a hybrid boot image that starts under UEFI and
 legacy BIOS from a USB stick, a hard disk or optical media:
@@ -161,12 +163,20 @@ subvolumes for what changes, on Btrfs.
   --disk-check <serial>
                        Add a boot entry that checks, and erases, the disk with
                        this serial number, and Linux's side of the check in
-                       crosscheck/ (the handbook's Supported hardware chapter)"
+                       crosscheck/ (the handbook's Supported hardware chapter)
+  --user <name>        Make an administrator's account of this name in the root,
+                       asking for its password twice; authd makes its home at the
+                       first boot (ADR 0218)
+  --full-name <name>   The account's full name
+  --password-file <path>
+                       Take the password from the first line of this file
+  --test-cost          Hash the password at the boot tests' Argon2id cost, which
+                       is quick to check under emulation, and to guess"
         }
         "run" => {
             "Usage: ./ob run [--bios | --uefi] [--media usb|cdrom|disk] [--headless] [--gdb]
-                [--cmdline <flags>] [--microcode <path>] [--debug | --release]
-                [-- <extra QEMU arguments>]
+                [--cmdline <flags>] [--microcode <path>] [--user <name> ...]
+                [--debug | --release] [-- <extra QEMU arguments>]
 
 Builds the image and boots it in QEMU. The serial console is this terminal;
 press Ctrl-A then X to quit QEMU. KVM is used when /dev/kvm is accessible.
@@ -179,7 +189,10 @@ press Ctrl-A then X to quit QEMU. KVM is used when /dev/kvm is accessible.
                        which stops at the kernel's first Rust function (adds
                        nokaslr, so the kernel runs where its symbols say)
   --cmdline <flags>    Kernel flags instead of boot.cmdline, such as \"kdb\"
-  --microcode <path>   Intel microcode file or directory instead of image.microcode"
+  --microcode <path>   Intel microcode file or directory instead of image.microcode
+  --user <name>        Make an administrator's account in the image, with
+                       --full-name, --password-file and --test-cost as ./ob image
+                       takes them"
         }
         "test" => {
             "Usage: ./ob test [unit | boot | kani | tla | corpus] [--case <name>]...
@@ -240,6 +253,11 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    session's: real paths, .., links, a /tmp of its own
   services         service files in TOML: service check, new and edit, old
                    files converted, and the last good copy of a broken one
+  accounts         authd, user and passwd: accounts made and their files,
+                   passwords checked with a wait after a wrong one, and alice
+                   changing her own
+  signin           sign-in on the consoles: the owner's account at the first
+                   boot, two people side by side, neither in the other's home
   spark-network    Spark gives each service the network its file asks for
   page-fault       a page fault's panic report, on serial and on screen
   crash-log-uefi   the panic report survives a restart (UEFI)
@@ -691,13 +709,19 @@ fn dispatch(argv: Vec<String>) -> Result<()> {
         }
         "image" => {
             let iso = args.flag("--iso");
-            let overrides = image::Overrides {
+            let account = account::Options::from_args(&mut args)?;
+            if iso && account.any() {
+                bail!("--user makes an account in the root partition, which an .iso has none of");
+            }
+            let mut overrides = image::Overrides {
                 cmdline: args.value("--cmdline")?,
                 microcode: args.value("--microcode")?,
                 disk_check: args.value("--disk-check")?,
+                account: None,
             };
             let profile = args.profile(&ctx.config)?;
             args.finish()?;
+            overrides.account = account.account(&ctx)?;
             let path = image::build_release(&ctx, profile, iso, &overrides)?;
             println!("\nImage ready: {}", ctx.display(&path));
             println!(

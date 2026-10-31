@@ -5,7 +5,8 @@
 # runs it on Cargo.toml; the kernel workspace has its own, stricter policy in
 # kernel/deny.toml. Dependencies must be under permissive licenses compatible
 # with Apache-2.0 OR MIT, and come from crates.io (BSD-2-Clause comes with the
-# Spleen fonts in radix-fbcon, which ob reads). The build tool never ships
+# Spleen fonts in radix-fbcon, which ob reads; BSD-3-Clause with subtle, which
+# Argon2 compares in constant time with, for `ob image --user`, ADR 0218). The build tool never ships
 # in an image, but it stays under the same terms as the rest of the tree
 # (docs/adr/0021-license-manifest-in-every-image.md).
 
@@ -13,7 +14,7 @@
 yanked = "deny"
 
 [licenses]
-allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "Unicode-3.0"]
+allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "Unicode-3.0"]
 confidence-threshold = 0.9
 
 [bans]

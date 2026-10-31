@@ -71,3 +71,11 @@ trivially_copy_pass_by_ref = "warn"
 unnested_or_patterns = "warn"
 unused_self = "warn"
 used_underscore_binding = "warn"
+
+# `ob image --user` hashes a password at Argon2id's full cost: a fraction
+# of a second optimized, and seconds in a debug build, which `ob` is.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

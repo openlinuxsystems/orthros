@@ -11,6 +11,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# authd(8)'s account files and Argon2id hashes, and what it is asked
+# (ADR 0218).
+accounts = { path = "../accounts", features = ["hash"] }
 # keymap(1)'s layouts and their setting (ADR 0149).
 keymap = { path = "../keymap" }
 libc = "0.2.191"

@@ -10,6 +10,7 @@
 #define POSIX_PROGRAMS_H
 
 #include <fcntl.h>
+#include <signal.h>
 
 #include "check.h"
 
@@ -140,9 +141,15 @@ static int run_program(const char *const argv[], const char *input, size_t input
 	close(in[0]);
 	close(out[1]);
 	// The inputs are smaller than a pipe holds, so this never waits on
-	// the program's output.
-	if(write(in[1], input, input_len) != (ssize_t)input_len)
-		check_failed(__FILE__, __LINE__, "writing the input", errno);
+	// the program's output. A program may end without reading its input,
+	// as one that refuses its arguments does, and that is no failure:
+	// with two processors it can end before the input is written.
+	void (*was)(int) = signal(SIGPIPE, SIG_IGN);
+	ssize_t wrote = write(in[1], input, input_len);
+	int error = errno;
+	signal(SIGPIPE, was);
+	if(wrote != (ssize_t)input_len && !(wrote < 0 && error == EPIPE))
+		check_failed(__FILE__, __LINE__, "writing the input", error);
 	close(in[1]);
 	size_t len = 0;
 	ssize_t got;

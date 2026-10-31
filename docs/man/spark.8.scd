@@ -436,7 +436,9 @@ header that the machine's embedded controller keeps
 *admin.hardware = true* gets a copy in _SLOT_PLATFORM_
 (*radix-startup*(2)), with the copy and transfer rights, so that its
 children get it through *fork* and *exec*: *consoled*(8)'s does, so that
-root's shells may run *ectool*(8). A service that does not ask cannot
+root's shells may run *ectool*(8) when the consoles have no sign-in. The
+sessions of people who sign in are *authd*(8)'s children, not
+consoled's, and do not get it. A service that does not ask cannot
 change them; the hardware monitor's files under _/kernel/class/hwmon_
 still show the fans and sensors to everyone (*radix-sysfs*(5)).
 
@@ -445,9 +447,13 @@ still show the fans and sensors to everyone (*radix-sysfs*(5)).
 Spark acts for root, and its root directory has the bypass right, which
 passes the owners and modes of files (*radix-names*(2), ADR 0214). The
 program it starts from its command line acts for root too, with that
-right on the root it gives it, until sign-in (Phase 13b.5). A service
-acts for root without it, in its view, unless its file sets
-*runs-with-your-access* (*service.toml*(5)). With *--names* before the
+right on the root it gives it. A service acts for root without it, in
+its view, unless its file sets *runs-with-your-access*
+(*service.toml*(5)). A service whose file sets *names = true* gets a
+copy of the names capability, as the descriptor after its mounts, with
+*NAMES_DESCRIPTOR* naming it: *authd*(8)'s does, to start the sessions
+of the people who sign in, acting for them (ADR 0250); no other
+service's should. With *--names* before the
 program, a POSIX program gets the names capability as its descriptor 3,
 as the *principals* boot test (*ob*(1)) needs to start processes for
 other users: *-- --posix --names /system/tests/posix/principals*.

@@ -533,6 +533,38 @@ _target/userspace/_).
 		_/usr/bin/env_, its own folder and _/tmp_, nothing past them,
 		and a file of mode 000 closed to it.
 
+	*accounts*
+		Boot 2 CPUs with the shipped services, *authd*(8) among them,
+		and _/system/tests/posix/accounttest_ as a program that holds
+		the names capability, which makes alice, an administrator, and
+		bob, with an empty password, with *user*(8); checks the account
+		files and the hashes' file, their modes and the homes, and what
+		*getpwnam*(3), *getgrnam*(3), *id*(1) and *user list* read;
+		asks authd over its socket as sign-in will, where a right
+		password passes and a wrong one, or a name there is not, is
+		answered alike after two seconds, a second try at once after
+		four; changes alice's password as root with *passwd*(1); then
+		starts itself as alice, who changes her own password given hers
+		but not bob's, makes no account, checks no password but hers,
+		and can neither read the hashes nor change the account files
+		(ADR 0218).
+
+	*signin*
+		Boot 2 CPUs under UEFI from USB with the shipped services and
+		_/system/tests/posix/signintest_ as root. The machine has no
+		account, so *login*(1) on tty1 asks for the owner's: the test
+		types alice, an administrator, and her password twice, and she
+		is signed in, with her ids, home, shell and terminal checked at
+		her shell. signintest makes bob through *authd*(8); the test
+		signs him in on tty2, where he cannot list alice's home,
+		*who*(1) lists both, and *signintest mount* finds that he
+		mounts and unmounts nothing; signintest checks that each session's
+		leader acts for its user on a terminal of its own. Bob signs out
+		and the sign-in comes back; a wrong password is refused after a
+		wait and the right one signs him in again; alice, still signed
+		in on tty1, cannot list bob's home. The power button ends it
+		(ADR 0250).
+
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test
 		services that run _/system/tests/posix/netgrant_: _granted_ asks
