@@ -439,7 +439,9 @@ header that the machine's embedded controller keeps
 children get it through *fork* and *exec*: *consoled*(8)'s does, so that
 root's shells may run *ectool*(8) when the consoles have no sign-in. The
 sessions of people who sign in are *authd*(8)'s children, not
-consoled's, and do not get it. A service that does not ask cannot
+consoled's, and do not get it; authd's file asks for it too, and authd
+hands it to an administrator's command inside *elevate*(8). A service
+that does not ask cannot
 change them; the hardware monitor's files under _/kernel/class/hwmon_
 still show the fans and sensors to everyone (*radix-sysfs*(5)).
 

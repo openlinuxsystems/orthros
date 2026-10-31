@@ -15,9 +15,10 @@ authd - keep the accounts and check passwords
 
 authd keeps Dukovo's accounts and their passwords (ADR 0218). Spark runs
 it as the *authd* service. It alone changes the account files, and it
-alone reads the passwords' hashes, and it alone starts the sessions of
-people who sign in: other programs ask it over a socket, as *login*(1),
-*user*(8) and *passwd*(1) do.
+alone reads the passwords' hashes, it alone starts the sessions of
+people who sign in, and it alone runs commands as an administrator:
+other programs ask it over a socket, as *login*(1), *user*(8),
+*passwd*(1) and *elevate*(8) do.
 
 An account is a name its owner chooses and a password, which may be
 empty: nothing else, and never an age, a birth date or an identity
@@ -83,6 +84,17 @@ closes the connection, but for a session (below):
 	Makes the owner's account, an administrator's, at a machine's first
 	sign-in. Only root may, and only while *needs-owner* says *yes*.
 
+*reset* _name_ _password_
+	Sets administrator _name_'s password to _password_, which may be
+	empty, from the startup-trouble menu of *login*(1) (ADR 0253). Only
+	root may, and only while the kernel was started with
+	*startup-trouble* (*dukovo-boot*(7)); an account that is not an
+	administrator's is refused, as an administrator changes its
+	password with *elevate passwd*. The wrong passwords given for
+	_name_ are forgotten, so the new one opens the account at once. It
+	is a security event, and each administrator is told at their next
+	sign-in (see SESSIONS).
+
 *session* _name_ _password_ _term_
 	Starts _name_'s session, if _password_ is theirs, on the terminal
 	sent with the request as a descriptor (*SCM_RIGHTS*), with *TERM*
@@ -92,10 +104,40 @@ closes the connection, but for a session (below):
 	that process ends, authd writes *ended* _status_, its wait status,
 	and closes it. See SESSIONS.
 
+*elevate* _mode_ _password-kind_ _password_ _term_ _directory_ [_language_...] *--* [_command_...]
+	Runs _command_ as an administrator, or root's shell for the
+	_mode_ *shell* or *login* (*command* runs the command), in
+	_directory_, for an administrator, after their password unless
+	their pane is unlocked: _password-kind_ is *password*, with the
+	password after it, or *none* or *ask*, with an empty field; *ask*
+	lets consoled ask for it on a console (PROMPTS). Each
+	_language_ is a setting *NAME=value* to keep. The request comes
+	with four descriptors: the command's standard input, output and
+	error, and the read end of a pipe. The answer is *ok password*
+	when a password is needed and none came, or *ok* _process_, after
+	which the connection stays open as a session's. See ELEVATE.
+
+*unlock* _password-kind_ _password_
+	Unlocks the asker's pane for 15 minutes, or 15 more, after the
+	password unless it is unlocked: *ok*, or *ok password*.
+
+*forget*
+	Locks the asker's pane again. Anyone may ask.
+
+*prompts*
+	Asks for the passwords to be asked on the consoles: *ok*, then the
+	connection stays open for *ask* and *done* lines (PROMPTS). Only
+	root may, as *consoled*(8) runs; a later one takes over.
+
+*prompted* _number_ *password*|*cancelled*|*elsewhere* _password_
+	What came of prompt _number_: the password typed, a prompt closed,
+	or a terminal that is not a console's, with an empty _password_ for
+	the last two. Only the process that asked *prompts* may.
+
 authd knows who asks by the connection: the kernel gives it the process
 at the other end, and the user and group it acted for when it connected
-(*SO_PEERCRED*, *radix-posix*(7)). Until *elevate* (Phase 13b.6), an
-administrator is root.
+(*SO_PEERCRED*, *radix-posix*(7)). An administrator is root inside
+*elevate*(8): see ELEVATE.
 
 # WRONG PASSWORDS
 
@@ -153,6 +195,95 @@ of authd ends the sessions it started.
 Without the names capability authd logs *no names capability: sign-in
 cannot start sessions* when it starts, and refuses *session*.
 
+Before a session's programs start, authd writes on its terminal what
+the person is to be told since they last signed in, and forgets it once
+the session starts: today, that a password was reset from the
+startup-trouble menu, which every administrator is told:
+
+```
+authd: the password of alice was reset from the startup-trouble menu, by process 61 (user 0)
+```
+
+```
+Your password was reset from the startup-trouble menu on Sat Oct 31 12:40 2026.
+The password of alice was reset from the startup-trouble menu on Sat Oct 31 12:40 2026.
+```
+
+# ELEVATE
+
+*elevate*(8), and *sudo*(8), which is the same program, run a command as
+an administrator through authd (ADR 0219). For an *elevate* request
+authd:
+
+- finds the asker's account by the user the connection gives, and
+  refuses one that is not an administrator's, a member of the *admins*
+  group, saying so in the audit log, before any password;
+- finds the command in _/system/commands_ and _/applications/commands_
+  only, or as given if it holds a */*, and refuses one not found;
+- unless the asker's pane is unlocked, answers *ok password* to a
+  request without a password, and checks the one that comes, waiting
+  after a wrong one as for *check*;
+- makes a process, its own child, acting for root as authd does, and
+  gives it authd's root, which passes the owners and modes of files
+  (the bypass right), the random source, the log, the platform
+  capability that its service file's *admin.hardware* gives it, and the
+  three descriptors as its 0, 1 and 2: the admin set;
+- runs *elevate --started* in it, which makes the first terminal among
+  them its controlling terminal in a new session, goes to the
+  directory and runs the command, with the environment *elevate*(8)
+  describes;
+- answers *ok* _process_, unlocks the pane for 15 minutes from then,
+  and audits it.
+
+A pane is the terminal of the asker's session, with that session and
+when its leader started, as *radix-proc*(5) shows them: another session
+on the same terminal is another pane, and a program with no terminal
+has none, so it is asked each time. Unlocked panes are kept in memory
+only, and forgotten when authd starts again.
+
+Then authd reads the pipe: a line *signal* _number_ sends the command's
+process group that signal, and *continue* sends it *SIGCONT*; the end
+of the pipe, or of the connection, hangs the command up with *SIGHUP*,
+as elevate is gone. When the command stops, authd writes *stopped*
+_signal_ on the connection; when it ends, *ended* _status_, and closes
+it. The audit lines:
+
+```
+authd: alice elevated on pts/0 (password typed): process 81 runs /system/commands/id, for process 77
+authd: alice elevated on pts/0 (unlocked): process 84 runs /system/commands/user add bob, for process 77
+authd: alice's elevated process 84 on pts/0 ended with status 0x0
+authd: alice unlocked elevate on pts/0 for 15 minutes, for process 77
+authd: bob, not an administrator, asked to elevate on pts/1: dmesg, for process 93
+```
+
+A command line shows as at most 256 characters, with *?* for each
+control character. An elevated command runs in authd's resource domain
+and ends when authd does.
+
+# PROMPTS
+
+*consoled*(8) asks *prompts* when it starts, so that the password for
+elevate, in a pane on a console, is asked where no program draws or
+reads (ADR 0251). An *elevate* or *unlock* request whose
+_password-kind_ is *ask*, from a locked pane, is then not answered *ok
+password*: authd keeps it, with its descriptors, and writes on
+consoled's connection
+
+```
+ask 12 pts/0 alice /system/commands/user add bob
+```
+
+the prompt's number, the pane's terminal, whose password it is and the
+command line, empty for *unlock*. consoled answers with a *prompted*
+request: authd takes the password typed as the one the request came
+with, waiting after a wrong one as ever, and elevate asks again; a
+closed prompt is answered *no no password was typed*, and *elsewhere*,
+for a terminal that is not a console's, *ok password*, so that elevate
+asks itself. A prompt not answered in 5 minutes is given up. When its
+elevate goes away first, authd writes *done* _number_, and consoled
+takes the prompt off. While no program asks *prompts*, and when it
+goes away, *ask* is answered as *none* is.
+
 # ACCOUNTS
 
 An account's name is 1 to 32 lowercase letters, digits, *\_*, *-* and
@@ -195,6 +326,10 @@ _/system/settings/group_
 _/system/state/authd/passwords_
 	The passwords' hashes.
 
+_/system/state/authd/notices_
+	What each person is told at their next sign-in: a line
+	_name_<tab>_text_ each.
+
 _/system/live/authd/socket_
 	The socket authd answers at.
 
@@ -208,6 +343,6 @@ exits with 1 if it cannot start.
 
 # SEE ALSO
 
-*login*(1), *user*(8), *passwd*(1), *id*(1), *consoled*(8), *service*(8),
+*login*(1), *elevate*(8), *sudo*(8), *user*(8), *passwd*(1), *id*(1), *consoled*(8), *service*(8),
 *service.toml*(5), *spark*(8), *logd*(8), *radix-names*(2), *radix-posix*(7),
 *systools*(1)

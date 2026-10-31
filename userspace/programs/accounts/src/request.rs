@@ -15,6 +15,12 @@
 //! needs-owner\0
 //! owner\0chase\0Chase\0her secret\0
 //! session\0alice\0secret\0linux\0
+//! reset\0alice\0new secret\0
+//! elevate\0command\0ask\0\0linux\0/users/alice\0LANG=C.UTF-8\0--\0dmesg\0-w\0
+//! unlock\0password\0secret\0
+//! forget\0
+//! prompts\0
+//! prompted\07\0password\0secret\0
 //! ```
 //!
 //! An answer is `ok`, maybe with words after it, or `no` and why, then a
@@ -25,6 +31,24 @@
 //! (SCM_RIGHTS), and its answer is `ok` and the number of the session's
 //! first process; the connection then stays open until that process
 //! ends, when authd writes [`ended`]'s line and closes it (ADR 0250).
+//!
+//! An `elevate` request (ADR 0219) comes with the three descriptors the
+//! command is to have as its 0, 1 and 2, and a pipe's read end, sent
+//! together with its first bytes. Its answer is `ok password` when a
+//! password is needed and none came, or `ok` and the command's process,
+//! after which the connection works as a session's: authd writes
+//! [`stopped`]'s line when the command stops and [`ended`]'s when it
+//! ends, and reads [`signal`]'s and [`CONTINUE`] lines from the pipe.
+//!
+//! The consoles' own password prompt (ADR 0251): consoled(8) asks
+//! `prompts`, and its connection stays open for authd to write
+//! [`Prompt`] lines to. An `elevate` or `unlock` request that says `ask`
+//! for its password, from a pane on a console, is then not answered
+//! `ok password`: authd has consoled ask for the password where no
+//! program can draw or read, and consoled answers with a `prompted`
+//! request, which authd takes as the password the first request came
+//! with. On any other terminal, or with no consoled, `ask` is answered
+//! as `none` is.
 
 use crate::wipe;
 
@@ -87,11 +111,137 @@ pub enum Request {
         /// The terminal's type, for `TERM`.
         term: String,
     },
+    /// Set administrator `name`'s password to `password`, from the
+    /// startup-trouble menu (ADR 0253): root's to ask, and only while the
+    /// kernel was started with `startup-trouble`. Every administrator is
+    /// told at their next sign-in.
+    Reset {
+        /// The administrator.
+        name: String,
+        /// Their new password, which may be empty.
+        password: Vec<u8>,
+    },
+    /// Run a command as an administrator, with the admin set (ADR 0219):
+    /// an administrator's to ask, and after their password unless their
+    /// terminal pane typed it in the last 15 minutes.
+    Elevate {
+        /// What runs: a command, or root's shell.
+        mode: Mode,
+        /// The asker's password, if it typed one.
+        password: Option<Vec<u8>>,
+        /// With no password: whether the console may ask for it.
+        ask: bool,
+        /// The terminal's type, for `TERM`.
+        term: String,
+        /// The directory the command starts in.
+        directory: Vec<u8>,
+        /// The asker's language settings, `LANG`, `LANGUAGE` and `LC_*`,
+        /// as `NAME=value`.
+        language: Vec<String>,
+        /// The command and its arguments: for a shell, what it runs with
+        /// `-c`, if anything.
+        command: Vec<Vec<u8>>,
+    },
+    /// Unlock elevate in the asker's terminal pane for 15 minutes, or for
+    /// 15 more, as `sudo -v` does: after the password, unless it is
+    /// unlocked already.
+    Unlock {
+        /// The asker's password, if it typed one.
+        password: Option<Vec<u8>>,
+        /// With no password: whether the console may ask for it.
+        ask: bool,
+    },
+    /// Lock elevate in the asker's terminal pane again, as `sudo -k`
+    /// does. Anyone may ask.
+    Forget,
+    /// Ask for passwords on the consoles (ADR 0251): authd writes
+    /// [`Prompt`] lines on this connection, which stays open. Root's to
+    /// ask, as consoled runs as root; a later one takes over.
+    Prompts,
+    /// What the person at the console typed for prompt `id`, from the
+    /// program that asked [`Request::Prompts`].
+    Prompted {
+        /// The prompt's number, from its [`Prompt::Ask`].
+        id: u64,
+        /// What came of it.
+        typed: Prompted,
+    },
+}
+
+/// What came of a password prompt on a console.
+#[derive(PartialEq, Eq)]
+pub enum Prompted {
+    /// The password typed.
+    Password(Vec<u8>),
+    /// The person closed the prompt, with Esc or Ctrl+C.
+    Cancelled,
+    /// The terminal is not a console's: the asker asks itself.
+    Elsewhere,
+}
+
+/// What an [`Request::Elevate`] runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// The command, found in the system's own commands.
+    Command,
+    /// Root's shell, in the directory asked for (`sudo -s`).
+    Shell,
+    /// Root's shell as a login shell, in root's home (`sudo -i`).
+    Login,
+}
+
+impl Mode {
+    fn word(self) -> &'static [u8] {
+        match self {
+            Mode::Command => b"command",
+            Mode::Shell => b"shell",
+            Mode::Login => b"login",
+        }
+    }
+
+    fn of(word: &[u8]) -> Option<Mode> {
+        match word {
+            b"command" => Some(Mode::Command),
+            b"shell" => Some(Mode::Shell),
+            b"login" => Some(Mode::Login),
+            _ => None,
+        }
+    }
+}
+
+/// What `ok` says to an `elevate` or `unlock` request that needs a
+/// password and came without one.
+pub const NEEDS_PASSWORD: &str = "password";
+
+/// Why a wrong password, or a name there is not, is refused: the same
+/// words for both.
+pub const WRONG_PASSWORD: &str = "the name or the password is wrong";
+
+/// The fields of an optional password: whether there is one, or whether
+/// the console may ask for it, then it.
+fn password_fields(password: &Option<Vec<u8>>, ask: bool) -> [&[u8]; 2] {
+    match password {
+        Some(password) => [b"password", password],
+        None if ask => [b"ask", b""],
+        None => [b"none", b""],
+    }
+}
+
+/// The optional password in `kind` and `password`, and whether the
+/// console may ask for one, as [`password_fields`] made them.
+fn password_of(kind: &[u8], password: &[u8]) -> Option<(Option<Vec<u8>>, bool)> {
+    match kind {
+        b"password" => Some((Some(password.to_vec()), false)),
+        b"none" if password.is_empty() => Some((None, false)),
+        b"ask" if password.is_empty() => Some((None, true)),
+        _ => None,
+    }
 }
 
 impl Request {
     /// What is sent.
     pub fn encode(&self) -> Vec<u8> {
+        let id_text;
         let fields: Vec<&[u8]> = match self {
             Request::Check { name, password } => vec![b"check", name.as_bytes(), password],
             Request::Passwd { name, current, new } => {
@@ -110,6 +260,31 @@ impl Request {
             }
             Request::Session { name, password, term } => {
                 vec![b"session", name.as_bytes(), password, term.as_bytes()]
+            }
+            Request::Reset { name, password } => vec![b"reset", name.as_bytes(), password],
+            Request::Elevate { mode, password, ask, term, directory, language, command } => {
+                let mut fields: Vec<&[u8]> = vec![b"elevate", mode.word()];
+                fields.extend(password_fields(password, *ask));
+                fields.extend([term.as_bytes(), directory.as_slice()]);
+                fields.extend(language.iter().map(String::as_bytes));
+                fields.push(b"--");
+                fields.extend(command.iter().map(Vec::as_slice));
+                fields
+            }
+            Request::Unlock { password, ask } => {
+                let [kind, password] = password_fields(password, *ask);
+                vec![b"unlock", kind, password]
+            }
+            Request::Forget => vec![b"forget"],
+            Request::Prompts => vec![b"prompts"],
+            Request::Prompted { id, typed } => {
+                id_text = id.to_string();
+                let (kind, password): (&[u8], &[u8]) = match typed {
+                    Prompted::Password(password) => (b"password", password),
+                    Prompted::Cancelled => (b"cancelled", b""),
+                    Prompted::Elsewhere => (b"elsewhere", b""),
+                };
+                vec![b"prompted", id_text.as_bytes(), kind, password]
             }
         };
         let mut bytes = Vec::new();
@@ -145,6 +320,9 @@ impl Request {
                 password: password.to_vec(),
             }),
             [b"needs-owner"] => Ok(Request::NeedsOwner),
+            [b"reset", name, password] => {
+                Ok(Request::Reset { name: text(name)?, password: password.to_vec() })
+            }
             [b"owner", name, full_name, password] => Ok(Request::Owner {
                 name: text(name)?,
                 full_name: text(full_name)?,
@@ -155,6 +333,46 @@ impl Request {
                 password: password.to_vec(),
                 term: text(term)?,
             }),
+            [b"elevate", mode, kind, password, term, directory, ref rest @ ..] => {
+                let mode = Mode::of(mode).ok_or_else(malformed)?;
+                let (password, ask) = password_of(kind, password).ok_or_else(malformed)?;
+                // The language settings, up to the first `--`; the command
+                // after it.
+                let split = rest.iter().position(|f| *f == b"--").ok_or_else(malformed)?;
+                let language = rest[..split]
+                    .iter()
+                    .map(|f| text(f).ok().filter(|t| t.contains('=')).ok_or_else(malformed))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let command: Vec<Vec<u8>> = rest[split + 1..].iter().map(|f| f.to_vec()).collect();
+                if mode == Mode::Command && command.is_empty() {
+                    return Err(malformed());
+                }
+                Ok(Request::Elevate {
+                    mode,
+                    password,
+                    ask,
+                    term: text(term)?,
+                    directory: directory.to_vec(),
+                    language,
+                    command,
+                })
+            }
+            [b"unlock", kind, password] => {
+                let (password, ask) = password_of(kind, password).ok_or_else(malformed)?;
+                Ok(Request::Unlock { password, ask })
+            }
+            [b"forget"] => Ok(Request::Forget),
+            [b"prompts"] => Ok(Request::Prompts),
+            [b"prompted", id, kind, password] => {
+                let id = text(id)?.parse().map_err(|_| malformed())?;
+                let typed = match (kind, password) {
+                    (b"password", password) => Prompted::Password(password.to_vec()),
+                    (b"cancelled", b"") => Prompted::Cancelled,
+                    (b"elsewhere", b"") => Prompted::Elsewhere,
+                    _ => return Err(malformed()),
+                };
+                Ok(Request::Prompted { id, typed })
+            }
             _ => Err(malformed()),
         }
     }
@@ -165,12 +383,20 @@ impl Request {
             Request::Check { password, .. }
             | Request::Add { password, .. }
             | Request::Owner { password, .. }
-            | Request::Session { password, .. } => wipe(password),
+            | Request::Session { password, .. }
+            | Request::Reset { password, .. } => wipe(password),
             Request::Passwd { current, new, .. } => {
                 wipe(current);
                 wipe(new);
             }
-            Request::NeedsOwner => {}
+            Request::Elevate { password, .. } | Request::Unlock { password, .. } => {
+                if let Some(password) = password {
+                    wipe(password);
+                }
+            }
+            Request::Prompted { typed: Prompted::Password(password), .. } => wipe(password),
+            Request::NeedsOwner | Request::Forget | Request::Prompts | Request::Prompted { .. } => {
+            }
         }
     }
 }
@@ -190,11 +416,34 @@ impl std::fmt::Debug for Request {
                 write!(f, "Add {{ name: {name:?}, full_name: {full_name:?}, admin: {admin} }}")
             }
             Request::NeedsOwner => write!(f, "NeedsOwner"),
+            Request::Reset { name, .. } => write!(f, "Reset {{ name: {name:?} }}"),
             Request::Owner { name, full_name, .. } => {
                 write!(f, "Owner {{ name: {name:?}, full_name: {full_name:?} }}")
             }
             Request::Session { name, term, .. } => {
                 write!(f, "Session {{ name: {name:?}, term: {term:?} }}")
+            }
+            Request::Elevate { mode, password, ask, term, command, .. } => {
+                let typed = password.is_some();
+                let command: Vec<_> = command.iter().map(|w| String::from_utf8_lossy(w)).collect();
+                write!(
+                    f,
+                    "Elevate {{ mode: {mode:?}, password: {typed}, ask: {ask}, term: {term:?}, \
+                     command: {command:?} }}"
+                )
+            }
+            Request::Unlock { password, ask } => {
+                write!(f, "Unlock {{ password: {}, ask: {ask} }}", password.is_some())
+            }
+            Request::Forget => write!(f, "Forget"),
+            Request::Prompts => write!(f, "Prompts"),
+            Request::Prompted { id, typed } => {
+                let typed = match typed {
+                    Prompted::Password(_) => "Password",
+                    Prompted::Cancelled => "Cancelled",
+                    Prompted::Elsewhere => "Elsewhere",
+                };
+                write!(f, "Prompted {{ id: {id}, typed: {typed} }}")
             }
         }
     }
@@ -241,4 +490,114 @@ pub fn ended(status: i32) -> String {
 /// The wait status in a line [`ended`] made.
 pub fn ended_status(line: &str) -> Option<i32> {
     line.trim_end_matches('\n').strip_prefix("ended ")?.parse().ok()
+}
+
+/// The line authd writes on an `elevate` connection when the command
+/// stops with signal `signal`, as Ctrl+Z stops it.
+pub fn stopped(signal: i32) -> String {
+    format!("stopped {signal}\n")
+}
+
+/// The signal in a line [`stopped`] made.
+pub fn stopped_signal(line: &str) -> Option<i32> {
+    line.trim_end_matches('\n').strip_prefix("stopped ")?.parse().ok()
+}
+
+/// The line elevate writes to its pipe to authd to have it send the
+/// command `signal`, as a terminal would.
+pub fn signal(signal: i32) -> String {
+    format!("signal {signal}\n")
+}
+
+/// The line elevate writes to its pipe to authd to have the stopped
+/// command go on, as `fg` has elevate do.
+pub const CONTINUE: &str = "continue\n";
+
+/// What a line elevate wrote to its pipe asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Relay {
+    /// Send the command this signal.
+    Signal(i32),
+    /// Have the stopped command go on.
+    Continue,
+}
+
+impl Relay {
+    /// The line `line`, without its newline, asks for, if it is one of
+    /// [`signal`]'s or [`CONTINUE`].
+    pub fn decode(line: &str) -> Option<Relay> {
+        if line == CONTINUE.trim_end() {
+            return Some(Relay::Continue);
+        }
+        let number: i32 = line.strip_prefix("signal ")?.parse().ok()?;
+        (1..=64).contains(&number).then_some(Relay::Signal(number))
+    }
+}
+
+/// The longest command line a [`Prompt::Ask`] shows, in characters.
+pub const PROMPT_SHOWN_MAX: usize = 256;
+
+/// A line authd writes on consoled's `prompts` connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Prompt {
+    /// Ask `name` for their password on the console of `terminal`, as
+    /// `pts/N`, to run `shown`, or to unlock elevate there if it is empty.
+    Ask {
+        /// The prompt's number, for the answer.
+        id: u64,
+        /// The terminal, as /processes names it.
+        terminal: String,
+        /// Whose password it is.
+        name: String,
+        /// The command line, one line of at most [`PROMPT_SHOWN_MAX`]
+        /// characters; empty for an unlock.
+        shown: String,
+    },
+    /// Prompt `id` is no longer wanted: its asker went away.
+    Done {
+        /// The prompt's number.
+        id: u64,
+    },
+}
+
+impl Prompt {
+    /// Its line. A field with a space or a control character in it would
+    /// not come back the same, so a terminal's or name's are left as they
+    /// are only if they have none; the command line takes the rest.
+    pub fn encode(&self) -> String {
+        let word = |text: &str| -> String {
+            text.chars()
+                .map(|c| if c.is_whitespace() || c.is_control() { '?' } else { c })
+                .collect()
+        };
+        match self {
+            Prompt::Ask { id, terminal, name, shown } => {
+                let shown: String = shown
+                    .chars()
+                    .map(|c| if c.is_control() { '?' } else { c })
+                    .take(PROMPT_SHOWN_MAX)
+                    .collect();
+                format!("ask {id} {} {} {shown}\n", word(terminal), word(name))
+            }
+            Prompt::Done { id } => format!("done {id}\n"),
+        }
+    }
+
+    /// The prompt line in `line`, without or with its newline.
+    pub fn decode(line: &str) -> Option<Prompt> {
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        let (verb, rest) = line.split_once(' ')?;
+        match verb {
+            "ask" => {
+                let mut fields = rest.splitn(4, ' ');
+                let id = fields.next()?.parse().ok()?;
+                let terminal = fields.next().filter(|t| !t.is_empty())?.to_string();
+                let name = fields.next().filter(|n| !n.is_empty())?.to_string();
+                let shown = fields.next()?.to_string();
+                Some(Prompt::Ask { id, terminal, name, shown })
+            }
+            "done" => Some(Prompt::Done { id: rest.parse().ok()? }),
+            _ => None,
+        }
+    }
 }

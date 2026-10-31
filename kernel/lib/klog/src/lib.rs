@@ -151,6 +151,9 @@ pub struct Record {
     /// The number of the process whose program wrote it, through the
     /// kernel log capability or _/devices/kmsg_; 0 for the kernel's own.
     pub process: u32,
+    /// The number of the user that process acted for (ADR 0214); 0 for
+    /// the kernel's own.
+    pub user: u32,
     /// Its syslog(3) facility (see [`Origin`]).
     pub facility: u8,
     len: u8,
@@ -164,6 +167,7 @@ impl Record {
         level: Level::Info,
         cpu: 0,
         process: 0,
+        user: 0,
         facility: KERN,
         len: 0,
         text: [0; RECORD_TEXT],
@@ -191,6 +195,7 @@ impl fmt::Debug for Record {
             .field("level", &self.level)
             .field("cpu", &self.cpu)
             .field("process", &self.process)
+            .field("user", &self.user)
             .field("facility", &self.facility)
             .field("text", &self.text())
             .finish_non_exhaustive()
@@ -291,6 +296,10 @@ pub struct Origin {
     /// The number of the process whose program wrote it; 0 for the
     /// kernel's own.
     pub process: u32,
+    /// The number of the user that process acted for; 0 for the
+    /// kernel's own. logd shows a user the records of their own
+    /// programs (ADR 0252).
+    pub user: u32,
     /// Its syslog(3) facility: [`KERN`] for the kernel's own, [`USER`] for
     /// a program's unless it names another, and [`AUTHPRIV`] for a
     /// security event.
@@ -299,7 +308,7 @@ pub struct Origin {
 
 impl Origin {
     /// The kernel's own records.
-    pub const KERNEL: Origin = Origin { process: 0, facility: KERN };
+    pub const KERNEL: Origin = Origin { process: 0, user: 0, facility: KERN };
 }
 
 /// Logs a message. Multi-line messages become one record per line.
@@ -309,7 +318,7 @@ pub fn log(level: Level, args: fmt::Arguments<'_>) {
 
 /// Logs a security event of the kernel's, for the audit log (ADR 0211).
 pub fn audit(args: fmt::Arguments<'_>) {
-    log_from(Level::Info, Origin { process: 0, facility: AUTHPRIV }, args);
+    log_from(Level::Info, Origin { process: 0, user: 0, facility: AUTHPRIV }, args);
 }
 
 /// Logs a message from `origin`, as [`log`] does: a program's, or one of
@@ -330,6 +339,7 @@ pub fn log_from(level: Level, origin: Origin, args: fmt::Arguments<'_>) {
             record.level = level;
             record.cpu = u16::try_from(cpu).unwrap_or(u16::MAX);
             record.process = origin.process;
+            record.user = origin.user;
             record.facility = origin.facility;
             let kept = text::floor_char_boundary(line, RECORD_TEXT);
             record.text[..kept].copy_from_slice(&line.as_bytes()[..kept]);

@@ -59,6 +59,50 @@ Made alice, number 1000, home /users/alice
 $
 ```
 
+# STARTUP TROUBLE
+
+For an administrator's lost password, the boot menu's second entry,
+*Dukovo Server* _version_*: startup trouble*, starts the computer with
+the kernel flag *startup-trouble* (*dukovo-boot*(7)), as Ubuntu's
+recovery mode does. login then shows its menu before each sign-in
+(ADR 0253):
+
+```
+Startup trouble: this computer was started from its boot menu's
+startup-trouble entry.
+
+  1  Reset an administrator's password
+  2  Sign in
+  3  Restart
+  4  Power off
+
+Choose 1 to 4: 1
+
+Administrators: alice
+Whose password? alice
+New password:
+The same again:
+The password of alice is reset. Every administrator is told at their
+next sign-in, and the audit log keeps it.
+```
+
+The new password is asked twice and warned about as at the first
+sign-in, never refused. *authd*(8) resets it only while the computer
+runs for startup trouble, and tells each administrator at their next
+sign-in, before their shell starts:
+
+```
+Your password was reset from the startup-trouble menu on Sat Oct 31 12:40 2026.
+```
+
+Anyone at the boot menu could already start the computer with root's
+shell (*console-sign-in=off*), so the menu gives no one more; what it
+adds is that the owner is never locked out of their own computer, and
+that nobody resets a password unseen. Restart and Power off ask
+*spark*(8), as *reboot*(8) and *poweroff*(8) do. Once the disks are
+encrypted (release 1.4), resetting a password will need the recovery
+key.
+
 # THE SESSION
 
 authd runs *login --session* as the session's first process, acting
@@ -84,4 +128,4 @@ authd could not be reached in 30 seconds, saying so.
 # SEE ALSO
 
 *authd*(8), *consoled*(8), *user*(8), *passwd*(1), *who*(1), *nukesh*(1),
-*systools*(1)
+*dukovo-boot*(7), *systools*(1)

@@ -24,7 +24,8 @@ at the terminal; with no terminal, as in a script, the password is the
 first line of the standard input, asked once. No rules are forced on it:
 an empty password, or one shorter than 8 characters, gets a warning,
 and at a terminal the question whether to keep it. Only root may make
-an account, and from Phase 13b.6 an administrator inside *elevate*.
+an account, which an administrator is inside *elevate*(8): *elevate
+user add bob*.
 
 A name is 1 to 32 lowercase letters, digits, *\_*, *-* and *.*, starting
 with a letter or *\_*, and one no user or group has. *authd*(8) says what
@@ -38,7 +39,7 @@ names.
 
 *--admin*
 	Make an administrator's account: one in the *admins* group, which
-	may elevate (Phase 13b.6).
+	may run commands as root with *elevate*(8).
 
 *--full-name* _name_
 	The account's full name, which the passwd file keeps after its

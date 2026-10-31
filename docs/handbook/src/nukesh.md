@@ -31,9 +31,10 @@ Dukovo Server 0.10.4 (tty1)
 
 There are six consoles, `tty1` to `tty6`: Alt+F1 to Alt+F6 show each,
 Shift+Page Up looks back through the last 1000 lines, and
-Ctrl+Alt+Delete restarts the machine. Each console runs a login shell
-as root, with no password until users arrive (Phase 13); `exit` starts
-a new one. `consoled(8)` describes the consoles and their keys.
+Ctrl+Alt+Delete shows a menu to sign in, restart or power off. Each
+console asks for a name and a password and runs that person's login
+shell (the handbook's users chapter); `exit` signs out. `consoled(8)`
+describes the consoles and their keys.
 
 ## Typing commands
 

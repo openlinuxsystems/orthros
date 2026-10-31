@@ -164,7 +164,8 @@ wrong in plain words:
 		and its ARGB header, with the platform capability
 		(*radix-platform*(2), ADR 0208); *false* unless set.
 		*consoled*(8)'s file sets it, so that root's shells may use
-		*ectool*(8).
+		*ectool*(8), and *authd*(8)'s, so that an administrator's
+		commands inside *elevate*(8) may.
 
 	Paths are absolute, without *.*, *..* or *//*; none is _/_ itself
 	or within another, none is within a place every service reads

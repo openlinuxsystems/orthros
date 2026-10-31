@@ -38,6 +38,13 @@ choose, so a program can show among a service's records by its name,
 with its process number after it. *-s* shows a service's records alone.
 Each option narrows what is shown; together they all must hold.
 
+Root sees every record, and so does an administrator through
+*elevate*(8): *elevate log*. Anyone else sees only the records of their
+own programs, the lines they wrote with *logger*(1) or to
+_/devices/kmsg_, as *logd*(8) answers them (ADR 0252); log says so on
+its standard error unless *-q*. The audit log, *--disk-usage* and
+trimming are root's.
+
 *journalctl*(1) is the same command with journalctl's options.
 
 # OPTIONS
@@ -112,6 +119,9 @@ Each option narrows what is shown; together they all must hold.
 *--disk-usage*
 	Print how much space the log takes, the audit log's share among it.
 
+*-q*, *--quiet*
+	Say nothing of what a user who is not root does not see.
+
 *--no-pager*
 	Changes nothing: log does not page.
 
@@ -134,10 +144,14 @@ Watch the log:
 
 	log -f
 
-The security events of the last week:
+The security events of the last week, as an administrator:
 
-	log --audit --all --since "7 days ago"
+	elevate log --audit --all --since "7 days ago"
+
+What a script of yours wrote with *logger -t backup*:
+
+	log backup
 
 # SEE ALSO
 
-*journalctl*(1), *dmesg*(1), *logd*(8), *logtrim*(8), *log*(5), *systools*(1)
+*journalctl*(1), *dmesg*(1), *logger*(1), *logd*(8), *elevate*(8), *logtrim*(8), *log*(5), *systools*(1)

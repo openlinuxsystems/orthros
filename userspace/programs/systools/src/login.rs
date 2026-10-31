@@ -14,11 +14,16 @@
 //! makes the terminal the session's controlling terminal, goes to their
 //! home and runs their shell as a login shell, as login(1) does on Linux
 //! after its checks.
+//!
+//! A computer started from its boot menu's startup-trouble entry, with
+//! the kernel flag `startup-trouble`, shows the startup-trouble menu
+//! before the sign-in (ADR 0253): it resets an administrator's password
+//! through authd, which tells every administrator at their next sign-in,
+//! or restarts or powers off the computer.
 
 use std::ffi::CString;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::Shutdown;
-use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
@@ -27,8 +32,8 @@ use accounts::wipe;
 
 use crate::account::Input;
 use crate::args::{Arg, Args};
-use crate::prompt;
 use crate::util::{self, Fail, fail};
+use crate::{authd, prompt, signin};
 
 /// How long login waits for authd to answer at all, as at boot, when
 /// the consoles may come up before it.
@@ -64,42 +69,15 @@ fn connect() -> Result<UnixStream, Fail> {
 fn send(request: &Request, terminal: bool) -> Result<UnixStream, Fail> {
     let stream = connect()?;
     let mut bytes = request.encode();
-    let sent =
-        if terminal { send_with_terminal(&stream, &bytes) } else { (&stream).write_all(&bytes) };
+    let sent = if terminal {
+        signin::send_with_fds(&stream, &bytes, &[0])
+    } else {
+        (&stream).write_all(&bytes)
+    };
     wipe(&mut bytes);
     sent.and_then(|()| stream.shutdown(Shutdown::Write))
         .map_err(|err| fail(format!("cannot ask authd: {}", util::strip_os_error(&err))))?;
     Ok(stream)
-}
-
-/// Sends `bytes` on `stream` with descriptor 0 (SCM_RIGHTS) in the first
-/// message.
-fn send_with_terminal(stream: &UnixStream, bytes: &[u8]) -> io::Result<()> {
-    let mut iov = libc::iovec { iov_base: bytes.as_ptr().cast_mut().cast(), iov_len: bytes.len() };
-    let mut control = [0u64; 4];
-    // SAFETY: all zeros is a valid msghdr: numbers and null pointers.
-    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
-    message.msg_iov = &raw mut iov;
-    message.msg_iovlen = 1;
-    message.msg_control = control.as_mut_ptr().cast();
-    // SAFETY: CMSG_SPACE only computes a size.
-    message.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as _;
-    // SAFETY: the control space holds one header and one descriptor, as
-    // CMSG_SPACE said; the macros point into it.
-    let sent = unsafe {
-        let header = libc::CMSG_FIRSTHDR(&raw const message);
-        (*header).cmsg_level = libc::SOL_SOCKET;
-        (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as _;
-        libc::CMSG_DATA(header).cast::<libc::c_int>().write_unaligned(0);
-        libc::sendmsg(stream.as_raw_fd(), &raw const message, 0)
-    };
-    if sent < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // What the first message did not take goes after it, as a write.
-    let rest = &bytes[sent as usize..];
-    if rest.is_empty() { Ok(()) } else { (&mut &*stream).write_all(rest) }
 }
 
 /// Reads authd's first line on `stream`.
@@ -222,11 +200,95 @@ fn sign_in(name: String, password: Vec<u8>) -> Result<Result<(), String>, Fail> 
     Ok(Ok(()))
 }
 
+/// The administrators' names, as the account files list them.
+fn administrators() -> Vec<String> {
+    let read = |path: &str| std::fs::read_to_string(path).unwrap_or_default();
+    let users = accounts::users(&read(accounts::PASSWD));
+    let groups = accounts::groups(&read(accounts::GROUP));
+    users
+        .entries()
+        .filter(|u| u.is_person() && accounts::is_admin(u, &groups))
+        .map(|u| u.name.clone())
+        .collect()
+}
+
+/// The startup-trouble menu (ADR 0253): whether to go on to the sign-in;
+/// not if the input ended.
+fn trouble() -> Result<bool, Fail> {
+    loop {
+        println!(
+            "Startup trouble: this computer was started from its boot menu's\n\
+             startup-trouble entry.\n\n  \
+             1  Reset an administrator's password\n  \
+             2  Sign in\n  \
+             3  Restart\n  \
+             4  Power off\n"
+        );
+        let Some(choice) = line("Choose 1 to 4: ")? else { return Ok(false) };
+        println!();
+        match choice.as_str() {
+            "1" => reset()?,
+            "2" | "" => return Ok(true),
+            "3" => power("reboot"),
+            "4" => power("poweroff"),
+            _ => println!("Type 1, 2, 3 or 4.\n"),
+        }
+    }
+}
+
+/// Resets an administrator's password, as authd allows only while the
+/// computer runs for startup trouble.
+fn reset() -> Result<(), Fail> {
+    let admins = administrators();
+    if admins.is_empty() {
+        println!("No administrator's account yet: signing in makes the owner's.\n");
+        return Ok(());
+    }
+    println!("Administrators: {}", admins.join(", "));
+    let Some(name) = line("Whose password? ")? else { return Ok(()) };
+    if name.is_empty() {
+        println!();
+        return Ok(());
+    }
+    let password = match Input::Terminal.new_password(&name) {
+        Ok(password) => password,
+        Err(why) => {
+            println!("{}\n", capitalized(&why.message));
+            return Ok(());
+        }
+    };
+    match ask(&Request::Reset { name: name.clone(), password })? {
+        Answer::Done(_) => println!(
+            "The password of {name} is reset. Every administrator is told at their\n\
+             next sign-in, and the audit log keeps it.\n"
+        ),
+        Answer::Refused(why) => println!("{}.\n", capitalized(&why)),
+    }
+    Ok(())
+}
+
+/// Restarts or powers off the computer with `command`, reboot(8) or
+/// poweroff(8), which ask Spark; the menu comes back only if it refused.
+fn power(command: &str) {
+    let path = format!("/system/commands/{command}");
+    match std::process::Command::new(&path).status() {
+        // Spark ends the sign-in with the rest.
+        Ok(status) if status.success() => loop {
+            std::thread::sleep(Duration::from_secs(60));
+        },
+        Ok(_) => println!(),
+        Err(err) => println!("{path}: {}\n", util::strip_os_error(&err)),
+    }
+}
+
 /// The sign-in at a console: name and password until a session starts
 /// and ends.
 fn console() -> Result<i32, Fail> {
     if util::own_user() != 0 {
         return Err(fail("only root signs people in: consoled(8) runs login".into()));
+    }
+    if util::kernel_flag(authd::STARTUP_TROUBLE) && !trouble()? {
+        return Ok(1);
     }
     loop {
         if needs_owner()? {

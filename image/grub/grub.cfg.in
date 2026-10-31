@@ -34,4 +34,12 @@ menuentry "Dukovo Server @VERSION@ (Radix)" {
     multiboot2 /boot/radix @CMDLINE@
 @MODULES@    boot
 }
+
+# For a lost administrator's password: the sign-in first shows the
+# startup-trouble menu (ADR 0253). The flag comes first, so it is the
+# kernel's whatever the command line holds after a lone `--`.
+menuentry "Dukovo Server @VERSION@: startup trouble" {
+    multiboot2 /boot/radix startup-trouble @CMDLINE@
+@MODULES@    boot
+}
 @ENTRIES@

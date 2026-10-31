@@ -219,8 +219,12 @@ their pull requests conflicted.
 | [0216](0216-service-files-in-toml.md) | Service files are TOML, read by one crate, and a file that does not read never takes a service down | Accepted |
 | [0217](0217-each-service-runs-in-a-view-of-what-its-file-declares.md) | Each service runs in a view of what its file declares, and gets its secrets as read-only files | Accepted |
 | [0218](0218-authd-keeps-the-accounts-and-passwords-are-argon2id-hashes.md) | authd keeps the accounts, and passwords are Argon2id hashes only it reads | Accepted |
+| [0219](0219-elevate-runs-a-command-as-an-administrator.md) | elevate runs a command as an administrator, through authd | Accepted |
 | [0230](0230-sensors-and-lsusb-with-the-usb-id-database.md) | sensors and lsusb are systools, with the USB ID database as a port | Accepted |
 | [0231](0231-the-firmwares-smbios-tables-and-hwinfo.md) | The firmware's SMBIOS tables show what the machine is, and hwinfo shows them | Accepted |
 | [0232](0232-memory-modules-spd-eeproms-over-the-smbus.md) | Memory modules' SPD EEPROMs are read over the SMBus, when first opened | Accepted |
 | [0233](0233-gpio-controllers-and-the-firmwares-gpio-events.md) | GPIO controllers are driven from their ACPI devices, and run the firmware's GPIO events | Accepted |
 | [0250](0250-sign-in-at-the-consoles-and-sessions-started-by-authd.md) | Sign-in at the consoles, and sessions started by authd | Accepted |
+| [0251](0251-the-consoles-ask-for-elevate-s-password-and-ctrl-alt-delete-is-the-secure-attention-key.md) | The consoles ask for elevate's password, and Ctrl+Alt+Delete is the secure attention key | Accepted |
+| [0252](0252-the-logs-are-for-administrators-and-everyone-reads-their-own-programs-records.md) | The logs are for administrators, and everyone reads their own programs' records | Accepted |
+| [0253](0253-the-startup-trouble-menu-resets-an-administrator-s-password.md) | The startup-trouble menu resets an administrator's password | Accepted |

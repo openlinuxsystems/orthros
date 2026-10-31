@@ -31,7 +31,7 @@ use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -93,6 +93,11 @@ pub struct Record {
     /// The process of the program that wrote it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<u64>,
+    /// The user that program acted for, as the kernel gave it: a user
+    /// who is not root reads only the records of their own programs
+    /// (ADR 0252).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<u32>,
     /// Whether it is a security event, kept in the audit log too.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub audit: bool,
@@ -110,22 +115,22 @@ impl Record {
             7 => "debug",
             _ => "info",
         };
-        let (from, name, process, text) = match line.process {
+        let (from, name, process, user, text) = match line.process {
             // Spark's line: `name: text`, a service's or Spark's own.
             Some(SPARK) => {
                 let text = after_stamp(&line.text);
                 match text.split_once(": ") {
                     Some((name, rest)) if is_name(name) => {
-                        ("service", name.to_string(), None, rest.to_string())
+                        ("service", name.to_string(), None, None, rest.to_string())
                     }
-                    _ => ("service", "spark".to_string(), None, text.to_string()),
+                    _ => ("service", "spark".to_string(), None, None, text.to_string()),
                 }
             }
             Some(process) => {
                 let (name, text) = stamp(&line.text);
-                ("program", name.to_string(), Some(process), text.to_string())
+                ("program", name.to_string(), Some(process), line.user, text.to_string())
             }
-            None => ("kernel", "kernel".to_string(), None, line.text.clone()),
+            None => ("kernel", "kernel".to_string(), None, None, line.text.clone()),
         };
         // The kernel's and Spark's; any other program's is a claim.
         let audit = matches!(line.facility, AUTH | AUTHPRIV)
@@ -138,6 +143,7 @@ impl Record {
             from: from.to_string(),
             name,
             process,
+            user,
             audit,
             text,
         }
@@ -153,6 +159,7 @@ impl Record {
             from: "service".to_string(),
             name: "logd".to_string(),
             process: None,
+            user: None,
             audit,
             text,
         }
@@ -594,6 +601,10 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
 
     let _ = fs::remove_file(QUERY);
     let listener = UnixListener::bind(QUERY).map_err(|e| util::failed(&QUERY, e))?;
+    // Everyone may ask: logd answers each user with what they may read.
+    if let Err(e) = fs::set_permissions(QUERY, fs::Permissions::from_mode(0o666)) {
+        eprintln!("logd: {QUERY}: only root can ask: {}", util::strip_os_error(&e));
+    }
     let shared = Arc::new(Shared { written: Mutex::new(0), changed: Condvar::new() });
     let (trims, asked) = mpsc::channel();
     let answering = Answering { dir: dir.clone(), boot: boot.clone(), boot_ns, trims };
@@ -831,10 +842,16 @@ fn serve(stream: &UnixStream, shared: &Shared, answering: &Answering) {
             return;
         }
     };
+    // Root reads every record; anyone else only their own programs',
+    // and neither the audit log nor what the log takes (ADR 0252).
+    let reader = peer_user(stream);
     let answered = match request.ask.as_str() {
-        "" | "records" => records(&mut out, &request, shared, answering),
+        "" | "records" if request.audit && reader != 0 => Err(for_administrators("the audit log")),
+        "" | "records" => records(&mut out, &request, reader, shared, answering),
         "boots" => boots(&mut out, &answering.dir),
+        "usage" if reader != 0 => Err(for_administrators("the log's size")),
         "usage" => usage(&mut out, &answering.dir),
+        "trim" if reader != 0 => Err(for_administrators("trimming the log")),
         "trim" => trim(&mut out, &request, stream, answering),
         other => Err(Answer::Refused(format!("logd does not know '{other}'"))),
     };
@@ -847,6 +864,19 @@ fn serve(stream: &UnixStream, shared: &Shared, answering: &Answering) {
         }
         Err(Answer::Gone) => {}
     }
+}
+
+/// The user the process at the other end of `stream` acts for, as the
+/// kernel gives it; a user no one is if it cannot say.
+fn peer_user(stream: &UnixStream) -> u32 {
+    let slot = sys::slot_of(stream.as_raw_fd());
+    radix_abi::file::socket_state(&sys::SYS, slot).map_or(u32::MAX, |state| state.user)
+}
+
+/// The refusal of what only root may ask, saying how an administrator
+/// asks for it.
+fn for_administrators(what: &str) -> Answer {
+    Answer::Refused(format!("{what} is for administrators: run it with elevate"))
 }
 
 /// Why a request was not answered in full.
@@ -969,6 +999,9 @@ fn files_for(request: &Request, boot: Option<&str>, answering: &Answering) -> Ve
 /// What a request for records chooses.
 struct Choice<'a> {
     request: &'a Request,
+    /// The user asking: root's are every record, anyone else's only
+    /// those of the programs that acted for them.
+    reader: u32,
     /// The boot (None: any).
     boot: Option<String>,
     grep: Option<util::Regex>,
@@ -978,7 +1011,8 @@ impl Choice<'_> {
     /// Whether `record` is one asked for.
     fn wants(&self, record: &Record) -> bool {
         let request = self.request;
-        self.boot.as_ref().is_none_or(|b| record.boot == *b)
+        (self.reader == 0 || record.from == "program" && record.user == Some(self.reader))
+            && self.boot.as_ref().is_none_or(|b| record.boot == *b)
             && (request.services.is_empty() && request.names.is_empty()
                 || record.from == "service" && request.services.contains(&record.name)
                 || request.names.contains(&record.name))
@@ -1005,6 +1039,7 @@ fn send(out: &mut impl Write, record: &Record) -> Result<(), Answer> {
 fn records(
     out: &mut io::BufWriter<&UnixStream>,
     request: &Request,
+    reader: u32,
     shared: &Shared,
     answering: &Answering,
 ) -> Result<(), Answer> {
@@ -1015,7 +1050,7 @@ fn records(
         }
         None => None,
     };
-    let choice = Choice { request, boot: which_boot(request, answering)?, grep };
+    let choice = Choice { request, reader, boot: which_boot(request, answering)?, grep };
     let files = files_for(request, choice.boot.as_deref(), answering);
     let mut seen = *shared.written.lock().unwrap_or_else(PoisonError::into_inner);
     // For the last few, count them first, then skip the rest: two reads
@@ -1185,6 +1220,7 @@ mod tests {
             facility: u8::from(process.is_some()),
             seq: 7,
             process,
+            user: process.map(|_| 1001),
             usec: 2_500_000,
             text: text.to_string(),
         }
@@ -1217,14 +1253,17 @@ mod tests {
         // A program that names itself after a service is still a program.
         let fake = Record::of(&line("volumed[9]: volumed: lies", Some(42), 3), boot, 0);
         assert_eq!((fake.from.as_str(), fake.name.as_str()), ("program", "volumed"));
-        assert_eq!((fake.process, fake.level.as_str()), (Some(42), "error"));
+        assert_eq!((fake.process, fake.user, fake.level.as_str()), (Some(42), Some(1001), "error"));
         assert_eq!(fake.text, "volumed: lies");
         let written = Record::of(&line("logtest: marker", Some(5), 4), boot, 0);
         assert_eq!((written.name.as_str(), written.text.as_str()), ("logtest", "marker"));
         let kernel = Record::of(&line("ahci: port 0 up", None, 6), boot, 0);
         assert_eq!((kernel.from.as_str(), kernel.text.as_str()), ("kernel", "ahci: port 0 up"));
         let json = serde_json::to_string(&kernel).unwrap();
-        assert!(!json.contains("process") && !json.contains("audit"));
+        assert!(!json.contains("process") && !json.contains("audit") && !json.contains("user"));
+        // A service's line is Spark's, whoever the service runs as.
+        assert_eq!(service.user, None);
+        assert!(serde_json::to_string(&fake).unwrap().contains(r#""process":42,"user":1001"#));
         // Security events: the kernel's and Spark's; a program's is a claim.
         let event = |text: &str, process| {
             Record::of(&dmesg::Line { facility: AUTHPRIV, ..line(text, process, 6) }, boot, 0)
@@ -1246,6 +1285,7 @@ mod tests {
         fn choose<'a>(request: &'a Request, boot: Option<&str>, grep: Option<&str>) -> Choice<'a> {
             Choice {
                 request,
+                reader: 0,
                 boot: boot.map(str::to_string),
                 grep: grep.map(|g| util::Regex::new(g, true).unwrap()),
             }
@@ -1274,6 +1314,26 @@ mod tests {
         request.kernel = true;
         assert!(!choose(&request, None, None).wants(&record));
         assert!(serde_json::from_str::<Request>(r#"{"bogus":1}"#).is_err());
+    }
+
+    #[test]
+    fn users_read_their_own_programs_records() {
+        let request = Request::default();
+        let reading = |reader| Choice { request: &request, reader, boot: None, grep: None };
+        let theirs = Record::of(&line("logger[3]: bob: hello", Some(58), 6), "b", 0);
+        let others = Record { user: Some(1000), ..theirs.clone() };
+        let service = Record::of(&line("spark[1]: authd: bob signed in", Some(1), 6), "b", 0);
+        let kernel = Record::of(&line("ahci: port 0 up", None, 6), "b", 0);
+        let older = Record { user: None, ..theirs.clone() };
+        for record in [&theirs, &others, &service, &kernel, &older] {
+            assert!(reading(0).wants(record));
+        }
+        assert!(reading(1001).wants(&theirs));
+        for record in [&others, &service, &kernel, &older] {
+            assert!(!reading(1001).wants(record));
+        }
+        // No one is user u32::MAX: one logd cannot place reads nothing.
+        assert!(!reading(u32::MAX).wants(&theirs));
     }
 
     #[test]
