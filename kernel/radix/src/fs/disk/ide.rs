@@ -386,7 +386,7 @@ fn add_channel(
             continue;
         };
         let which = if end == 0 { "master" } else { "slave" };
-        if let Err(why) = add_disk(&disk, end as u32, identity, *serial, name, &place, which) {
+        if let Err(why) = add_disk(&disk, end as u32, identity, *serial, name, place, which) {
             super::give_back_sd_letter(*letter);
             warn!("Disk: IDE {place}, {which}: {why}");
         } else {
