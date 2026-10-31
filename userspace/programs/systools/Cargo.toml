@@ -17,6 +17,9 @@ libc = "0.2.191"
 # The system call interface, generated from abi/*.ridl, for what the C
 # library does not wrap: affinity, I/O priority, tracing.
 radix-abi = { path = "../../../kernel/abi" }
+# logd(8)'s records and requests, as lines of JSON (ADR 0210).
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.140"
 
 [lints]
 workspace = true

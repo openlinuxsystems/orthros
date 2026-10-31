@@ -16,14 +16,14 @@
 //! take while threads take it around other locks.
 
 use core::any::Any;
-use core::fmt::Write;
+use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use radix_abi::Status;
 use radix_abi::errors::Kernel;
 use radix_abi::file::Whence;
 use radix_abi::kernel_log::WRITE_MAX;
-use radix_klog::{Level, TextBuf, debug, error, info, warn};
+use radix_klog::{Level, TextBuf, error};
 use radix_vfs::{In, Kind, Node, NodeRef, Out, Stat};
 
 use super::FileObject;
@@ -148,14 +148,29 @@ pub fn read(file: &FileObject, out: &mut dyn Out, non_blocking: bool) -> Result<
         }
         if let Some(record) = radix_klog::record(seq) {
             let mut line = TextBuf::<{ radix_klog::RECORD_TEXT + 48 }>::new();
-            let _ = writeln!(
-                line,
-                "{},{},{},-;{}",
-                priority(record.level),
-                record.seq,
-                record.time_ns / 1000,
-                record.text()
-            );
+            // A program's record is of the user facility, 1, as Linux
+            // marks the lines written to its _/dev/kmsg_, and names its
+            // process after the flags, as Linux's `caller=` field does.
+            let _ = if record.process == 0 {
+                writeln!(
+                    line,
+                    "{},{},{},-;{}",
+                    priority(record.level),
+                    record.seq,
+                    record.time_ns / 1000,
+                    record.text()
+                )
+            } else {
+                writeln!(
+                    line,
+                    "{},{},{},-,process={};{}",
+                    8 + priority(record.level),
+                    record.seq,
+                    record.time_ns / 1000,
+                    record.process,
+                    record.text()
+                )
+            };
             let bytes = line.as_str().as_bytes();
             if out.len() < bytes.len() {
                 return Err(Kernel::InvalidArgument.status(0));
@@ -179,6 +194,28 @@ pub fn read(file: &FileObject, out: &mut dyn Out, non_blocking: bool) -> Result<
     }
 }
 
+/// The level a program's line asks for with `<priority>` first, as Linux
+/// takes it: the facility times eight and the level (systemd writes `<30>`
+/// for a daemon's information), of which only the level counts; and the
+/// text after it. Information without one.
+pub fn level_of(text: &[u8]) -> (Level, &[u8]) {
+    if let [b'<', after @ ..] = text
+        && let Some(end) = after.iter().position(|&b| b == b'>')
+        && (1..=9).contains(&end)
+        && after[..end].iter().all(u8::is_ascii_digit)
+    {
+        let priority = after[..end].iter().fold(0u32, |n, &d| n * 10 + u32::from(d - b'0'));
+        let level = match priority & 7 {
+            0..=3 => Level::Error,
+            4 => Level::Warn,
+            7 => Level::Debug,
+            _ => Level::Info,
+        };
+        return (level, &after[end + 1..]);
+    }
+    (Level::Info, text)
+}
+
 /// Logs `data`, a line, as a program's: with a `<N>` before it, at
 /// syslog(3) level N & 7 (N is a facility times eight plus a level).
 pub fn write(data: &dyn In) -> Result<usize, Status> {
@@ -190,29 +227,40 @@ pub fn write(data: &dyn In) -> Result<usize, Status> {
     while let [rest @ .., b'\n' | b'\r'] = text {
         text = rest;
     }
-    // `<priority>` first, as Linux takes it: the facility times eight and
-    // the level (systemd writes `<30>` for a daemon's information); only
-    // the level counts here.
-    let mut level = 6;
-    if let [b'<', after @ ..] = text
-        && let Some(end) = after.iter().position(|&b| b == b'>')
-        && (1..=9).contains(&end)
-        && after[..end].iter().all(u8::is_ascii_digit)
-    {
-        let priority = after[..end].iter().fold(0u32, |n, &d| n * 10 + u32::from(d - b'0'));
-        level = (priority & 7) as u8;
-        text = &after[end + 1..];
-    }
-    let text = core::str::from_utf8(text).unwrap_or("<not UTF-8>");
-    let name = sched::running().map(|me| me.name());
+    let (level, text) = level_of(text);
+    let me = sched::running();
+    let process = me.as_ref().and_then(|me| me.user()).map_or(0, |user| user.process.number());
+    let name = me.as_ref().map(|me| me.name());
     let name = name.as_ref().map_or("?", |name| name.as_str());
-    match level {
-        0..=3 => error!("{name}: {text}"),
-        4 => warn!("{name}: {text}"),
-        7 => debug!("{name}: {text}"),
-        _ => info!("{name}: {text}"),
-    }
+    // Saturating, so that no process passes for another (logd trusts
+    // Spark's, ADR 0210).
+    let process = u32::try_from(process).unwrap_or(u32::MAX);
+    radix_klog::log_from(
+        level,
+        process,
+        format_args!("{}: {}", Shown(name.as_bytes()), Shown(text)),
+    );
     Ok(len)
+}
+
+/// Text from a program as the log shows it: UTF-8 kept, control
+/// characters and bytes that are not UTF-8 shown as `?`, so that no line
+/// of the log moves a terminal's cursor, changes its colors or sends it
+/// anything else when shown, and no program splits its line in two.
+pub struct Shown<'a>(pub &'a [u8]);
+
+impl fmt::Display for Shown<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for chunk in self.0.utf8_chunks() {
+            for c in chunk.valid().chars() {
+                f.write_char(if c.is_control() { '?' } else { c })?;
+            }
+            if !chunk.invalid().is_empty() {
+                f.write_char('?')?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Moves the reader: to the oldest record kept since the last clear for

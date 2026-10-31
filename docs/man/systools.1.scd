@@ -30,9 +30,10 @@ name, and *systools --list* lists them.
 The tools that show processes read *radix-proc*(5); *lsof*(8) lists the
 capabilities each process holds; *rtrace*(1) reads a trace of a
 process's system calls (*radix-trace*(2)); *dmesg*(1) reads the kernel's
-log through _/devices/kmsg_ (*radix-files*(7)); *shutdown*(8), *reboot*(8),
-*poweroff*(8), *halt*(8) and *service*(8) ask Spark over its control
-socket (*spark*(8)). Until users come, in Phase 13 of the roadmap,
+log through _/devices/kmsg_ (*radix-files*(7)), and *logd*(8) keeps it
+as the system's log, which *log*(1) and *journalctl*(1) read;
+*shutdown*(8), *reboot*(8), *poweroff*(8), *halt*(8) and *service*(8)
+ask Spark over its control socket (*spark*(8)). Until users come, in Phase 13 of the roadmap,
 every process is root's, so the user columns all say root and the
 options that select users select all or nothing.
 
@@ -76,10 +77,14 @@ error that starts with the tool's name.
 :  a process's I/O class and level
 |  *iostat*(1)
 :  what the CPUs and the disks have done, per second
+|  *journalctl*(1), *log*(1)
+:  the system's log
 |  *keymap*(1)
 :  the keyboard layout the consoles type in
 |  *kill*(1)
 :  send a signal
+|  *logd*(8)
+:  keep the system's log
 |  *lsblk*(8)
 :  the disks and their partitions, as a tree
 |  *lscpu*(1)

@@ -148,13 +148,23 @@ pub struct Record {
     pub level: Level,
     /// CPU that logged it.
     pub cpu: u16,
+    /// The number of the process whose program wrote it, through the
+    /// kernel log capability or _/devices/kmsg_; 0 for the kernel's own.
+    pub process: u32,
     len: u8,
     text: [u8; RECORD_TEXT],
 }
 
 impl Record {
-    const EMPTY: Record =
-        Record { seq: 0, time_ns: 0, level: Level::Info, cpu: 0, len: 0, text: [0; RECORD_TEXT] };
+    const EMPTY: Record = Record {
+        seq: 0,
+        time_ns: 0,
+        level: Level::Info,
+        cpu: 0,
+        process: 0,
+        len: 0,
+        text: [0; RECORD_TEXT],
+    };
 
     /// The message text (one line).
     pub fn text(&self) -> &str {
@@ -177,6 +187,7 @@ impl fmt::Debug for Record {
             .field("time_ns", &self.time_ns)
             .field("level", &self.level)
             .field("cpu", &self.cpu)
+            .field("process", &self.process)
             .field("text", &self.text())
             .finish_non_exhaustive()
     }
@@ -262,6 +273,12 @@ pub fn add_sink(sink: &'static dyn Sink, replay: bool) -> bool {
 
 /// Logs a message. Multi-line messages become one record per line.
 pub fn log(level: Level, args: fmt::Arguments<'_>) {
+    log_from(level, 0, args);
+}
+
+/// Logs a message a program wrote, as [`log`] does, marking each record
+/// with the number of its process (0: the kernel's own).
+pub fn log_from(level: Level, process: u32, args: fmt::Arguments<'_>) {
     let time_ns = now_ns();
     let cpu = current_cpu();
     let mut message = TextBuf::<512>::new();
@@ -276,6 +293,7 @@ pub fn log(level: Level, args: fmt::Arguments<'_>) {
             record.time_ns = time_ns;
             record.level = level;
             record.cpu = u16::try_from(cpu).unwrap_or(u16::MAX);
+            record.process = process;
             let kept = text::floor_char_boundary(line, RECORD_TEXT);
             record.text[..kept].copy_from_slice(&line.as_bytes()[..kept]);
             record.len = kept as u8;

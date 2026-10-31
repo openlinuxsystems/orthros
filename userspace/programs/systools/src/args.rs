@@ -191,6 +191,25 @@ impl Args {
         Some(item.clone())
     }
 
+    /// The value of an option that may have one, as journalctl's `-b`
+    /// (`-b`, `-b -1`, `--boot=-1`): what follows its `=` or the rest of
+    /// its cluster, or the next argument if `wanted` takes it, even one
+    /// that starts with `-`; else none.
+    pub fn optional_value_where(&mut self, wanted: impl Fn(&OsStr) -> bool) -> Option<OsString> {
+        if let Some(value) = self.long_value.take() {
+            return Some(value);
+        }
+        if let Some(value) = self.joined_value() {
+            return Some(value);
+        }
+        let item = self.items.get(self.next)?;
+        if self.ended || !wanted(item) {
+            return None;
+        }
+        self.next += 1;
+        Some(item.clone())
+    }
+
     /// Takes a long option's value if it has one (`--color=never`), or none
     /// (`--color`).
     pub fn optional_value(&mut self) -> Option<OsString> {
