@@ -222,9 +222,11 @@ _/kernel/class/thermal/cooling_device_*n*_/type_, _max_state_, _cur_state_
 _/kernel/class/hwmon/hwmon_*n*_/name_
 	The temperature sensors, as Linux's hwmon class shows them, numbered
 	in this order: *acpitz*, the thermal zones, if the firmware has any;
-	*k10temp*, the sensors of AMD's Zen processors; and a *coretemp* for
-	each package of Intel's processors (*dukovo-boot*(7)'s *SENSORS*).
-	The sensors program of lm-sensors reads these.
+	*k10temp*, the sensors of AMD's Zen processors; a *coretemp* for
+	each package of Intel's processors (*dukovo-boot*(7)'s *SENSORS*);
+	and *cros_ec*, the fans and sensors of Framework's embedded
+	controller (*dukovo-boot*(7)'s *EMBEDDED CONTROLLER*). The sensors
+	program of lm-sensors reads these.
 
 _/kernel/class/hwmon/hwmon_*n*_/temp_*k*_input_, _temp_*k*_label_
 	A sensor's temperature, in thousandths of a degree Celsius, read
@@ -234,8 +236,17 @@ _/kernel/class/hwmon/hwmon_*n*_/temp_*k*_input_, _temp_*k*_label_
 	dies' registers Linux knows *Tccd1*, *Tccd2*... (from _temp3_), each
 	core complex die's. For *coretemp*, *Package id* _p_ (_temp1_) and
 	*Core* _c_ (_temp_*c+2*), read on a CPU of that package or core at
-	most once a second. A sensor that gives no reading, as Intel's below
-	the temperature they can measure, fails to read with EIO.
+	most once a second. For *cros_ec*, each sensor the EC's memory map
+	has, _temp1_ for its first place, with the name the EC gives it
+	(*power-f75303*, *amd-apu*...). A sensor that gives no reading, as
+	Intel's below the temperature they can measure, fails to read with
+	EIO.
+
+_/kernel/class/hwmon/hwmon_*n*_/temp_*k*_fault_, _fan_*k*_input_, _fan_*k*_fault_
+	For *cros_ec*: *1* while the EC says the sensor failed, is not
+	powered or not calibrated, else *0*; each fan's speed, in
+	revolutions a minute, *0* when it is stopped or stalled; and *1*
+	while an older EC says the fan stalled, else *0*.
 
 _/kernel/class/hwmon/hwmon_*n*_/temp_*k*_crit_, _temp_*k*_max_, _temp_*k*_crit_alarm_
 	For *acpitz*, a zone's critical trip point, where it has one. For

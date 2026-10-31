@@ -144,6 +144,7 @@ dependencies = [
  "radix-bootfs",
  "radix-btrfs",
  "radix-cap",
+ "radix-crosec",
  "radix-elf",
  "radix-exfat",
  "radix-ext4",
@@ -274,6 +275,10 @@ version = "0.10.4"
 dependencies = [
  "proptest",
 ]
+
+[[package]]
+name = "radix-crosec"
+version = "0.10.4"
 
 [[package]]
 name = "radix-elf"

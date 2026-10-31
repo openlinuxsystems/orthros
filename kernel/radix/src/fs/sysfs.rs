@@ -61,7 +61,10 @@
 //!   `temp<k>_label` (`Tctl`, `Tccd1`...); and a `coretemp` for each of
 //!   Intel's packages, with each sensor's `temp<k>_label` (`Package id
 //!   0`, `Core 0`...), `temp<k>_input`, `temp<k>_crit` (TjMax),
-//!   `temp<k>_max` where the processor gives it and `temp<k>_crit_alarm`.
+//!   `temp<k>_max` where the processor gives it and `temp<k>_crit_alarm`;
+//!   and `cros_ec`, Framework's embedded controller's (ADR 0207), with
+//!   each fan's `fan<k>_input` and `fan<k>_fault` and each sensor's
+//!   `temp<k>_input`, `temp<k>_fault` and `temp<k>_label`.
 //!   Each `name` says which, and a sensor that gives no reading fails to
 //!   read (EIO);
 //! - `/kernel/devices/system/cpu`: `possible`, `present` and `online`, the
@@ -294,7 +297,7 @@ fn hwmon_device(dir: &FixedDir, index: usize, device: hwmon::Device) -> Result<(
                 return;
             }
             let mut name = TextBuf::<32>::new();
-            let _ = write!(name, "temp{}_{}", channel.number(), file.suffix());
+            let _ = write!(name, "{}{}_{}", channel.kind(), channel.number(), file.suffix());
             result = value(move |text| hwmon::write_file(channel, file, text))
                 .and_then(|generated| device_dir.add(name.as_str(), generated));
         }

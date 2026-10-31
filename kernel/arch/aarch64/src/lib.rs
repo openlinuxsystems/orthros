@@ -309,6 +309,12 @@ impl Devices for Arch {
     fn smbus_name(_out: &mut dyn core::fmt::Write) -> core::fmt::Result {
         Err(core::fmt::Error)
     }
+
+    fn ec_read(_port: u16) -> u8 {
+        0xff
+    }
+
+    fn ec_write(_port: u16, _value: u8) {}
 }
 
 /// A placeholder thread context.

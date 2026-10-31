@@ -44,6 +44,9 @@ const POWER_TABLE: &str = "file=power.aml";
 /// The SSDT `acpi-thermal` gives QEMU (`src/acpi/thermal.asl`), likewise.
 const THERMAL_AML: &[u8] = include_bytes!("acpi/thermal.aml");
 const THERMAL_TABLE: &str = "file=thermal.aml";
+/// The SSDT of the `framework-ec` case: a Framework EC's ACPI device.
+const CROSEC_AML: &[u8] = include_bytes!("acpi/crosec.aml");
+const CROSEC_TABLE: &str = "file=crosec.aml";
 /// The release's name, which the kernel's banner gives after its version
 /// (`BANNER` in kernel/radix/src/main.rs) and the console's greeting
 /// begins with (userspace/defaults/issue).
@@ -63,6 +66,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-bootinfo",
     "radix-btrfs",
     "radix-cap",
+    "radix-crosec",
     "radix-elf",
     "radix-exfat",
     "radix-ext4",
@@ -1294,6 +1298,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "framework-ec",
+        about: "QEMU with an ACPI table of the test's that names a Framework EC: the kernel finds the device, sees no EC's memory map behind it and leaves it alone",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit",
+        cpus: 1,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-acpitable", CROSEC_TABLE],
+        script: framework_ec,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "smbus",
         about: "the kernel drives the SMBus controller of q35's ICH9 and finds the eight memory modules' EEPROMs QEMU puts on it; Linux's /sys/bus/i2c names its adapter at the console",
         firmware: Firmware::Bios,
@@ -2421,6 +2441,7 @@ fn run_case(
         let (name, aml) = match arg.as_str() {
             POWER_TABLE => ("power.aml", POWER_AML),
             THERMAL_TABLE => ("thermal.aml", THERMAL_AML),
+            CROSEC_TABLE => ("crosec.aml", CROSEC_AML),
             _ => continue,
         };
         let path = dir.join(name);
@@ -4408,6 +4429,18 @@ fn mm_stress(vm: &mut Vm, case: &Case) -> Result<(), String> {
 fn tlb(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     selftest_passed(vm, "tlb")?;
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+/// QEMU with [`CROSEC_AML`] (ADR 0207): the kernel finds the EC's ACPI
+/// device, and the memory map it reads at 0xe00 is the empty bus's.
+fn framework_ec(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect_anywhere(
+        "EC: the firmware names FRMWC004, but its memory map does not say EC at port 0xe00; \
+         it is not used",
+    )?;
+    vm.expect("Boot complete.")?;
     vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 

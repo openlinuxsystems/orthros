@@ -22,6 +22,7 @@ radix-nvme = { path = "../drivers/nvme" }
 radix-block = { path = "../fs/block" }
 radix-bootfs = { path = "../lib/bootfs" }
 radix-cap = { path = "../cap" }
+radix-crosec = { path = "../drivers/crosec" }
 radix-elf = { path = "../lib/elf" }
 radix-btrfs = { path = "../fs/btrfs" }
 radix-exfat = { path = "../fs/exfat" }

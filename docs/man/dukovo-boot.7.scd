@@ -148,7 +148,8 @@ _/system/resources/licenses/_
   _/kernel/bus/pci/devices_ (*radix-sysfs*(5)).
 . Unless *aml=off*, uACPI then runs the firmware's AML, and the kernel
   hears the power button through it; see *ACPI*. The kernel then drives
-  the chipset's SMBus controller, if it has one; see *SMBUS*.
+  the chipset's SMBus controller, if it has one, and Framework's embedded
+  controller; see *SMBUS* and *EMBEDDED CONTROLLER*.
 . Each CPU then picks its own speed where it can; see *CPU FREQUENCY*.
   The firmware's thermal zones are watched from then on; see *ACPI*.
   The kernel then looks for the CPUs' temperature sensors; see
@@ -735,6 +736,25 @@ QEMU's CPUs have neither, even under KVM:
 
 The sensors, and the thermal zones of *ACPI*, are in
 _/kernel/class/hwmon_, as on Linux (*radix-sysfs*(5)).
+
+# EMBEDDED CONTROLLER
+
+Framework's machines have a Chromium embedded controller, which runs
+their fans and power LEDs (ADR 0207). Once uACPI has started, the kernel
+looks for the ACPI device that names it (*FRMWC004*, or Chromebooks'
+*GOOG0004*), checks that the EC answers, and logs its firmware, fans and
+sensors:
+
+```
+EC: Framework's embedded controller (FRMWC004), firmware dogwood-0.0.11 (read-write image), with 3 fans and 5 temperature sensors
+```
+
+A device with no EC behind it is a warning:
+
+	EC: the firmware names FRMWC004, but its memory map does not say EC at port 0xe00; it is not used
+
+The fans and sensors are in _/kernel/class/hwmon_ as *cros_ec*
+(*radix-sysfs*(5)).
 
 # SMBUS
 

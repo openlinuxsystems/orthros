@@ -20,6 +20,7 @@ members = [
     "cap",
     "drivers/ahci",
     "drivers/amdvi",
+    "drivers/crosec",
     "drivers/nvme",
     "drivers/scsi",
     "drivers/smbus",

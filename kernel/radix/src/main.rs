@@ -54,6 +54,7 @@ mod caps;
 mod captest;
 mod console;
 mod crashlog;
+mod crosec;
 mod debug_console;
 mod domains;
 mod fs;
@@ -254,6 +255,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     acpi::finish_events();
     watchdog::find();
     i2c::find();
+    crosec::find();
     mce::start(flags.value("mce-poll"));
     pstate::start(flags.value("pstate") == Some("off"), flags.value("epp"));
     acpi::thermal::start();
