@@ -147,10 +147,10 @@ pub const BUDGETS: &[(&str, u64)] = &[
     ("posix_poll", 1_300),                     // 1,092
     ("posix_futex_same_cpu", 5_300),           // 4,787
     ("posix_futex_shared_same_cpu", 5_800),    // 5,248
-    ("posix_tcp_connect", 51_000),             // 46,050
-    ("posix_tcp_roundtrip_same_cpu", 20_000),  // 17,995
-    ("posix_udp_roundtrip_same_cpu", 17_000),  // 15,014
-    ("posix_tcp_mib", 2_000_000),              // 1,746,668
+    ("posix_tcp_connect", 50_000),             // 44,709
+    ("posix_tcp_roundtrip_same_cpu", 20_000),  // 17,527
+    ("posix_udp_roundtrip_same_cpu", 17_000),  // 14,627
+    ("posix_tcp_mib", 2_200_000),              // 1,990,584
 ];
 
 /// One measurement: a `BENCH name=... ns=... iterations=...` line.

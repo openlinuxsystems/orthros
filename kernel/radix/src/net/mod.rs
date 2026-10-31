@@ -75,9 +75,9 @@ const IDLE_NS: u64 = 10_000_000;
 /// 65,536.
 const LOOPBACK_MTU: usize = 65_535;
 /// The bytes of packets the loopback interface holds until its stack
-/// takes them back: a whole window of a socket's (`TCP_BUFFER`) and the
-/// ACKs that answer it.
-const LOOPBACK_RING: usize = 2 * 65_536;
+/// takes them back: two of the longest, two windows of a socket's
+/// (`TCP_BUFFER`), or one and the ACKs that answer it.
+const LOOPBACK_RING: usize = Loopback::ring_for(2, LOOPBACK_MTU);
 /// The loopback interface's own address.
 pub const LOOPBACK: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
 /// How long an orphan has to finish closing before it is reset.
@@ -155,6 +155,13 @@ impl Link for Card {
         match self {
             Card::Virtio { .. } => true,
             Card::Loopback(link) => link.needs_checksums(),
+        }
+    }
+
+    fn loopback(&mut self) -> Option<&mut Loopback> {
+        match self {
+            Card::Virtio { .. } => None,
+            Card::Loopback(link) => link.loopback(),
         }
     }
 }

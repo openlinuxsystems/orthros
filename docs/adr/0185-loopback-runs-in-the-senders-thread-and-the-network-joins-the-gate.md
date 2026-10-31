@@ -49,6 +49,17 @@ sat in LAST-ACK for that long.
   as one packet. Every card's packets still have theirs made and
   checked. A UDP socket holds 64 KiB of datagrams each way, so the
   longest datagram `lo` carries, 65,507 bytes, fits, as on Linux.
+- **`lo`'s packets are written and read in place**, in its ring, which
+  holds two of the longest. Each has a slot there, its length and then
+  its bytes; a slot that does not fit before the ring's end goes at its
+  start. smoltcp writes a packet to send straight into a slot, and reads
+  a packet received from its slot, as Linux's loopback hands on the same
+  buffer. It used to write to the stack's buffer for sending, which the
+  link copied into its ring, and read from its buffer for receiving,
+  which the link copied out to: four copies of every byte that went over
+  `lo` besides the program's own two, and now two. A packet that answers
+  one received (an echo reply, a reset) goes in place too, around the
+  packet being read.
 - **A read that opens a connection's window polls the stack only when
   the window had shut to half the buffer or less**, as Linux sends a
   window by itself only when it opens that much. Every byte read used to

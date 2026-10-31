@@ -408,6 +408,139 @@ fn the_loopback_link_gives_back_what_is_sent_in_order() {
     assert!(!link.needs_checksums(), "its packets never leave memory");
 }
 
+/// Takes the loopback link's oldest packet and checks it is `bytes`.
+fn take(link: &mut Loopback, bytes: &[u8]) {
+    let (oldest, _) = link.oldest().unwrap();
+    oldest.read(|packet| assert_eq!(packet, bytes));
+}
+
+#[test]
+fn the_loopback_ring_wraps_round_its_end() {
+    // Slots of 48 bytes for packets of 40; the second ring has no room
+    // after its last slot for a header that says it wraps.
+    for len in [128, 100] {
+        let mut link = Loopback::new(leak(0u8, len), 40);
+        assert!(link.send(&[1; 40]) && link.send(&[2; 40]));
+        assert!(!link.send(&[0; 25]), "no room for a third slot");
+        take(&mut link, &[1; 40]);
+        // The next goes at the start, before the oldest packet.
+        assert!(link.send(&[3; 40]));
+        assert!(!link.send(&[0; 1]), "the ring is full again");
+        take(&mut link, &[2; 40]);
+        take(&mut link, &[3; 40]);
+        assert!(!link.pending());
+        // Empty, it has all its room again.
+        assert!(link.send(&[4; 40]) && link.send(&[5; 40]));
+        take(&mut link, &[4; 40]);
+        take(&mut link, &[5; 40]);
+    }
+    // Slots that wrapped fill the ring up to where the last packet before
+    // the end was: the room after it, past the wrap, is free all the same.
+    let mut link = Loopback::new(leak(0u8, 128), 40);
+    assert!(link.send(&[1; 40]) && link.send(&[2; 40]));
+    take(&mut link, &[1; 40]);
+    assert!(link.send(&[3; 40]));
+    take(&mut link, &[2; 40]);
+    assert!(link.send(&[4; 40]), "after the packet that wrapped");
+    assert!(link.send(&[5; 16]), "after the wrap");
+    for (fill, len) in [(3, 40), (4, 40), (5, 16)] {
+        take(&mut link, &std::vec![fill; len]);
+    }
+    assert_eq!(Loopback::ring_for(2, 40), 96);
+    assert_eq!(Loopback::ring_for(2, 65_535), 2 * (8 + 65_536));
+}
+
+#[test]
+fn an_answer_goes_in_place_beside_the_packet_it_answers() {
+    // Slots of 48 bytes for packets of 40.
+    let mut link = Loopback::new(leak(0u8, 128), 40);
+    let mut spare = [0u8; 40];
+    // After the packet answered, at the tail.
+    assert!(link.send(&[1; 40]));
+    let (oldest, answer) = link.oldest().unwrap();
+    answer.send_with(40, &mut spare, |slot| slot.fill(9));
+    oldest.read(|packet| assert_eq!(packet, &[1; 40], "the answer is beside it"));
+    take(&mut link, &[9; 40]);
+    // Before it, at the start, when the tail is too near the end.
+    assert!(link.send(&[1; 40]) && link.send(&[2; 40]));
+    take(&mut link, &[1; 40]);
+    let (oldest, answer) = link.oldest().unwrap();
+    answer.send_with(40, &mut spare, |slot| slot.fill(8));
+    oldest.read(|packet| assert_eq!(packet, &[2; 40]));
+    take(&mut link, &[8; 40]);
+    assert!(!link.pending());
+    // With no room, it is written to the spare buffer, and lost.
+    assert!(link.send(&[1; 40]) && link.send(&[2; 40]));
+    let (oldest, answer) = link.oldest().unwrap();
+    answer.send_with(40, &mut spare, |slot| slot.fill(5));
+    oldest.read(|packet| assert_eq!(packet, &[1; 40]));
+    assert_eq!(spare, [5; 40]);
+    take(&mut link, &[2; 40]);
+    assert!(!link.pending(), "the answer that had no room is lost");
+
+    // At a tail that came round already, before the packet answered: a
+    // ring of two slots, the second taken, whose first holds a packet of
+    // 16 bytes and has room for one of 8 after it.
+    let mut link = Loopback::new(leak(0u8, 96), 40);
+    assert!(link.send(&[1; 40]) && link.send(&[2; 40]));
+    take(&mut link, &[1; 40]);
+    assert!(link.send(&[3; 16]));
+    let (oldest, answer) = link.oldest().unwrap();
+    answer.send_with(8, &mut spare, |slot| slot.fill(4));
+    oldest.read(|packet| assert_eq!(packet, &[2; 40]));
+    take(&mut link, &[3; 16]);
+    take(&mut link, &[4; 8]);
+    assert!(!link.pending());
+}
+
+#[test]
+fn the_loopback_ring_keeps_packets_whole_and_in_order() {
+    // Packets and answers of random lengths, against a queue: each comes
+    // back whole and in order, and an empty ring always has room.
+    let mut link = Loopback::new(leak(0u8, 200), 60);
+    let mut queue = VecDeque::new();
+    let mut spare = [0u8; 60];
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut random = |below: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        usize::try_from(seed % below).unwrap()
+    };
+    for round in 0..100_000usize {
+        let fill = u8::try_from(round % 251).unwrap();
+        let len = 1 + random(60);
+        match random(3) {
+            0 => {
+                let empty = queue.is_empty();
+                if link.send(&std::vec![fill; len]) {
+                    queue.push_back(std::vec![fill; len]);
+                } else {
+                    assert!(!empty, "an empty ring has room for any packet");
+                }
+            }
+            1 => {
+                let Some((oldest, answer)) = link.oldest() else {
+                    assert!(queue.is_empty());
+                    continue;
+                };
+                spare.fill(0);
+                answer.send_with(len, &mut spare, |slot| slot.fill(fill.wrapping_add(1)));
+                let expected = queue.pop_front().unwrap();
+                oldest.read(|packet| assert_eq!(packet, &expected[..]));
+                if spare[0] == 0 {
+                    queue.push_back(std::vec![fill.wrapping_add(1); len]);
+                }
+            }
+            _ => match queue.pop_front() {
+                Some(expected) => take(&mut link, &expected),
+                None => assert!(link.oldest().is_none()),
+            },
+        }
+        assert_eq!(link.pending(), !queue.is_empty());
+    }
+}
+
 #[test]
 fn tcp_and_udp_go_through_the_loopback_link_in_one_poll() {
     let mut lo = loopback();
