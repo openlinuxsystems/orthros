@@ -163,9 +163,9 @@ fn tmpfs_times_are_set() {
 
 /// The users the gate's tests act for: alice, also in group 100, bob, and
 /// carol with the bypass right.
-const ALICE: Who = Who { user: 1000, group: 1000, groups: &[100], bypass: false };
-const BOB: Who = Who { user: 1001, group: 1001, groups: &[], bypass: false };
-const CAROL: Who = Who { user: 1002, group: 1002, groups: &[], bypass: true };
+const ALICE: Who = Who { user: 1000, group: 1000, groups: &[100], bypass: false, file_mask: 0 };
+const BOB: Who = Who { user: 1001, group: 1001, groups: &[], bypass: false, file_mask: 0 };
+const CAROL: Who = Who { user: 1002, group: 1002, groups: &[], bypass: true, file_mask: 0 };
 
 fn owned(who: &Who, mode: u16) -> Access {
     Access { owner: who.user, group: who.group, mode }
@@ -285,12 +285,17 @@ fn only_owners_change_modes_and_only_the_bypass_gives_files_away() {
     assert_eq!(ALICE.may_change(theirs, chmod(0o2755)), Ok(chmod(0o755)));
     assert_eq!(CAROL.may_change(theirs, chmod(0o2755)), Ok(chmod(0o2755)));
     // Times: given ones by the owner; now by whoever may write too.
-    let open = Access { mode: 0o666, ..file };
-    assert_eq!(BOB.may_set_times(Kind::File, open, true), Err(Error::NotPermitted));
-    assert!(BOB.may_set_times(Kind::File, open, false).is_ok());
-    assert_eq!(BOB.may_set_times(Kind::File, file, false), Err(Error::Denied));
-    assert!(ALICE.may_set_times(Kind::File, file, true).is_ok());
-    assert!(CAROL.may_set_times(Kind::File, file, true).is_ok());
+    let vfs = vfs();
+    let root = vfs.root();
+    vfs.open(&K, &root, "open", makes(Access { mode: 0o666, ..file })).unwrap();
+    vfs.open(&K, &root, "file", makes(file)).unwrap();
+    let open = vfs.resolve(&K, &root, "open").unwrap().node;
+    let file = vfs.resolve(&K, &root, "file").unwrap().node;
+    assert_eq!(BOB.may_set_times(&*open, true), Err(Error::NotPermitted));
+    assert!(BOB.may_set_times(&*open, false).is_ok());
+    assert_eq!(BOB.may_set_times(&*file, false), Err(Error::Denied));
+    assert!(ALICE.may_set_times(&*file, true).is_ok());
+    assert!(CAROL.may_set_times(&*file, true).is_ok());
 }
 
 #[test]
@@ -2353,4 +2358,224 @@ fn a_view_takes_only_its_own_names_places() {
     // The second gate looks at attached places as anywhere else.
     vfs.make_directory(&K, &root, "a/closed", owned(&BOB, 0o700)).unwrap();
     assert_eq!(vfs.stat(&ALICE, &view, "a/closed/x").err(), Some(Error::Denied));
+}
+
+/// An access list's attribute value, from (tag, perm, id) entries.
+fn acl_value(entries: &[(u16, u16, u32)]) -> Vec<u8> {
+    let mut value = 2u32.to_le_bytes().to_vec();
+    for &(tag, perm, id) in entries {
+        value.extend_from_slice(&tag.to_le_bytes());
+        value.extend_from_slice(&perm.to_le_bytes());
+        value.extend_from_slice(&id.to_le_bytes());
+    }
+    value
+}
+
+use crate::Setting;
+use crate::acl::{self, Acl, tag};
+use crate::attributes;
+
+/// A file of alice's at `path`, 0640, in a world-searchable tree.
+fn alices_file(vfs: &Vfs, path: &str) -> Location {
+    let root = vfs.root();
+    vfs.open(&K, &root, path, makes(owned(&ALICE, 0o640))).unwrap();
+    vfs.resolve(&K, &root, path).unwrap()
+}
+
+#[test]
+fn access_lists_are_read_and_checked_as_linux_has_them() {
+    const U: u32 = u32::MAX;
+    // The form: version 2, whole entries, the tags in order, a mask with
+    // named entries.
+    let good = acl_value(&[
+        (tag::USER_OBJ, 6, U),
+        (tag::USER, 6, 1001),
+        (tag::GROUP_OBJ, 4, U),
+        (tag::MASK, 6, U),
+        (tag::OTHER, 0, U),
+    ]);
+    let list = Acl::parse(&good).unwrap().unwrap();
+    assert_eq!(list.to_value().unwrap()[..], good[..]);
+    assert!(list.extended());
+    assert_eq!(list.mode_bits(), 0o660);
+    assert_eq!(Acl::parse(&good[..good.len() - 1]), Err(Error::InvalidArgument));
+    let mut old = good.clone();
+    old[0] = 1;
+    assert_eq!(Acl::parse(&old), Err(Error::NotSupported));
+    assert_eq!(Acl::parse(&2u32.to_le_bytes()), Ok(None));
+    let unmasked = acl_value(&[
+        (tag::USER_OBJ, 6, U),
+        (tag::USER, 6, 1001),
+        (tag::GROUP_OBJ, 4, U),
+        (tag::OTHER, 0, U),
+    ]);
+    assert_eq!(Acl::parse(&unmasked), Err(Error::InvalidArgument));
+    let unordered = acl_value(&[(tag::GROUP_OBJ, 4, U), (tag::USER_OBJ, 6, U), (tag::OTHER, 0, U)]);
+    assert_eq!(Acl::parse(&unordered), Err(Error::InvalidArgument));
+    let too_much = acl_value(&[(tag::USER_OBJ, 8, U), (tag::GROUP_OBJ, 4, U), (tag::OTHER, 0, U)]);
+    assert_eq!(Acl::parse(&too_much), Err(Error::InvalidArgument));
+    let plain = Acl::from_mode(0o640).unwrap();
+    assert!(!plain.extended());
+    assert_eq!(plain.mode_bits(), 0o640);
+
+    // Alice gives bob read and write on her file, and only she may.
+    let vfs = vfs();
+    vfs.make_directory(&K, &vfs.root(), "home", DIR).unwrap();
+    let at = alices_file(&vfs, "home/notes");
+    let file = &*at.node;
+    assert_eq!(BOB.check(file, want::READ), Err(Error::Denied));
+    assert_eq!(
+        attributes::set(&BOB, &at, acl::ACCESS, &good, Setting::Either),
+        Err(Error::NotPermitted)
+    );
+    attributes::set(&ALICE, &at, acl::ACCESS, &good, Setting::Either).unwrap();
+    // The mode's group bits are the mask.
+    assert_eq!(file.access().mode, 0o660);
+    assert!(BOB.check(file, want::READ | want::WRITE).is_ok());
+    assert_eq!(BOB.check(file, want::EXECUTE), Err(Error::Denied));
+    // Carol, in neither, gets the others' nothing.
+    let carol = Who { bypass: false, ..CAROL };
+    assert_eq!(carol.check(file, want::READ), Err(Error::Denied));
+    // A chmod sets the mask, in the attribute too: bob reads alone.
+    let chmod = AccessChange { mode: Some(0o640), ..AccessChange::default() };
+    file.set_access(&chmod).unwrap();
+    attributes::mode_changed(file, 0o640).unwrap();
+    assert!(BOB.check(file, want::READ).is_ok());
+    assert_eq!(BOB.check(file, want::WRITE), Err(Error::Denied));
+    let read = Acl::parse(&attributes::get(&BOB, file, acl::ACCESS).unwrap()).unwrap().unwrap();
+    assert_eq!(read.mode_bits(), 0o640);
+    assert_eq!(file.get_attribute(acl::ACCESS).unwrap(), read.to_value().unwrap());
+    // With a mask of nothing the mode alone decides, as on Linux: bob
+    // gets the others' bits, whatever his entry says.
+    file.set_access(&AccessChange { mode: Some(0o604), ..AccessChange::default() }).unwrap();
+    assert!(BOB.check(file, want::READ).is_ok());
+    file.set_access(&AccessChange { mode: Some(0o600), ..AccessChange::default() }).unwrap();
+    assert_eq!(BOB.check(file, want::READ), Err(Error::Denied));
+    // A named group: alice's group 100 may read; the owner's entry is
+    // the mode's.
+    let groups = acl_value(&[
+        (tag::USER_OBJ, 6, U),
+        (tag::GROUP_OBJ, 0, U),
+        (tag::GROUP, 4, 100),
+        (tag::MASK, 7, U),
+        (tag::OTHER, 0, U),
+    ]);
+    let at = vfs.resolve(&K, &vfs.root(), "home").unwrap();
+    vfs.open(&K, &at, "shared", makes(owned(&BOB, 0o600))).unwrap();
+    let shared = vfs.resolve(&K, &at, "shared").unwrap();
+    attributes::set(&BOB, &shared, acl::ACCESS, &groups, Setting::Either).unwrap();
+    assert_eq!(shared.node.access().mode, 0o670);
+    assert!(ALICE.check(&*shared.node, want::READ).is_ok());
+    assert_eq!(ALICE.check(&*shared.node, want::WRITE), Err(Error::Denied));
+    // In a matching group whose entries do not give it, the others'
+    // bits do not count either.
+    shared.node.set_access(&AccessChange { mode: Some(0o674), ..AccessChange::default() }).unwrap();
+    let in_100 = Who { user: 2000, group: 2000, groups: &[100], bypass: false, file_mask: 0 };
+    assert_eq!(in_100.check(&*shared.node, want::WRITE), Err(Error::Denied));
+    // A list the mode says all of goes, and sets the mode.
+    let same = acl_value(&[(tag::USER_OBJ, 7, U), (tag::GROUP_OBJ, 5, U), (tag::OTHER, 0, U)]);
+    attributes::set(&BOB, &shared, acl::ACCESS, &same, Setting::Either).unwrap();
+    assert_eq!(shared.node.access().mode, 0o750);
+    assert_eq!(shared.node.get_attribute(acl::ACCESS), Err(Error::NoAttribute));
+    assert_eq!(ALICE.check(&*shared.node, want::READ), Err(Error::Denied));
+    // A default list is a directory's alone.
+    assert_eq!(
+        attributes::set(&BOB, &shared, acl::DEFAULT, &good, Setting::Either),
+        Err(Error::Denied)
+    );
+}
+
+#[test]
+fn what_is_made_takes_its_directorys_default_list() {
+    const U: u32 = u32::MAX;
+    let vfs = vfs();
+    let root = vfs.root();
+    vfs.make_directory(&K, &root, "project", owned(&ALICE, 0o755)).unwrap();
+    let project = vfs.resolve(&K, &root, "project").unwrap();
+    let default = acl_value(&[
+        (tag::USER_OBJ, 7, U),
+        (tag::USER, 7, 1001),
+        (tag::GROUP_OBJ, 5, U),
+        (tag::MASK, 7, U),
+        (tag::OTHER, 5, U),
+    ]);
+    attributes::set(&ALICE, &project, acl::DEFAULT, &default, Setting::Either).unwrap();
+    // The file mode mask plays no part: the list masks the mode.
+    let masked = Who { file_mask: 0o077, ..ALICE };
+    vfs.open(&masked, &project, "plan", makes(owned(&ALICE, 0o666))).unwrap();
+    let plan = vfs.resolve(&K, &project, "plan").unwrap().node;
+    assert_eq!(plan.access().mode, 0o664);
+    let list = Acl::parse(&plan.get_attribute(acl::ACCESS).unwrap()).unwrap().unwrap();
+    assert!(list.entries().contains(&acl::Entry { tag: tag::USER, perm: 7, id: 1001 }));
+    assert!(BOB.check(&*plan, want::READ | want::WRITE).is_ok());
+    assert_eq!(BOB.check(&*plan, want::EXECUTE), Err(Error::Denied));
+    assert_eq!(plan.get_attribute(acl::DEFAULT), Err(Error::NoAttribute));
+    // A directory takes the default list too, and passes it on.
+    vfs.make_directory(&masked, &project, "notes", owned(&ALICE, 0o777)).unwrap();
+    let notes = vfs.resolve(&K, &project, "notes").unwrap().node;
+    assert_eq!(notes.access().mode, 0o775);
+    assert_eq!(notes.get_attribute(acl::DEFAULT).unwrap(), default);
+    // Without one, the mask counts.
+    vfs.make_directory(&K, &root, "plain", owned(&ALICE, 0o755)).unwrap();
+    vfs.open(&masked, &root, "plain/lone", makes(owned(&ALICE, 0o666))).unwrap();
+    let lone = vfs.resolve(&K, &root, "plain/lone").unwrap().node;
+    assert_eq!(lone.access().mode, 0o600);
+    assert_eq!(lone.get_attribute(acl::ACCESS), Err(Error::NoAttribute));
+    // A link takes none, and keeps 0777.
+    vfs.make_link(&masked, &project, "link", "plan", owned(&ALICE, 0o777)).unwrap();
+    let link = vfs.resolve_link(&K, &project, "link").unwrap().node;
+    assert_eq!(link.access().mode, 0o777);
+    assert_eq!(link.get_attribute(acl::ACCESS), Err(Error::NoAttribute));
+}
+
+#[test]
+fn user_attributes_follow_the_files_modes() {
+    let vfs = vfs();
+    let root = vfs.root();
+    vfs.make_directory(&K, &root, "tmp", Access { mode: 0o1777, ..DIR }).unwrap();
+    let at = alices_file(&vfs, "tmp/notes");
+    let file = &*at.node;
+    let name = b"user.origin";
+    assert_eq!(attributes::get(&ALICE, file, name), Err(Error::NoAttribute));
+    attributes::set(&ALICE, &at, name, b"wonderland", Setting::Create).unwrap();
+    assert_eq!(attributes::set(&ALICE, &at, name, b"x", Setting::Create), Err(Error::Exists));
+    assert_eq!(
+        attributes::set(&ALICE, &at, b"user.none", b"x", Setting::Replace),
+        Err(Error::NoAttribute)
+    );
+    assert_eq!(attributes::get(&ALICE, file, name).unwrap(), b"wonderland");
+    // Read with read permission, changed with write: bob has neither.
+    assert_eq!(attributes::get(&BOB, file, name), Err(Error::Denied));
+    assert_eq!(attributes::set(&BOB, &at, name, b"x", Setting::Either), Err(Error::Denied));
+    // Trusted names are the bypass right's, which the others do not see.
+    assert_eq!(
+        attributes::set(&ALICE, &at, b"trusted.mark", b"1", Setting::Either),
+        Err(Error::NotPermitted)
+    );
+    attributes::set(&CAROL, &at, b"trusted.mark", b"1", Setting::Either).unwrap();
+    assert_eq!(attributes::get(&ALICE, file, b"trusted.mark"), Err(Error::NoAttribute));
+    assert_eq!(attributes::list(&ALICE, file).unwrap(), b"user.origin\0");
+    assert_eq!(attributes::list(&CAROL, file).unwrap(), b"user.origin\0trusted.mark\0");
+    // Names: none past 255 bytes, none of a namespace no one knows.
+    let long = [b'a'; 256];
+    assert_eq!(attributes::get(&ALICE, file, &long), Err(Error::OutOfRange));
+    assert_eq!(attributes::get(&ALICE, file, b"os2.x"), Err(Error::NotSupported));
+    assert_eq!(attributes::get(&ALICE, file, b"user."), Err(Error::InvalidArgument));
+    // In a sticky directory only its owner changes a directory's.
+    vfs.make_directory(&ALICE, &root, "tmp/d", owned(&ALICE, 0o1777)).unwrap();
+    let dir = vfs.resolve(&K, &root, "tmp/d").unwrap();
+    assert_eq!(attributes::set(&BOB, &dir, name, b"x", Setting::Either), Err(Error::NotPermitted));
+    attributes::set(&ALICE, &dir, name, b"x", Setting::Either).unwrap();
+    attributes::remove(&ALICE, &at, name).unwrap();
+    assert_eq!(attributes::remove(&ALICE, &at, name), Err(Error::NoAttribute));
+    // A tmpfs charges them to its limit, and gives them back.
+    let small = Vfs::new(tmpfs(4096), "tmpfs").unwrap();
+    let small_root = small.root();
+    small.open(&K, &small_root, "f", create()).unwrap();
+    let f = small.resolve(&K, &small_root, "f").unwrap();
+    let big = std::vec![7u8; 5000];
+    assert_eq!(attributes::set(&K, &f, b"user.big", &big, Setting::Either), Err(Error::NoSpace));
+    attributes::set(&K, &f, b"user.big", &big[..3000], Setting::Either).unwrap();
+    attributes::remove(&K, &f, b"user.big").unwrap();
+    attributes::set(&K, &f, b"user.big", &big[..4000], Setting::Either).unwrap();
 }

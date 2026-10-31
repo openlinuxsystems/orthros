@@ -907,6 +907,8 @@ pub fn status(err: Error) -> Status {
         Error::TooManyNames => FileError::TooManyNames,
         Error::QuotaExceeded => FileError::QuotaExceeded,
         Error::Denied => FileError::Denied,
+        Error::NoAttribute => FileError::NoAttribute,
+        Error::OutOfRange => return Kernel::OutOfRange.status(0),
         Error::NotPermitted => return Kernel::NotPermitted.status(0),
         // What a node does not do is an argument it does not take.
         Error::NotSupported => return Kernel::InvalidArgument.status(0),

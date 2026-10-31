@@ -86,6 +86,8 @@ error that starts with the tool's name.
 :  discard what a mounted filesystem does not use
 |  *free*(1)
 :  memory in use and free
+|  *getfacl*(1), *setfacl*(1)
+:  show and change files' access lists
 |  *halt*(8), *poweroff*(8), *reboot*(8)
 :  halt, power off or restart the machine
 |  *hexdump*(1), *hd*(1)

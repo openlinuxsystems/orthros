@@ -7,8 +7,9 @@
 // symbolic links, `..` beneath directory descriptors and fchdir, reading
 // into and writing from memory not made yet, the root's folders by their
 // names and by Unix's, descriptors by their names in /devices/fd, and
-// owners, groups and modes, on the tmpfs at /tmp and the read-only
-// /system; and what each refuses, with Linux's errors.
+// owners, groups and modes, extended attributes and access lists, on the
+// tmpfs at /tmp and the read-only /system; and what each refuses, with
+// Linux's errors.
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -21,6 +22,7 @@
 #include <sys/statvfs.h>
 #include <sys/sysmacros.h>
 #include <sys/uio.h>
+#include <sys/xattr.h>
 
 #include "check.h"
 
@@ -934,6 +936,139 @@ static void modes(void) {
 	umask(old);
 }
 
+// An access list's attribute value, in Linux's posix_acl_xattr form, of
+// `count` entries of tag, permissions and number, into `out`; returns
+// its length.
+static size_t acl_value(uint8_t *out, int count, const uint32_t (*entries)[3]) {
+	const uint32_t version = 2;
+	memcpy(out, &version, 4);
+	for(int i = 0; i < count; i++) {
+		uint16_t tag = (uint16_t)entries[i][0];
+		uint16_t perm = (uint16_t)entries[i][1];
+		memcpy(out + 4 + i * 8, &tag, 2);
+		memcpy(out + 4 + i * 8 + 2, &perm, 2);
+		memcpy(out + 4 + i * 8 + 4, &entries[i][2], 4);
+	}
+	return 4 + (size_t)count * 8;
+}
+
+// Linux's tags, and the number of an entry that names no one.
+enum { USER_OBJ = 1, USER = 2, GROUP_OBJ = 4, GROUP = 8, MASK = 0x10, OTHER = 0x20 };
+#define NO_ID UINT32_MAX
+
+// Extended attributes and access lists (ADR 0256), on the tmpfs, as
+// root: `user.` names on files and directories, with XATTR_CREATE and
+// XATTR_REPLACE, the size alone for an empty buffer and ERANGE for one
+// too short; `trusted.` names, root's; an access list, which sets the
+// mode, and a directory's default list, which what is made in it takes,
+// the umask left out; and what each refuses, with Linux's errors.
+static void attributes(void) {
+	int fd = open("/tmp/files-x", O_RDWR | O_CREAT | O_EXCL, 0644);
+	CHECK(fd >= 0);
+	CHECK(setxattr("/tmp/files-x", "user.origin", "wonderland", 10, 0) == 0);
+	char value[64] = {0};
+	CHECK(getxattr("/tmp/files-x", "user.origin", value, sizeof(value)) == 10);
+	CHECK(!memcmp(value, "wonderland", 10));
+	CHECK(getxattr("/tmp/files-x", "user.origin", NULL, 0) == 10);
+	CHECK_ERROR(getxattr("/tmp/files-x", "user.origin", value, 4), ERANGE);
+	CHECK_ERROR(getxattr("/tmp/files-x", "user.none", value, sizeof(value)), ENODATA);
+	CHECK_ERROR(setxattr("/tmp/files-x", "user.origin", "x", 1, XATTR_CREATE), EEXIST);
+	CHECK_ERROR(setxattr("/tmp/files-x", "user.none", "x", 1, XATTR_REPLACE), ENODATA);
+	CHECK(setxattr("/tmp/files-x", "user.origin", "looking glass", 13, XATTR_REPLACE) == 0);
+	CHECK(fsetxattr(fd, "user.empty", "", 0, XATTR_CREATE) == 0);
+	CHECK(fgetxattr(fd, "user.empty", value, sizeof(value)) == 0);
+	// Listed with a NUL after each.
+	char names[256];
+	ssize_t n = listxattr("/tmp/files-x", names, sizeof(names));
+	CHECK(n == (ssize_t)(sizeof("user.origin") + sizeof("user.empty")));
+	CHECK(flistxattr(fd, NULL, 0) == n);
+	CHECK_ERROR(listxattr("/tmp/files-x", names, 3), ERANGE);
+	int seen = 0;
+	for(char *p = names; n > 0 && p < names + n; p += strlen(p) + 1)
+		seen += !strcmp(p, "user.origin") + !strcmp(p, "user.empty");
+	CHECK(seen == 2);
+	CHECK(fremovexattr(fd, "user.empty") == 0);
+	CHECK_ERROR(removexattr("/tmp/files-x", "user.empty"), ENODATA);
+	// Names of no namespace, with nothing after it, or too long; flags
+	// setxattr has not; a value past XATTR_SIZE_MAX.
+	CHECK_ERROR(setxattr("/tmp/files-x", "other.name", "x", 1, 0), EOPNOTSUPP);
+	CHECK_ERROR(setxattr("/tmp/files-x", "user.", "x", 1, 0), EINVAL);
+	char long_name[300];
+	memset(long_name, 'a', sizeof(long_name) - 1);
+	memcpy(long_name, "user.", 5);
+	long_name[sizeof(long_name) - 1] = 0;
+	CHECK_ERROR(setxattr("/tmp/files-x", long_name, "x", 1, 0), ERANGE);
+	CHECK_ERROR(setxattr("/tmp/files-x", "user.flags", "x", 1, 4), EINVAL);
+	static char big[65537];
+	CHECK_ERROR(setxattr("/tmp/files-x", "user.big", big, sizeof(big), 0), E2BIG);
+	// `user.` names are files' and directories': a link has none, and
+	// the calls without l follow it.
+	CHECK(symlink("files-x", "/tmp/files-xl") == 0);
+	CHECK_ERROR(lgetxattr("/tmp/files-xl", "user.origin", value, sizeof(value)), ENODATA);
+	CHECK_ERROR(lsetxattr("/tmp/files-xl", "user.origin", "x", 1, 0), EPERM);
+	CHECK(getxattr("/tmp/files-xl", "user.origin", value, sizeof(value)) == 13);
+	// `trusted.` names are root's, on anything.
+	CHECK(lsetxattr("/tmp/files-xl", "trusted.mark", "1", 1, 0) == 0);
+	CHECK(lgetxattr("/tmp/files-xl", "trusted.mark", value, sizeof(value)) == 1);
+	CHECK(llistxattr("/tmp/files-xl", names, sizeof(names)) == (ssize_t)sizeof("trusted.mark"));
+	CHECK(lremovexattr("/tmp/files-xl", "trusted.mark") == 0);
+
+	// An access list sets the mode's permission bits: the owner's, the
+	// mask's for the group's, and the others'.
+	static const uint32_t BOB[][3] = {
+			{USER_OBJ, 6, NO_ID}, {USER, 7, 1001}, {GROUP_OBJ, 4, NO_ID},
+			{MASK, 5, NO_ID}, {OTHER, 0, NO_ID}};
+	uint8_t acl[64];
+	size_t len = acl_value(acl, 5, BOB);
+	CHECK(setxattr("/tmp/files-x", "system.posix_acl_access", acl, len, 0) == 0);
+	struct stat st;
+	CHECK(stat("/tmp/files-x", &st) == 0 && (st.st_mode & 07777) == 0650);
+	// chmod sets the list's owner, mask and others, as it reads back.
+	CHECK(fchmod(fd, 0640) == 0);
+	uint8_t back[64];
+	CHECK(getxattr("/tmp/files-x", "system.posix_acl_access", back, sizeof(back)) == (ssize_t)len);
+	CHECK(back[4 + 3 * 8] == MASK && back[4 + 3 * 8 + 2] == 4);
+	CHECK(back[4 + 1 * 8] == USER && back[4 + 1 * 8 + 2] == 7);
+	// One the mode says all of is not kept; one out of order is refused.
+	static const uint32_t PLAIN[][3] = {{USER_OBJ, 6, NO_ID}, {GROUP_OBJ, 4, NO_ID}, {OTHER, 4, NO_ID}};
+	len = acl_value(acl, 3, PLAIN);
+	CHECK(setxattr("/tmp/files-x", "system.posix_acl_access", acl, len, 0) == 0);
+	CHECK_ERROR(getxattr("/tmp/files-x", "system.posix_acl_access", back, sizeof(back)), ENODATA);
+	CHECK(stat("/tmp/files-x", &st) == 0 && (st.st_mode & 07777) == 0644);
+	static const uint32_t BACKWARDS[][3] = {{OTHER, 4, NO_ID}, {USER_OBJ, 6, NO_ID}, {GROUP_OBJ, 4, NO_ID}};
+	len = acl_value(acl, 3, BACKWARDS);
+	CHECK_ERROR(setxattr("/tmp/files-x", "system.posix_acl_access", acl, len, 0), EINVAL);
+	CHECK_ERROR(lsetxattr("/tmp/files-xl", "system.posix_acl_access", acl, len, 0), EOPNOTSUPP);
+
+	// A default list is a directory's: what is made in it takes it, and
+	// it decides the mode, not the umask.
+	CHECK(mkdir("/tmp/files-xd", 0755) == 0);
+	static const uint32_t SHARED[][3] = {
+			{USER_OBJ, 7, NO_ID}, {USER, 6, 1001}, {GROUP_OBJ, 5, NO_ID},
+			{MASK, 7, NO_ID}, {OTHER, 0, NO_ID}};
+	len = acl_value(acl, 5, SHARED);
+	CHECK_ERROR(setxattr("/tmp/files-x", "system.posix_acl_default", acl, len, 0), EACCES);
+	CHECK(setxattr("/tmp/files-xd", "system.posix_acl_default", acl, len, 0) == 0);
+	CHECK(getxattr("/tmp/files-xd", "system.posix_acl_default", back, sizeof(back)) == (ssize_t)len);
+	mode_t old = umask(077);
+	int made = open("/tmp/files-xd/f", O_RDWR | O_CREAT | O_EXCL, 0666);
+	CHECK(made >= 0);
+	CHECK(mkdir("/tmp/files-xd/sub", 0777) == 0);
+	umask(old);
+	CHECK(fstat(made, &st) == 0 && (st.st_mode & 07777) == 0660);
+	CHECK(fgetxattr(made, "system.posix_acl_access", back, sizeof(back)) == (ssize_t)len);
+	CHECK(back[4 + 1 * 8] == USER && back[4 + 1 * 8 + 2] == 6);
+	CHECK(stat("/tmp/files-xd/sub", &st) == 0 && (st.st_mode & 07777) == 0770);
+	CHECK(getxattr("/tmp/files-xd/sub", "system.posix_acl_default", back, sizeof(back)) == (ssize_t)len);
+	close(made);
+	close(fd);
+	CHECK(unlink("/tmp/files-xd/f") == 0);
+	CHECK(rmdir("/tmp/files-xd/sub") == 0);
+	CHECK(rmdir("/tmp/files-xd") == 0);
+	CHECK(unlink("/tmp/files-xl") == 0);
+	CHECK(unlink("/tmp/files-x") == 0);
+}
+
 // What open, truncation, preallocation and scattered reads and writes
 // refuse, with the errors Linux 6.8 gives.
 static void refusals(void) {
@@ -1012,6 +1147,7 @@ int main(void) {
 	RUN(folder_names);
 	RUN(named_descriptors);
 	RUN(modes);
+	RUN(attributes);
 	RUN(refusals);
 	return check_end();
 }

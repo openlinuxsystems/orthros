@@ -34,6 +34,7 @@ mod dmesg;
 mod ectool;
 mod eject;
 mod elevate;
+mod facl;
 mod findmnt;
 mod fstrim;
 mod hexdump;
@@ -117,6 +118,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("findmnt", findmnt::main),
     ("fstrim", fstrim::main),
     ("free", memory::free),
+    ("getfacl", facl::getfacl),
     ("halt", power::halt),
     ("hd", hexdump::hd),
     ("hexdump", hexdump::main),
@@ -161,6 +163,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("scrub", scrub::main),
     ("sensors", sensors::main),
     ("service", power::service),
+    ("setfacl", facl::setfacl),
     ("shutdown", power::shutdown),
     ("ss", ss::main),
     ("subvolume", subvolume::main),
@@ -185,7 +188,7 @@ const TOOLS: &[(&str, Tool)] = &[
 
 /// The tools whose Linux versions exit with 2, not 1, for a mistake in
 /// the command line: procps-ng's pgrep and pkill, and which.
-const USAGE_TWO: &[&str] = &["pgrep", "pkill", "which"];
+const USAGE_TWO: &[&str] = &["getfacl", "pgrep", "pkill", "setfacl", "which"];
 
 /// The tool named `name`.
 fn tool(name: &str) -> Option<Tool> {

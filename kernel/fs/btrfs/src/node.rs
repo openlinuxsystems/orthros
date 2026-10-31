@@ -23,12 +23,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use radix_block::mem::CachePage;
 use radix_block::{PAGE_SIZE, Page, SegmentMut};
 use radix_sync::{Mutex, Once};
+use radix_vfs::acl::{self, Acl, AclCell};
 use radix_vfs::cache::{Backing, FileCache, page_len};
 use radix_vfs::mem::{self, Alloc, KArc, KVec};
 use radix_vfs::path::check_name;
 use radix_vfs::{
-    Access, AccessChange, Error, In, Kind, ListFn, Node, NodeRef, Out, Result, SocketBinding, Stat,
-    now,
+    Access, AccessChange, Error, In, Kind, ListFn, Node, NodeRef, Out, Result, Setting,
+    SocketBinding, Stat, now,
 };
 
 use crate::dir::Entries;
@@ -40,6 +41,7 @@ use crate::inode::{self, Inode};
 use crate::pack::{CHUNK, Packer};
 use crate::tree::{Cursor, Root};
 use crate::unpack::{self, Workspace};
+use crate::xattr;
 
 const PAGE: u64 = PAGE_SIZE as u64;
 
@@ -100,6 +102,10 @@ pub struct BtrfsNode {
     freed: AtomicBool,
     /// Whether the filesystem keeps it for the next sync.
     pinned: AtomicBool,
+    /// Its access list, once read from its attribute (ADR 0256).
+    acl: AclCell,
+    /// A directory's default access list, once read.
+    default_acl: AclCell,
     /// Itself, to be kept.
     me: Once<Weak<BtrfsNode, Alloc>>,
 }
@@ -150,6 +156,8 @@ impl BtrfsNode {
             removed: AtomicBool::new(false),
             freed: AtomicBool::new(false),
             pinned: AtomicBool::new(false),
+            acl: AclCell::unread(),
+            default_acl: AclCell::unread(),
             me: Once::new(),
         })
     }
@@ -1760,6 +1768,43 @@ impl Node for BtrfsNode {
         })
     }
 
+    fn get_attribute(&self, name: &[u8]) -> Result<KVec<u8>> {
+        let _reading = self.fs.reading();
+        xattr::get(&self.fs.volume, &self.tree()?, self.ino, name)
+    }
+
+    fn set_attribute(&self, name: &[u8], value: &[u8], how: Setting) -> Result<()> {
+        self.change_attribute(
+            name,
+            |f| f.check_set_xattr(self.ino, name, value, how),
+            |f, found, time| f.set_xattr(self.ino, name, value, found, time),
+        )
+    }
+
+    fn list_attributes(&self) -> Result<KVec<u8>> {
+        let _reading = self.fs.reading();
+        xattr::list(&self.fs.volume, &self.tree()?, self.ino)
+    }
+
+    fn remove_attribute(&self, name: &[u8]) -> Result<()> {
+        self.change_attribute(
+            name,
+            |f| f.check_remove_xattr(self.ino, name),
+            |f, found, time| f.remove_xattr(self.ino, name, found, time),
+        )
+    }
+
+    fn access_list(&self) -> Result<Option<KArc<Acl>>> {
+        self.acl.get(|| self.get_attribute(acl::ACCESS))
+    }
+
+    fn default_list(&self) -> Result<Option<KArc<Acl>>> {
+        if self.kind != Kind::Directory {
+            return Ok(None);
+        }
+        self.default_acl.get(|| self.get_attribute(acl::DEFAULT))
+    }
+
     fn read_link(&self, out: &mut dyn Out) -> Result<usize> {
         if self.kind != Kind::Symlink {
             return Err(Error::NotLink);
@@ -1781,6 +1826,36 @@ impl Node for BtrfsNode {
 }
 
 impl BtrfsNode {
+    /// Changes an attribute of its, `name`, in a transaction: `check`
+    /// finds it and checks the change may be made, before anything
+    /// changes, and `change` makes it, given what `check` found and the
+    /// time now. The access list it keeps is read again after a change of
+    /// `system.posix_acl_access`.
+    fn change_attribute(
+        &self,
+        name: &[u8],
+        check: impl FnOnce(&Files<'_>) -> Result<xattr::Found>,
+        change: impl FnOnce(&mut Files<'_>, &xattr::Found, u64) -> Result<()>,
+    ) -> Result<()> {
+        self.writes()?;
+        let time = now();
+        let changed = self.fs.change(|txn| {
+            if self.freed.load(Ordering::Acquire) {
+                return Err(Error::NotFound);
+            }
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            let found = check(&files)?;
+            files.whole(|f| change(f, &found, time))?;
+            self.reload(&files)
+        });
+        if name == acl::ACCESS {
+            self.acl.forget();
+        } else if name == acl::DEFAULT {
+            self.default_acl.forget();
+        }
+        changed
+    }
+
     /// Lists the directory from `cursor`, as [`Node::list`] does; the
     /// caller holds the transaction on a writable mount.
     fn list_from(&self, cursor: u64, f: &mut dyn FnMut(u64, &str, Kind) -> bool) -> Result<()> {

@@ -67,7 +67,8 @@ own with mode 0700, and sftp, tar and rsync carry owners and modes.
   by deriving a capability without it. Spark's root has it, and so for
   now do the services, which share Spark's root until their files
   declare what they get (13b.4).
-- **The gate**, as Linux's without access lists (those come in 13b.7):
+- **The gate**, as Linux's without access lists (those came in 13b.7d,
+  ADR 0256, which consults them first as Linux's does):
   the owner's bits if the name's user owns the node, else the group's if
   the node's group is the name's group or one of its others, else the
   others'. Bypass passes it, but for running a file without an execute
@@ -150,8 +151,8 @@ own with mode 0700, and sftp, tar and rsync carry owners and modes.
 - **Not yet:** users' names and the accounts behind them (`passwd` and
   `group` from authd, 13b.5), and the user of a Unix socket's peer,
   which `SO_PEERCRED` still gives as 0 (13b.5); who, w and users still
-  show every session as root's until sign-in (13b.5); access lists and mounts owned by a user
-  (13b.7); a write taking away set-user-ID bits, which mean nothing
+  show every session as root's until sign-in (13b.5); access lists (13b.7d,
+  ADR 0256) and mounts owned by a user (13b.7); a write taking away set-user-ID bits, which mean nothing
   where no program runs as its file's owner; Linux's
   `fs.protected_symlinks`, which a private `/tmp` per session (13b.5)
   makes less needed.

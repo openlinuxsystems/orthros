@@ -24,6 +24,9 @@
 //! and [`bootfs`] serves the boot archive. [`locks`] is what a file's
 //! advisory locks do (Phase 8). [`raw`] reads and writes block devices
 //! with no cache between, for `/devices/sda` and its kind (Phase 10).
+//! A node may have extended attributes, names with values as Linux's
+//! xattrs, which [`attributes`] reads and changes with the second gate's
+//! checks, and among them an access list ([`acl`], Phase 13).
 //!
 //! The crate is a compartment: it has no `unsafe` code. It builds for the
 //! host (feature `host`), where its tests run.
@@ -38,6 +41,8 @@
 
 extern crate alloc;
 
+pub mod acl;
+pub mod attributes;
 pub mod bootfs;
 pub mod cache;
 pub mod locks;
@@ -135,6 +140,13 @@ pub enum Error {
     /// this: change its mode, owner or times, or remove it from a sticky
     /// directory (ADR 0214). POSIX's EPERM.
     NotPermitted,
+    /// The node has no extended attribute of that name (ADR 0256).
+    /// Linux's ENODATA.
+    NoAttribute,
+    /// An extended attribute's name is empty or longer than
+    /// [`attributes::NAME_MAX`], or a value or list does not fit where it
+    /// is to go. Linux's ERANGE.
+    OutOfRange,
 }
 
 impl fmt::Display for Error {
@@ -168,6 +180,8 @@ impl fmt::Display for Error {
             Error::InvalidArgument => "invalid argument",
             Error::Denied => "permission denied",
             Error::NotPermitted => "operation not permitted",
+            Error::NoAttribute => "no such attribute",
+            Error::OutOfRange => "out of range",
         })
     }
 }
@@ -306,7 +320,8 @@ pub mod want {
 /// Who a call acts for, which the second gate checks (ADR 0214): the name
 /// of the capability it comes through (a user, its group and the other
 /// groups it is in) and whether that capability has the bypass right
-/// (the security design's override), which passes the gate.
+/// (the security design's override), which passes the gate; and for a
+/// call that makes a node, the caller's file mode mask.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Who<'a> {
     /// The user's number.
@@ -317,12 +332,18 @@ pub struct Who<'a> {
     pub groups: &'a [u32],
     /// Whether it passes the gate.
     pub bypass: bool,
+    /// The permission bits a node the call makes does not get, the
+    /// process's umask(2), unless the directory it is made in has a
+    /// default access list, which decides in its place as on Linux
+    /// ([`mount::made_with`], ADR 0256).
+    pub file_mask: u16,
 }
 
 impl Who<'_> {
     /// The kernel's own calls, and those of a capability with the bypass
     /// right acting for root.
-    pub const KERNEL: Who<'static> = Who { user: 0, group: 0, groups: &[], bypass: true };
+    pub const KERNEL: Who<'static> =
+        Who { user: 0, group: 0, groups: &[], bypass: true, file_mask: 0 };
 
     /// Whether it is in `group`.
     pub fn in_group(&self, group: u32) -> bool {
@@ -334,6 +355,7 @@ impl Who<'_> {
     /// access lists: the owner's bits if it owns the node, else the
     /// group's if it is in the node's group, else the others'. The bypass
     /// passes, but for running a file no one may run, as for Linux's root.
+    /// [`Who::check`] reads the node's access list too.
     pub fn may(&self, access: Access, kind: Kind, want: u16) -> bool {
         if self.bypass {
             return want & want::EXECUTE == 0
@@ -350,14 +372,25 @@ impl Who<'_> {
         (access.mode >> shift) & want == want
     }
 
-    /// [`Who::may`] for `node`, failing with [`Error::Denied`]. With
+    /// [`Who::may`] for `node`, failing with [`Error::Denied`], with its
+    /// access list (ADR 0256) as Linux's `acl_permission_check` reads it:
+    /// for a name that does not own the node, when the mode's group bits,
+    /// the list's mask, are not all clear ([`acl::Acl::permits`]). With
     /// the bypass it does not read the node's access unless it must.
     pub fn check(&self, node: &dyn Node, want: u16) -> Result<()> {
         let kind = node.kind();
         if self.bypass && (want & want::EXECUTE == 0 || kind == Kind::Directory) {
             return Ok(());
         }
-        if self.may(node.access(), kind, want) { Ok(()) } else { Err(Error::Denied) }
+        let access = node.access();
+        if !self.bypass
+            && access.owner != self.user
+            && access.mode & 0o070 != 0
+            && let Some(list) = node.access_list()?
+        {
+            return if list.permits(self, access, want) { Ok(()) } else { Err(Error::Denied) };
+        }
+        if self.may(access, kind, want) { Ok(()) } else { Err(Error::Denied) }
     }
 
     /// Whether it owns a node with `access`, or passes the gate: who may
@@ -398,19 +431,17 @@ impl Who<'_> {
         Ok(allowed)
     }
 
-    /// Whether it may set the times of a node with `access`: to times it
-    /// gives (`given`) as their owner, and to now as their owner or one
-    /// who may write it, as utimensat(2) has it; [`Error::NotPermitted`]
-    /// or [`Error::Denied`] otherwise.
-    pub fn may_set_times(&self, kind: Kind, access: Access, given: bool) -> Result<()> {
-        if self.owns(access) {
+    /// Whether it may set the times of `node`: to times it gives
+    /// (`given`) as their owner, and to now as their owner or one who may
+    /// write it, as utimensat(2) has it; [`Error::NotPermitted`] or
+    /// [`Error::Denied`] otherwise.
+    pub fn may_set_times(&self, node: &dyn Node, given: bool) -> Result<()> {
+        if self.owns(node.access()) {
             Ok(())
         } else if given {
             Err(Error::NotPermitted)
-        } else if self.may(access, kind, want::WRITE) {
-            Ok(())
         } else {
-            Err(Error::Denied)
+            self.check(node, want::WRITE)
         }
     }
 }
@@ -821,6 +852,54 @@ pub trait Node: Send + Sync + Any {
         Err(Error::NotSupported)
     }
 
+    /// The value of its extended attribute `name` (ADR 0256): a name of
+    /// one of Linux's namespaces, such as `user.origin` or
+    /// `system.posix_acl_access`, whose value the filesystem keeps as
+    /// Linux does. [`Error::NoAttribute`] if it has none of that name, and
+    /// [`Error::NotSupported`] if its filesystem keeps none. Who may read
+    /// which is [`attributes`]' to check.
+    fn get_attribute(&self, _name: &[u8]) -> Result<KVec<u8>> {
+        Err(Error::NotSupported)
+    }
+
+    /// Sets its extended attribute `name` to `value` as `how` says, and
+    /// its change time: [`Error::Exists`] if it has one already and `how`
+    /// is [`Setting::Create`], [`Error::NoAttribute`] if it has none and
+    /// `how` is [`Setting::Replace`], and [`Error::NoSpace`] if the place
+    /// the filesystem keeps them has no room for it.
+    fn set_attribute(&self, _name: &[u8], _value: &[u8], _how: Setting) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// The names of its extended attributes, each with a NUL after it, as
+    /// listxattr(2) gives them.
+    fn list_attributes(&self) -> Result<KVec<u8>> {
+        Err(Error::NotSupported)
+    }
+
+    /// Removes its extended attribute `name`, and sets its change time:
+    /// [`Error::NoAttribute`] if it has none of that name.
+    fn remove_attribute(&self, _name: &[u8]) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Its access list ([`acl`]): what its attribute
+    /// `system.posix_acl_access` holds, which a filesystem that reads it
+    /// from a disk keeps in memory ([`acl::AclCell`]); none if it has none
+    /// or its filesystem keeps no attributes. The gate asks for it often.
+    fn access_list(&self) -> Result<Option<KArc<acl::Acl>>> {
+        Ok(None)
+    }
+
+    /// A directory's default access list: what its attribute
+    /// `system.posix_acl_default` holds, which what is made in it takes
+    /// ([`mount::made_with`]); none if it has none. Making any node asks
+    /// for it, so a filesystem that reads it from a disk keeps it in
+    /// memory ([`acl::AclCell`]), as Linux keeps `i_default_acl`.
+    fn default_list(&self) -> Result<Option<KArc<acl::Acl>>> {
+        acl::AclCell::unread().get(|| self.get_attribute(acl::DEFAULT))
+    }
+
     /// Writes what the node holds in memory to the disk.
     fn sync(&self) -> Result<()> {
         Ok(())
@@ -838,6 +917,20 @@ pub trait Node: Send + Sync + Any {
 
 /// The offset of a write that appends.
 pub const APPEND: u64 = u64::MAX;
+
+/// How [`Node::set_attribute`] sets an attribute, as setxattr(2)'s flags
+/// say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Setting {
+    /// Makes it, or replaces the value it has.
+    Either,
+    /// Makes it, failing with [`Error::Exists`] if it is there
+    /// (XATTR_CREATE).
+    Create,
+    /// Replaces it, failing with [`Error::NoAttribute`] if it is not
+    /// there (XATTR_REPLACE).
+    Replace,
+}
 
 /// The path the symbolic link `node` points to: UTF-8, not empty, at most
 /// [`PATH_MAX`] bytes, without NULs (what a link that holds anything else

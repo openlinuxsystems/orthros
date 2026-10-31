@@ -11,6 +11,10 @@
 //! goes when the last reference to them does: a file removed while a
 //! program has it open lives until the program lets go, as on Linux.
 //!
+//! A node keeps its extended attributes in memory too, charged to the
+//! limit by their names' and values' bytes, at most [`ATTRIBUTES_MAX`]
+//! for one node (ADR 0256).
+//!
 //! The root filesystem of every Radix system is a tmpfs (spec 7.1), as
 //! are `/system/settings` and `/system/state` on top of the read-only boot
 //! archive until Phase 10 brings Btrfs.
@@ -21,13 +25,19 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use radix_sync::Mutex;
 
+use crate::acl::{self, Acl, AclCell};
 use crate::cache::{Backing, FileCache};
 use crate::mem::{self, Alloc, KArc, KVec};
 use crate::path::check_name;
 use crate::{
     Access, AccessChange, Error, FileSystem, FsInfo, FsKind, In, Kind, ListFn, Node, NodeRef, Out,
-    Result, SocketBinding, Stat, now,
+    Result, Setting, SocketBinding, Stat, now,
 };
+
+/// The most bytes one node's extended attributes may take, their names'
+/// and values' together: room for the longest value Linux allows and
+/// some more.
+pub const ATTRIBUTES_MAX: u64 = 128 << 10;
 
 /// What every node of one tmpfs shares.
 struct Shared {
@@ -48,6 +58,17 @@ struct Shared {
 }
 
 impl Shared {
+    /// Charges `bytes` more to the limit, or fails with
+    /// [`Error::NoSpace`].
+    fn charge(&self, bytes: u64) -> Result<()> {
+        let used = self.used.fetch_add(bytes, Ordering::Relaxed);
+        if used + bytes > self.max {
+            self.used.fetch_sub(bytes, Ordering::Relaxed);
+            return Err(Error::NoSpace);
+        }
+        Ok(())
+    }
+
     /// Counts one more file, or name, against the limit.
     fn count_file(&self) -> Result<()> {
         self.files
@@ -183,6 +204,10 @@ pub struct TmpNode {
     links: AtomicU32,
     /// Who it belongs to and its mode (ADR 0213).
     access: Mutex<Access>,
+    /// Its extended attributes (ADR 0256).
+    attributes: Mutex<Attributes>,
+    /// Its access list, as its attribute holds it.
+    acl: AclCell,
     shared: KArc<Shared>,
     /// The directory it is in; none for the root, or once it is removed.
     parent: Mutex<Option<Weak<TmpNode, Alloc>>>,
@@ -306,6 +331,8 @@ impl TmpNode {
             changed: AtomicU64::new(created),
             links: AtomicU32::new(0),
             access: Mutex::new(access),
+            attributes: Mutex::new(Attributes { list: mem::vec(), bytes: 0 }),
+            acl: AclCell::none(),
             shared,
             parent: Mutex::new(None),
             me: radix_sync::Once::new(),
@@ -404,6 +431,20 @@ impl TmpNode {
     }
 }
 
+/// A node's extended attributes: each name with its value, in the order
+/// they were made, and the bytes they are charged.
+struct Attributes {
+    list: KVec<(KVec<u8>, KVec<u8>)>,
+    bytes: u64,
+}
+
+impl Attributes {
+    /// Where `name` is in the list.
+    fn find(&self, name: &[u8]) -> Option<usize> {
+        self.list.iter().position(|(n, _)| n[..] == *name)
+    }
+}
+
 /// The backing of a tmpfs file: no disk, and growth charged to the
 /// filesystem's limit.
 struct Charge<'a> {
@@ -450,7 +491,8 @@ impl Drop for TmpNode {
             Body::Link { target, .. } => target.len() as u64,
             Body::Dir(_) | Body::Socket { .. } | Body::Special { .. } => 0,
         };
-        self.shared.used.fetch_sub(charged, Ordering::Relaxed);
+        let attributes = self.attributes.get_mut().bytes;
+        self.shared.used.fetch_sub(charged + attributes, Ordering::Relaxed);
     }
 }
 
@@ -714,6 +756,86 @@ impl Node for TmpNode {
         // Setting a time changes the node, now.
         self.changed.store(now(), Ordering::Relaxed);
         Ok(())
+    }
+
+    fn get_attribute(&self, name: &[u8]) -> Result<KVec<u8>> {
+        let attributes = self.attributes.lock();
+        let at = attributes.find(name).ok_or(Error::NoAttribute)?;
+        Ok(mem::copy(&attributes.list[at].1)?)
+    }
+
+    fn set_attribute(&self, name: &[u8], value: &[u8], how: Setting) -> Result<()> {
+        let mut attributes = self.attributes.lock();
+        let at = attributes.find(name);
+        match (at, how) {
+            (Some(_), Setting::Create) => return Err(Error::Exists),
+            (None, Setting::Replace) => return Err(Error::NoAttribute),
+            _ => {}
+        }
+        let had = at.map_or(0, |at| {
+            let (name, value) = &attributes.list[at];
+            (name.len() + value.len()) as u64
+        });
+        let bytes = (name.len() + value.len()) as u64;
+        if attributes.bytes - had + bytes > ATTRIBUTES_MAX {
+            return Err(Error::NoSpace);
+        }
+        let value = mem::copy(value)?;
+        let made = match at {
+            Some(_) => None,
+            None => {
+                // Room in the list first, so that nothing fails once the
+                // bytes are charged.
+                attributes.list.try_reserve(1).map_err(|_| Error::NoMemory)?;
+                Some(mem::copy(name)?)
+            }
+        };
+        if bytes > had {
+            self.shared.charge(bytes - had)?;
+        } else {
+            self.shared.used.fetch_sub(had - bytes, Ordering::Relaxed);
+        }
+        match (at, made) {
+            (Some(at), _) => attributes.list[at].1 = value,
+            (None, Some(name)) => mem::push(&mut attributes.list, (name, value))?,
+            (None, None) => {}
+        }
+        attributes.bytes = attributes.bytes - had + bytes;
+        drop(attributes);
+        if name == acl::ACCESS {
+            self.acl.forget();
+        }
+        self.changed.store(now(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn list_attributes(&self) -> Result<KVec<u8>> {
+        let attributes = self.attributes.lock();
+        let mut names = mem::vec();
+        for (name, _) in &attributes.list {
+            mem::extend(&mut names, name)?;
+            mem::extend(&mut names, &[0])?;
+        }
+        Ok(names)
+    }
+
+    fn remove_attribute(&self, name: &[u8]) -> Result<()> {
+        let mut attributes = self.attributes.lock();
+        let at = attributes.find(name).ok_or(Error::NoAttribute)?;
+        let (name, value) = attributes.list.remove(at);
+        let bytes = (name.len() + value.len()) as u64;
+        attributes.bytes -= bytes;
+        self.shared.used.fetch_sub(bytes, Ordering::Relaxed);
+        drop(attributes);
+        if name[..] == *acl::ACCESS {
+            self.acl.forget();
+        }
+        self.changed.store(now(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn access_list(&self) -> Result<Option<KArc<Acl>>> {
+        self.acl.get(|| self.get_attribute(acl::ACCESS))
     }
 
     fn as_any(&self) -> &dyn Any {

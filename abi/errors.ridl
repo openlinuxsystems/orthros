@@ -203,4 +203,6 @@ errors file = 2 {
     /// The file's owner, group and mode do not let the name the
     /// capability acts for do this: the second gate (radix-directory(2)).
     denied = 24 => EACCES;
+    /// The file has no extended attribute of that name (ADR 0256).
+    no_attribute = 25 => ENODATA;
 }

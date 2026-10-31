@@ -588,7 +588,11 @@ _target/userspace/_).
 		bob's home, reads every wrong password, the unknown name's too,
 		with *elevate lastb*, and finds bob's note neither in her _/tmp_
 		nor in the system's, but *elevate cat* reads it at its real
-		path. The power button ends it (ADRs 0250, 0254 and 0255).
+		path. Then she shares a folder with bob with *setfacl*(1): he
+		may pass through her home, read her file and write the one she
+		makes after, which takes the folder's default list, as
+		*getfacl*(1) shows, but not list her home or write her file. The
+		power button ends it (ADRs 0250, 0254, 0255 and 0256).
 
 	*elevate*
 		Boot 2 CPUs under BIOS from USB with the shipped services and

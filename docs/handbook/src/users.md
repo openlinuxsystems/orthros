@@ -230,6 +230,38 @@ person sees only their own, and an administrator sees everyone's, with
 passwords typed for names that are no account's are for administrators
 alone.
 
+## Sharing files with each other
+
+Each home is its owner's alone. To share a folder with someone, without
+an administrator making a group for the two of you, give them an entry
+in its access list with `setfacl`, as on Linux. Alice lets bob through
+her home, but not list it, then lets him read `shared` and gives him a
+default entry there, which everything made in it later takes:
+
+```
+$ setfacl -m u:bob:x .
+$ mkdir shared
+$ setfacl -m u:bob:rx shared
+$ setfacl -d -m u:bob:rw shared
+$ echo icing > shared/cake
+$ getfacl shared/cake
+# file: shared/cake
+# owner: alice
+# group: alice
+user::rw-
+user:bob:rw-
+group::r-x                      #effective:r--
+mask::rw-
+other::r--
+```
+
+Bob now reads and changes `/users/alice/shared/cake`, and nothing else of
+hers. `setfacl -x u:bob shared` takes his entry away, and `setfacl -b`
+the whole list. A default list decides the permissions of what is made
+under it, in place of your umask. The lists are kept on the disk as
+Linux keeps them, so they go with a Btrfs or ext4 disk moved between the
+two; FAT and exFAT keep none. See setfacl(1) and getfacl(1).
+
 ## Changing a password
 
 `passwd` changes yours, given the one you have; an administrator,

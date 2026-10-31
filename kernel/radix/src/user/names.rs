@@ -111,6 +111,7 @@ impl Identity {
             group: self.group,
             groups: self.groups(),
             bypass,
+            file_mask: 0,
         })
     }
 

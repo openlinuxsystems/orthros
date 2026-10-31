@@ -1306,7 +1306,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "signin",
-        about: "sign-in on the consoles: a machine with no account asks for its owner's, an administrator's, and signs her in; a second account signs in on Alt+F2 beside her; each session acts for its user on its own terminal, who lists both, neither reads the other's home, bob mounts and unmounts nothing and has a /tmp of his own that lasts from one of his sessions to the next, a user reads only their own programs' records of the log and not the kernel log or the audit log, a wrong password waits and fails, and signing out shows the sign-in again; signing in tells of the last sign-in and the wrong passwords since, and last, lastb and lastlog show bob his own sign-ins and an administrator everyone's",
+        about: "sign-in on the consoles: a machine with no account asks for its owner's, an administrator's, and signs her in; a second account signs in on Alt+F2 beside her; each session acts for its user on its own terminal, who lists both, neither reads the other's home, bob mounts and unmounts nothing and has a /tmp of his own that lasts from one of his sessions to the next, a user reads only their own programs' records of the log and not the kernel log or the audit log, a wrong password waits and fails, and signing out shows the sign-in again; signing in tells of the last sign-in and the wrong passwords since, and last, lastb and lastlog show bob his own sign-ins and an administrator everyone's; alice shares a folder with bob through access lists, which setfacl sets and getfacl shows",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // Spark starts the services, consoled among them with sign-in, and
@@ -7625,6 +7625,43 @@ fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
          \"system $?\"; echo 'queen of hearts' | elevate -S cat /system/live/authd/tmp/1001/note",
     )?;
     vm.expect_screen(&["cat: /tmp/note: No such file or directory", "system 1", "tea party"])?;
+    // Alice shares a folder with bob through access lists (ADR 0256): he
+    // may pass through her home without reading it, read what she shares,
+    // and write what she makes in the folder after, which takes its
+    // default list, and the umask has no say.
+    answer_prompt(
+        vm,
+        "$",
+        "clear; cd; mkdir shared; echo 'drink me' > shared/bottle; setfacl -m u:bob:x .; \
+         setfacl -m u:bob:rx shared; setfacl -m u:bob:r shared/bottle; setfacl -d -m u:bob:rw \
+         shared; echo 'eat me' > shared/cake; getfacl shared/cake",
+    )?;
+    vm.expect_screen(&[
+        "# file: shared/cake",
+        "# owner: alice",
+        "user::rw-",
+        "user:bob:rw-",
+        "group::r-x",
+        "#effective:r--",
+        "mask::rw-",
+        "other::r--",
+    ])?;
+    vm.press(&["alt-f2"])?;
+    answer_prompt(
+        vm,
+        "$",
+        "clear; cat /users/alice/shared/bottle; ls /users/alice; echo 'and more' >> \
+         /users/alice/shared/cake; cat /users/alice/shared/cake; echo spilt > \
+         /users/alice/shared/bottle; echo \"listed $(ls /users/alice/shared | tr '\\n' ' ')\"",
+    )?;
+    vm.expect_screen(&[
+        "drink me",
+        "cannot open directory '/users/alice': Permission denied",
+        "eat me",
+        "and more",
+        "/users/alice/shared/bottle: Permission denied",
+        "listed bottle cake",
+    ])?;
     vm.press_power_button()?;
     vm.expect("spark: every service has stopped")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;

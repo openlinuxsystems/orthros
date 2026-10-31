@@ -21,6 +21,8 @@
 //! - [`extent`] holds a file's blocks as a list of extents in memory, and
 //!   reads and writes the tree they are kept in on the disk.
 //! - [`dir`] reads and changes directory blocks.
+//! - [`xattr`] reads and changes extended attributes and access lists,
+//!   in the inode and in a block of their own (ADR 0256).
 //! - [`journal`] replays the journal (jbd2) at mount and writes a
 //!   transaction to it at each sync.
 //! - [`fs::Ext4Fs`] is the filesystem; [`node::Ext4Node`] a file or
@@ -51,6 +53,7 @@ mod inode;
 mod journal;
 mod node;
 mod sb;
+mod xattr;
 
 #[cfg(test)]
 mod tests;
