@@ -1306,7 +1306,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "signin",
-        about: "sign-in on the consoles: a machine with no account asks for its owner's, an administrator's, and signs her in; a second account signs in on Alt+F2 beside her; each session acts for its user on its own terminal, who lists both, neither reads the other's home, bob mounts and unmounts nothing, a user reads only their own programs' records of the log and not the kernel log or the audit log, a wrong password waits and fails, and signing out shows the sign-in again; signing in tells of the last sign-in and the wrong passwords since, and last, lastb and lastlog show bob his own sign-ins and an administrator everyone's",
+        about: "sign-in on the consoles: a machine with no account asks for its owner's, an administrator's, and signs her in; a second account signs in on Alt+F2 beside her; each session acts for its user on its own terminal, who lists both, neither reads the other's home, bob mounts and unmounts nothing and has a /tmp of his own that lasts from one of his sessions to the next, a user reads only their own programs' records of the log and not the kernel log or the audit log, a wrong password waits and fails, and signing out shows the sign-in again; signing in tells of the last sign-in and the wrong passwords since, and last, lastb and lastlog show bob his own sign-ins and an administrator everyone's",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // Spark starts the services, consoled among them with sign-in, and
@@ -7498,7 +7498,9 @@ fn accounts(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// is refused after a wait. Signed in again, bob is told of his last
 /// sign-in and the wrong password since, and last, lastb and lastlog show
 /// him his own sign-ins alone, and alice, through elevate, every wrong
-/// password (ADR 0254). The power button ends it.
+/// password (ADR 0254). Bob's /tmp is his own, kept from one of his
+/// sessions to the next, and in neither alice's view nor the system's
+/// (ADR 0255). The power button ends it.
 fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
     owner_signs_in(vm, case)?;
     answer_prompt(vm, "$", "clear; id; pwd; echo \"$USER $HOME $SHELL\"; tty")?;
@@ -7525,6 +7527,14 @@ fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
     // unmounts /processes for no one.
     answer_prompt(vm, "$", "clear; /system/tests/posix/signintest mount")?;
     vm.expect_screen(&["signintest-mount: every check passed"])?;
+    // His /tmp is his own (ADR 0255): his, mode 1777, and what he leaves
+    // there is in no one else's.
+    answer_prompt(
+        vm,
+        "$",
+        "clear; echo 'tea party' > /tmp/note; ls -ld /tmp | cut -c1-10; stat -c '%U' /tmp",
+    )?;
+    vm.expect_screen(&["drwxrwxrwt", "bob"])?;
     // The log is for administrators (ADR 0252). Bob reads his own
     // programs' records alone, with a hint unless -q, and the kernel log
     // and the audit log are refused him.
@@ -7567,8 +7577,9 @@ fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
         "Last sign-in: ",
         "Since then, 1 wrong password was typed for bob, the last on ",
     ])?;
-    answer_prompt(vm, "$", "clear; whoami")?;
-    vm.expect_screen(&["bob"])?;
+    // His /tmp outlived his first session, as tmux's sockets must.
+    answer_prompt(vm, "$", "clear; whoami; cat /tmp/note")?;
+    vm.expect_screen(&["bob", "tea party"])?;
     // His sign-ins are his to read, and only his: the session that runs,
     // the one before, the computer's start, the wrong password, and his
     // last sign-in, each with a hint that an administrator sees all.
@@ -7605,6 +7616,15 @@ fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
         "nobody   pts/",
     ])?;
     vm.expect_screen_without("Hint:")?;
+    // Bob's note is in neither her /tmp nor the system's, which elevate
+    // sees; root finds it at its real path.
+    answer_prompt(
+        vm,
+        "$",
+        "clear; cat /tmp/note; echo 'queen of hearts' | elevate -S test -e /tmp/note; echo \
+         \"system $?\"; echo 'queen of hearts' | elevate -S cat /system/live/authd/tmp/1001/note",
+    )?;
+    vm.expect_screen(&["cat: /tmp/note: No such file or directory", "system 1", "tea party"])?;
     vm.press_power_button()?;
     vm.expect("spark: every service has stopped")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;

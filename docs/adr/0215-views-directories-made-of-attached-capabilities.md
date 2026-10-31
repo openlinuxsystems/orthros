@@ -91,7 +91,8 @@ onto.
   bind mount on Linux.
 - **A session's `/tmp`** is a directory of its own, attached at `tmp` in
   place of the system's, as Linux's pam_namespace makes `/tmp` one per
-  user. authd builds each sign-in session's view so (13b.5); the `views`
+  user. authd builds each sign-in session's view so (13b.7c, ADR 0255,
+  with one `/tmp` for each person rather than each session); the `views`
   boot test builds one the same way, from a root stamped for alice. Until
   sign-in every session is root's, and root's console sessions keep the
   system's root and `/tmp`, as pam_namespace's usual setup leaves root

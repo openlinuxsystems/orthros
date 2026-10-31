@@ -57,8 +57,9 @@ Someone who knows the password of a disabled account is told it is
 disabled when they sign in; anyone else is told the password is wrong.
 
 *user remove* removes the account _name_: it disables it and ends what
-it runs, then takes it out of the account files, with its own group.
-Its number is never given to an account again, so the files it leaves
+it runs, then takes it out of the account files, with its own group,
+and removes its own _/tmp_ (*authd*(8)); its sign-in records stay, for
+root to read. Its number is never given to an account again, so the files it leaves
 are no one else's. At a terminal it asks what becomes of the account's
 home, _/users/_*name*: whether to keep it, archive it or delete it;
 a script says so with an option. A home elsewhere is kept.

@@ -108,8 +108,8 @@ authd hold it.
 - **Not yet:** the setting that lets a user's jobs run while they are
   signed out, which waits for jobs (16a); the owner's limit on what an
   account may install, which waits for the catalog (13e); `last` and
-  `lastlog` (13b.7b, ADR 0254), a private `/tmp` per session (13b.7c) and access
-  lists (13b.7d).
+  `lastlog` (13b.7b, ADR 0254), a private `/tmp` for each person
+  (13b.7c, ADR 0255) and access lists (13b.7d).
 
 ## Alternatives considered
 

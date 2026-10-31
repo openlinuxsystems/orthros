@@ -40,6 +40,14 @@ own, so two people can work side by side, one on Alt+F1 and one on
 Alt+F2, and `who` lists them. A wrong name or password gets the same
 answer, after a wait.
 
+Your `/tmp` is your own: what you leave there, nobody else sees, and
+nobody can take a name there before your programs do. Your sessions
+share it, so `tmux attach` on a second console finds the server you
+started on the first. It is cleared when the computer stops, as `/tmp`
+always is. An administrator finds it at
+`/system/live/authd/tmp/NUMBER`; `elevate` itself sees the system's
+`/tmp`.
+
 Ctrl+Alt+Delete is the secure attention key: no program ever gets it,
 so whatever it shows is the system's own. With no password prompt on
 the console it shows a menu on the bottom line, where Enter takes you
@@ -262,6 +270,7 @@ recovery key.
 | `/system/state/authd/notices` | What each person is told at their next sign-in, such as a password reset |
 | `/system/state/authd/retired` | The numbers of removed accounts, which no account gets again |
 | `/system/state/sign-ins` | Who signed in, when, and the wrong passwords typed: a file for each account, which that person reads, and one of the computer's starts and stops |
+| `/system/live/authd/tmp` | Each person's own `/tmp`, a folder named by their account's number |
 | `/users/.removed` | The archived homes of removed accounts |
 
 `/etc/passwd` and `/etc/group` lead to the first two, so programs from

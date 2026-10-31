@@ -203,6 +203,9 @@ service holds:
   session's root, so that the session mounts and unmounts nothing;
 - it opens _/system/commands/login_ through that root, so that it is a
   program the user may run;
+- unless the user is root, it builds a view (ADR 0215) acting for them,
+  as the session's root in place of that copy: each name of the root at
+  its place, with the user's own _/tmp_ at _tmp_ (see below);
 - it makes a process, names it for the user and their groups, and gives
   it that root, the random source, the log, and the terminal as its
   descriptors 0, 1 and 2, and nothing else of authd's: not its root,
@@ -212,6 +215,19 @@ service holds:
   *LANG=C.UTF-8* and *EDITOR=nano*; login makes the terminal the
   controlling terminal of a new session and runs the user's shell in
   their home.
+
+Each person has a _/tmp_ of their own (ADR 0255),
+_/system/live/authd/tmp/_*number*, theirs and mode 1777, which authd
+makes at their first sign-in; their sessions share it, so tmux and
+screen find their servers from any of them, and no one else's view
+holds it. It lasts until the computer stops, and removing the account
+removes it. Each place of the view is attached without the bypass
+right and without control, so the owners and modes of the files decide
+as they would without it, and nothing is mounted or attached in it. A
+name added to the root after a session started is not in its view
+until the next sign-in. Root's sessions, and commands run with
+*elevate*(8), keep the whole tree and the system's _/tmp_; root finds a
+person's at its real path.
 
 The groups are the account's own and each group of
 _/system/settings/group_ that lists its name, up to 32. A session
@@ -419,6 +435,9 @@ _/system/state/sign-ins_
 
 _/system/live/authd/socket_
 	The socket authd answers at.
+
+_/system/live/authd/tmp/_*number*
+	Each person's own _/tmp_, which only root lists.
 
 _/users/_*name*
 	Each account's home.

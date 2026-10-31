@@ -571,7 +571,9 @@ _target/userspace/_).
 		her shell. signintest makes bob through *authd*(8); the test
 		signs him in on tty2, where he cannot list alice's home,
 		*who*(1) lists both, and *signintest mount* finds that he
-		mounts and unmounts nothing; he writes a line with *logger*(1), and
+		mounts and unmounts nothing; he leaves a note in his _/tmp_,
+		which is his, mode 1777 (ADR 0255); he writes a line with
+		*logger*(1), and
 		*log*(1) shows him that line alone, with its hint, while
 		*dmesg*(1) and *log --audit* are refused him (ADR 0252);
 		signintest checks that each session's
@@ -580,11 +582,13 @@ _target/userspace/_).
 		and the sign-in comes back; a name that is no account's and a
 		wrong password are refused, the second after a wait, and the
 		right one signs him in again, told of his last sign-in and the
-		wrong password since. *last*(1), *lastb*(1) and *lastlog*(8)
-		show him his own sign-ins alone, with a hint; alice, still
-		signed in on tty1, cannot list bob's home, and reads every
-		wrong password, the unknown name's too, with *elevate lastb*.
-		The power button ends it (ADRs 0250 and 0254).
+		wrong password since, and his note is still in his _/tmp_.
+		*last*(1), *lastb*(1) and *lastlog*(8) show him his own sign-ins
+		alone, with a hint; alice, still signed in on tty1, cannot list
+		bob's home, reads every wrong password, the unknown name's too,
+		with *elevate lastb*, and finds bob's note neither in her _/tmp_
+		nor in the system's, but *elevate cat* reads it at its real
+		path. The power button ends it (ADRs 0250, 0254 and 0255).
 
 	*elevate*
 		Boot 2 CPUs under BIOS from USB with the shipped services and

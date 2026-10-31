@@ -1374,6 +1374,14 @@ impl Authd {
             eprintln!("authd: {why}");
         }
         self.wrong.retain(|(account, _), _| account != name);
+        // Its own /tmp goes with it (ADR 0255); its sign-in records stay,
+        // root's to read.
+        let tmp = format!("{}/{}", signin::TMP, user.uid);
+        if let Err(err) = fs::remove_dir_all(&tmp)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            eprintln!("authd: cannot remove {tmp}: {}", util::strip_os_error(&err));
+        }
         audit!(
             "removed the account {name} ({}), for process {} (user {}); {ended} of its processes \
              ended, and its number is retired",
