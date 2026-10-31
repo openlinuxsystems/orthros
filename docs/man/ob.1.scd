@@ -1250,6 +1250,18 @@ _target/userspace/_).
 		*ntfscp*, which the second boot must read (ADR 0237). ntfs-3g and
 		The Sleuth Kit must be installed (*ob doctor* says how).
 
+	*ntfs-power-cut*
+		The power is cut while _/system/tests/storage churn_ writes,
+		syncs, renames and removes files on a 64 MiB virtio disk that
+		*mkntfs* made, of 4 KiB clusters, 0 to 1.5 seconds after its
+		thirtieth file is synced. The volume must be left marked dirty,
+		for Windows to check, and The Sleuth Kit (*fls* and *icat*) must
+		find every file synced whole. On the next boot Radix must mount
+		it read-only and say why, _/system/tests/storage churned-kept_
+		must read each file whole or a start of itself and have its
+		write refused, and the disk must not change (ADR 0238). ntfs-3g
+		and The Sleuth Kit must be installed (*ob doctor* says how).
+
 ; Phase 11's boot tests go above this line.
 
 	_Phase 12: networking_

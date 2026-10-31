@@ -99,6 +99,7 @@ the user programs, except as Rust's standard library uses them (above).
 | [libc](https://github.com/rust-lang/libc) 0.2 | `linux-bench`, for Linux's system calls (`getrandom`, `eventfd`, futexes, CPU affinity); proptest's dependencies | MIT OR Apache-2.0 |
 | [regex-syntax](https://github.com/rust-lang/regex), [bitflags](https://github.com/bitflags/bitflags), [num-traits](https://github.com/rust-num/num-traits), [unarray](https://github.com/cameron1024/unarray), [cfg-if](https://github.com/rust-lang/cfg-if), [autocfg](https://github.com/cuviper/autocfg), [core_detect](https://github.com/thomcc/core_detect) | proptest and its dependencies | MIT OR Apache-2.0 |
 | [r-efi](https://github.com/r-efi/r-efi) | getrandom, on UEFI hosts | MIT OR Apache-2.0 OR LGPL-2.1-or-later (we use it under MIT OR Apache-2.0) |
+| [sha2](https://github.com/RustCrypto/hashes) 0.10.9 (with digest, block-buffer, crypto-common and cpufeatures by the RustCrypto developers, [generic-array](https://github.com/fizyk20/generic-array), [typenum](https://github.com/paholg/typenum) and [version_check](https://github.com/SergioBenitez/version_check)) | radix-ntfs's tests, to list what the volumes they keep for Windows' `chkdsk` hold | MIT OR Apache-2.0 (generic-array: MIT) |
 
 ## Build, test and documentation tools
 
@@ -143,6 +144,8 @@ These run on the build machine or in CI and are never part of an image.
 | [taiki-e/install-action](https://github.com/taiki-e/install-action) | Installing cargo-deny in CI | Apache-2.0 OR MIT |
 | [ntfs-3g](https://github.com/tuxera/ntfs-3g) 2022.10.3, by Tuxera and contributors (`mkntfs`, `ntfscp`, `ntfscat`) | Making the NTFS volumes Radix's NTFS tests and the `ntfs` boot test read, writing files into them and reading back their bitmaps | GPL-2.0-or-later |
 | ntfs-3g's FUSE driver 2022.10.3, with `setfattr` from [attr](https://savannah.nongnu.org/projects/attr) | Writing, once, the NTFS volume Radix's NTFS tests and the `ntfs` boot test read (`kernel/fs/ntfs/src/fixtures`); none of its code is in the repository | GPL-2.0-or-later |
+| Windows Server, on GitHub's `windows-latest` runners, with its `chkdsk` and `Mount-DiskImage`, and [PowerShell](https://github.com/PowerShell/PowerShell) 7 | Checking every NTFS volume Radix's NTFS tests write, as Windows does (`tools/windows/chkdsk.ps1`) | Proprietary (PowerShell: MIT) |
+| [actions/download-artifact](https://github.com/actions/download-artifact) | Handing those volumes to CI's Windows job | MIT |
 
 ## The shell corpus
 
@@ -478,8 +481,13 @@ We implement these from their published descriptions. No code is copied.
   ([ADR 0236](docs/adr/0236-ntfs-is-our-own-implementation-read-only-first.md)),
   which writes NTFS as ntfs-3g does, emptying Windows' log before its
   first change and refusing names Windows could not open
-  ([ADR 0237](docs/adr/0237-ntfs-is-written-as-ntfs-3g-writes-it-its-log-emptied.md)).
+  ([ADR 0237](docs/adr/0237-ntfs-is-written-as-ntfs-3g-writes-it-its-log-emptied.md)),
+  and makes Windows' and WSL's links as [MS-FSCC] gives them
+  ([ADR 0238](docs/adr/0238-ntfs-compressed-sparse-and-links-are-written-and-windows-checks-them.md)).
   We use no code of Linux's ntfs3, of ntfs-3g or of the `ntfs` crate.
+- Microsoft's *Virtual Hard Disk Image Format Specification* (version
+  1.0, 2006), from which radix-ntfs's tests write the fixed VHDs that
+  CI's Windows job mounts.
 
 ## Projects whose ideas we follow
 

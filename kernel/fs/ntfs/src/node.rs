@@ -35,9 +35,17 @@
 //! clusters until its last reference goes, as on Linux; its names are
 //! gone at once.
 //!
-//! Radix does not write compressed, sparse or encrypted data yet, nor a
-//! file whose attributes are in more than one record, nor make symbolic
-//! links: those fail with [`Error::NotSupported`] (ADR 0237).
+//! Compressed data is written a compression unit (16 clusters) at a
+//! time, each unit compressed into fewer clusters when it saves one, as
+//! Windows does, and left a hole when it is all zeros; a sparse file's
+//! holes are given clusters a unit at a time as data goes into them
+//! (ADR 0238). Symbolic links are made as Windows' links when Windows
+//! can follow them, and as WSL's otherwise, each listed in
+//! `$Extend\$Reparse`.
+//!
+//! Radix does not write encrypted data, nor a file whose attributes are
+//! in more than one record, nor a directory whose index bitmap is in
+//! clusters: those fail with [`Error::NotSupported`].
 
 use alloc::sync::Weak;
 use core::any::Any;
@@ -136,7 +144,8 @@ struct Dir {
     blocks: Option<Stream>,
     /// Which blocks are in use.
     bitmap: KVec<u8>,
-    /// Whether the bitmap is in clusters, which Radix does not change.
+    /// Whether Radix does not change it: its bitmap is in clusters, or
+    /// its sizes are damaged.
     fixed: bool,
     /// Whether it is `$R`, of reparse points, not `$I30`.
     view: bool,
@@ -159,7 +168,7 @@ impl Dir {
         vol: &crate::fs::Volume,
         root: KVec<u8>,
         blocks: Option<Value>,
-        bitmap: Option<Value>,
+        bitmap: Option<&Value>,
         view: bool,
     ) -> Result<(Dir, u64, u64)> {
         // A directory's index is of names, collated as names are; a view
@@ -177,7 +186,7 @@ impl Dir {
             Some(Value::Resident(_)) => return Err(Error::Corrupt),
             None => None,
         };
-        let (bitmap, in_clusters) = match &bitmap {
+        let (bitmap, in_clusters) = match bitmap {
             Some(value @ Value::Clusters(_)) => (vol.read_whole(value, MAX_WHOLE_BITMAP)?, true),
             Some(Value::Resident(bytes)) => (mem::copy(bytes)?, false),
             None => (mem::vec(), false),
@@ -187,11 +196,21 @@ impl Dir {
         }
         let size = blocks.as_ref().map_or(root.len() as u64, |b| b.size);
         let allocated = blocks.as_ref().map_or(0, |b| b.size);
+        // Blocks its clusters do not hold, or its bitmap has no bits for,
+        // are of a damaged index: it is read as far as it goes, and not
+        // changed.
+        let index_size = u64::from(vol.geo.index_size);
+        let cs = u64::from(vol.geo.cluster_size);
+        let damaged = blocks.as_ref().is_some_and(|b| {
+            !b.size.is_multiple_of(index_size)
+                || b.runs.clusters().checked_mul(cs).is_none_or(|held| b.size > held)
+                || b.size / index_size > bitmap.len() as u64 * 8
+        });
         let dir = Dir {
             root,
             blocks,
             bitmap,
-            fixed: in_clusters,
+            fixed: in_clusters || damaged,
             view,
             marks: mem::vec(),
             next_mark: 1,
@@ -377,7 +396,7 @@ impl NtfsNode {
             }
             Kind::Directory => {
                 let root = root.ok_or(Error::Corrupt)?;
-                let (index, bytes, held) = Dir::load(vol, root, blocks, bitmap, false)?;
+                let (index, bytes, held) = Dir::load(vol, root, blocks, bitmap.as_ref(), false)?;
                 (size, allocated) = (bytes, held);
                 dir = Some(index);
             }
@@ -389,7 +408,7 @@ impl NtfsNode {
             && kind == Kind::File
             && let Some(root) = root_of_view
         {
-            dir = Some(Dir::load(vol, root, blocks_of_view, bitmap_of_view, true)?.0);
+            dir = Some(Dir::load(vol, root, blocks_of_view, bitmap_of_view.as_ref(), true)?.0);
         }
         if kind == Kind::Symlink {
             fixed = Some(Error::NotSupported);
@@ -994,10 +1013,12 @@ struct DirStore<'a> {
 }
 
 impl DirStore<'_> {
-    /// How many blocks it has.
+    /// How many blocks it has: as many as its allocation holds and its
+    /// bitmap has bits for, whatever a damaged size says.
     fn count(&self) -> u64 {
         let size = u64::from(self.fs.vol.geo.index_size);
-        self.blocks.as_ref().map_or(0, |b| b.size / size)
+        let blocks = self.blocks.as_ref().map_or(0, |b| b.size / size);
+        blocks.min(self.bitmap.len() as u64 * 8)
     }
 
     fn in_use(&self, block: u64) -> bool {
@@ -1246,7 +1267,12 @@ impl NtfsNode {
                 mem::push(&mut dir.bitmap, 0)?;
             }
             let clusters = blocks.runs.clusters();
-            let sizes = edit::Sizes { allocated: clusters * cs, size, initialized: size, ..edit::Sizes::default() };
+            let sizes = edit::Sizes {
+                allocated: clusters * cs,
+                size,
+                initialized: size,
+                ..edit::Sizes::default()
+            };
             replace_named(buf, kind::INDEX_ALLOCATION, name, &blocks.runs, clusters, sizes)?;
             match edit::find(buf, kind::BITMAP, name) {
                 Some(at) => edit::set_value(buf, at, &dir.bitmap)?,
@@ -1281,7 +1307,9 @@ impl NtfsNode {
     fn update_entry(&self, name: &[u16], reference: u64, dup: &Dup) -> Result<()> {
         let upcase = &self.fs.upcase;
         self.change_index(None, &mut |root, store| {
-            tree::update(root, store, tree::Order::Names(upcase), name, reference, &mut |key| dup.put(key))
+            tree::update(root, store, tree::Order::Names(upcase), name, reference, &mut |key| {
+                dup.put(key);
+            })
         })
     }
 
@@ -1441,11 +1469,12 @@ impl NtfsNode {
             };
             let is_dir = kind == Kind::Directory || link.is_some_and(|(_, to_dir)| to_dir);
             let t = names::to_nt(now());
-            let file_attributes = match link {
-                Some(_) => attributes::ARCHIVE | attributes::REPARSE_POINT,
-                None if kind == Kind::Directory => 0,
-                None => attributes::ARCHIVE,
-            } | if compress && link.is_none() { attributes::COMPRESSED } else { 0 };
+            let file_attributes =
+                match link {
+                    Some(_) => attributes::ARCHIVE | attributes::REPARSE_POINT,
+                    None if kind == Kind::Directory => 0,
+                    None => attributes::ARCHIVE,
+                } | if compress && link.is_none() { attributes::COMPRESSED } else { 0 };
             let dup = Dup {
                 created: t,
                 modified: t,
@@ -1987,9 +2016,11 @@ impl Node for NtfsNode {
         target.add_name(&moving, &to_units, names::namespace_of(to))?;
         self.remove_name(&mut ns, &moving, &stored)?;
         {
+            // One node's state at a time.
+            let to = target.reference();
             let mut st = moving.state.lock();
             if record_of(st.parent) == self.record {
-                st.parent = target.reference();
+                st.parent = to;
             }
         }
         self.touch();
@@ -2038,35 +2069,42 @@ impl Node for NtfsNode {
         {
             let mut store =
                 DirStore { fs, blocks: &mut dir.blocks, bitmap: &mut dir.bitmap, others: 0 };
-            tree::walk(&dir.root, &mut store, tree::Order::Names(&fs.upcase), start.as_deref(), &mut |e| {
-                let reference = u64_at(e, 0);
-                let key_len = usize::from(u16_at(e, 0x0a));
-                let name = FileName::new(e.get(0x10..0x10 + key_len).ok_or(Error::Corrupt)?)?;
-                // A short name repeats a long one; the system's files, and
-                // the root's entry for itself, are left out, as Linux's
-                // drivers leave them.
-                if name.namespace() == namespace::DOS || record_of(reference) < records::FIRST_USER
-                {
-                    return Ok(true);
-                }
-                if skipped < skip {
-                    skipped += 1;
-                    return Ok(true);
-                }
-                count += 1;
-                let kind = self.kind_of(reference, &name);
-                let len = utf8(name.units(), text);
-                let next = (u64::from(new_id) << 32) | u64::from(count);
-                if !f(next, core::str::from_utf8(&text[..len]).unwrap_or(""), kind) {
-                    return Ok(false);
-                }
-                for (slot, unit) in last.iter_mut().zip(name.units()) {
-                    *slot = unit;
-                }
-                last_len = Some(name.len());
-                last_count = count;
-                Ok(true)
-            })?;
+            tree::walk(
+                &dir.root,
+                &mut store,
+                tree::Order::Names(&fs.upcase),
+                start.as_deref(),
+                &mut |e| {
+                    let reference = u64_at(e, 0);
+                    let key_len = usize::from(u16_at(e, 0x0a));
+                    let name = FileName::new(e.get(0x10..0x10 + key_len).ok_or(Error::Corrupt)?)?;
+                    // A short name repeats a long one; the system's files, and
+                    // the root's entry for itself, are left out, as Linux's
+                    // drivers leave them.
+                    if name.namespace() == namespace::DOS
+                        || record_of(reference) < records::FIRST_USER
+                    {
+                        return Ok(true);
+                    }
+                    if skipped < skip {
+                        skipped += 1;
+                        return Ok(true);
+                    }
+                    count += 1;
+                    let kind = self.kind_of(reference, &name);
+                    let len = utf8(name.units(), text);
+                    let next = (u64::from(new_id) << 32) | u64::from(count);
+                    if !f(next, core::str::from_utf8(&text[..len]).unwrap_or(""), kind) {
+                        return Ok(false);
+                    }
+                    for (slot, unit) in last.iter_mut().zip(name.units()) {
+                        *slot = unit;
+                    }
+                    last_len = Some(name.len());
+                    last_count = count;
+                    Ok(true)
+                },
+            )?;
         }
         let mark = Mark {
             id: new_id,
@@ -2344,13 +2382,15 @@ impl FileBacking<'_> {
             vcn += n;
         }
         let near = old.iter().find(|(l, _)| *l != HOLE).map(|&(l, _)| l).or_else(|| {
-            first.checked_sub(1).and_then(|v| stream.runs.map(v)).and_then(|(l, _)| {
-                (l != HOLE).then(|| l + 1)
-            })
+            first
+                .checked_sub(1)
+                .and_then(|v| stream.runs.map(v))
+                .and_then(|(l, _)| (l != HOLE).then(|| l + 1))
         });
         let room = ((per_unit - 1) * cs) as usize;
         let zeros = plain.iter().all(|&b| b == 0);
-        let compressed = if zeros { Some(0) } else { lznt1::compress(plain, &mut packed[..room], matcher) };
+        let compressed =
+            if zeros { Some(0) } else { lznt1::compress(plain, &mut packed[..room], matcher) };
         for try_packed in [true, false] {
             let (bytes, k): (&[u8], u64) = match compressed {
                 Some(n) if try_packed => {
@@ -2439,7 +2479,13 @@ impl FileBacking<'_> {
 
     /// Writes pages from byte `pos` on of the compressed `stream`, the
     /// last `len` bytes long, a compression unit at a time.
-    fn write_units(&self, stream: &mut Stream, pos: u64, pages: &[&Page], len: usize) -> Result<()> {
+    fn write_units(
+        &self,
+        stream: &mut Stream,
+        pos: u64,
+        pages: &[&Page],
+        len: usize,
+    ) -> Result<()> {
         let cs = u64::from(self.0.fs.vol.geo.cluster_size);
         let unit_bytes = cs * stream.grain();
         let last = pages.len() - 1;
@@ -2450,7 +2496,7 @@ impl FileBacking<'_> {
             let from = stream.initialized;
             let gap_end = (pos / unit_bytes * unit_bytes).max(from);
             let whole_from = from.next_multiple_of(unit_bytes);
-            if from < gap_end && from % unit_bytes != 0 {
+            if from < gap_end && !from.is_multiple_of(unit_bytes) {
                 let unit_end = whole_from.min(gap_end);
                 self.rewrite_units(stream, from, unit_end, &mut |_, _| {})?;
             }

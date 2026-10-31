@@ -41,4 +41,4 @@ line.
 
 # SEE ALSO
 
-*volumed*(8), *findmnt*(8), *systools*(1)
+*volumed*(8), *remount*(8), *findmnt*(8), *systools*(1)

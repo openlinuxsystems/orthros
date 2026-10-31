@@ -293,7 +293,7 @@ fn take(loaded: &mut Loaded, attr: &Attr<'_>, clusters: u64) -> Result<()> {
             loaded.root = Some(mem::copy(attr.value())?);
         }
         kind::INDEX_ALLOCATION if named("$I30") || named("$R") => {
-            piece(&mut loaded.blocks, attr, clusters)?
+            piece(&mut loaded.blocks, attr, clusters)?;
         }
         kind::BITMAP if named("$I30") || named("$R") => piece(&mut loaded.bitmap, attr, clusters)?,
         kind::BITMAP if attr.unnamed() => piece(&mut loaded.own_bitmap, attr, clusters)?,
@@ -355,20 +355,36 @@ impl Volume {
     /// `$MFTMirr` too if it keeps that one: in the cache, or at once if
     /// `through`.
     pub(crate) fn write_record(&self, number: u64, buf: &[u8], through: bool) -> Result<()> {
+        self.write_record_in(number, buf, through, false)
+    }
+
+    /// As [`Volume::write_record`], `$MFTMirr`'s copy first if
+    /// `mirror_first`: written at once, the copy written last is the one
+    /// a power cut in between leaves as it was.
+    pub(crate) fn write_record_in(
+        &self,
+        number: u64,
+        buf: &[u8],
+        through: bool,
+        mirror_first: bool,
+    ) -> Result<()> {
         let rs = u64::from(self.geo.record_size);
         let mut out = mem::copy(buf)?;
         fix_down(&mut out)?;
-        {
-            let mft = self.mft.lock();
-            if number >= mft.records {
-                return Err(Error::Corrupt);
-            }
-            write_runs(&self.cache, &self.geo, &mft.runs, number * rs, &out, through)?;
+        let records = self.mft.lock().records;
+        if number >= records {
+            return Err(Error::Corrupt);
         }
-        if let Some(mirror) = &self.mirror
-            && number < mirror.records
-        {
-            write_runs(&self.cache, &self.geo, &mirror.runs, number * rs, &out, through)?;
+        let mirrored = self.mirror.as_ref().filter(|mirror| number < mirror.records);
+        for mirror in [mirror_first, !mirror_first] {
+            if mirror {
+                if let Some(copy) = mirrored {
+                    write_runs(&self.cache, &self.geo, &copy.runs, number * rs, &out, through)?;
+                }
+            } else {
+                let mft = self.mft.lock();
+                write_runs(&self.cache, &self.geo, &mft.runs, number * rs, &out, through)?;
+            }
         }
         Ok(())
     }
@@ -808,12 +824,20 @@ impl Inner {
                 stream.initialized = bitmap_bytes;
             }
             let clusters = runs.clusters();
-            let sizes =
-                Sizes { allocated: clusters * cs, size: target * rs, initialized: target * rs, ..Sizes::default() };
+            let sizes = Sizes {
+                allocated: clusters * cs,
+                size: target * rs,
+                initialized: target * rs,
+                ..Sizes::default()
+            };
             replace_stream(&mut first, kind::DATA, &runs, clusters, sizes)?;
             let bits = stream.runs.clusters();
-            let sizes =
-                Sizes { allocated: bits * cs, size: stream.size, initialized: stream.initialized, ..Sizes::default() };
+            let sizes = Sizes {
+                allocated: bits * cs,
+                size: stream.size,
+                initialized: stream.initialized,
+                ..Sizes::default()
+            };
             replace_stream(&mut first, kind::BITMAP, &stream.runs, bits, sizes)?;
             Ok(first)
         })();
@@ -901,7 +925,9 @@ impl Inner {
         Ok(device.flush()?)
     }
 
-    /// Writes the volume flags `flags` to `$Volume`, at once.
+    /// Writes the volume flags `flags` to `$Volume`, at once. Marked
+    /// dirty, `$MFT`'s copy goes first, and marked clean, `$MFTMirr`'s:
+    /// a power cut between the two leaves dirty the copy that is read.
     fn write_flags(&self, flags: u16) -> Result<()> {
         let mut buf = zeroed(self.vol.geo.record_size as usize)?;
         self.vol.read_record(records::VOLUME, &mut buf)?;
@@ -911,7 +937,8 @@ impl Inner {
             return Err(Error::Corrupt);
         }
         put_u16(value, 10, flags);
-        self.vol.write_record(records::VOLUME, &buf, true)
+        let clean = flags & volume_flags::DIRTY == 0;
+        self.vol.write_record_in(records::VOLUME, &buf, true, clean)
     }
 
     /// Writes every change to the disk: the nodes' data and records, then

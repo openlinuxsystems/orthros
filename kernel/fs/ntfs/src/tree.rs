@@ -76,9 +76,9 @@ impl Order<'_> {
             Order::Names(upcase) => Ok(collate(upcase, key, key_of(entry)?.units())),
             Order::Ulongs => {
                 let theirs = raw_key(entry)?;
-                let ours = key.chunks(2).map(|p| {
-                    u32::from(p[0]) | u32::from(p.get(1).copied().unwrap_or(0)) << 16
-                });
+                let ours = key
+                    .chunks(2)
+                    .map(|p| u32::from(p[0]) | u32::from(p.get(1).copied().unwrap_or(0)) << 16);
                 let theirs = theirs.chunks(4).map(|b| {
                     let mut n = [0u8; 4];
                     n[..b.len()].copy_from_slice(b);

@@ -264,7 +264,14 @@ fn listings_go_on_after_names_taken_out() {
         }
         for name in &batch {
             let units: Vec<u16> = name.encode_utf16().collect();
-            tree::remove(&mut root, &mut store, Order::Names(&upcase), &units, reference(number[name])).unwrap();
+            tree::remove(
+                &mut root,
+                &mut store,
+                Order::Names(&upcase),
+                &units,
+                reference(number[name]),
+            )
+            .unwrap();
         }
         last = Some(batch.last().unwrap().encode_utf16().collect());
         seen.extend(batch);
@@ -288,9 +295,16 @@ fn keys_change_in_place() {
     }
     for (i, name) in names.iter().enumerate() {
         let units: Vec<u16> = name.encode_utf16().collect();
-        tree::update(&mut root, &mut store, Order::Names(&upcase), &units, reference(i as u64), &mut |k| {
-            k[0x30..0x38].copy_from_slice(&(i as u64 * 10).to_le_bytes());
-        })
+        tree::update(
+            &mut root,
+            &mut store,
+            Order::Names(&upcase),
+            &units,
+            reference(i as u64),
+            &mut |k| {
+                k[0x30..0x38].copy_from_slice(&(i as u64 * 10).to_le_bytes());
+            },
+        )
         .unwrap();
     }
     let mut sizes = Vec::new();
@@ -301,10 +315,24 @@ fn keys_change_in_place() {
     .unwrap();
     assert_eq!(sizes, (0..200).map(|i| i * 10).collect::<Vec<u64>>());
     let units: Vec<u16> = "k001".encode_utf16().collect();
-    let wrong = tree::update(&mut root, &mut store, Order::Names(&upcase), &units, reference(7), &mut |_| {});
+    let wrong = tree::update(
+        &mut root,
+        &mut store,
+        Order::Names(&upcase),
+        &units,
+        reference(7),
+        &mut |_| {},
+    );
     assert_eq!(wrong.unwrap_err(), Error::NotFound);
     let units: Vec<u16> = "nope".encode_utf16().collect();
-    let missing = tree::update(&mut root, &mut store, Order::Names(&upcase), &units, reference(1), &mut |_| {});
+    let missing = tree::update(
+        &mut root,
+        &mut store,
+        Order::Names(&upcase),
+        &units,
+        reference(1),
+        &mut |_| {},
+    );
     assert_eq!(missing.unwrap_err(), Error::NotFound);
 }
 

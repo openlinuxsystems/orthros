@@ -171,12 +171,18 @@ and Windows' and WSL's links and junctions read as Windows wrote them,
 names are found whatever their case, and a file that is encrypted or
 kept in the cloud fails to read rather than reading as zeros. Dukovo
 writes files, directories, renames and hard links as ntfs-3g does, with
-names Windows can open; compressed and sparse files, links and junctions
-are not written yet. An NTFS that Windows hibernated with (Fast
-Startup), left dirty or with changes in its journal to replay is
+names Windows can open, and compressed and sparse files as Windows
+does. A symbolic link Dukovo makes is a Windows link when Windows can
+follow it (a relative path of names Windows takes), and a WSL link
+otherwise. Encrypted files, and files so fragmented that their record
+overflows, are not written yet. An NTFS that Windows hibernated with
+(Fast Startup), left dirty or with changes in its journal to replay is
 mounted read-only, since writing it would lose Windows' changes: shut
 Windows down fully (hold Shift as you choose Shut down) and Dukovo
-writes it. Anything else is left alone.
+writes it. When Windows cannot be started any more, `remount -w
+--discard-hibernation /volumes/`*name* writes a hibernated NTFS anyway,
+after a warning: what Windows left open is lost, and Windows checks the
+disk at its next start. Anything else is left alone.
 
 Changes reach a FAT, exFAT or ext4 disk within five seconds, and a Btrfs
 disk within 30 seconds, as on Linux, or at once when a program asks for
@@ -408,4 +414,7 @@ The `ntfs` boot test reads two such disks back, one of them filled
 through ntfs-3g with links, junctions, hard links and compressed and
 sparse files. `ntfs-write` writes two, and checks them on the host with
 ntfs-3g's `ntfsresize --info` and `ntfsfix -n` and reads them back with
-The Sleuth Kit and after a reboot.
+The Sleuth Kit and after a reboot. `ntfs-power-cut` cuts the power while
+the storage test writes one: what was synced before must be there, and
+the disk marked to be checked. In CI, Windows' own `chkdsk` checks every
+volume the NTFS host tests write, those power cuts left included.

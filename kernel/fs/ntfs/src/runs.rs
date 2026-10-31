@@ -200,7 +200,10 @@ impl Runs {
             let run_end = run.vcn + run.len;
             let (from, to) = (run.vcn.max(vcn), run_end.min(end));
             if from < to && run.lcn != HOLE {
-                mem::push(&mut freed, Run { vcn: from, len: to - from, lcn: run.lcn + (from - run.vcn) })?;
+                mem::push(
+                    &mut freed,
+                    Run { vcn: from, len: to - from, lcn: run.lcn + (from - run.vcn) },
+                )?;
             }
             if run_end > end {
                 let skip = end.saturating_sub(run.vcn);

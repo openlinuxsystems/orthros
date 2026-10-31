@@ -10,7 +10,7 @@
 //! Kit's `fls` and `icat` read every file back, finding none in no
 //! directory.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 use std::string::String;
 use std::vec::Vec;
@@ -20,14 +20,16 @@ use proptest::prelude::*;
 use radix_block::ram::RamDisk;
 use radix_block::{BlockDevice, DeviceRef};
 use radix_vfs::mem::{self, KArc};
-use radix_vfs::{Access, Error, FileSystem, Kind, NodeRef, Slice};
+use radix_vfs::{Access, Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
 
 use crate::NtfsFs;
 use crate::fs::Options;
 use crate::node::NtfsNode;
 use crate::tests::{
-    Image, SIZES, VOLUMES, names, pattern, read_all, read_link, run, scratch, test_names, tool, walk,
+    Image, SIZES, VOLUMES, names, pattern, read_all, read_link, run, scratch, test_names, tool,
+    walk,
 };
+use crate::windows_tests::{self, Found};
 
 const DIR: Access = Access::default_for(Kind::Directory);
 const FILE: Access = Access::default_for(Kind::File);
@@ -203,12 +205,17 @@ fn check(image: &[u8], block: u32, expected: &BTreeMap<String, Vec<u8>>) {
     }
     let volume = Volume::mount_in(block, image, true).unwrap();
     assert!(!volume.fs.dirty(), "synced, the volume is clean");
+    let mut find = Vec::new();
     for (path, data) in expected {
         let node = walk(&volume.root(), path).unwrap();
         if node.stat().kind == Kind::File {
             assert!(read_all(&node) == *data, "{path}: Radix reads other bytes");
+            find.push((path.as_str(), Found::File(data)));
+        } else {
+            find.push((path.as_str(), Found::Dir));
         }
     }
+    windows_tests::keep(image, &find, false);
 }
 
 #[test]
@@ -484,7 +491,10 @@ fn a_hibernation_is_discarded_when_asked() {
     assert!(after[..4096].iter().all(|&b| b == 0) && after[4096..] == hiberfil[4096..]);
     let again = Volume::mount_in(512, &written, true).unwrap();
     assert!(again.fs.dirty() && !again.fs.hibernated());
-    assert_eq!(read_all(&walk(&again.root(), "written.txt").unwrap()), b"written over a hibernation");
+    assert_eq!(
+        read_all(&walk(&again.root(), "written.txt").unwrap()),
+        b"written over a hibernation"
+    );
     drop(again);
     assert_eq!(forced_cat("/written.txt"), b"written over a hibernation");
     let file = Scratch::new(&written);
@@ -574,9 +584,8 @@ fn what_ntfs_3g_wrote_is_written_to() {
     let volume = Volume::new_in(512, &image);
     let root = volume.root();
     let mut expected: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let mut change = |path: &str, at: usize, data: &[u8]| {
-        changed(&root, &mut expected, path, at, data)
-    };
+    let mut change =
+        |path: &str, at: usize, data: &[u8]| changed(&root, &mut expected, path, at, data);
     // Compressed files, a unit (8 KiB here) at a time: into the middle of
     // text that compresses, over noise that does not, and into the zeros
     // of a unit left a hole; and past their ends.
@@ -622,8 +631,14 @@ fn what_ntfs_3g_wrote_is_written_to() {
     let seen = sleuthkit_files(&written);
     for (path, data) in &expected {
         assert!(seen[path] == *data, "{path}: The Sleuth Kit reads other bytes");
-        assert!(ntfscat(&written, &format!("/{path}")) == *data, "{path}: ntfs-3g reads other bytes");
+        assert!(
+            ntfscat(&written, &format!("/{path}")) == *data,
+            "{path}: ntfs-3g reads other bytes"
+        );
     }
+    let find: Vec<_> =
+        expected.iter().map(|(path, data)| (path.as_str(), Found::File(data))).collect();
+    windows_tests::keep(&written, &find, false);
 }
 
 /// What `$Extend\$Reparse` lists in `volume`: each reparse point's tag
@@ -631,7 +646,7 @@ fn what_ntfs_3g_wrote_is_written_to() {
 fn reparse_points(volume: &Volume) -> Vec<(u32, u64)> {
     let root = volume.root();
     let node = radix_vfs::downcast::<NtfsNode>(&*root).unwrap();
-    node.reparse_points().unwrap().to_vec()
+    node.reparse_points().unwrap().clone()
 }
 
 #[test]
@@ -694,10 +709,11 @@ fn links_are_made_as_windows_and_wsl_make_them() {
             let node = walk(&root, path).unwrap();
             assert_eq!(node.stat().kind, Kind::Symlink, "{path}");
             assert_eq!(read_link(&node), target, "{path}");
-            let tag = if target.contains(':') || target.ends_with('/') { LX_SYMLINK } else { SYMLINK };
+            let tag =
+                if target.contains(':') || target.ends_with('/') { LX_SYMLINK } else { SYMLINK };
             listed.push((tag, node.stat().id));
         }
-        listed.sort();
+        listed.sort_unstable();
         assert_eq!(reparse_points(&volume), listed);
         assert!(walk(&root, "nowhere").is_err() && walk(&root, "absolute").is_err());
         drop(root);
@@ -710,6 +726,9 @@ fn links_are_made_as_windows_and_wsl_make_them() {
             let dir = matches!(path, "to docs" | "docs/up");
             assert_eq!(seen[path].0 == Kind::Directory, dir, "{path}");
         }
+        let mut find = vec![("docs", Found::Dir), ("docs/a.txt", Found::File(b"a\n"))];
+        find.extend(left.iter().map(|&(path, _)| (path, Found::Link)));
+        windows_tests::keep(&written, &find, false);
     }
 }
 
@@ -737,11 +756,15 @@ fn reparse_index_grows_into_blocks_and_back() {
         .iter()
         .filter(|(i, _)| i % 2 == 1)
         .map(|&(i, id)| {
-            let tag = if i % 3 == 0 { crate::reparse::tag::LX_SYMLINK } else { crate::reparse::tag::SYMLINK };
+            let tag = if i % 3 == 0 {
+                crate::reparse::tag::LX_SYMLINK
+            } else {
+                crate::reparse::tag::SYMLINK
+            };
             (tag, id)
         })
         .collect();
-    left.sort();
+    left.sort_unstable();
     assert_eq!(reparse_points(&volume), left);
     let root = volume.root();
     let dir = walk(&root, "links").unwrap();
@@ -772,6 +795,92 @@ fn links_windows_and_wsl_made_go() {
     let volume = volume.remount();
     assert_eq!(reparse_points(&volume), []);
     ntfs_3g_check(&volume.image());
+}
+
+/// Power cuts all through a sync: the disk takes the first `n` requests
+/// of it and fails the rest, for cuts from its start to its end. The
+/// first change since the volume was last clean marked it dirty on the
+/// disk at once, so whatever a cut leaves is dirty: Radix mounts it only
+/// to read it, and Windows checks it at its next mount (CI's Windows job
+/// runs `chkdsk /f` on each). The files synced before the changes, which
+/// none changed, keep their records and their bytes, as The Sleuth Kit
+/// reads them by record.
+#[test]
+fn a_power_cut_leaves_what_was_synced() {
+    let image = Image::mkntfs(16, 512, 4096);
+    let volume = Volume::new_in(512, &image.bytes());
+    let root = volume.root();
+    let kept = root.create("kept", Kind::Directory, DIR).unwrap();
+    let mut synced = BTreeMap::new();
+    synced.insert(String::from("kept"), Vec::new());
+    let mut records = Vec::new();
+    for i in 0..40 {
+        let (path, data) =
+            (format!("kept/file {i}.txt"), pattern(i, SIZES[i as usize % SIZES.len()]));
+        let node = make_file(&kept, &path[5..], &data, 4096);
+        records.push((node.stat().id, data.clone()));
+        synced.insert(path, data);
+    }
+    let big = pattern(99, 300_000);
+    records.push((make_file(&root, "big.bin", &big, 1 << 16).stat().id, big.clone()));
+    synced.insert(String::from("big.bin"), big);
+    drop((root, kept));
+    let before = volume.image();
+    drop(volume);
+    check(&before, 512, &synced);
+    // The same changes each time: the synced directory grows into index
+    // blocks, the master file table grows, and a new directory holds a
+    // large file.
+    let changes = |volume: &Volume| {
+        let root = volume.root();
+        let kept = walk(&root, "kept").unwrap();
+        for i in 0..300 {
+            make_file(&kept, &format!("new {i}"), &pattern(1000 + i, 3000), usize::MAX);
+        }
+        let fresh = root.create("fresh", Kind::Directory, DIR).unwrap();
+        make_file(&fresh, "large.bin", &pattern(7, 2 << 20), 1 << 16);
+    };
+    let (whole, after) = {
+        let volume = Volume::new_in(512, &before);
+        changes(&volume);
+        let start = volume.disk.requests();
+        volume.fs.sync().unwrap();
+        (volume.disk.requests() - start, volume.raw())
+    };
+    assert!(whole > 20, "a sync of {whole} requests");
+    let mut find: Vec<(&str, Found<'_>)> = vec![("kept", Found::Dir)];
+    find.extend(
+        synced.iter().filter(|(p, _)| *p != "kept").map(|(p, d)| (p.as_str(), Found::File(d))),
+    );
+    // A dozen cuts through it, and each of its last requests.
+    let mut cuts: Vec<u64> = (0..whole).step_by((whole / 12) as usize).collect();
+    cuts.extend(whole - 6..whole);
+    for n in cuts {
+        let volume = Volume::new_in(512, &before);
+        changes(&volume);
+        volume.disk.fail_after(n as u32);
+        assert!(volume.fs.sync().is_err(), "a sync cut after {n} of {whole} requests");
+        let cut = volume.raw();
+        drop(volume);
+        let read = Volume::mount_in(512, &cut, true).unwrap();
+        let dirty = read.fs.dirty();
+        drop(read);
+        // Clean, the cut came after the last write, before its flush.
+        if !dirty {
+            assert!(cut == after, "cut after {n} of {whole} requests, clean but not all written");
+            continue;
+        }
+        assert_eq!(Volume::mount_in(512, &cut, false).err(), Some(Error::NotSupported));
+        let file = Scratch::new(&cut);
+        for (record, data) in &records {
+            let found = run(Command::new(tool("icat"))
+                .args(["-f", "ntfs"])
+                .arg(&file.0)
+                .arg(record.to_string()));
+            assert!(found == *data, "cut after {n} of {whole} requests: record {record} changed");
+        }
+        windows_tests::keep(&cut, &find, true);
+    }
 }
 
 /// What a step of [`random_changes_read_back`] does.
@@ -881,5 +990,114 @@ proptest! {
             expected.insert(dir, Vec::new());
         }
         check(&volume.image(), 512, &expected);
+    }
+}
+
+/// [`crate::tests::ntfs_3g`]'s volume, and the sectors of it that hold
+/// metadata: its boot sector, and its records and index blocks, found by
+/// their signatures.
+fn damage_volume() -> &'static (Vec<u8>, Vec<usize>) {
+    static VOLUME: std::sync::OnceLock<(Vec<u8>, Vec<usize>)> = std::sync::OnceLock::new();
+    VOLUME.get_or_init(|| {
+        let image = crate::tests::ntfs_3g();
+        let mut sectors = vec![0];
+        for (i, sector) in image.chunks(512).enumerate() {
+            if sector.starts_with(b"FILE") {
+                sectors.extend(i..i + 2);
+            } else if sector.starts_with(b"INDX") {
+                sectors.extend(i..i + 8);
+            }
+        }
+        (image, sectors)
+    })
+}
+
+/// Reads everything under `dir` once, ignoring what fails.
+fn read_everything(dir: &NodeRef, seen: &mut BTreeSet<u64>) {
+    let mut names = Vec::new();
+    let _ = dir.list(0, &mut |_, name, _| {
+        names.push(String::from(name));
+        names.len() < 1000
+    });
+    for name in names {
+        let Ok(node) = dir.lookup(&name) else { continue };
+        let stat = node.stat();
+        if !seen.insert(stat.id) {
+            continue;
+        }
+        match stat.kind {
+            Kind::Directory => read_everything(&node, seen),
+            Kind::Symlink => {
+                let _ = node.read_link(&mut SliceMut(&mut [0; 300]));
+            }
+            _ => {
+                let _ = node.read(0, &mut SliceMut(&mut vec![0; 70_000]));
+            }
+        }
+    }
+}
+
+/// Changes what is under `dir` once, ignoring what fails: each file
+/// written into and cut, every other name taken out, or moved, and a
+/// file, a directory and a link made in each directory.
+fn change_everything(dir: &NodeRef, seen: &mut BTreeSet<u64>) {
+    let mut names = Vec::new();
+    let _ = dir.list(0, &mut |_, name, _| {
+        names.push(String::from(name));
+        names.len() < 200
+    });
+    for (i, name) in names.iter().enumerate() {
+        let Ok(node) = dir.lookup(name) else { continue };
+        let stat = node.stat();
+        if !seen.insert(stat.id) {
+            continue;
+        }
+        match stat.kind {
+            Kind::Directory => change_everything(&node, seen),
+            Kind::File => {
+                let _ = node.write(3000, &Slice(&pattern(i as u32, 9000)));
+                let _ = node.set_size(5000);
+            }
+            _ => {}
+        }
+        if i % 2 == 1 {
+            let _ = dir.remove(name);
+        } else if i % 4 == 0 {
+            let _ = dir.rename(name, &**dir, &format!("{name} moved"));
+        }
+    }
+    if let Ok(node) = dir.create("new file", Kind::File, FILE) {
+        let _ = node.write(0, &Slice(&pattern(5, 20_000)));
+    }
+    let _ = dir.create("new dir", Kind::Directory, DIR);
+    let _ = dir.make_link("new link", "new file", FILE);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// Damaged metadata never panics the driver, reading or writing: the
+    /// ntfs-3g volume, its records and index blocks with bytes flipped,
+    /// past what their update sequences catch, is mounted to be read and
+    /// to be written, and everything on it read, then written, cut,
+    /// moved and taken out. What fails, fails.
+    #[test]
+    fn damaged_metadata_never_panics(
+        flips in prop::collection::vec((any::<prop::sample::Index>(), 0usize..512, any::<u8>()), 1..24),
+    ) {
+        let (image, sectors) = damage_volume();
+        let mut image = image.clone();
+        for (sector, at, bits) in flips {
+            image[sectors[sector.index(sectors.len())] * 512 + at] ^= bits | 1;
+        }
+        if let Ok(volume) = Volume::mount_in(512, &image, true) {
+            read_everything(&volume.root(), &mut BTreeSet::default());
+        }
+        if let Ok(volume) = Volume::mount_in(512, &image, false) {
+            let root = volume.root();
+            read_everything(&root, &mut BTreeSet::default());
+            change_everything(&root, &mut BTreeSet::default());
+            let _ = volume.fs.sync();
+        }
     }
 }
