@@ -26,9 +26,10 @@ ends too; consoled clears the console and starts it again.
 
 A wrong name or password is answered, after a wait that grows with
 each wrong one in a row, with *The name or the password is wrong.*,
-whichever it was, and the name is asked again. Every sign-in and
-sign-out, and every wrong password, is a security event in the audit
-log (*authd*(8)).
+whichever it was, and the name is asked again. The right password of a
+disabled account (*user*(8)) is answered with *The account* _name_ *is
+disabled*. Every sign-in and sign-out, and every wrong password, is a
+security event in the audit log (*authd*(8)).
 
 Each console signs in on its own: two people, or one person twice, can
 be signed in on two consoles at once, and *who*(1) lists them.
@@ -94,6 +95,10 @@ sign-in, before their shell starts:
 ```
 Your password was reset from the startup-trouble menu on Sat Oct 31 12:40 2026.
 ```
+
+A disabled administrator's account is listed as *(disabled)*, and
+resetting its password enables it too (ADR 0220): it is how the owner
+gets back in.
 
 Anyone at the boot menu could already start the computer with root's
 shell (*console-sign-in=off*), so the menu gives no one more; what it

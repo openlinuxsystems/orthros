@@ -492,7 +492,11 @@ _target/userspace/_).
 		only their *status* in _/processes_. Root, whose root has the
 		bypass right, then reads both homes, and a capability stamped
 		for bob makes files that are his and reaches alice's only with
-		the bypass right (ADR 0214).
+		the bypass right (ADR 0214). Last, root starts itself as carol,
+		who starts a child, and ends her (*radix-names*(2)'s *end*): both
+		end, the kernel answers 0 the second time, a capability stamped
+		for her before is denied even with the bypass right, one stamped
+		after is not, and root cannot be ended (ADR 0220).
 
 	*views*
 		Boot 2 CPUs with _/system/tests/posix/views_ as a program that
@@ -547,7 +551,16 @@ _target/userspace/_).
 		starts itself as alice, who changes her own password given hers
 		but not bob's, makes no account, checks no password but hers,
 		and can neither read the hashes nor change the account files
-		(ADR 0218).
+		(ADR 0218). Then root changes bob's full name and makes him an
+		administrator and not; is asked for a yes before disabling or
+		demoting alice, the last administrator; starts bob with a child
+		and cannot rename his account while they run; disables it, which
+		ends both, after which his password answers that it is disabled
+		and *user list* says so; enables it; renames it to robert, with
+		his group and his home; removes it, deleting the home, after
+		which its number is retired and carol, made next, gets the one
+		after; archives carol's home in _/users/.removed_ and keeps
+		dave's, and a new dave is told whose the kept home is (ADR 0220).
 
 	*signin*
 		Boot 2 CPUs under UEFI from USB with the shipped services and
@@ -588,7 +601,11 @@ _target/userspace/_).
 		again, Esc closes the prompt, and *-S* reads the password from the
 		input. Ctrl+Alt+Delete with no prompt shows consoled's menu; Esc
 		closes it, and Enter shows the sign-in on tty3, where nobody is
-		signed in. The power button ends it (ADRs 0219, 0251 and 0252).
+		signed in. Alice cannot disable her own account; she disables
+		bob's, which ends his session on tty2 at once, and his password
+		then gets that it is disabled, until she enables it and he signs
+		in again. The power button ends it (ADRs 0219, 0220, 0251 and
+		0252).
 
 	*startup-trouble*
 		Boot 2 CPUs under UEFI from USB with *startup-trouble*, as the

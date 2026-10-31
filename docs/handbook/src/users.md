@@ -139,6 +139,59 @@ the password's hash, never the password; the home is made at the first
 boot. `--password-file` takes the password from a file instead, for
 scripts.
 
+## Disabling, removing and renaming accounts
+
+Disabling an account ends everything it runs at once, its sessions on
+every console, what it left running and the commands it runs through
+elevate, and nobody signs in to it until it is enabled again, with the
+password it had:
+
+```
+$ elevate user disable bob
+bob is disabled: 3 of its processes ended. user enable bob enables it again.
+$ elevate user enable bob
+bob is enabled again.
+```
+
+A folder the account handed to another program opens nothing more
+either, since the system itself takes the account's access away, not a
+command that hunts down its programs one by one. Someone who knows the
+password of a disabled account is told it is disabled when they sign
+in; anyone else is told the password is wrong.
+
+Removing an account disables it the same way and takes it out of the
+account files. `user` asks what becomes of its home:
+
+- **keep** leaves it where it is, for an administrator to see to;
+- **archive** packs it into one compressed file in `/users/.removed`,
+  which only administrators open, and deletes it;
+- **delete** deletes it, after asking again.
+
+In a script, `--keep-home`, `--archive-home` or `--delete-home` says
+which. A removed account's number is never given to another account, so
+the files it left anywhere stay out of everyone else's reach.
+
+```
+$ elevate user remove --archive-home bob
+bob is removed: its home is archived in /users/.removed/bob-2026-10-31.tar.zst,
+for administrators only.
+```
+
+`elevate user rename bob robert` renames an account, with its group and
+its home, once it runs nothing: after bob signs out and what he left
+running ends, or once it is disabled. `user set` changes an account's
+full name, which anyone changes for themselves, or whether it is an
+administrator's: `elevate user set --admin bob`. Someone who is no
+longer an administrator keeps nothing of it, not an elevated shell they
+left open.
+
+You do not disable, remove or rename the account you are signed in
+with: another administrator does, so that your own session does not end
+under you. Disabling or removing the last administrator who can sign
+in, or making them no longer one, asks first, since nobody could
+elevate afterwards; the startup-trouble menu (below) enables a disabled
+administrator again.
+
 ## Changing a password
 
 `passwd` changes yours, given the one you have; an administrator,
@@ -161,7 +214,7 @@ startup-trouble menu:
 ```
 
 Choose 1, name the administrator, and type the new password twice; then
-choose 2 and sign in with it. Nobody resets a password unseen: the audit
+choose 2 and sign in with it. A disabled administrator is enabled too. Nobody resets a password unseen: the audit
 log keeps each reset, and every administrator is told at their next
 sign-in, before their shell starts. The menu gives nothing that the boot
 menu did not give already, since anyone at it can start root's shell; a
@@ -177,6 +230,8 @@ recovery key.
 | `/system/settings/group` | The groups, in Linux's format |
 | `/system/state/authd/passwords` | The passwords' Argon2id hashes, which only the authd service reads |
 | `/system/state/authd/notices` | What each person is told at their next sign-in, such as a password reset |
+| `/system/state/authd/retired` | The numbers of removed accounts, which no account gets again |
+| `/users/.removed` | The archived homes of removed accounts |
 
 `/etc/passwd` and `/etc/group` lead to the first two, so programs from
 Linux find them where they look. Only authd changes these files, and it
@@ -184,6 +239,7 @@ keeps any line it does not read, so a comment an administrator adds by
 hand stays. A hash is in the format Linux's libxcrypt reads, so a
 password hash can move between Dukovo and Linux.
 
-Making an account, changing a password and each wrong password are
-security events in the audit log: `log --audit` shows them (see
+Making, disabling, enabling, removing, renaming and changing an
+account, changing a password and each wrong password are security
+events in the audit log: `log --audit` shows them (see
 [Logs, monitoring and troubleshooting](logs.md)).

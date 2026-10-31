@@ -37,8 +37,15 @@ pub const GROUP: &str = "/system/settings/group";
 /// Where authd keeps its files, which no other program's view holds.
 pub const STATE: &str = "/system/state/authd";
 /// The password hashes: a line `name:hash:` each, as Linux's
-/// `/etc/shadow` begins, where an empty hash is an empty password.
+/// `/etc/shadow` begins, where an empty hash is an empty password and
+/// [`DISABLED`] in front marks a disabled account.
 pub const PASSWORDS: &str = "/system/state/authd/passwords";
+/// The numbers of removed accounts, which no account gets again (ADR
+/// 0220): a line `number:name:removed`, the day of the removal, each.
+pub const RETIRED: &str = "/system/state/authd/retired";
+/// Where the homes of removed accounts are archived, if they are: no
+/// account's name starts with a dot.
+pub const REMOVED: &str = "/users/.removed";
 /// The socket authd answers at.
 pub const SOCKET: &str = "/system/live/authd/socket";
 /// Where homes are: `/users/<name>`.
@@ -167,6 +174,11 @@ pub struct Password {
     pub hash: String,
 }
 
+/// The mark in front of a disabled account's hash, as Linux's `usermod
+/// -L` puts it there: the password is kept, and opens nothing until the
+/// mark goes (ADR 0220).
+pub const DISABLED: char = '!';
+
 impl Password {
     /// A hash from a line of [`PASSWORDS`]: `name:hash:` and any fields
     /// after, as `/etc/shadow`'s lines have.
@@ -175,6 +187,23 @@ impl Password {
         let name = fields.next().filter(|n| !n.is_empty())?;
         let hash = fields.next()?;
         Some(Password { name: name.into(), hash: hash.into() })
+    }
+
+    /// Whether its account is disabled: its hash has [`DISABLED`] in
+    /// front.
+    pub fn is_disabled(&self) -> bool {
+        self.hash.starts_with(DISABLED)
+    }
+
+    /// The password's own hash, without the mark of a disabled account.
+    pub fn own_hash(&self) -> &str {
+        self.hash.strip_prefix(DISABLED).unwrap_or(&self.hash)
+    }
+
+    /// Disables its account, or enables it, keeping the password.
+    pub fn set_disabled(&mut self, disabled: bool) {
+        let own = self.own_hash().to_string();
+        self.hash = if disabled { format!("{DISABLED}{own}") } else { own };
     }
 }
 
@@ -318,24 +347,39 @@ pub fn password_warning(name: &str, password: &str) -> Option<String> {
     }
 }
 
+/// The numbers in the text of [`RETIRED`].
+pub fn retired(text: &str) -> Vec<u32> {
+    text.lines().filter_map(|line| line.split(':').next()?.parse().ok()).collect()
+}
+
+/// The line of [`RETIRED`] for `user`, removed on `day`.
+pub fn retired_line(user: &User, day: &str) -> String {
+    format!("{}:{}:{day}\n", user.uid, user.name)
+}
+
 /// The number a new account gets: the lowest from [`FIRST_USER`] that no
-/// user and no group has.
-pub fn free_number(users: &Table<User>, groups: &Table<Group>) -> Option<u32> {
-    (FIRST_USER..=LAST_USER)
-        .find(|&n| !users.entries().any(|u| u.uid == n) && !groups.entries().any(|g| g.gid == n))
+/// user and no group has, and that no removed account had (`retired`), so
+/// that the files a removed account left are never another's.
+pub fn free_number(users: &Table<User>, groups: &Table<Group>, retired: &[u32]) -> Option<u32> {
+    (FIRST_USER..=LAST_USER).find(|&n| {
+        !users.entries().any(|u| u.uid == n)
+            && !groups.entries().any(|g| g.gid == n)
+            && !retired.contains(&n)
+    })
 }
 
 /// Adds the account `name` to `users` and `groups`, as authd(8) and `ob
-/// image --user` make one: with the lowest free number, a group of its
-/// own of that number, its home in [`USERS`] and the [`SHELL`], and if
-/// `admin`, in the [`ADMINS`] group, which is made if there is none. Its
-/// user, or why it cannot be made.
+/// image --user` make one: with the lowest free number not `retired`, a
+/// group of its own of that number, its home in [`USERS`] and the
+/// [`SHELL`], and if `admin`, in the [`ADMINS`] group, which is made if
+/// there is none. Its user, or why it cannot be made.
 pub fn add(
     users: &mut Table<User>,
     groups: &mut Table<Group>,
     name: &str,
     full_name: &str,
     admin: bool,
+    retired: &[u32],
 ) -> Result<User, String> {
     check_name(name)?;
     check_full_name(full_name)?;
@@ -345,21 +389,9 @@ pub fn add(
     if groups.entries().any(|g| g.name == name) {
         return Err(format!("there is a group {name} already"));
     }
-    let number = free_number(users, groups).ok_or("every account number is taken")?;
+    let number = free_number(users, groups, retired).ok_or("every account number is taken")?;
     if admin {
-        if let Some(admins) = groups.entries_mut().find(|g| g.name == ADMINS) {
-            admins.members.push(name.into());
-        } else if groups.entries().any(|g| g.gid == ADMINS_GROUP) {
-            return Err(format!(
-                "there is no {ADMINS} group, and its number, {ADMINS_GROUP}, is another group's"
-            ));
-        } else {
-            groups.push(Group {
-                name: ADMINS.into(),
-                gid: ADMINS_GROUP,
-                members: vec![name.into()],
-            });
-        }
+        set_admin(groups, name, true)?;
     }
     groups.push(Group { name: name.into(), gid: number, members: Vec::new() });
     let user = User {
@@ -372,6 +404,93 @@ pub fn add(
     };
     users.push(user.clone());
     Ok(user)
+}
+
+/// Puts `name` in the [`ADMINS`] group, made if there is none, or takes
+/// it out: not as its own group, which only another `gid` changes.
+pub fn set_admin(groups: &mut Table<Group>, name: &str, admin: bool) -> Result<(), String> {
+    if let Some(admins) = groups.entries_mut().find(|g| g.name == ADMINS) {
+        let listed = admins.members.iter().any(|m| m == name);
+        if admin && !listed {
+            admins.members.push(name.into());
+        } else if !admin {
+            admins.members.retain(|m| m != name);
+        }
+        return Ok(());
+    }
+    if !admin {
+        return Ok(());
+    }
+    if groups.entries().any(|g| g.gid == ADMINS_GROUP) {
+        return Err(format!(
+            "there is no {ADMINS} group, and its number, {ADMINS_GROUP}, is another group's"
+        ));
+    }
+    groups.push(Group { name: ADMINS.into(), gid: ADMINS_GROUP, members: vec![name.into()] });
+    Ok(())
+}
+
+/// Takes the account `name` out of `users` and `groups`: its user, its
+/// own group (of its name and number) and its name in every group's
+/// members, as Linux's `userdel` does. Its user, or why there is none.
+/// Its home is the caller's to keep, archive or delete.
+pub fn remove(
+    users: &mut Table<User>,
+    groups: &mut Table<Group>,
+    name: &str,
+) -> Result<User, String> {
+    let user = users
+        .entries()
+        .find(|u| u.name == name)
+        .cloned()
+        .ok_or_else(|| format!("there is no account {name}"))?;
+    users.retain_entries(|u| u.name != name);
+    groups.retain_entries(|g| !(g.name == name && g.gid == user.gid));
+    for group in groups.entries_mut() {
+        group.members.retain(|m| m != name);
+    }
+    Ok(user)
+}
+
+/// Renames the account `name` to `new` in `users` and `groups`: its user,
+/// its own group, its name in every group's members, and its home if it
+/// is `/users/<name>`, as Linux's `usermod -l new -d /users/new -m`
+/// does. The user as it was and as it is, or why it cannot be renamed.
+/// Moving the home is the caller's.
+pub fn rename(
+    users: &mut Table<User>,
+    groups: &mut Table<Group>,
+    name: &str,
+    new: &str,
+) -> Result<(User, User), String> {
+    check_name(new)?;
+    if users.entries().any(|u| u.name == new) {
+        return Err(format!("there is an account {new} already"));
+    }
+    if groups.entries().any(|g| g.name == new) {
+        return Err(format!("there is a group {new} already"));
+    }
+    let user = users
+        .entries_mut()
+        .find(|u| u.name == name)
+        .ok_or_else(|| format!("there is no account {name}"))?;
+    let before = user.clone();
+    user.name = new.into();
+    if user.home == format!("{USERS}/{name}") {
+        user.home = format!("{USERS}/{new}");
+    }
+    let after = user.clone();
+    for group in groups.entries_mut() {
+        if group.name == name && group.gid == before.gid {
+            group.name = new.into();
+        }
+        for member in &mut group.members {
+            if member == name {
+                *member = new.into();
+            }
+        }
+    }
+    Ok((before, after))
 }
 
 /// Whether the user `name` is an administrator: in the [`ADMINS`] group,

@@ -10,23 +10,50 @@
 //! and `fork` pass on and `exec` keeps; a file object keeps the name it
 //! was opened for ([`crate::fs::FileObject::name`]): its directory's, or
 //! for what a process makes without a path, as a pipe, the process's.
-//! Only the two methods here give another.
+//! Only the first two methods here give another.
+//!
+//! The third, `end`, takes a user's names away (ADR 0220): it ends the
+//! processes that act for it, and from then on the gate turns away every
+//! name of it given before ([`Identity::is_current`]). Each name counts
+//! when it was given ([`MADE`]), and the kernel keeps when each user was
+//! ended ([`ENDED`]): a name given before is stale.
+
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use radix_abi::UserBuffer;
 use radix_abi::errors::Kernel;
-use radix_abi::names::{self as abi, GROUPS_MAX, NameProcessArgs, StampArgs};
+use radix_abi::names::{self as abi, EndArgs, EndResults, GROUPS_MAX, NameProcessArgs, StampArgs};
+use radix_abi::signal::SIGKILL;
 use radix_cap::{Capability, ObjectKind, Rights, SlotRef};
 use radix_hal::UserMode;
+use radix_mm::{Flags, HEAP, Kmalloc};
+use radix_posix::signal::{Info, SI_KERNEL};
+use radix_sync::Mutex;
 use radix_vfs::Who;
 use radix_vfs::mem::{self, KArc};
 
 use super::methods::{Answer, answer};
 use super::objects::{self, Object};
+use super::posix::signal::{self, Sent};
 use super::{Result, UserRef, cap_error, error};
 use crate::Arch;
 use crate::fs::FileObject;
 
 const MAX: usize = GROUPS_MAX as usize;
+
+/// How many names were given since the kernel started: each
+/// [`Identity::new`] counts the next, and `end` one more.
+static MADE: AtomicU64 = AtomicU64::new(1);
+
+/// The users ended since the kernel started, each with the count of
+/// [`MADE`] it was ended at: a name of it given before then is stale.
+/// Made when the first is ended.
+static ENDED: Mutex<Option<Vec<(u32, u64), Kmalloc>>> = Mutex::new(None);
+
+/// Whether [`ENDED`] holds any user: until it does, the gate does not
+/// take its lock.
+static ANY_ENDED: AtomicBool = AtomicBool::new(false);
 
 /// A name: a user, its group, and up to GROUPS_MAX other groups, which
 /// most names have none of and the others share.
@@ -37,6 +64,9 @@ pub struct Identity {
     /// Its group's number.
     pub group: u32,
     others: Option<KArc<Groups>>,
+    /// The count of [`MADE`] it was given at, which its copies keep; 0
+    /// for root's.
+    made: u64,
 }
 
 #[derive(Debug)]
@@ -48,7 +78,7 @@ struct Groups {
 impl Identity {
     /// Root, user and group 0 with no other groups: what the kernel starts
     /// Spark with, and its own calls act for.
-    pub const ROOT: Identity = Identity { user: 0, group: 0, others: None };
+    pub const ROOT: Identity = Identity { user: 0, group: 0, others: None, made: 0 };
 
     /// User `user` in group `group` and in `groups`; `None` if there are
     /// more than GROUPS_MAX of them, or no memory for them.
@@ -63,7 +93,7 @@ impl Identity {
             list[..groups.len()].copy_from_slice(groups);
             Some(mem::arc(Groups { count: groups.len(), list }).ok()?)
         };
-        Some(Identity { user, group, others })
+        Some(Identity { user, group, others, made: MADE.fetch_add(1, Ordering::Relaxed) })
     }
 
     /// Its other groups.
@@ -72,9 +102,27 @@ impl Identity {
     }
 
     /// It as the second gate takes it, passing it with `bypass`: whether
-    /// the capability it comes through has the bypass right.
-    pub fn who(&self, bypass: bool) -> Who<'_> {
-        Who { user: self.user, group: self.group, groups: self.groups(), bypass }
+    /// the capability it comes through has the bypass right. None if its
+    /// user was ended after it was given ([`Identity::is_current`]), which
+    /// the gate turns away.
+    pub fn who(&self, bypass: bool) -> Option<Who<'_>> {
+        self.is_current().then(|| Who {
+            user: self.user,
+            group: self.group,
+            groups: self.groups(),
+            bypass,
+        })
+    }
+
+    /// Whether its user was not ended since it was given (ADR 0220).
+    /// Root's always is.
+    pub fn is_current(&self) -> bool {
+        if self.user == 0 || !ANY_ENDED.load(Ordering::Acquire) {
+            return true;
+        }
+        let ended = ENDED.lock();
+        let at = ended.as_ref().and_then(|users| users.iter().find(|e| e.0 == self.user));
+        at.is_none_or(|&(_, at)| self.made > at)
     }
 }
 
@@ -141,6 +189,50 @@ pub fn method(user: &UserRef, cap: &Capability, label: u32, args: &[u64; 8]) -> 
             )?;
             answer(label, 0, [0; 8])
         }
+        abi::END => {
+            let a = EndArgs::decode(args)?;
+            if a.user == 0 {
+                return Err(Kernel::InvalidArgument.status(0));
+            }
+            mark_ended(a.user)?;
+            let ended = end_processes(a.user)?;
+            answer(label, EndResults::WORDS, EndResults { ended }.encode())
+        }
         _ => Err(error(Kernel::NoSuchMethod)),
     }
+}
+
+fn kmalloc() -> Kmalloc {
+    HEAP.with(Flags::MAY_SLEEP)
+}
+
+/// Notes that `user` was ended now: every name of it given until now is
+/// stale.
+fn mark_ended(user: u32) -> Result<()> {
+    let mut ended = ENDED.lock();
+    let users = ended.get_or_insert_with(|| Vec::new_in(kmalloc()));
+    let at = MADE.fetch_add(1, Ordering::Relaxed);
+    if let Some(entry) = users.iter_mut().find(|e| e.0 == user) {
+        entry.1 = at;
+    } else {
+        users.try_reserve(1).map_err(|_| error(Kernel::NoMemory))?;
+        // Room was reserved above.
+        let _ = users.push_within_capacity((user, at));
+    }
+    ANY_ENDED.store(true, Ordering::Release);
+    Ok(())
+}
+
+/// Sends SIGKILL to every process that acts for `user`, as the kernel;
+/// how many it ended, of those that were not ending already.
+fn end_processes(user: u32) -> Result<u32> {
+    let processes = objects::processes().ok_or(error(Kernel::NoMemory))?;
+    let from = Info { code: SI_KERNEL, pid: 0, status: 0 };
+    let mut ended = 0u32;
+    for process in processes.iter().filter(|p| p.user() == user) {
+        if signal::send_process(process, SIGKILL, from) != Sent::Dropped {
+            ended = ended.saturating_add(1);
+        }
+    }
+    Ok(ended)
 }

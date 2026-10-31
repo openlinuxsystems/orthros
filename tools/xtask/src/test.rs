@@ -1242,7 +1242,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "principals",
-        about: "processes and capabilities act for names: alice, with a root stamped for her and no bypass right, cannot read bob's 0700 home, give her files away, remove bob's files from a sticky directory, run a file without an execute bit, or signal, trace or read more than the status of bob's processes, while root's bypass right reaches them all",
+        about: "processes and capabilities act for names: alice, with a root stamped for her and no bypass right, cannot read bob's 0700 home, give her files away, remove bob's files from a sticky directory, run a file without an execute bit, or signal, trace or read more than the status of bob's processes, while root's bypass right reaches them all; ending carol ends her processes and denies what was stamped for her before",
         firmware: Firmware::Bios,
         media: Media::Usb,
         cmdline: "lockdep -- --posix --names /system/tests/posix/principals",
@@ -1290,7 +1290,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "accounts",
-        about: "authd keeps the accounts: user add makes an administrator and an account with an empty password, with their groups, homes and Argon2id hashes in files of the right modes, which getpwnam, getgrnam, id and user list read; a right password opens an account, a wrong one or a name there is not is answered alike after a wait, and tries at once wait their turn; root changes a password with passwd, and alice changes hers given hers, but not bob's, makes no account, checks no one else's password and reads no hash",
+        about: "authd keeps the accounts: user add makes an administrator and an account with an empty password, with their groups, homes and Argon2id hashes in files of the right modes, which getpwnam, getgrnam, id and user list read; a right password opens an account, a wrong one or a name there is not is answered alike after a wait, and tries at once wait their turn; root changes a password with passwd, and alice changes hers given hers, but not bob's, makes no account, checks no one else's password and reads no hash; root changes bob's settings, disables him, which ends what he runs, enables, renames and removes him, whose number is never given again, and archives and keeps homes",
         firmware: Firmware::Bios,
         media: Media::Usb,
         cmdline: "lockdep -- --services --posix --names /system/tests/posix/accounttest",
@@ -1324,7 +1324,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "elevate",
-        about: "elevate and sudo run commands as an administrator: alice, an administrator, types her password once, at the console's own prompt that Ctrl+Alt+Delete clears and no program reads, and runs commands as root with a clean environment and the fixed path, reads the kernel log and the audit log, Ctrl+C reaches an elevated command, an elevated shell runs on a terminal of its own, a wrong password is asked again, Esc closes the prompt, -S reads the password, -k locks the pane and -n will not ask; bob, who is not one, cannot, and each use is in the audit log; Ctrl+Alt+Delete's menu shows the sign-in on a free console",
+        about: "elevate and sudo run commands as an administrator: alice, an administrator, types her password once, at the console's own prompt that Ctrl+Alt+Delete clears and no program reads, and runs commands as root with a clean environment and the fixed path, reads the kernel log and the audit log, Ctrl+C reaches an elevated command, an elevated shell runs on a terminal of its own, a wrong password is asked again, Esc closes the prompt, -S reads the password, -k locks the pane and -n will not ask; bob, who is not one, cannot, and each use is in the audit log; Ctrl+Alt+Delete's menu shows the sign-in on a free console; disabling bob's account ends his session at once and keeps him out until it is enabled",
         firmware: Firmware::Bios,
         media: Media::Usb,
         // As signin: Spark starts the services and signintest, which makes
@@ -7383,7 +7383,8 @@ fn logging(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// The `principals` test: Spark starts principals
 /// (userspace/posix/principals.c) as root with the names capability,
 /// which starts itself as bob and as alice, each with a root of their own
-/// name, and checks the second gate between them (ADR 0214).
+/// name, and checks the second gate between them (ADR 0214), then as
+/// carol, whom it ends (ADR 0220).
 fn principals(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
@@ -7450,7 +7451,8 @@ fn services(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// and accounttest (userspace/posix/accounttest.c) as root with the
 /// names capability, which makes accounts with user(8), checks what
 /// authd wrote and how it answers, and starts itself as alice
-/// (ADR 0218).
+/// (ADR 0218); then changes, disables, renames and removes accounts
+/// (ADR 0220).
 fn accounts(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
@@ -7467,12 +7469,19 @@ fn accounts(vm: &mut Vm, case: &Case) -> Result<(), String> {
         return Err(format!("accounttest exited with code {code}"));
     }
     // What authd did is in the audit log: the accounts it made, the
-    // wrong passwords, and the password changed.
+    // wrong passwords, the password changed, and the accounts changed,
+    // disabled, enabled, renamed and removed.
     for said in [
         "authd: made the account alice (1000), an administrator's, for process ",
         "authd: made the account bob (1001), a user's, for process ",
         "authd: a wrong password for alice, from process ",
         "authd: a wrong password for nobody, from process ",
+        "authd: disabled the account bob (1001), for process ",
+        "authd: refused bob to process ",
+        "authd: enabled the account bob, for process ",
+        "authd: renamed the account bob (1001) to robert, its home /users/robert, for process ",
+        "authd: removed the account robert (1001), for process ",
+        "authd: changed the account bob (1001): an administrator, for process ",
     ] {
         if !log.contains(said) {
             return Err(format!("authd did not say \"{said}\""));
@@ -7658,7 +7667,9 @@ fn bob_signs_in(vm: &mut Vm) -> Result<(), String> {
 /// reads; Ctrl+C stops an elevated command, an elevated shell runs on a
 /// terminal of its own, `elevate -k` locks the pane again, `-n` will not
 /// ask for the password, and a wrong one is asked again. authd's audit
-/// lines say each time. The power button ends it.
+/// lines say each time. Alice disables bob's account, which ends his
+/// session at once and keeps him out until she enables it (ADR 0220),
+/// but not her own. The power button ends it.
 fn elevate(vm: &mut Vm, case: &Case) -> Result<(), String> {
     owner_signs_in(vm, case)?;
     bob_signs_in(vm)?;
@@ -7762,6 +7773,37 @@ fn elevate(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.press(&["ret"])?;
     vm.expect_anywhere("consoled: Ctrl+Alt+Delete menu: sign-in on tty3")?;
     vm.expect_screen(&["(tty3)", "Name:"])?;
+    // Disabling bob's account ends his session on tty2 at once, and he
+    // cannot sign in again until it is enabled (ADR 0220); alice's own is
+    // another administrator's to disable.
+    vm.press(&["alt-f1"])?;
+    answer_prompt(
+        vm,
+        "$",
+        "clear; echo 'queen of hearts' | elevate -S user disable alice; elevate user disable bob",
+    )?;
+    vm.expect_screen(&[
+        "user: alice is the account you are signed in with: another administrator disables it",
+        "bob is disabled: ",
+        " of its processes ended. user enable bob enables it again.",
+    ])?;
+    vm.expect_anywhere("authd: disabled the account bob (1001), for process ")?;
+    vm.expect_anywhere("authd: bob signed out on pts/")?;
+    vm.press(&["alt-f2"])?;
+    answer_prompt(vm, "Name:", "bob")?;
+    answer_prompt(vm, "Password:", "white rabbit")?;
+    vm.expect_screen(&[
+        "The account bob is disabled: an administrator enables it with elevate user enable bob.",
+    ])?;
+    vm.expect_anywhere("authd: refused bob to process ")?;
+    vm.press(&["alt-f1"])?;
+    answer_prompt(vm, "$", "clear; elevate user enable bob")?;
+    vm.expect_screen(&["bob is enabled again."])?;
+    vm.press(&["alt-f2"])?;
+    answer_prompt(vm, "Name:", "bob")?;
+    answer_prompt(vm, "Password:", "white rabbit")?;
+    answer_prompt(vm, "$", "clear; echo \"back $(id -un)\"")?;
+    vm.expect_screen(&["back bob"])?;
     vm.press_power_button()?;
     vm.expect("spark: every service has stopped")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;

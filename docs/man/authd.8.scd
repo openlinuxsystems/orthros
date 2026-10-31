@@ -91,9 +91,45 @@ closes the connection, but for a session (below):
 	*startup-trouble* (*dukovo-boot*(7)); an account that is not an
 	administrator's is refused, as an administrator changes its
 	password with *elevate passwd*. The wrong passwords given for
-	_name_ are forgotten, so the new one opens the account at once. It
-	is a security event, and each administrator is told at their next
-	sign-in (see SESSIONS).
+	_name_ are forgotten, so the new one opens the account at once, and
+	a disabled account is enabled. It is a security event, and each
+	administrator is told at their next sign-in (see SESSIONS).
+
+*disable* _name_
+	Disables the person's account _name_ (ADR 0220): marks it with *!*
+	before its hash, as Linux's *usermod -L*, keeping the password;
+	ends the commands authd started for it through *elevate*(8) and
+	forgets the panes unlocked for it; and has the kernel end the user
+	(*radix-names*(2)'s *end*), again until no process of it is left.
+	Its sessions and everything it runs end, and a directory it handed
+	to another program opens nothing more. Answers *ok* and how many of
+	its processes ended. Only root may. A disabled account's right
+	password is answered *no the account* _name_ *is disabled*, which
+	only someone who knows it learns; a wrong one as any wrong one.
+
+*enable* _name_
+	Takes the mark away: the account signs in again with the password
+	it had. Only root may.
+
+*remove* _name_
+	Disables and ends the account as *disable* does, adds its number to
+	the retired ones, which no account gets again, and takes its user,
+	its own group and its name in other groups out of the account files.
+	Answers *ok* and its home, which authd leaves as it is: *user*(8)
+	keeps, archives or deletes it. Only root may.
+
+*rename* _name_ _new_
+	Renames the account, its own group, its name in other groups, its
+	hash's line and its notices, and moves its home if it is
+	_/users/_*name*. Refused while any process acts for it, as
+	_/processes_ shows. Only root may.
+
+*set* _name_ [*full-name* _text_] [*admin* *yes*|*no*]
+	Changes the account's full name, or whether it is an
+	administrator's. Root changes either; anyone changes their own full
+	name, as Linux's chfn lets them. Someone made no longer an
+	administrator keeps nothing of the admin set: their elevated
+	commands end and their panes lock.
 
 *session* _name_ _password_ _term_
 	Starts _name_'s session, if _password_ is theirs, on the terminal
@@ -288,7 +324,8 @@ goes away, *ask* is answered as *none* is.
 
 An account's name is 1 to 32 lowercase letters, digits, *\_*, *-* and
 *.*, starting with a letter or *\_*, as Debian's adduser takes them. It
-gets the lowest number from 1000 that no user or group has, a group of
+gets the lowest number from 1000 that no user or group has and no
+removed account had, a group of
 its own of that name and number, the shell *nukesh*(1) and the home
 _/users/_*name*, of mode 0700, with _documents_, _downloads_, _desktop_,
 _development_, _music_, _pictures_, _videos_ and _applications_, of mode
@@ -304,9 +341,9 @@ was made without *--user*, the first sign-in makes the owner's
 still root's, and gives the home to its user last, so that a user
 already running cannot put a link where a folder is to go.
 
-Each account made, each password changed and each wrong password is a
-security event in the audit log (*logd*(8)), with the process and user
-that asked. A name a request gave is shown as at most 64 characters,
+Each account made, disabled, enabled, removed, renamed or changed, each
+password changed and each wrong password is a security event in the
+audit log (*logd*(8)), with the process and user that asked. A name a request gave is shown as at most 64 characters,
 with *?* for each control character, so that it cannot start a line of
 its own:
 
@@ -324,7 +361,11 @@ _/system/settings/group_
 	The groups.
 
 _/system/state/authd/passwords_
-	The passwords' hashes.
+	The passwords' hashes, a disabled account's with *!* in front.
+
+_/system/state/authd/retired_
+	The numbers of removed accounts, which no account gets again: a
+	line _number_:_name_:_date_ each.
 
 _/system/state/authd/notices_
 	What each person is told at their next sign-in: a line

@@ -315,9 +315,12 @@ fn directory_of(found: &Found, needs: Rights) -> Result<&FileRef> {
 
 /// Who a call through a capability with `rights` to `object` acts for:
 /// the object's name, which passes the second gate with the bypass right
-/// (ADR 0214).
-fn who(rights: Rights, object: &FileObject) -> Who<'_> {
-    object.name.who(rights.contains(Rights::BYPASS))
+/// (ADR 0214). A name whose user was ended since is denied (ADR 0220).
+fn who(rights: Rights, object: &FileObject) -> Result<Who<'_>> {
+    object
+        .name
+        .who(rights.contains(Rights::BYPASS))
+        .ok_or_else(|| fs::status(radix_vfs::Error::Denied))
 }
 
 /// The file `found` designates, if its capability has the rights `needs`,
@@ -416,7 +419,7 @@ pub fn directory_method(
                 want: if asked.contains(Rights::READ) { want::READ } else { 0 }
                     | if asked.contains(Rights::WRITE) { want::WRITE } else { 0 },
             };
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             let mut at = vfs()?.open(&who, &dir.at, path.as_str()?, flags).map_err(fs::status)?;
             let description = Description {
                 append: a.flags.contains(OpenFlags::APPEND),
@@ -466,7 +469,7 @@ pub fn directory_method(
             // from its mode; the directory's own comes from its parent.
             let mut access = made_access(user, &dir.name, a.mode)?;
             access.mode &= !(radix_vfs::mode::SET_USER | radix_vfs::mode::SET_GROUP);
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             vfs()?.make_directory(&who, &dir.at, path.as_str()?, access).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
@@ -476,7 +479,7 @@ pub fn directory_method(
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
             vfs()?
-                .remove(&who(found.cap.rights(), dir), &dir.at, path.as_str()?)
+                .remove(&who(found.cap.rights(), dir)?, &dir.at, path.as_str()?)
                 .map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
@@ -486,7 +489,7 @@ pub fn directory_method(
             let (to_cap, to_dir) = objects::directory(cspace, a.to_dir, Rights::WRITE)?;
             let (mut from, mut to) = (Path::Empty, Path::Empty);
             let (from, to) = (from.copy(a.from)?, to.copy(a.to)?);
-            let (who, to_who) = (who(found.cap.rights(), dir), who(to_cap.rights(), &to_dir));
+            let (who, to_who) = (who(found.cap.rights(), dir)?, who(to_cap.rights(), &to_dir)?);
             vfs()?
                 .rename(&who, &dir.at, from.as_str()?, &to_who, &to_dir.at, to.as_str()?)
                 .map_err(fs::status)?;
@@ -496,7 +499,7 @@ pub fn directory_method(
             let a = directory::ListArgs::decode(args)?;
             let dir = directory_of(found, Rights::READ)?;
             let (address, len) = user_range(a.buffer)?;
-            let results = list(&who(found.cap.rights(), dir), &dir.at, a.cursor, address, len)?;
+            let results = list(&who(found.cap.rights(), dir)?, &dir.at, a.cursor, address, len)?;
             answer(label, directory::ListResults::WORDS, results.encode())
         }
         directory::STAT => {
@@ -504,7 +507,7 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::READ)?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            let at = resolve(&who(found.cap.rights(), dir), &dir.at, path.as_str()?, a.flags)?;
+            let at = resolve(&who(found.cap.rights(), dir)?, &dir.at, path.as_str()?, a.flags)?;
             put_status(&at, a.buffer)?;
             answer(label, 0, [0; 8])
         }
@@ -513,7 +516,7 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             let at = resolve(&who, &dir.at, path.as_str()?, a.flags)?;
             set_times(&who, &at, a.accessed, a.modified)?;
             answer(label, 0, [0; 8])
@@ -523,7 +526,7 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             let at = resolve(&who, &dir.at, path.as_str()?, a.flags)?;
             set_access(&who, &at, a.owner, a.group, a.mode)?;
             answer(label, 0, [0; 8])
@@ -534,7 +537,7 @@ pub fn directory_method(
             let (mut path, mut target) = (Path::Empty, Path::Empty);
             let (path, target) = (path.copy(a.path)?, target.copy(a.target)?);
             let access = made_access(user, &dir.name, 0o777)?;
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             vfs()?
                 .make_link(&who, &dir.at, path.as_str()?, target.as_target()?, access)
                 .map_err(refused_as_not_permitted)?;
@@ -547,7 +550,7 @@ pub fn directory_method(
             let (mut from, mut to) = (Path::Empty, Path::Empty);
             let (from, to) = (from.copy(a.path)?, to.copy(a.to)?);
             let follow = a.flags.contains(LinkFlags::FOLLOW);
-            let (who, to_who) = (who(found.cap.rights(), dir), who(to_cap.rights(), &to_dir));
+            let (who, to_who) = (who(found.cap.rights(), dir)?, who(to_cap.rights(), &to_dir)?);
             vfs()?
                 .link(&who, &dir.at, from.as_str()?, &to_who, &to_dir.at, to.as_str()?, follow)
                 .map_err(refused_as_not_permitted)?;
@@ -567,7 +570,7 @@ pub fn directory_method(
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
             let access = made_access(user, &dir.name, a.mode)?;
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             vfs()?
                 .make_node(&who, &dir.at, path.as_str()?, kind, a.device, access)
                 .map_err(refused_as_not_permitted)?;
@@ -578,7 +581,7 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             vfs()?.make_subvolume(&who, &dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
@@ -588,7 +591,7 @@ pub fn directory_method(
             let (to_cap, to_dir) = objects::directory(cspace, a.to_dir, Rights::WRITE)?;
             let (mut from, mut to) = (Path::Empty, Path::Empty);
             let (from, to) = (from.copy(a.path)?, to.copy(a.to)?);
-            let (who, to_who) = (who(found.cap.rights(), dir), who(to_cap.rights(), &to_dir));
+            let (who, to_who) = (who(found.cap.rights(), dir)?, who(to_cap.rights(), &to_dir)?);
             let (from, to) = (from.as_str()?, to.as_str()?);
             vfs()?
                 .snapshot(&who, &dir.at, from, &to_who, &to_dir.at, to, a.read_only)
@@ -600,7 +603,7 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             vfs()?.remove_subvolume(&who, &dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
@@ -777,7 +780,7 @@ pub fn directory_method(
             let path = path.copy(a.path)?;
             let (address, len) = user_range(a.buffer)?;
             let mut out = UserOut { address, len };
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             let len =
                 vfs()?.read_link(&who, &dir.at, path.as_str()?, &mut out).map_err(fs::status)?;
             let results = directory::ReadLinkResults { len: len as u64 };
@@ -790,7 +793,7 @@ pub fn directory_method(
             let path = path.copy(a.path)?;
             let (address, len) = user_range(a.buffer)?;
             let mut out = UserOut { address, len };
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             let len =
                 vfs()?.real_path(&who, &dir.at, path.as_str()?, &mut out).map_err(fs::status)?;
             let results = directory::RealPathResults { len: len as u64 };
@@ -805,7 +808,7 @@ pub fn directory_method(
             }
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             vfs()?.unmount(&who, &dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
@@ -848,7 +851,7 @@ pub fn directory_method(
             let name = name.copy(a.name)?;
             let name = socket::Name::of(name.bytes()).ok_or(Kernel::InvalidArgument.status(2))?;
             let access = made_access(user, &dir.name, 0o777)?;
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             socket::bind(socket, vfs()?, &who, &dir.at, path.as_str()?, name, access)?;
             answer(label, 0, [0; 8])
         }
@@ -859,7 +862,7 @@ pub fn directory_method(
             let socket = file.socket().ok_or(error(Kernel::NotSocket))?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             let named = vfs()?.resolve(&who, &dir.at, path.as_str()?).map_err(fs::status)?;
             // As unix(7) has it, connecting needs write permission on the
             // socket's name.
@@ -883,7 +886,7 @@ pub fn directory_method(
                 asked.iter().filter(|(bit, _)| a.want & bit != 0).fold(0, |w, (_, b)| w | b);
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            let who = who(found.cap.rights(), dir);
+            let who = who(found.cap.rights(), dir)?;
             let at = resolve(&who, &dir.at, path.as_str()?, a.flags)?;
             // A device, pipe or socket is written elsewhere than its mount,
             // as access(2) has it on Linux.
@@ -927,7 +930,7 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
     let kind = kind.copy(a.filesystem)?;
     let kind = kind.as_str()?;
     let rw = if read_only { Rights::READ } else { Rights::READ.union(Rights::WRITE) };
-    let who = who(found.cap.rights(), dir);
+    let who = who(found.cap.rights(), dir)?;
     // A bind mount: the directory in slot `source`, mounted again.
     if kind == "bind" {
         if compress {
@@ -990,7 +993,7 @@ fn view_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> Re
         directory::MAKE_VIEW => {
             let a = directory::MakeViewArgs::decode(args)?;
             let dir = directory_of(found, Rights::NONE)?;
-            let at = vfs()?.make_view(&who(found.cap.rights(), dir)).map_err(fs::status)?;
+            let at = vfs()?.make_view(&who(found.cap.rights(), dir)?).map_err(fs::status)?;
             let object = FileObject::new(at, dir.name.clone()).ok_or(error(Kernel::NoMemory))?;
             let rights = VIEW_RIGHTS.union(found.cap.rights().intersection(Rights::BYPASS));
             install_file(
@@ -1018,7 +1021,7 @@ fn view_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> Re
                     &dir.at,
                     path.as_str()?,
                     &what.at,
-                    &who(what_cap.rights(), &what),
+                    &who(what_cap.rights(), &what)?,
                     read_only,
                 )
                 .map_err(view_status)?;
@@ -1154,13 +1157,13 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
         file::SET_TIMES => {
             let a = file::SetTimesArgs::decode(args)?;
             let file = file_of(found, Rights::WRITE)?;
-            set_times(&who(found.cap.rights(), file), &file.at, a.accessed, a.modified)?;
+            set_times(&who(found.cap.rights(), file)?, &file.at, a.accessed, a.modified)?;
             answer(label, 0, [0; 8])
         }
         file::SET_ACCESS => {
             let a = file::SetAccessArgs::decode(args)?;
             let file = file_of(found, Rights::WRITE)?;
-            set_access(&who(found.cap.rights(), file), &file.at, a.owner, a.group, a.mode)?;
+            set_access(&who(found.cap.rights(), file)?, &file.at, a.owner, a.group, a.mode)?;
             answer(label, 0, [0; 8])
         }
         file::SET_SIZE => {

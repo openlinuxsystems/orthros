@@ -71,7 +71,7 @@ impl Options {
         };
         let full_name = full_name.unwrap_or_default();
         let (mut users, mut groups) = read_tables(&ctx.root.join(userspace::DEFAULTS))?;
-        accounts::add(&mut users, &mut groups, &name, &full_name, true).map_err(Error::new)?;
+        accounts::add(&mut users, &mut groups, &name, &full_name, true, &[]).map_err(Error::new)?;
         let mut password = match file {
             Some(path) => read_password_file(Path::new(&path))?,
             None => ask_password(&name)?,
@@ -219,7 +219,7 @@ pub fn add(system: &Path, settings: &Path, state: &Path, account: &Account) -> R
     let defaults = userspace::DEFAULTS_DIR.strip_prefix("system/").expect("in the system");
     let (mut users, mut groups) = read_tables(&system.join(defaults))?;
     let Account { name, full_name, hash } = account;
-    accounts::add(&mut users, &mut groups, name, full_name, true).map_err(Error::new)?;
+    accounts::add(&mut users, &mut groups, name, full_name, true, &[]).map_err(Error::new)?;
     let mut passwords = accounts::passwords("");
     passwords.push(accounts::Password { name: name.clone(), hash: hash.clone() });
     write(&settings.join("passwd"), &users.text(), 0o644)?;
