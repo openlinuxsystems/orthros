@@ -61,6 +61,8 @@ pub mod page {
     pub const BUTTON: u16 = 0x09;
     /// Consumer: media and application keys, the horizontal wheel.
     pub const CONSUMER: u16 = 0x0c;
+    /// Digitizers: touchpads, touchscreens and pens.
+    pub const DIGITIZER: u16 = 0x0d;
 }
 
 /// The usages the decoder reads.
@@ -95,6 +97,11 @@ pub mod usage {
     pub const CONSUMER_CONTROL: Usage = 0x000c_0001;
     /// The horizontal wheel (AC Pan): right is more.
     pub const AC_PAN: Usage = 0x000c_0238;
+    /// A touchscreen.
+    pub const TOUCH_SCREEN: Usage = 0x000d_0004;
+    /// A touchpad, which reports its fingers when told to and is a mouse
+    /// until then.
+    pub const TOUCH_PAD: Usage = 0x000d_0005;
 }
 
 /// A main item's flags that the decoder reads (HID 1.11, 6.2.2.5).

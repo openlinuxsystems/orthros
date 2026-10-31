@@ -60,6 +60,7 @@ mod dmi;
 mod domains;
 mod fs;
 mod gpio;
+mod hid;
 mod hwmon;
 mod i2c;
 mod iommutest;

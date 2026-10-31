@@ -150,8 +150,8 @@ _/system/resources/licenses/_
 . Unless *aml=off*, uACPI then runs the firmware's AML, and the kernel
   hears the power button through it; see *ACPI*. The kernel then drives
   the chipset's GPIO controllers, its SMBus controller, if it has one,
-  and Framework's embedded controller; see *GPIO*, *SMBUS* and
-  *EMBEDDED CONTROLLER*.
+  its I2C controllers and Framework's embedded controller; see *GPIO*,
+  *SMBUS*, *I2C* and *EMBEDDED CONTROLLER*.
 . Each CPU then picks its own speed where it can; see *CPU FREQUENCY*.
   The firmware's thermal zones are watched from then on; see *ACPI*.
   The kernel then looks for the CPUs' temperature sensors; see
@@ -839,6 +839,46 @@ kernel leaves it to the firmware, as Linux does. The adapter is named in
 _/kernel/bus/i2c/devices/i2c-0/name_ (*radix-sysfs*(5)), and each EEPROM
 found is _/kernel/bus/i2c/devices/0-00<address>_; *hwinfo*(8) decodes
 them.
+
+# I2C
+
+A laptop's touchpad sits on one of the chipset's I2C buses. The kernel
+drives the DesignWare I2C controllers of Intel Sunrise Point's LPSS (PCI
+functions, or ACPI _INT3442_ to _INT3447_) and of AMD's FCH (ACPI
+_AMDI0010_, _AMD0010_), once the firmware's AML runs (ADR 0234). The
+devices on a bus are those the firmware names with an _I2cSerialBus_
+resource; the bus runs in fast mode if all of them allow 400 kHz, else
+in standard mode, with the firmware's counts for its clock if it has
+them (_SSCN_, _FMCN_). Each bus, from _i2c-1_, and each device on it is
+logged:
+
+```
+I2C: Intel Sunrise Point's controller \_SB_.PCI0.I2C1 (0000:00:15.1) is i2c-2: fast mode (400 kHz), 64-byte FIFOs, the firmware's counts
+I2C: i2c-2 has \_SB_.PCI0.I2C1.TPD0 (PNP0C50) at 0x2c, up to 400 kHz
+```
+
+A controller the kernel cannot use is a warning that says why: its
+registers cannot be mapped or read all ones, or it is not a DesignWare
+controller. An LPSS function that is a UART or an SPI controller is left
+alone. The buses and devices are named in _/kernel/bus/i2c/devices_
+(*radix-sysfs*(5)).
+
+A device whose _\_HID_ or _\_CID_ is _PNP0C50_ is HID over I2C: a
+touchpad, a keyboard or a touchscreen (ADR 0235). The thread _i2c-hid_
+reads its HID descriptor from the register its _\_DSM_ gives, asks for
+the GPIO pin its resources name as its interrupt, resets it and reads
+its report descriptor; then each report it interrupts for goes where a
+USB device's go, keys to _/devices/kbd_ and the pointer to
+_/devices/mouse_. A touchpad is read as the mouse it is until told to
+report its fingers, which the kernel does not yet tell it:
+
+```
+I2C-HID: \_SB_.PCI0.I2C1.TPD0 (06cb:7e7e) on i2c-2 at 0x2c: a touchpad, read as a mouse into /devices/mouse
+```
+
+A device that cannot be used is a warning that says why, such as a HID
+descriptor that could not be read or no interrupt pin; one whose reads
+keep failing says it stopped reporting.
 
 # IOMMU
 

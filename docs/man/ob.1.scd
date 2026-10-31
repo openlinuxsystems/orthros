@@ -675,6 +675,19 @@ _target/userspace/_).
 		events on their pins that the controllers' _\_AEI_ list, then run
 		*selftest=gpio*, whose events must each run their method once.
 
+	*i2c*
+		Boot with QEMU's _pc-testdev_ and an SSDT of the test's whose
+		Intel LPSS (in ACPI mode) and AMD DesignWare I2C controllers
+		have their registers in the test device's memory, with a device
+		on each bus and one that is not there: the kernel must log both
+		buses, at fast and standard mode, and their two devices; then
+		*selftest=i2c* reads back how LPSS and each controller were set
+		up and runs a transfer on each. The device on the Intel bus is a
+		HID over I2C touchpad by its _\_CID_: the kernel must read its
+		_\_DSM_ and say that its HID descriptor at 20h could not be
+		read. At the console, the buses' and devices' names must be in
+		_/sys/bus/i2c/devices_.
+
 	*msr*
 		Boot with *selftest=msr*: EFER must read, and with KVM a read
 		of an MSR no processor has must fault and go on, as the
