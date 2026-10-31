@@ -2301,6 +2301,7 @@ pub const PROVED_LIBRARIES: &[&str] = &[
     "radix-ext4",
     "radix-ahci",
     "radix-nvme",
+    "radix-net",
 ];
 
 /// `ob test kani`: checks the Kani proof harnesses. They take minutes each,

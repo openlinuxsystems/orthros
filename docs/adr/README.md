@@ -191,6 +191,7 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0186](0186-a-loopback-connection-passes-its-bytes-straight-across.md) | A loopback connection passes its bytes straight across | Accepted |
 | [0187](0187-tcp-keeps-quiet-connections-and-controls-congestion-as-linux-does.md) | TCP keeps quiet connections, and controls congestion, as Linux does | Accepted |
 | [0188](0188-tcp-recovers-from-losses-with-sack-and-an-interface-holds-thousands-of-sockets.md) | TCP recovers from losses with SACK, and an interface holds thousands of sockets | Accepted |
+| [0189](0189-frames-changed-at-random-break-neither-stack-and-kani-proves-the-headers.md) | Frames changed at random break neither stack, and Kani proves the headers | Accepted |
 | [0200](0200-uacpi-runs-the-firmwares-aml-in-the-kernel.md) | uACPI runs the firmware's AML in the kernel | Accepted |
 | [0201](0201-batteries-adapters-and-lids-through-uacpi.md) | Batteries, AC adapters and lids through uACPI, and the embedded controller | Accepted |
 | [0202](0202-cpu-frequency-through-hwp-and-cppc.md) | CPU frequency through Intel's HWP and AMD's CPPC | Accepted |

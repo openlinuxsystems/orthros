@@ -69,6 +69,13 @@ WireGuard. This page grows with each.
   ([ADR 0182](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0182-the-kernel-patches-smoltcp-so-socket-memory-comes-back.md)).
   `./ob crates` fetches it from crates.io and applies the patch, and
   every build does that first.
+- **Tested against broken and hostile networks**: `ob test` gives two
+  stacks 100,000 frames each, changed at random, alongside their own
+  traffic; neither may panic or send a malformed frame, and a new
+  connection between them must work afterwards. Kani proves that the
+  stack reads any Ethernet, ARP, IPv4, ICMP and UDP header, and any TCP
+  option, without a panic and writes it back the same
+  ([ADR 0189](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0189-frames-changed-at-random-break-neither-stack-and-kani-proves-the-headers.md)).
 
 - **The C library's BSD sockets**: `socket`, `bind`, `listen`,
   `connect`, `accept`, `send`, `recv`, `sendto`, `recvfrom`, `sendmsg`,

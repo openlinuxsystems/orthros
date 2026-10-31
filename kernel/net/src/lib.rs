@@ -41,6 +41,8 @@
 
 mod across;
 mod loopback;
+#[cfg(kani)]
+mod proofs;
 mod sockets;
 #[cfg(test)]
 mod tests;
