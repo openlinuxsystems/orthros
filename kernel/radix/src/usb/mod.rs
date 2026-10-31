@@ -18,6 +18,7 @@
 //! console to a second computer ([`dbc`], ADR 0160). Bus numbers
 //! count controllers from 1, and a device is named as Linux names one, by
 //! its bus, the root port and the hub ports it is behind: `1-3.2`.
+//! `/kernel/bus/usb/devices` shows them ([`shown`], ADR 0230).
 //!
 //! `usb=off` leaves the controllers as the firmware left them.
 //! [`shutdown`] halts every controller before the machine is powered off
@@ -38,6 +39,7 @@ mod controller;
 pub mod dbc;
 mod hid;
 mod hub;
+pub mod shown;
 pub mod storage;
 
 /// The most controllers driven.

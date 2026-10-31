@@ -36,6 +36,7 @@ project's design, it adds the project here (see
 | [musl](https://musl.libc.org/) 1.2.5 by Rich Felker and contributors | Exact floating-point formatting and scanning, `strftime` and the calendar conversions of `mktime`, `gmtime` and `localtime`, `scanf`'s conversions and integers, `inet_pton` and `inet_ntop`, the `rand48` family, the message catalogs of `catopen` and the limits `pathconf` gives, in `ports/mlibc/musl` and the patches ([ADR 0072](docs/adr/0072-exact-numbers-and-times-in-the-c-library.md)); its cancellation points, system calls made from a stub whose labels the cancel signal's handler looks for, are the design of ours, with no code taken ([ADR 0104](docs/adr/0104-cancellation-points-as-musl-makes-them.md)) | MIT |
 | [GNU C Library](https://www.gnu.org/software/libc/) 2.42 locale data | The `C.UTF-8` locale, compiled from glibc's tables of Unicode 16 ([ADR 0073](docs/adr/0073-c-utf-8-locale.md)) | Unicode-3.0 |
 | The [PCI ID Database](https://pci-ids.ucw.cz/) 2026.10.28 by Martin Mares, Albert Pool and the PCI ID Project's contributors | The names of PCI vendors, devices and classes that `lspci` shows, in `/system/resources/hwdata/pci.ids` ([ADR 0144](docs/adr/0144-lspci-lscpu-and-lsmem-with-the-pci-id-database.md)) | BSD-3-Clause (offered as GPL-2.0-or-later OR BSD-3-Clause) |
+| The [USB ID Repository](http://www.linux-usb.org/usb-ids.html)'s database 2026.06.26, kept by Stephen J. Gowdy, with its contributors | The names of USB vendors, products and classes that `lsusb` shows, in `/system/resources/hwdata/usb.ids`, with the GPL text its repository carries as its notice ([ADR 0230](docs/adr/0230-sensors-and-lsusb-with-the-usb-id-database.md)) | GPL-2.0-or-later OR BSD-3-Clause |
 | [xkeyboard-config](https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config) 2.48 by its contributors, compiled with [libxkbcommon](https://xkbcommon.org/) | The consoles' 40 keyboard layouts, made from its layouts by `userspace/programs/keymap/generate.py` and built into consoled and keymap(1), with its COPYING as their notice ([ADR 0149](docs/adr/0149-the-consoles-type-in-layouts-made-from-xkeyboard-configs.md)); the dead keys' letters are Unicode's compositions | MIT and notices like it |
 | [compiler-rt](https://compiler-rt.llvm.org/) builtins from LLVM 20 | Helper functions every C program links | Apache-2.0 WITH LLVM-exception |
 | [Rust](https://www.rust-lang.org/) `std`, `panic_unwind` and `unwind`, with the crates they use: [libc](https://github.com/rust-lang/libc) 0.2.191 from crates.io (patched for Radix, [ADR 0080](docs/adr/0080-crates-patched-for-radix.md)), [unwinding](https://github.com/nbdd0121/unwinding) 0.2.10 by Gary Guo, [addr2line](https://github.com/gimli-rs/addr2line), [gimli](https://github.com/gimli-rs/gimli), [object](https://github.com/gimli-rs/object), [miniz_oxide](https://github.com/Frommi/miniz_oxide), [adler2](https://github.com/oyvindln/adler2), [hashbrown](https://github.com/rust-lang/hashbrown), [memchr](https://github.com/BurntSushi/memchr) by Andrew Gallant, [rustc-demangle](https://github.com/rust-lang/rustc-demangle), [cfg-if](https://github.com/rust-lang/cfg-if) and `std_detect` | Rust's standard library for programs on Radix ([ADR 0070](docs/adr/0070-rust-standard-library-port.md)) | MIT OR Apache-2.0 (memchr: Unlicense OR MIT; miniz_oxide also Zlib; adler2 also 0BSD) |
@@ -404,6 +405,15 @@ We implement these from their published descriptions. No code is copied.
   and what the kernel checks before a fan curve reaches the EC follows
   how Framework's fork uses one
   ([ADR 0208](docs/adr/0208-programs-set-the-fans-leds-and-argb-header-through-the-platform-capability.md)).
+  No code is taken from them.
+- `sensors` and `lsusb`: their output and options follow those of
+  [lm-sensors](https://github.com/lm-sensors/lm-sensors)' sensors
+  (GPL-2.0-or-later), with libsensors' names for chips and adapters, and
+  of [usbutils](https://github.com/gregkh/usbutils)' lsusb
+  (GPL-2.0-or-later); the files of `/kernel/bus/usb` and the way devices
+  are numbered follow Linux's `/sys/bus/usb` and
+  `Documentation/ABI/stable/sysfs-bus-usb`
+  ([ADR 0230](docs/adr/0230-sensors-and-lsusb-with-the-usb-id-database.md)).
   No code is taken from them.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.

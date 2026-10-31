@@ -363,7 +363,7 @@ _target/userspace/_).
 		(_tools/xtask/src/acpi/thermal.asl_), as QEMU has no thermal
 		zone: the kernel must say what its zone is, and at the console
 		the zone's files in _/sys/class/thermal_, and hwmon's _acpitz_
-		in _/sys/class/hwmon_, must read as the table says. Once the
+		through *sensors*(1), must read as the table says. Once the
 		console has read its temperature three times, the zone warms
 		5 °C a read: the kernel must say it cannot slow QEMU's
 		CPUs at each step past the passive trip point, warn at the hot
@@ -376,7 +376,9 @@ _target/userspace/_).
 		port beside the boot stick, and a hub on the third with a mouse
 		behind it and a second hub with a keyboard behind that. The kernel
 		must name the controller, say it has no Debug Capability, and name
-		each hub and each device on its port; USB tablets
+		each hub and each device on its port, and at the console
+		*lsusb*(8) must list each by its number, IDs and names and show
+		the tree of ports, interfaces and drivers; USB tablets
 		plugged into the fourth port and into the first hub with QEMU's
 		_device_add_ must be named too, and pulling them out with
 		_device_del_ logged; pulling out the second hub must let go of its
