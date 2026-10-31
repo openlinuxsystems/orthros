@@ -616,7 +616,8 @@ fn mount_disks(root: &Dir, compress: &[&str]) -> Vec<(String, MountFlags)> {
 /// Mounts the filesystem on `/devices/<name>` at `/volumes/<name>`: FAT,
 /// exFAT, NTFS, Btrfs or ext4, read-only if the disk is. A filesystem that
 /// the disk or Radix cannot write (yet) mounts read-only, as Linux's
-/// `mount` does with a disk that refuses writes, as NTFS does for now.
+/// `mount` does with a disk that refuses writes, as an NTFS that Windows
+/// hibernated with does.
 /// FAT, exFAT and NTFS are tried first: `mkfs.btrfs` and `mkfs.ext4` clear
 /// where they keep their boot sectors, but `mkfs.fat`, `mkfs.exfat` and
 /// `mkntfs` can leave an older Btrfs or ext4 superblock behind, so theirs

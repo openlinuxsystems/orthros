@@ -8,7 +8,8 @@
 //! LCNs). A run list is packed: each run is a header byte, whose low
 //! nibble is the length's size in bytes and whose high nibble the
 //! offset's, then the length, then the offset from the last run's LCN,
-//! signed; a run with no offset is a hole, which reads as zeros. A zero
+//! both signed (Windows and ntfs-3g refuse a length with its top bit
+//! set); a run with no offset is a hole, which reads as zeros. A zero
 //! header byte ends the list. A file in more than one record has a run
 //! list in each, for its own VCNs; [`Runs::add`] puts them together.
 
@@ -136,6 +137,76 @@ impl Runs {
         Some((lcn, run.len - skip))
     }
 
+    /// Adds `len` clusters from LCN `lcn` (or a hole, [`HOLE`]) after the
+    /// runs so far.
+    pub fn append(&mut self, lcn: u64, len: u64) -> Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        self.push(Run { vcn: self.clusters(), len, lcn })
+    }
+
+    /// Cuts the runs to their first `clusters` clusters; returns the runs
+    /// cut off that were on the disk, whose clusters are free now.
+    pub fn truncate(&mut self, clusters: u64) -> Result<KVec<Run>> {
+        let mut freed = mem::vec();
+        while let Some(last) = self.runs.last_mut() {
+            if last.vcn >= clusters {
+                let run = *last;
+                self.runs.pop();
+                if run.lcn != HOLE {
+                    mem::push(&mut freed, run)?;
+                }
+            } else if last.vcn + last.len > clusters {
+                let keep = clusters - last.vcn;
+                if last.lcn != HOLE {
+                    let cut = Run { vcn: clusters, len: last.len - keep, lcn: last.lcn + keep };
+                    mem::push(&mut freed, cut)?;
+                }
+                last.len = keep;
+                break;
+            } else {
+                break;
+            }
+        }
+        Ok(freed)
+    }
+
+    /// The packed run list of the runs from VCN `from` to `to` (not
+    /// included), which must start and end on runs' edges or within
+    /// them, as a record holds it, with its end byte.
+    pub fn pack(&self, from: u64, to: u64) -> Result<KVec<u8>> {
+        let mut out = mem::vec();
+        let mut last_lcn: i64 = 0;
+        for run in &self.runs {
+            let start = run.vcn.max(from);
+            let end = (run.vcn + run.len).min(to);
+            if start >= end {
+                continue;
+            }
+            let len = end - start;
+            let len_bytes = signed_size(len as i64);
+            let mut field = [0u8; 17];
+            field[1..=len_bytes].copy_from_slice(&len.to_le_bytes()[..len_bytes]);
+            let mut n = 1 + len_bytes;
+            let off_bytes = if run.lcn == HOLE {
+                0
+            } else {
+                let lcn = (run.lcn + (start - run.vcn)) as i64;
+                let delta = lcn - last_lcn;
+                last_lcn = lcn;
+                let size = signed_size(delta);
+                field[n..n + size].copy_from_slice(&delta.to_le_bytes()[..size]);
+                n += size;
+                size
+            };
+            field[0] = ((off_bytes as u8) << 4) | len_bytes as u8;
+            mem::extend(&mut out, &field[..n])?;
+        }
+        mem::push(&mut out, 0)?;
+        Ok(out)
+    }
+
     /// How many of the clusters from `vcn`, `len` of them at most, are on
     /// the disk (not holes).
     pub fn allocated_in(&self, vcn: u64, len: u64) -> u64 {
@@ -151,6 +222,16 @@ impl Runs {
         }
         found
     }
+}
+
+/// The fewest bytes that hold `n`, signed: its top bit must be its sign.
+fn signed_size(n: i64) -> usize {
+    (1..=8)
+        .find(|&size| {
+            let bits = 8 * size as u32;
+            bits == 64 || (-(1i64 << (bits - 1))..(1i64 << (bits - 1))).contains(&n)
+        })
+        .unwrap_or(8)
 }
 
 /// The little-endian unsigned number in `bytes`.

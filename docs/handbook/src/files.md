@@ -166,11 +166,17 @@ replays the journal Linux left, checks every checksum, and gives a file
 of an ext3 block map extents when it changes it. An ext4 that uses a
 feature Dukovo does not write yet (such as quotas, inline data or
 encryption) is mounted read-only. NTFS, which Windows formats its disks
-with, is read, and mounted read-only for now: compressed and sparse
-files, hard links, and Windows' and WSL's links and junctions read as
-Windows wrote them, names are found whatever their case, and a file that
-is encrypted or kept in the cloud fails to read rather than reading as
-zeros. Anything else is left alone.
+with, mounts read-write too: compressed and sparse files, hard links,
+and Windows' and WSL's links and junctions read as Windows wrote them,
+names are found whatever their case, and a file that is encrypted or
+kept in the cloud fails to read rather than reading as zeros. Dukovo
+writes files, directories, renames and hard links as ntfs-3g does, with
+names Windows can open; compressed and sparse files, links and junctions
+are not written yet. An NTFS that Windows hibernated with (Fast
+Startup), left dirty or with changes in its journal to replay is
+mounted read-only, since writing it would lose Windows' changes: shut
+Windows down fully (hold Shift as you choose Shut down) and Dukovo
+writes it. Anything else is left alone.
 
 Changes reach a FAT, exFAT or ext4 disk within five seconds, and a Btrfs
 disk within 30 seconds, as on Linux, or at once when a program asks for
@@ -394,10 +400,12 @@ echo "Hello from the host" > hello.txt && ntfscp ntfs.img hello.txt /hello.txt
 ```
 
 ```text
-Files: mounted ntfs from vda on /volumes/vda, read-only, labelled MYNTFS
-spark: mounted the NTFS filesystem of vda at /volumes/vda, read-only
+Files: mounted ntfs from vda on /volumes/vda, labelled MYNTFS
+spark: mounted the NTFS filesystem of vda at /volumes/vda
 ```
 
 The `ntfs` boot test reads two such disks back, one of them filled
 through ntfs-3g with links, junctions, hard links and compressed and
-sparse files.
+sparse files. `ntfs-write` writes two, and checks them on the host with
+ntfs-3g's `ntfsresize --info` and `ntfsfix -n` and reads them back with
+The Sleuth Kit and after a reboot.

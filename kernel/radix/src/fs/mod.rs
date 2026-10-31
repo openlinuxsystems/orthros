@@ -570,9 +570,9 @@ pub struct Flags {
 /// `exfat`, `btrfs`, `ext4` and `ntfs` on the block device `source` stands
 /// for, the others from nothing, mounted as `flags` say. A Btrfs that
 /// Radix cannot write yet, an exFAT with two tables, an ext4 with features
-/// Radix only reads, or an NTFS, which Radix only reads for now, fails a
-/// writable mount with `NotSupported` (ADRs 0130, 0140, 0141 and 0236),
-/// and mounts read-only.
+/// Radix only reads, or an NTFS that Windows left dirty, hibernated or
+/// with a log to replay, fails a writable mount with `NotSupported` (ADRs
+/// 0130, 0140, 0141 and 0237), and mounts read-only.
 pub fn make(kind: &str, source: Option<&NodeRef>, flags: Flags) -> radix_vfs::Result<Made> {
     let Flags { read_only, compress } = flags;
     use core::fmt::Write;
@@ -597,7 +597,7 @@ pub fn make(kind: &str, source: Option<&NodeRef>, flags: Flags) -> radix_vfs::Re
                 "fat" => mount_fat(device, read_only)?,
                 "exfat" => mount_exfat(device, read_only)?,
                 "ext4" => mount_ext4(device, read_only)?,
-                "ntfs" => mount_ntfs(device, read_only)?,
+                "ntfs" => mount_ntfs(device, name.as_str(), read_only)?,
                 _ => mount_btrfs(device, name.as_str(), read_only, compress)?,
             }
         }
@@ -633,10 +633,20 @@ fn mount_ext4(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Res
     fs_ref(radix_ext4::Ext4Fs::mount(device, read_only)?)
 }
 
-/// Mounts the NTFS filesystem on `device` ([`mount_fat`]).
+/// Mounts the NTFS filesystem on `device`, the disk `name` ([`mount_fat`]).
+/// Mounted read-only, it says why it could not be written, if that is so
+/// (ADR 0237).
 #[inline(never)]
-fn mount_ntfs(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Result<FsRef> {
-    fs_ref(radix_ntfs::NtfsFs::mount(device, read_only)?)
+fn mount_ntfs(
+    device: radix_block::DeviceRef,
+    name: &str,
+    read_only: bool,
+) -> radix_vfs::Result<FsRef> {
+    let fs = radix_ntfs::NtfsFs::mount(device, read_only)?;
+    if let Some(why) = fs.kept_from_writing() {
+        warn!("Files: the NTFS of {name} is only read: {why}");
+    }
+    fs_ref(fs)
 }
 
 /// A Btrfs filesystem mounted: its ID, the disk it was mounted from, and

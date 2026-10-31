@@ -475,7 +475,10 @@ We implement these from their published descriptions. No code is copied.
   for reparse points and file attributes and
   [[MS-XCA]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xca/)
   for LZNT1 compression, and what ntfs-3g writes: `radix-ntfs`
-  ([ADR 0236](docs/adr/0236-ntfs-is-our-own-implementation-read-only-first.md)).
+  ([ADR 0236](docs/adr/0236-ntfs-is-our-own-implementation-read-only-first.md)),
+  which writes NTFS as ntfs-3g does, emptying Windows' log before its
+  first change and refusing names Windows could not open
+  ([ADR 0237](docs/adr/0237-ntfs-is-written-as-ntfs-3g-writes-it-its-log-emptied.md)).
   We use no code of Linux's ntfs3, of ntfs-3g or of the `ntfs` crate.
 
 ## Projects whose ideas we follow

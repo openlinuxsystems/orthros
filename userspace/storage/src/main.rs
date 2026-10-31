@@ -25,6 +25,8 @@
 //!   with each file's size and FNV-1a hash, and checks that the volumes
 //!   refuse writes: the `btrfs` boot test's host compares what it prints
 //!   with what Linux's `mkfs.btrfs` put there ([`list_volume`]);
+//!   `storage list --no-write` lists them so, but writes nothing, for
+//!   the `ntfs` boot test's host to find each disk unchanged;
 //!   `storage replayed` lists them so too, then writes a file to each:
 //!   the `btrfs-log` boot test's host compares the list with Linux's after
 //!   it replayed the same disk's log of fsyncs (ADR 0151);
@@ -279,8 +281,13 @@ fn main(_: &Startup) -> u64 {
             }
         }
         "list" | "replayed" => {
+            let write = match mode {
+                "replayed" => Write::Taken,
+                _ if args().skip(2).any(|arg| arg == "--no-write") => Write::None,
+                _ => Write::Refused,
+            };
             for name in &volumes {
-                list_volume(&root, name, mode == "list");
+                list_volume(&root, name, write);
             }
         }
         "churn" => {
@@ -669,12 +676,22 @@ fn hash_file(dir: &Dir, path: &str) -> radix_rt::fs::Result<(u64, u64)> {
     }
 }
 
+/// What [`list_volume`] checks of a write to the volume after listing it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Write {
+    /// That it fails, as the volume is read-only.
+    Refused,
+    /// That it is taken and synced.
+    Taken,
+    /// Nothing: none is made.
+    None,
+}
+
 /// Prints every file, directory and link of the volume at
 /// `/volumes/<name>`, a line each, in name order and depth first: a
 /// file's size and hash, or the error reading it gave, or the file it is
-/// another name of; a link's target. Then checks that a write fails, if
-/// the volume is `read_only`, or that one is taken and synced.
-fn list_volume(root: &Dir, name: &str, read_only: bool) {
+/// another name of; a link's target. Then checks a write as `write` says.
+fn list_volume(root: &Dir, name: &str, write: Write) {
     let dir = match root.open_dir(&format!("volumes/{name}"), Rights::READ) {
         Ok(dir) => dir,
         Err(err) => return fail(&format!("cannot open /volumes/{name}: {err}")),
@@ -683,10 +700,14 @@ fn list_volume(root: &Dir, name: &str, read_only: bool) {
     let mut count = 0;
     list_dir(&dir, name, "", &mut seen, &mut count);
     println!("storage: list {name}: {count} entries");
+    if write == Write::None {
+        println!("storage: list {name}: nothing written");
+        return;
+    }
     let rw = Rights::READ.union(Rights::WRITE);
-    let write = root.open_dir(&format!("volumes/{name}"), rw);
-    if !read_only {
-        let written = write.and_then(|dir| {
+    let opened = root.open_dir(&format!("volumes/{name}"), rw);
+    if write == Write::Taken {
+        let written = opened.and_then(|dir| {
             dir.write_file("new.txt", b"after the replay")?;
             dir.sync()
         });
@@ -696,7 +717,7 @@ fn list_volume(root: &Dir, name: &str, read_only: bool) {
         }
         return;
     }
-    match write.and_then(|dir| dir.write_file("new.txt", b"refused")) {
+    match opened.and_then(|dir| dir.write_file("new.txt", b"refused")) {
         Err(err) if err.is(FileError::ReadOnly) => {
             println!("storage: list {name}: writes fail with read_only");
         }

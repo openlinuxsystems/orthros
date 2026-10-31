@@ -3388,7 +3388,6 @@ fn ntfs_3g_files() -> Vec<(String, Made)> {
     files
 }
 
-
 /// Checks an ext4 disk with e2fsprogs' `e2fsck`, changing nothing, both
 /// as it is and with its journal replayed as Linux would at its next
 /// mount: Radix keeps the journal's last transaction there while the
@@ -5863,6 +5862,8 @@ fn storage_host(case: &Case, disks: &[DiskImage]) -> Result<(), String> {
                 exfat_written(disk, &name)
             } else if made.ext4() {
                 ext4_written(disk, &name)
+            } else if made.ntfs() {
+                phase11::ntfs_written(disk, &name, &source)
             } else {
                 fat_written(disk, &name, &source)
             }
@@ -6958,7 +6959,7 @@ fn btrfs_unchanged(disk: &DiskImage, _log: &str) -> Result<(), String> {
     let made = std::fs::read(&sums).map_err(|err| format!("reading {}: {err}", sums.display()))?;
     let now = host_tool(std::process::Command::new("sha256sum").arg(&disk.path))?;
     if now != made {
-        return Err(format!("{} changed, though it was mounted read-only", disk.path.display()));
+        return Err(format!("{} changed, though it was only read", disk.path.display()));
     }
     Ok(())
 }
@@ -6967,12 +6968,15 @@ fn btrfs_unchanged(disk: &DiskImage, _log: &str) -> Result<(), String> {
 /// `btrfs` test ([`btrfs_files`]): as Linux would list them, but for the
 /// damaged file, which fails with `io`.
 fn btrfs_listing(volume: &str) -> Vec<String> {
-    listing(&btrfs_files(), volume, &[(BTRFS_DAMAGED, "io")])
+    let mut lines = listing(&btrfs_files(), volume, &[(BTRFS_DAMAGED, "io")]);
+    lines.push(format!("storage: list {volume}: writes fail with read_only"));
+    lines
 }
 
-/// The lines the storage program's `list` prints for the read-only volume
-/// `volume` that holds `files`, each path after its directory: but for
-/// the files `unreadable` names, which fail with the error it gives.
+/// The lines the storage program's `list` prints for the volume `volume`
+/// that holds `files`, each path after its directory, up to its count of
+/// entries: but for the files `unreadable` names, which fail with the
+/// error it gives.
 fn listing(files: &[(String, Made)], volume: &str, unreadable: &[(&str, &str)]) -> Vec<String> {
     let mut lines = Vec::new();
     // The first path of each file with more than one name.
@@ -7039,7 +7043,6 @@ fn listing(files: &[(String, Made)], volume: &str, unreadable: &[(&str, &str)]) 
     }
     walk(files, "", volume, unreadable, &mut first, &mut lines);
     lines.push(format!("storage: list {volume}: {} entries", files.len()));
-    lines.push(format!("storage: list {volume}: writes fail with read_only"));
     lines
 }
 

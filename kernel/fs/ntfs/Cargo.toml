@@ -3,7 +3,7 @@
 
 [package]
 name = "radix-ntfs"
-description = "NTFS for Radix, read-only for now, from the public descriptions of its format"
+description = "NTFS for Radix, read and written, from the public descriptions of its format"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

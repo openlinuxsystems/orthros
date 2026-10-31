@@ -29,7 +29,7 @@ use crate::runs::{HOLE, Runs};
 use crate::{index, lznt1};
 
 /// A tool of ntfs-3g (or of dosfstools or exfatprogs).
-fn tool(name: &str) -> PathBuf {
+pub(crate) fn tool(name: &str) -> PathBuf {
     for dir in ["/usr/sbin", "/sbin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/local/bin"] {
         let path = PathBuf::from(dir).join(name);
         if path.exists() {
@@ -40,26 +40,26 @@ fn tool(name: &str) -> PathBuf {
 }
 
 /// A file name for a scratch file.
-fn scratch(what: &str) -> PathBuf {
+pub(crate) fn scratch(what: &str) -> PathBuf {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("radix-ntfs-{}-{what}-{n}", std::process::id()))
 }
 
 /// Runs `cmd`, which must succeed; returns its output.
-fn run(cmd: &mut Command) -> Vec<u8> {
+pub(crate) fn run(cmd: &mut Command) -> Vec<u8> {
     let out = cmd.env("LC_ALL", "C.UTF-8").output().unwrap();
     assert!(out.status.success(), "{cmd:?}: {}", String::from_utf8_lossy(&out.stderr));
     out.stdout
 }
 
 /// An image file being made: removed when done with.
-struct Image(PathBuf);
+pub(crate) struct Image(pub(crate) PathBuf);
 
 impl Image {
     /// A fresh volume of `mib` MiB from `mkntfs`, labelled `RADIXTEST`,
     /// with sectors and clusters of `sector` and `cluster` bytes.
-    fn mkntfs(mib: u64, sector: u32, cluster: u32) -> Image {
+    pub(crate) fn mkntfs(mib: u64, sector: u32, cluster: u32) -> Image {
         let path = scratch("mkntfs.img");
         std::fs::File::create(&path).unwrap().set_len(mib << 20).unwrap();
         run(Command::new(tool("mkntfs"))
@@ -70,7 +70,7 @@ impl Image {
     }
 
     /// Writes `data` to the file `name` in the root, with `ntfscp`.
-    fn copy_in(&self, name: &str, data: &[u8]) {
+    pub(crate) fn copy_in(&self, name: &str, data: &[u8]) {
         let source = scratch("source");
         std::fs::write(&source, data).unwrap();
         run(Command::new(tool("ntfscp"))
@@ -82,11 +82,11 @@ impl Image {
     }
 
     /// The bytes of the system file `name`, as `ntfscat` reads them.
-    fn cat(&self, name: &str) -> Vec<u8> {
+    pub(crate) fn cat(&self, name: &str) -> Vec<u8> {
         run(Command::new(tool("ntfscat")).arg(&self.0).arg(name))
     }
 
-    fn bytes(&self) -> Vec<u8> {
+    pub(crate) fn bytes(&self) -> Vec<u8> {
         std::fs::read(&self.0).unwrap()
     }
 }
@@ -99,7 +99,7 @@ impl Drop for Image {
 
 /// The kinds of volume the tests use: (MiB, sector, cluster bytes), with
 /// clusters smaller than a page, a page, larger, and 4 KiB sectors.
-const VOLUMES: [(u64, u32, u32); 4] =
+pub(crate) const VOLUMES: [(u64, u32, u32); 4] =
     [(16, 512, 512), (32, 512, 4096), (64, 512, 65536), (32, 4096, 4096)];
 
 /// A volume on a RAM disk of logical blocks of `block` bytes.
@@ -132,7 +132,7 @@ impl Volume {
 }
 
 /// The node at `path` (names separated by `/`) under `dir`.
-fn walk(dir: &NodeRef, path: &str) -> Result<NodeRef, Error> {
+pub(crate) fn walk(dir: &NodeRef, path: &str) -> Result<NodeRef, Error> {
     let mut node = dir.clone();
     for name in path.split('/').filter(|n| !n.is_empty()) {
         node = node.lookup(name)?;
@@ -140,7 +140,7 @@ fn walk(dir: &NodeRef, path: &str) -> Result<NodeRef, Error> {
     Ok(node)
 }
 
-fn read_all(node: &NodeRef) -> Vec<u8> {
+pub(crate) fn read_all(node: &NodeRef) -> Vec<u8> {
     let size = node.stat().size as usize;
     let mut out = vec![0u8; size + 100];
     let n = node.read(0, &mut SliceMut(&mut out)).unwrap();
@@ -155,7 +155,7 @@ fn read_link(node: &NodeRef) -> String {
     String::from_utf8(out[..n].to_vec()).unwrap()
 }
 
-fn names(dir: &NodeRef) -> Vec<(String, Kind)> {
+pub(crate) fn names(dir: &NodeRef) -> Vec<(String, Kind)> {
     let mut out = Vec::new();
     dir.list(0, &mut |_, name, kind| {
         out.push((String::from(name), kind));
@@ -168,7 +168,7 @@ fn names(dir: &NodeRef) -> Vec<(String, Kind)> {
 
 /// Bytes that differ from offset to offset and file to file, as `ob
 /// fixture ntfs-3g` makes them.
-fn pattern(seed: u32, len: usize) -> Vec<u8> {
+pub(crate) fn pattern(seed: u32, len: usize) -> Vec<u8> {
     let mut x = seed.wrapping_mul(2_654_435_761) | 1;
     (0..len)
         .map(|_| {
@@ -182,7 +182,7 @@ fn pattern(seed: u32, len: usize) -> Vec<u8> {
 
 /// Names of every kind: short, with spaces, non-ASCII, astral (two units
 /// a character), and as long as NTFS allows, 255 units.
-fn test_names() -> Vec<String> {
+pub(crate) fn test_names() -> Vec<String> {
     let mut names: Vec<String> = [
         "README.TXT",
         "notes.txt",
@@ -201,7 +201,7 @@ fn test_names() -> Vec<String> {
 
 /// The sizes of the test files: empty, resident in the record, around a
 /// page, and over many clusters.
-const SIZES: [usize; 8] = [0, 1, 600, 4095, 4096, 4097, 70_000, 300_001];
+pub(crate) const SIZES: [usize; 8] = [0, 1, 600, 4095, 4096, 4097, 70_000, 300_001];
 
 #[test]
 fn a_fresh_volume_mounts() {
@@ -230,15 +230,6 @@ fn a_fresh_volume_mounts() {
         let sectors = (mib << 20) / u64::from(sector) - 1;
         assert_eq!(info.blocks, sectors / u64::from(cluster / sector));
     }
-}
-
-#[test]
-fn a_writable_mount_is_refused() {
-    let image = Image::mkntfs(16, 512, 4096);
-    let disk = mem::arc(RamDisk::with_blocks(32768, false, 512)).unwrap();
-    disk.load(0, &image.bytes()).unwrap();
-    let device: DeviceRef = disk;
-    assert_eq!(NtfsFs::mount(device, false).err(), Some(Error::NotSupported));
 }
 
 #[test]
@@ -372,7 +363,19 @@ fn a_hibernated_volume_says_so() {
         image.copy_in("hiberfil.sys", &data);
         let volume = Volume::new_in(512, &image.bytes());
         assert_eq!(volume.fs.hibernated(), hibernated);
+        // Mounted read-only, it says why it could not be written.
+        let why = volume.fs.kept_from_writing();
+        assert_eq!(why.is_some_and(|w| w.contains("Fast Startup")), hibernated, "{why:?}");
+        let rw = NtfsFs::mount(volume_device(&image.bytes()), false).err();
+        assert_eq!(rw, hibernated.then_some(Error::NotSupported));
     }
+}
+
+/// `image` on a RAM disk of 512-byte blocks.
+fn volume_device(image: &[u8]) -> DeviceRef {
+    let disk = mem::arc(RamDisk::with_blocks(image.len() as u64 / 512, false, 512)).unwrap();
+    disk.load(0, image).unwrap();
+    disk
 }
 
 /// A volume of 8 MiB that `mkntfs -c 512 -L NTFS3G` made and ntfs-3g
@@ -384,7 +387,7 @@ fn a_hibernated_volume_says_so() {
 const NTFS_3G: &[u8] = include_bytes!("fixtures/ntfs-3g.sectors");
 
 /// [`NTFS_3G`]'s volume.
-fn ntfs_3g() -> Vec<u8> {
+pub(crate) fn ntfs_3g() -> Vec<u8> {
     let word = |at: &[u8]| u32::from_le_bytes(at[..4].try_into().unwrap());
     let mut image = vec![0u8; word(NTFS_3G) as usize * 512];
     let mut at = 4;

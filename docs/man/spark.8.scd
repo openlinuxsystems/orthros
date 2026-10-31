@@ -99,8 +99,9 @@ Init: /system/commands/spark is process 1
   Btrfs or ext4 filesystem of each partition, or of each disk with no
   partition table, at _/volumes/_*name*, read-write, or read-only when
   the device is or when the kernel refuses to write it (*read_only* from
-  the disk, or *invalid_argument* for what Radix does not write yet:
-  NTFS, an exFAT with two tables, or a Btrfs or ext4 feature). A Btrfs
+  the disk, or *invalid_argument* for what Radix does not write: an
+  NTFS that Windows left dirty, hibernated or with a log to replay, an
+  exFAT with two tables, or a Btrfs or ext4 feature). A Btrfs
   named with *--compress* compresses what is written to it. FAT, exFAT
   and NTFS are tried first, in that order, as *mkfs.btrfs* and
   *mkfs.ext4* clear the sectors they start in while *mkfs.fat*,

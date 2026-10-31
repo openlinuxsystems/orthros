@@ -14,10 +14,8 @@
 //! of the names before it, and the last, keyless entry to the block of
 //! those after the rest.
 //!
-//! A lookup goes down the tree. A listing walks the root, then every
-//! block in use in turn, as Linux's `ntfs3` does: not in name order, but
-//! each entry once, and a listing's cursor is where it stopped (the node
-//! and the offset in it), so a long listing never starts again.
+//! A lookup goes down the tree; a listing walks it in order
+//! ([`crate::tree::walk`]).
 
 use core::cmp::Ordering;
 
@@ -67,6 +65,8 @@ pub mod attributes {
     pub const HIDDEN: u32 = 0x0002;
     /// A file of the system.
     pub const SYSTEM: u32 = 0x0004;
+    /// Changed since a backup last cleared it.
+    pub const ARCHIVE: u32 = 0x0020;
     /// The file has a reparse point: it is a link, a mount point or the
     /// like.
     pub const REPARSE_POINT: u32 = 0x0400;
@@ -306,19 +306,4 @@ fn descend(
     }
     // A node without its last entry.
     Err(Error::Corrupt)
-}
-
-/// The node a listing's cursor is in: 0 for the root, n + 1 for block n.
-pub fn cursor_node(cursor: u64) -> u64 {
-    cursor >> 24
-}
-
-/// The offset in its node a listing's cursor is at.
-pub fn cursor_offset(cursor: u64) -> usize {
-    (cursor & 0xff_ffff) as usize
-}
-
-/// The cursor of offset `offset` in node `node`.
-pub fn cursor(node: u64, offset: usize) -> u64 {
-    (node << 24) | offset as u64
 }

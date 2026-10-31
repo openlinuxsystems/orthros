@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! NTFS, read-only for now (Phase 11f.1).
+//! NTFS, read (Phase 11f.1) and written (11f.2).
 //!
 //! NTFS is what Windows formats its disks with, and many USB disks come
 //! with. Microsoft publishes no specification of it; this crate is built
@@ -10,8 +10,9 @@
 //! reparse points and [MS-XCA] for its compression), with no code of
 //! Linux's or ntfs-3g's, which are GPL. It is checked against ntfs-3g's
 //! tools: the tests format volumes with `mkntfs`, write files with
-//! `ntfscp`, and read a volume ntfs-3g filled through FUSE. ADR 0236
-//! records the decision.
+//! `ntfscp`, and read a volume ntfs-3g filled through FUSE; what Radix
+//! writes, `ntfsresize --info`, `ntfsfix -n` and The Sleuth Kit check.
+//! ADRs 0236 (reading) and 0237 (writing) record the decisions.
 //!
 //! - [`boot`] reads the boot sector: how big clusters and records are,
 //!   and where the master file table is.
@@ -20,7 +21,13 @@
 //! - [`runs`] reads run lists, where non-resident attributes' clusters
 //!   are.
 //! - [`upcase`] holds the volume's up-case table, which orders names.
-//! - [`index`] walks directory indexes, B+ trees of names.
+//! - [`index`] walks directory indexes, B+ trees of names, and [`tree`]
+//!   changes them.
+//! - [`edit`] changes file records: attributes made, resized and taken
+//!   out.
+//! - [`space`] finds free clusters in `$Bitmap` and free records in the
+//!   master file table's bitmap.
+//! - [`names`] makes the names and times Radix writes.
 //! - [`lznt1`] uncompresses compressed files.
 //! - [`reparse`] reads reparse points: links and junctions.
 //! - [`fs::NtfsFs`] is the filesystem; [`node::NtfsNode`] its files,
@@ -41,17 +48,25 @@
 extern crate alloc;
 
 pub mod boot;
+pub mod edit;
 pub mod fs;
 pub mod index;
 pub mod lznt1;
+pub mod names;
 pub mod node;
 pub mod record;
 pub mod reparse;
 pub mod runs;
+pub mod space;
+pub mod tree;
 pub mod upcase;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tree_tests;
+#[cfg(test)]
+mod write_tests;
 
 pub use fs::NtfsFs;
 pub use node::NtfsNode;
