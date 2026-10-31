@@ -11,9 +11,14 @@
 //! Linux replays the log. The disk, kept as [`sparse`] blocks, and the
 //! lists go to the Btrfs host tests' fixtures, which check that Radix
 //! replays the log as Linux does (ADR 0151).
+//!
+//! `ntfs-3g` fills an NTFS volume through ntfs-3g ([`ntfs`]), which the
+//! NTFS host tests read (ADR 0236).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+pub mod ntfs;
 
 use crate::config::{Firmware, Media};
 use crate::process::{self, step};
@@ -41,12 +46,14 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     match name.as_deref() {
         Some("btrfs-log") => btrfs_log(ctx, kernel),
         Some("btrfs-radix-log") => btrfs_radix_log(ctx, kernel),
+        Some("ntfs-3g") => ntfs::ntfs_3g(ctx),
         Some(other) => {
             crate::bail!(
-                "there is no fixture {other}: those there are are btrfs-log, btrfs-radix-log"
+                "there is no fixture {other}: those there are are btrfs-log, btrfs-radix-log, \
+                 ntfs-3g"
             )
         }
-        None => crate::bail!("name the fixture to make: btrfs-log or btrfs-radix-log"),
+        None => crate::bail!("name the fixture to make: btrfs-log, btrfs-radix-log or ntfs-3g"),
     }
 }
 
