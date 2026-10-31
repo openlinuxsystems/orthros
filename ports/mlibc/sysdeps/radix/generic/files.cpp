@@ -83,14 +83,21 @@ uint32_t open_flags(int flags) {
 	return out;
 }
 
+// The permission bits of a mode the kernel takes: as Linux, the others
+// are dropped.
+uint32_t mode_bits(mode_t mode) {
+	return static_cast<uint32_t>(mode) & 07777;
+}
+
 // Opens `path` with `flags` (the kernel's) and `rights` into the lowest
-// free descriptor; returns 0 and the descriptor and what it is.
-int open_rights(const radix::Path &path, uint32_t flags, uint64_t rights, int *fd,
+// free descriptor, making a file with `mode` if `flags` say to; returns 0
+// and the descriptor and what it is.
+int open_rights(const radix::Path &path, uint32_t flags, uint64_t rights, mode_t mode, int *fd,
 		uint8_t *kind) {
 	return radix::place(0, fd, [&](uint32_t slot) {
 		struct radix_directory_open_results r;
 		uint64_t status = radix_directory_open(path.dir, path.text, path.len, flags, rights,
-				slot, &r);
+				slot, mode_bits(mode), &r);
 		if(!status)
 			*kind = r.kind;
 		return status;
@@ -107,8 +114,8 @@ int access_mode(int flags) {
 	return flags & (O_RDONLY | O_WRONLY | O_RDWR);
 }
 
-// Opens `path` as POSIX's openat does.
-int open_path(const radix::Path &path, int flags, int *fd) {
+// Opens `path` as POSIX's openat does, making a file with `mode`.
+int open_path(const radix::Path &path, int flags, mode_t mode, int *fd) {
 	// Linux 6.4 and later refuse to make a file that must be a directory,
 	// and make nothing.
 	if((flags & O_CREAT) && (flags & O_DIRECTORY))
@@ -132,7 +139,7 @@ int open_path(const radix::Path &path, int flags, int *fd) {
 	// filesystem allows it: POSIX lets openat make files beneath any
 	// directory descriptor, which takes that right here.
 	if(read_only && (flags & O_DIRECTORY)) {
-		int e = open_rights(path, kernel_flags, RADIX_RIGHTS_READ | RADIX_RIGHTS_WRITE, fd,
+		int e = open_rights(path, kernel_flags, RADIX_RIGHTS_READ | RADIX_RIGHTS_WRITE, mode, fd,
 				&kind);
 		if(e != EROFS && e != EACCES) {
 			if(!e) {
@@ -142,7 +149,7 @@ int open_path(const radix::Path &path, int flags, int *fd) {
 			return e;
 		}
 	}
-	if(int e = open_rights(path, kernel_flags, rights, fd, &kind); e)
+	if(int e = open_rights(path, kernel_flags, rights, mode, fd, &kind); e)
 		return e;
 	if(kind != RADIX_FILE_KIND_DIRECTORY)
 		return 0;
@@ -158,7 +165,7 @@ int open_path(const radix::Path &path, int flags, int *fd) {
 		// it may have it, in the same descriptor.
 		int wider;
 		uint8_t again;
-		if(!open_rights(path, kernel_flags, RADIX_RIGHTS_READ | RADIX_RIGHTS_WRITE, &wider,
+		if(!open_rights(path, kernel_flags, RADIX_RIGHTS_READ | RADIX_RIGHTS_WRITE, mode, &wider,
 				&again)) {
 			uint32_t slot = radix::slot_of(*fd);
 			radix_capability_delete(slot);
@@ -444,13 +451,12 @@ int Sysdeps<Open>::operator()(const char *pathname, int flags, mode_t mode, int 
 }
 
 int Sysdeps<Openat>::operator()(int dirfd, const char *path, int flags, mode_t mode, int *fd) {
-	(void)mode;
 	radix::Path resolved;
 	if(int e = radix::resolve(dirfd, path, &resolved); e)
 		return e;
 	if(int from = named_fd(resolved); from >= 0)
 		return open_named(from, flags, fd);
-	return open_path(resolved, flags, fd);
+	return open_path(resolved, flags, mode, fd);
 }
 
 int Sysdeps<OpenDir>::operator()(const char *path, int *handle) {
@@ -932,7 +938,7 @@ int Sysdeps<Access>::operator()(const char *path, int mode) {
 
 int Sysdeps<Faccessat>::operator()(int dirfd, const char *pathname, int mode, int flags) {
 	(void)mode;
-	// There are no permissions until users come (Phase 13): a file that
+	// Modes are kept but not yet checked (13b.2, ADR 0213): a file that
 	// exists may be read, written and run.
 	radix::Path resolved;
 	if(int e = radix::resolve(dirfd, pathname, &resolved); e)
@@ -948,12 +954,11 @@ int Sysdeps<Mkdir>::operator()(const char *path, mode_t mode) {
 }
 
 int Sysdeps<Mkdirat>::operator()(int dirfd, const char *path, mode_t mode) {
-	(void)mode;
 	radix::Path resolved;
 	if(int e = radix::resolve(dirfd, path, &resolved); e)
 		return e;
 	return radix::to_errno(radix_directory_make_directory(resolved.dir, resolved.text,
-			resolved.len));
+			resolved.len, mode_bits(mode)));
 }
 
 int Sysdeps<Rmdir>::operator()(const char *path) {
@@ -1187,36 +1192,64 @@ int Sysdeps<Chmod>::operator()(const char *pathname, mode_t mode) {
 	return sysdep<Fchmodat>(AT_FDCWD, pathname, mode, 0);
 }
 
+namespace {
+
+// Changes the owner, group or mode of the file or directory `fd` (ADR
+// 0213), each that is RADIX_DIRECTORY_KEEP staying: a directory's
+// capability takes the change as its own ".".
+int set_access_fd(int fd, uint32_t owner, uint32_t group, uint32_t mode) {
+	uint32_t slot = radix::slot_of(fd);
+	if(slot == radix::NO_SLOT)
+		return EBADF;
+	uint64_t status = radix_file_set_access(slot, owner, group, mode);
+	if(other_kind(status))
+		status = radix_directory_set_access(slot, ".", 1, 0, owner, group, mode);
+	return radix::to_errno(status);
+}
+
+// Changes the owner, group or mode of the file at `path`, as
+// set_access_fd does; with `flags` AT_SYMLINK_NOFOLLOW, of a symbolic
+// link there itself, whose mode cannot change (EOPNOTSUPP).
+int set_access_path(const radix::Path &path, int flags, uint32_t owner, uint32_t group,
+		uint32_t mode) {
+	if(int from = named_fd(path); from >= 0)
+		return set_access_fd(from, owner, group, mode);
+	return radix::to_errno(radix_directory_set_access(path.dir, path.text, path.len,
+			path_flags(flags), owner, group, mode));
+}
+
+// An owner or group of chown's as set_access takes it: -1 leaves it.
+uint32_t kept_id(uint32_t id) {
+	return id == static_cast<uint32_t>(-1) ? RADIX_DIRECTORY_KEEP : id;
+}
+
+} // namespace
+
 int Sysdeps<Fchmod>::operator()(int fd, mode_t mode) {
-	(void)mode;
-	struct stat st;
-	return stat_fd(fd, &st);
+	return set_access_fd(fd, RADIX_DIRECTORY_KEEP, RADIX_DIRECTORY_KEEP, mode_bits(mode));
 }
 
 int Sysdeps<Fchmodat>::operator()(int fd, const char *pathname, mode_t mode, int flags) {
-	(void)mode;
-	// Files have no permissions to change until users come (Phase 13).
+	if(flags & ~AT_SYMLINK_NOFOLLOW)
+		return EINVAL;
 	radix::Path resolved;
 	if(int e = radix::resolve(fd, pathname, &resolved); e)
 		return e;
-	struct stat st;
-	return stat_path(resolved, &st, flags);
+	return set_access_path(resolved, flags, RADIX_DIRECTORY_KEEP, RADIX_DIRECTORY_KEEP,
+			mode_bits(mode));
 }
 
 int Sysdeps<Fchownat>::operator()(int dirfd, const char *pathname, uid_t owner, gid_t group,
 		int flags) {
-	(void)owner;
-	(void)group;
-	if((flags & AT_EMPTY_PATH) && pathname && !*pathname) {
-		struct stat st;
-		return stat_fd(dirfd, &st);
-	}
-	// Files have no owners until users come (Phase 13).
+	if(flags & ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW))
+		return EINVAL;
+	if((flags & AT_EMPTY_PATH) && pathname && !*pathname)
+		return set_access_fd(dirfd, kept_id(owner), kept_id(group), RADIX_DIRECTORY_KEEP);
 	radix::Path resolved;
 	if(int e = radix::resolve(dirfd, pathname, &resolved); e)
 		return e;
-	struct stat st;
-	return stat_path(resolved, &st, flags);
+	return set_access_path(resolved, flags, kept_id(owner), kept_id(group),
+			RADIX_DIRECTORY_KEEP);
 }
 
 namespace {
@@ -1270,8 +1303,8 @@ int Sysdeps<Utimensat>::operator()(int dirfd, const char *pathname, const struct
 }
 
 int Sysdeps<Umask>::operator()(mode_t mode, mode_t *old) {
-	// Kept by the kernel, so that exec keeps it; only kept, as files have
-	// no permissions until users come (Phase 13).
+	// Kept by the kernel, so that exec keeps it, and applied by it to
+	// what a program makes (ADR 0213).
 	struct radix_process_file_mask_results r;
 	if(uint64_t status = radix_process_file_mask(radix::SLOT_PROCESS, true, mode & 0777, &r);
 			status)
@@ -1284,7 +1317,6 @@ int Sysdeps<Mkfifoat>::operator()(int dirfd, const char *path, mode_t mode) {
 	return sysdep<Mknodat>(dirfd, path, S_IFIFO | (mode & 07777), 0);
 }
 
-// The mode's permissions are not kept until users come (Phase 13).
 int Sysdeps<Mknodat>::operator()(int dirfd, const char *path, int mode, int dev) {
 	enum radix_file_kind kind;
 	uint64_t device = 0;
@@ -1315,7 +1347,7 @@ int Sysdeps<Mknodat>::operator()(int dirfd, const char *path, int mode, int dev)
 	if(int e = radix::resolve(dirfd, path, &resolved); e)
 		return e;
 	return radix::to_errno(radix_directory_make_node(resolved.dir, resolved.text, resolved.len,
-			kind, device));
+			kind, device, mode_bits(mode)));
 }
 
 int Sysdeps<Pipe>::operator()(int *fds, int flags) {

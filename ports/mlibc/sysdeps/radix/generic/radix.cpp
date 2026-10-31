@@ -317,29 +317,32 @@ void fill_stat(struct ::stat *st, const struct radix_file_status &f) {
 	st->st_ino = f.id;
 	switch(f.kind) {
 	case RADIX_FILE_KIND_DIRECTORY:
-		st->st_mode = S_IFDIR | 0755;
+		st->st_mode = S_IFDIR;
 		break;
 	case RADIX_FILE_KIND_BLOCK_DEVICE:
-		st->st_mode = S_IFBLK | 0660;
+		st->st_mode = S_IFBLK;
 		break;
 	case RADIX_FILE_KIND_CHAR_DEVICE:
-		st->st_mode = S_IFCHR | 0666;
+		st->st_mode = S_IFCHR;
 		break;
 	case RADIX_FILE_KIND_PIPE:
-		st->st_mode = S_IFIFO | 0600;
+		st->st_mode = S_IFIFO;
 		break;
 	case RADIX_FILE_KIND_SYMLINK:
-		st->st_mode = S_IFLNK | 0777;
+		st->st_mode = S_IFLNK;
 		break;
 	case RADIX_FILE_KIND_SOCKET:
-		st->st_mode = S_IFSOCK | 0777;
+		st->st_mode = S_IFSOCK;
 		break;
 	default:
-		// Files have no permissions until users come (Phase 13): all may
-		// read, write and run them.
-		st->st_mode = S_IFREG | 0755;
+		st->st_mode = S_IFREG;
 		break;
 	}
+	// Its permission bits and owners, as its filesystem keeps them or
+	// the kernel makes them up (ADR 0213).
+	st->st_mode |= f.mode & 07777;
+	st->st_uid = f.owner;
+	st->st_gid = f.group;
 	st->st_nlink = f.links;
 	if(f.kind == RADIX_FILE_KIND_CHAR_DEVICE || f.kind == RADIX_FILE_KIND_BLOCK_DEVICE)
 		st->st_rdev = makedev(static_cast<unsigned int>(f.device >> 32),

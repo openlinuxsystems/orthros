@@ -15,10 +15,11 @@ use super::XorShift;
 use super::files::noise;
 use super::rw::{Model, Thing, mount_rw, put, synced};
 use super::write::{mkfs_empty, writable};
+use super::{DIR, FILE};
 
 /// Makes the file `name` in `dir`, which is `path`, holding `data`.
 fn file(dir: &NodeRef, path: &str, name: &str, data: &[u8], model: &mut Model) -> NodeRef {
-    let file = dir.create(name, Kind::File).unwrap();
+    let file = dir.create(name, Kind::File, FILE).unwrap();
     put(&file, 0, data);
     model.insert(format!("{path}/{name}"), Thing::File(data.to_vec()));
     file
@@ -74,7 +75,7 @@ fn a_clone_shares_its_sources_data_until_either_changes_it() {
     let a = file(&root, "", "a", &noise(1, 900_000), &mut model);
     synced(&fs, &disk, &model, "written");
     let free = fs.info().free;
-    let b = root.create("b", Kind::File).unwrap();
+    let b = root.create("b", Kind::File, FILE).unwrap();
     model.insert("/b".into(), Thing::File(Vec::new()));
     clone((&b, "/b"), (&a, "/a"), 0, 0, 0, &mut model);
     synced(&fs, &disk, &model, "cloned whole");
@@ -119,7 +120,7 @@ fn a_clone_shares_its_sources_data_until_either_changes_it() {
     root.make_subvolume("sub").unwrap();
     model.insert("/sub".into(), Thing::Dir);
     let sub = root.lookup("sub").unwrap();
-    let d = sub.create("d", Kind::File).unwrap();
+    let d = sub.create("d", Kind::File, FILE).unwrap();
     model.insert("/sub/d".into(), Thing::File(Vec::new()));
     clone((&d, "/sub/d"), (&b, "/b"), 0, 0, 0, &mut model);
     synced(&fs, &disk, &model, "into another subvolume");
@@ -150,7 +151,7 @@ fn clones_linux_refuses_are_refused() {
     let mut model = Model::new();
     let a = file(&root, "", "a", &noise(1, 50_000), &mut model);
     let b = file(&root, "", "b", &noise(2, 90_000), &mut model);
-    let dir = root.create("dir", Kind::Directory).unwrap();
+    let dir = root.create("dir", Kind::Directory, DIR).unwrap();
     model.insert("/dir".into(), Thing::Dir);
     // Not whole blocks.
     assert_eq!(b.clone_range(&a, 100, 4096, 0), Err(Error::InvalidArgument));
@@ -168,7 +169,7 @@ fn clones_linux_refuses_are_refused() {
     // Another filesystem.
     let other_disk = writable(&mkfs_empty(&[]));
     let other = mount_rw(&other_disk);
-    let x = other.root().create("x", Kind::File).unwrap();
+    let x = other.root().create("x", Kind::File, FILE).unwrap();
     assert_eq!(x.clone_range(&a, 0, 0, 0), Err(Error::CrossMount));
     // Nothing changed.
     synced(&fs, &disk, &model, "refused");

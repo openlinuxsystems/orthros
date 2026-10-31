@@ -19,13 +19,14 @@ use radix_block::ram::RamDisk;
 use radix_block::{BlockDevice, DeviceRef};
 use radix_vfs::mem::{self, KArc};
 use radix_vfs::mount::{OpenFlags, Vfs};
-use radix_vfs::{Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
+use radix_vfs::{Access, Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
 
 use super::files::{contents, mount, noise};
 use super::write::{
     CrashDisk, Op, SIZE, assert_checks, btrfs_check, image_of, mkfs_empty, mkfs_sized, writable,
     write_sparse,
 };
+use super::{DIR, FILE, LINK};
 use super::{XorShift, scratch, tool};
 use crate::files::{ORPHAN_ITEM, object};
 use crate::format::{Key, item, tree};
@@ -165,11 +166,11 @@ fn files_written_read_back_and_pass_btrfs_check() {
     let free = fs.info().free;
     let root = fs.root();
     let mut model = Model::new();
-    root.create("docs", Kind::Directory).unwrap();
-    root.create("docs/x", Kind::File).map(|_| ()).unwrap_err();
+    root.create("docs", Kind::Directory, DIR).unwrap();
+    root.create("docs/x", Kind::File, FILE).map(|_| ()).unwrap_err();
     let docs = root.lookup("docs").unwrap();
     model.insert("/docs".into(), Thing::Dir);
-    let deep = docs.create("deeper", Kind::Directory).unwrap();
+    let deep = docs.create("deeper", Kind::Directory, DIR).unwrap();
     model.insert("/docs/deeper".into(), Thing::Dir);
     // Sizes around the sector and the page cache's runs of 32 pages.
     for (n, len) in
@@ -177,7 +178,7 @@ fn files_written_read_back_and_pass_btrfs_check() {
     {
         let dir = if n % 2 == 0 { &docs } else { &deep };
         let name = format!("size-{len}");
-        let file = dir.create(&name, Kind::File).unwrap();
+        let file = dir.create(&name, Kind::File, FILE).unwrap();
         let data = noise(n as u64 + 1, len);
         put(&file, 0, &data);
         assert_eq!(file.stat().size, len as u64);
@@ -185,14 +186,14 @@ fn files_written_read_back_and_pass_btrfs_check() {
             if n % 2 == 0 { format!("/docs/{name}") } else { format!("/docs/deeper/{name}") };
         model.insert(path, Thing::File(data));
     }
-    root.make_link("link", "docs/size-100").unwrap();
+    root.make_link("link", "docs/size-100", LINK).unwrap();
     model.insert("/link".into(), Thing::Link("docs/size-100".into()));
     let long = "x/".repeat(1000);
-    root.make_link("long-link", &long).unwrap();
+    root.make_link("long-link", &long, LINK).unwrap();
     model.insert("/long-link".into(), Thing::Link(long));
-    assert_eq!(root.create("docs", Kind::File).map(|_| ()), Err(Error::Exists));
-    assert_eq!(root.create("link", Kind::Symlink).map(|_| ()), Err(Error::NotSupported));
-    assert_eq!(root.create("", Kind::File).map(|_| ()), Err(Error::BadName));
+    assert_eq!(root.create("docs", Kind::File, FILE).map(|_| ()), Err(Error::Exists));
+    assert_eq!(root.create("link", Kind::Symlink, LINK).map(|_| ()), Err(Error::NotSupported));
+    assert_eq!(root.create("", Kind::File, FILE).map(|_| ()), Err(Error::BadName));
     assert_eq!(snapshot(&root), model, "before the sync");
     // The pages written take their room as they change, as on Linux.
     let dirty = fs.info().free;
@@ -210,7 +211,7 @@ fn overwrites_cuts_and_holes_keep_every_byte() {
     let fs = mount_rw(&disk);
     let root = fs.root();
     let mut model = Model::new();
-    let file = root.create("f", Kind::File).unwrap();
+    let file = root.create("f", Kind::File, FILE).unwrap();
     model.insert("/f".into(), Thing::File(Vec::new()));
     let step = |model: &mut Model, offset: u64, data: Vec<u8>, what: &str| {
         put(&file, offset, &data);
@@ -248,12 +249,12 @@ fn removing_and_renaming_keep_directories_whole() {
     let mut model = Model::new();
     for dir in ["/a", "/a/b", "/c", "/empty"] {
         let (at_dir, name) = parent(&root, dir);
-        at_dir.create(name, Kind::Directory).unwrap();
+        at_dir.create(name, Kind::Directory, DIR).unwrap();
         model.insert(dir.into(), Thing::Dir);
     }
     for (n, path) in ["/a/one", "/a/b/two", "/c/three", "/four"].into_iter().enumerate() {
         let (dir, name) = parent(&root, path);
-        let file = dir.create(name, Kind::File).unwrap();
+        let file = dir.create(name, Kind::File, FILE).unwrap();
         let data = noise(n as u64 + 10, 5000 * (n + 1));
         put(&file, 0, &data);
         model.insert(path.into(), Thing::File(data));
@@ -261,7 +262,7 @@ fn removing_and_renaming_keep_directories_whole() {
     // Many names in one directory split its leaves (4 KiB nodes).
     let c = root.lookup("c").unwrap();
     for n in 0..300 {
-        c.create(&format!("name-{n:03}-{}", "y".repeat(30)), Kind::File).unwrap();
+        c.create(&format!("name-{n:03}-{}", "y".repeat(30)), Kind::File, FILE).unwrap();
         model.insert(format!("/c/name-{n:03}-{}", "y".repeat(30)), Thing::File(Vec::new()));
     }
     synced(&fs, &disk, &model, "made");
@@ -285,7 +286,7 @@ fn removing_and_renaming_keep_directories_whole() {
     a.rename("uno", &*c, "three").unwrap();
     let uno = model.remove("/a/uno").unwrap();
     model.insert("/c/three".into(), uno);
-    root.create("d", Kind::Directory).unwrap();
+    root.create("d", Kind::Directory, DIR).unwrap();
     model.insert("/d".into(), Thing::Dir);
     let b = a.lookup("b").unwrap();
     assert_eq!(a.rename("b", &*b, "inside"), Err(Error::BadName));
@@ -381,7 +382,7 @@ fn a_file_removed_while_open_goes_when_it_closes_or_at_the_next_mount() {
     let disk = writable(&mkfs_empty(&[]));
     let fs = mount_rw(&disk);
     let root = fs.root();
-    let file = root.create("open", Kind::File).unwrap();
+    let file = root.create("open", Kind::File, FILE).unwrap();
     let data = noise(40, 70_000);
     put(&file, 0, &data);
     let ino = file.stat().id;
@@ -403,7 +404,7 @@ fn a_file_removed_while_open_goes_when_it_closes_or_at_the_next_mount() {
 
     // Removed while open, and the power goes before it closes: the next
     // writable mount frees it.
-    let file = root.create("crash", Kind::File).unwrap();
+    let file = root.create("crash", Kind::File, FILE).unwrap();
     put(&file, 0, &data);
     let ino = file.stat().id;
     root.remove("crash").unwrap();
@@ -435,10 +436,10 @@ fn files_written_closed_and_removed_before_a_sync_give_their_room_back_at_once()
         let mut gone = Vec::new();
         for n in 0..3000 {
             let file = if through_vfs {
-                let flags = OpenFlags { create: true, ..OpenFlags::default() };
+                let flags = OpenFlags { create: Some(FILE), ..OpenFlags::default() };
                 vfs.open(&top, "temp", flags).unwrap().node
             } else {
-                root.create("temp", Kind::File).unwrap()
+                root.create("temp", Kind::File, FILE).unwrap()
             };
             put(&file, 0, &data);
             if n % 500 == 0 {
@@ -469,7 +470,7 @@ fn the_writeback_thread_commits_early_once_more_pages_wait_than_the_limit() {
     let fs = mount_rw(&disk);
     let root = fs.root();
     assert!(!fs.is_dirty());
-    let file = root.create("big", Kind::File).unwrap();
+    let file = root.create("big", Kind::File, FILE).unwrap();
     let data = noise(43, 1 << 20);
     let limit = (crate::fs::DIRTY_PAGES_MAX * radix_block::PAGE_SIZE) as u64;
     for at in (0..limit).step_by(data.len()) {
@@ -483,7 +484,7 @@ fn the_writeback_thread_commits_early_once_more_pages_wait_than_the_limit() {
     drop(file);
     root.remove("big").unwrap();
     assert!(!fs.is_dirty(), "a removed file's pages are never written");
-    let file = root.create("again", Kind::File).unwrap();
+    let file = root.create("again", Kind::File, FILE).unwrap();
     for at in (0..=limit).step_by(data.len()) {
         put(&file, at, &data);
     }
@@ -510,11 +511,11 @@ fn a_power_cut_anywhere_keeps_the_last_sync() {
         let mut random = XorShift(0x5eed);
         for round in 0..4 {
             let dir = format!("round-{round}");
-            root.create(&dir, Kind::Directory).unwrap();
+            root.create(&dir, Kind::Directory, DIR).unwrap();
             model.insert(format!("/{dir}"), Thing::Dir);
             let d = root.lookup(&dir).unwrap();
             for n in 0..6 {
-                let file = d.create(&format!("f{n}"), Kind::File).unwrap();
+                let file = d.create(&format!("f{n}"), Kind::File, FILE).unwrap();
                 let data = noise(random.next(), random.below(200_000));
                 put(&file, 0, &data);
                 model.insert(format!("/{dir}/f{n}"), Thing::File(data));
@@ -587,7 +588,7 @@ fn a_power_cut_in_a_churn_of_synced_files_keeps_the_last_commit() {
         for round in 0..48u64 {
             let (temp, file) = (format!("temp-{round:04}"), format!("file-{round:04}"));
             let data = noise(round, (round as usize * 40_009) % (192 << 10) + 1);
-            let made = root.create(&temp, Kind::File).unwrap();
+            let made = root.create(&temp, Kind::File, FILE).unwrap();
             put(&made, 0, &data);
             model.insert(format!("/{temp}"), Thing::File(data));
             made.sync().unwrap();
@@ -644,7 +645,7 @@ fn random_changes_match_a_model() {
         let mut random = XorShift(0xd0c0 + args.len() as u64);
         let dirs = ["", "/x", "/y"];
         for dir in &dirs[1..] {
-            root.create(&dir[1..], Kind::Directory).unwrap();
+            root.create(&dir[1..], Kind::Directory, DIR).unwrap();
             model.insert(dir.to_string(), Thing::Dir);
         }
         let files = |model: &Model| -> Vec<String> {
@@ -661,7 +662,7 @@ fn random_changes_match_a_model() {
                     let path = format!("{}/n{}", dirs[random.below(3)], random.below(40));
                     if let Entry::Vacant(slot) = model.entry(path) {
                         let (dir, name) = parent(&root, slot.key());
-                        dir.create(name, Kind::File).unwrap();
+                        dir.create(name, Kind::File, FILE).unwrap();
                         slot.insert(Thing::File(Vec::new()));
                     }
                 }
@@ -722,7 +723,7 @@ fn fill(args: &[&str], size: u64, megs: u64) {
         let fs = mount_rw(&disk);
         let root = fs.root();
         for n in 0..megs / 4 {
-            let file = root.create(&format!("f{n}"), Kind::File).unwrap();
+            let file = root.create(&format!("f{n}"), Kind::File, FILE).unwrap();
             let data = noise(n, 4 << 20);
             put(&file, 0, &data);
             model.insert(format!("/f{n}"), Thing::File(data));
@@ -739,7 +740,7 @@ fn fill(args: &[&str], size: u64, megs: u64) {
     let fs = mount_rw(&disk);
     let root = fs.root();
     for n in 100..100 + megs / 8 {
-        let file = root.create(&format!("f{n}"), Kind::File).unwrap();
+        let file = root.create(&format!("f{n}"), Kind::File, FILE).unwrap();
         let data = noise(n, 4 << 20);
         put(&file, 0, &data);
         model.insert(format!("/f{n}"), Thing::File(data));
@@ -769,7 +770,7 @@ fn files_past_the_first_dup_data_chunk_go_to_new_dup_ones() {
 fn fill_up(root: &NodeRef, model: &mut Model, first: usize) -> usize {
     for n in first.. {
         let name = format!("full-{n}");
-        let file = match root.create(&name, Kind::File) {
+        let file = match root.create(&name, Kind::File, FILE) {
             Ok(file) => file,
             Err(Error::NoSpace) => return n - first,
             Err(e) => panic!("create {name}: {e:?}"),
@@ -870,7 +871,7 @@ fn files_written_compressed_read_back_and_linux_restores_them() {
         .chain([("noise".to_string(), noise(7, 300_000)), ("mixed".to_string(), mixed)])
         .collect();
     for (name, data) in &files {
-        let file = root.create(name, Kind::File).unwrap();
+        let file = root.create(name, Kind::File, FILE).unwrap();
         put(&file, 0, data);
         model.insert(format!("/{name}"), Thing::File(data.clone()));
         logical += data.len() as u64;
@@ -929,10 +930,13 @@ fn nothing_in_a_read_only_subvolume_changes() {
     assert!(!root.read_only());
     // Every change fails as on Linux (EROFS), the mount writable or not.
     let ro = Err(Error::ReadOnly);
-    assert_eq!(sealed.create("new", Kind::File).map(drop), ro);
-    assert_eq!(inner.create("new", Kind::Directory).map(drop), ro);
-    assert_eq!(sealed.make_link("link", "file").map(drop), ro);
-    assert_eq!(sealed.make_node("pipe", Kind::Pipe, 0).map(drop), ro);
+    assert_eq!(sealed.create("new", Kind::File, FILE).map(drop), ro);
+    assert_eq!(inner.create("new", Kind::Directory, DIR).map(drop), ro);
+    assert_eq!(sealed.make_link("link", "file", LINK).map(drop), ro);
+    assert_eq!(
+        sealed.make_node("pipe", Kind::Pipe, 0, Access::default_for(Kind::Pipe)).map(drop),
+        ro
+    );
     assert_eq!(sealed.link("again", &file), ro);
     assert_eq!(sealed.remove("file"), ro);
     assert_eq!(sealed.rename("file", &*sealed, "moved"), ro);
@@ -943,10 +947,10 @@ fn nothing_in_a_read_only_subvolume_changes() {
     let top = vfs.root();
     assert_eq!(vfs.resolve(&top, "sealed/file").unwrap().writable(), ro);
     assert_eq!(vfs.resolve(&top, "open").unwrap().writable(), Ok(()));
-    let flags = OpenFlags { create: true, ..OpenFlags::default() };
+    let flags = OpenFlags { create: Some(FILE), ..OpenFlags::default() };
     assert_eq!(vfs.open(&top, "sealed/inner/new", flags).map(drop), ro);
     // The subvolume beside it takes changes, and what was there stays.
-    let made = root.lookup("open").unwrap().create("new", Kind::File).unwrap();
+    let made = root.lookup("open").unwrap().create("new", Kind::File, FILE).unwrap();
     put(&made, 0, b"written");
     fs.sync().unwrap();
     assert_eq!(contents(&*file, 4096).unwrap(), b"kept");

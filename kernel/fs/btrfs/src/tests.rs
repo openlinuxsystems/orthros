@@ -15,8 +15,8 @@ use std::vec::Vec;
 
 use radix_block::DeviceRef;
 use radix_block::ram::RamDisk;
-use radix_vfs::Error;
 use radix_vfs::mem::{self, KArc, KBox};
+use radix_vfs::{Access, Error, Kind};
 
 use crate::Volume;
 use crate::chunk::kind;
@@ -24,6 +24,12 @@ use crate::csum::{self, CsumType};
 use crate::format::{Key, item, name_hash, tree, u16_at, u64_at};
 use crate::superblock::{self, incompat};
 use crate::tree::{Cursor, HEADER_SIZE, Root, find};
+
+/// The owner, group and mode of the directories, files and links the
+/// tests make: user 0's, with Linux's usual modes.
+const DIR: Access = Access::default_for(Kind::Directory);
+const FILE: Access = Access::default_for(Kind::File);
+const LINK: Access = Access::default_for(Kind::Symlink);
 
 /// A tool of btrfs-progs: from the directory `RADIX_BTRFS_PROGS` names,
 /// where `ob test` puts a newer copy when the system's is too old for

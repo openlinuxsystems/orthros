@@ -543,13 +543,14 @@ pub fn make(user: &crate::user::UserRef, to: u32, flags: PipeFlags) -> Result<()
 }
 
 /// Gives `socket` the name `path` beneath `dir` (radix-directory(2)'s
-/// `bind_socket`), which it knows as `name`.
+/// `bind_socket`), which it knows as `name`, with `access`.
 pub fn bind(
     socket: &Socket,
     vfs: &Vfs,
     dir: &Location,
     path: &str,
     name: Name,
+    access: radix_vfs::Access,
 ) -> Result<(), Status> {
     {
         let mut state = socket.state.lock();
@@ -564,7 +565,7 @@ pub fn bind(
         .map_err(|_| Kernel::NoMemory.status(0))
         .and_then(|binding| {
             let held: SocketBinding = binding.clone();
-            vfs.make_socket(dir, path, held).map_err(|err| match err {
+            vfs.make_socket(dir, path, held, access).map_err(|err| match err {
                 // FAT has no sockets' names: Linux says EPERM.
                 radix_vfs::Error::NotSupported => Kernel::NotPermitted.status(0),
                 err => super::status(err),

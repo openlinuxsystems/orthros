@@ -26,12 +26,15 @@ use radix_sync::{Mutex, Once};
 use radix_vfs::cache::{Backing, FileCache, page_len};
 use radix_vfs::mem::{self, Alloc, KArc, KVec};
 use radix_vfs::path::check_name;
-use radix_vfs::{Error, In, Kind, ListFn, Node, NodeRef, Out, Result, SocketBinding, Stat, now};
+use radix_vfs::{
+    Access, AccessChange, Error, In, Kind, ListFn, Node, NodeRef, Out, Result, SocketBinding, Stat,
+    now,
+};
 
 use crate::dir::Entries;
 use crate::extent::{self, Compression, Extent, Regular};
 use crate::files::{Files, Packed, Put, at, compression, file_type, put_time, put_u32, put_u64};
-use crate::format::{Key, item, name_hash, tree};
+use crate::format::{Key, item, name_hash, tree, u32_at};
 use crate::fs::{Inner, Txn};
 use crate::inode::{self, Inode};
 use crate::pack::{CHUNK, Packer};
@@ -40,16 +43,16 @@ use crate::unpack::{self, Workspace};
 
 const PAGE: u64 = PAGE_SIZE as u64;
 
-/// The modes of the nodes a writable mount makes: their type and
-/// permissions, as Linux makes them with the usual umask.
+/// The type bits of the modes of the nodes a writable mount makes, as
+/// POSIX numbers them; their permissions are the caller's (ADR 0213).
 mod mode {
-    pub const FILE: u32 = 0o100_644;
-    pub const DIR: u32 = 0o040_755;
-    pub const LINK: u32 = 0o120_777;
-    pub const FIFO: u32 = 0o010_644;
-    pub const CHAR: u32 = 0o020_644;
-    pub const BLOCK: u32 = 0o060_644;
-    pub const SOCKET: u32 = 0o140_755;
+    pub const FILE: u32 = 0o100_000;
+    pub const DIR: u32 = 0o040_000;
+    pub const LINK: u32 = 0o120_000;
+    pub const FIFO: u32 = 0o010_000;
+    pub const CHAR: u32 = 0o020_000;
+    pub const BLOCK: u32 = 0o060_000;
+    pub const SOCKET: u32 = 0o140_000;
 }
 
 /// A device number as Linux keeps it in an inode item, its own 32-bit
@@ -914,12 +917,14 @@ impl BtrfsNode {
         })
     }
 
-    /// Makes `name` in this directory: a new inode of `kind` with `mode`,
-    /// and for a link, `target` inline.
+    /// Makes `name` in this directory: a new inode of `kind` with the type
+    /// bits `mode`, `access`'s owner, group and permissions, and for a
+    /// link, `target` inline.
     fn make(
         &self,
         name: &str,
         (mode, rdev): (u32, u64),
+        access: Access,
         kind: Kind,
         target: Option<&[u8]>,
     ) -> Result<NodeRef> {
@@ -946,7 +951,8 @@ impl BtrfsNode {
             let index = files.next_index(self.ino)?;
             let size = target.map_or(0, |t| t.len() as u64);
             files.whole(|f| {
-                f.make_inode(ino, (mode, rdev), flags, size, size, time)?;
+                let mode = mode | u32::from(access.mode & radix_vfs::mode::ALL);
+                f.make_inode(ino, (mode, rdev), (access.owner, access.group), flags, size, time)?;
                 if let Some(target) = target {
                     f.inline_extent(ino, target)?;
                 }
@@ -1437,15 +1443,52 @@ impl Node for BtrfsNode {
         }
     }
 
-    fn create(&self, name: &str, kind: Kind) -> Result<NodeRef> {
+    fn access(&self) -> Access {
+        let inode = self.inode();
+        Access { owner: inode.uid, group: inode.gid, mode: (inode.mode & 0o7777) as u16 }
+    }
+
+    fn set_access(&self, change: &AccessChange) -> Result<()> {
+        self.writes()?;
+        if change.mode.is_some() && self.kind == Kind::Symlink {
+            return Err(Error::NotSupported);
+        }
+        let time = now();
+        self.fs.change(|txn| {
+            // A file still open without a name keeps its item, which
+            // changes as on Linux; one whose items went has none.
+            if self.freed.load(Ordering::Acquire) {
+                return Err(Error::NotFound);
+            }
+            let mut files = txn.files(&self.fs.volume, self.subvol);
+            files.whole(|f| {
+                f.change_inode(self.ino, |d| {
+                    // The item as the transaction has it.
+                    let mode = u32_at(d, at::MODE);
+                    let access = change.apply(Access {
+                        owner: u32_at(d, at::UID),
+                        group: u32_at(d, at::GID),
+                        mode: (mode & 0o7777) as u16,
+                    });
+                    put_u32(d, at::UID, access.owner);
+                    put_u32(d, at::GID, access.group);
+                    put_u32(d, at::MODE, (mode & !0o7777) | u32::from(access.mode));
+                    put_time(d, at::CTIME, time);
+                })
+            })?;
+            self.reload(&files)
+        })
+    }
+
+    fn create(&self, name: &str, kind: Kind, access: Access) -> Result<NodeRef> {
         self.is_dir()?;
         self.writes()?;
         let mode = match kind {
             Kind::File => mode::FILE,
             Kind::Directory => mode::DIR,
-            _ => return self.make_node(name, kind, 0),
+            _ => return self.make_node(name, kind, 0, access),
         };
-        self.make(name, (mode, 0), kind, None)
+        self.make(name, (mode, 0), access, kind, None)
     }
 
     fn link(&self, name: &str, node: &NodeRef) -> Result<()> {
@@ -1497,7 +1540,7 @@ impl Node for BtrfsNode {
         })
     }
 
-    fn make_node(&self, name: &str, kind: Kind, device: u64) -> Result<NodeRef> {
+    fn make_node(&self, name: &str, kind: Kind, device: u64, access: Access) -> Result<NodeRef> {
         self.is_dir()?;
         self.writes()?;
         let mode = match kind {
@@ -1508,10 +1551,10 @@ impl Node for BtrfsNode {
             Kind::BlockDevice => (mode::BLOCK, linux_rdev(device)),
             _ => return Err(Error::NotSupported),
         };
-        self.make(name, mode, kind, None)
+        self.make(name, mode, access, kind, None)
     }
 
-    fn make_link(&self, name: &str, target: &str) -> Result<NodeRef> {
+    fn make_link(&self, name: &str, target: &str, access: Access) -> Result<NodeRef> {
         self.is_dir()?;
         self.writes()?;
         if target.is_empty() {
@@ -1520,11 +1563,11 @@ impl Node for BtrfsNode {
         if target.len() > LINK_MAX {
             return Err(Error::NameTooLong);
         }
-        self.make(name, (mode::LINK, 0), Kind::Symlink, Some(target.as_bytes()))
+        self.make(name, (mode::LINK, 0), access, Kind::Symlink, Some(target.as_bytes()))
     }
 
-    fn make_socket(&self, name: &str, binding: SocketBinding) -> Result<NodeRef> {
-        let node = self.make_node(name, Kind::Socket, 0)?;
+    fn make_socket(&self, name: &str, binding: SocketBinding, access: Access) -> Result<NodeRef> {
+        let node = self.make_node(name, Kind::Socket, 0, access)?;
         let made = radix_vfs::downcast::<BtrfsNode>(&*node).ok_or(Error::Corrupt)?;
         self.fs.set_socket(made.subvol, made.ino, Some(binding))?;
         Ok(node)

@@ -26,7 +26,8 @@ use radix_sync::Mutex;
 
 use crate::mem::{self, KArc, KBox, KVec};
 use crate::{
-    Error, FileSystem, FsInfo, FsKind, In, Kind, ListFn, Node, NodeRef, Out, Result, Stat, Text,
+    Access, Error, FileSystem, FsInfo, FsKind, In, Kind, ListFn, Node, NodeRef, Out, Result, Stat,
+    Text,
 };
 
 /// Writes a generated file's text.
@@ -213,7 +214,7 @@ impl Node for FixedDir {
         }
     }
 
-    fn create(&self, _name: &str, _kind: Kind) -> Result<NodeRef> {
+    fn create(&self, _name: &str, _kind: Kind, _access: Access) -> Result<NodeRef> {
         Err(Error::ReadOnly)
     }
 
@@ -283,7 +284,7 @@ impl Node for ListedDir {
         self.listing.lookup(name)
     }
 
-    fn create(&self, _name: &str, _kind: Kind) -> Result<NodeRef> {
+    fn create(&self, _name: &str, _kind: Kind, _access: Access) -> Result<NodeRef> {
         Err(Error::ReadOnly)
     }
 

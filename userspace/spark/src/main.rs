@@ -427,7 +427,10 @@ fn build(root: &Dir, volumes: bool, compress: &[&str]) -> bool {
         }
         _ => {
             for (path, kind, flags) in IN_MEMORY {
-                if let Err(err) = root.mount(path, kind, None, flags) {
+                let mounted = root.mount(path, kind, None, flags).and_then(|()| {
+                    if kind == FilesystemKind::Tmpfs { narrow(root, path) } else { Ok(()) }
+                });
+                if let Err(err) = mounted {
                     println!("spark: cannot mount {} on /{path}: {err}", kind.name());
                     return false;
                 }
@@ -713,7 +716,11 @@ fn mount_root(root: &Dir, disk: &str) -> bool {
         mounted.push(at);
     }
     if failed.is_none() {
-        match root.mount("system/live", FilesystemKind::Tmpfs, None, MountFlags::NONE) {
+        let live = "system/live";
+        match root
+            .mount(live, FilesystemKind::Tmpfs, None, MountFlags::NONE)
+            .and_then(|()| narrow(root, live))
+        {
             Ok(()) => return true,
             Err(err) => failed = Some(format!("cannot mount tmpfs on /system/live: {err}")),
         }
@@ -725,6 +732,16 @@ fn mount_root(root: &Dir, disk: &str) -> bool {
         }
     }
     false
+}
+
+/// The mode of the root of each tmpfs Spark mounts in `/system`: only
+/// root changes what is there (ADR 0213). A tmpfs starts as `/tmp` is,
+/// 1777, as on Linux.
+const SYSTEM_MODE: u16 = 0o755;
+
+/// Gives the tmpfs just mounted on `path` [`SYSTEM_MODE`].
+fn narrow(root: &Dir, path: &str) -> radix_rt::fs::Result<()> {
+    root.set_access(path, None, None, Some(SYSTEM_MODE))
 }
 
 /// Waits for good.

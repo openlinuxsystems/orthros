@@ -10,7 +10,7 @@
 //! holds must mount, replay, and pass `e2fsck`.
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::string::{String, ToString};
@@ -22,12 +22,18 @@ use proptest::prelude::*;
 use radix_block::ram::RamDisk;
 use radix_block::{BlockDevice, DeviceRef};
 use radix_vfs::mem::{self, KArc};
-use radix_vfs::{Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
+use radix_vfs::{Access, AccessChange, Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
 
 use crate::Ext4Fs;
 use crate::inode::flags;
 use crate::sb::{self, at, incompat};
 use crate::{le16, le32, put16, put32};
+
+/// The owner, group and mode of the directories, files and links the
+/// tests make: user 0's, with Linux's usual modes.
+const DIR: Access = Access::default_for(Kind::Directory);
+const FILE: Access = Access::default_for(Kind::File);
+const LINK: Access = Access::default_for(Kind::Symlink);
 
 /// 2026-10-22 00:42:22 UTC, for files' times.
 fn clock() -> u64 {
@@ -325,7 +331,7 @@ fn link_of(node: &NodeRef) -> String {
 
 /// A file `name` in `dir` holding `data`.
 fn make_file(dir: &NodeRef, name: &str, data: &[u8]) -> NodeRef {
-    let node = dir.create(name, Kind::File).unwrap();
+    let node = dir.create(name, Kind::File, FILE).unwrap();
     if !data.is_empty() {
         write_all(&node, 0, data).unwrap();
     }
@@ -337,9 +343,9 @@ fn put_tree(root: &NodeRef, tree: &Tree) {
     for (path, thing) in tree {
         let (dir, name) = parent(root, path);
         match thing {
-            Thing::Dir => drop(dir.create(name, Kind::Directory).unwrap()),
+            Thing::Dir => drop(dir.create(name, Kind::Directory, DIR).unwrap()),
             Thing::File(data) => drop(make_file(&dir, name, data)),
-            Thing::Link(target) => drop(dir.make_link(name, target).unwrap()),
+            Thing::Link(target) => drop(dir.make_link(name, target, LINK).unwrap()),
         }
     }
 }
@@ -624,7 +630,7 @@ fn linux_journal_replays_read_only_in_memory() {
     assert_eq!(label, "LINUXJNL");
     // Nothing reached the disk.
     assert!(volume.raw() == image, "a read-only mount wrote to the disk");
-    assert_eq!(volume.root().create("new", Kind::File).err(), Some(Error::ReadOnly));
+    assert_eq!(volume.root().create("new", Kind::File, FILE).err(), Some(Error::ReadOnly));
 }
 
 #[test]
@@ -654,11 +660,11 @@ fn workload(
     synced: &mut Vec<Tree>,
 ) -> Result<(), Error> {
     let mut tree = before.clone();
-    let dir = root.create("work", Kind::Directory)?;
+    let dir = root.create("work", Kind::Directory, DIR)?;
     tree.insert(String::from("work"), Thing::Dir);
     for i in 0..12u32 {
         let data = pattern(i, 1000 + 3000 * i as usize);
-        let node = dir.create(&format!("file {i}"), Kind::File)?;
+        let node = dir.create(&format!("file {i}"), Kind::File, FILE)?;
         write_all(&node, 0, &data)?;
         tree.insert(format!("work/file {i}"), Thing::File(data));
         if i % 4 == 3 {
@@ -679,12 +685,12 @@ fn workload(
     }
     fs.sync()?;
     synced.push(tree.clone());
-    let sub = dir.create("sub", Kind::Directory)?;
+    let sub = dir.create("sub", Kind::Directory, DIR)?;
     tree.insert(String::from("work/sub"), Thing::Dir);
-    sub.make_link("to moved", "../../moved")?;
+    sub.make_link("to moved", "../../moved", LINK)?;
     tree.insert(String::from("work/sub/to moved"), Thing::Link(String::from("../../moved")));
     let data = pattern(77, 70_000);
-    let node = sub.create("last", Kind::File)?;
+    let node = sub.create("last", Kind::File, FILE)?;
     write_all(&node, 0, &data)?;
     tree.insert(String::from("work/sub/last"), Thing::File(data));
     // Overwritten in place after a sync: the data goes straight to its
@@ -821,6 +827,60 @@ fn debugfs_flags(image: &[u8], path: &str) -> u32 {
     let at = text.find("Flags: 0x").unwrap() + 9;
     let hex: String = text[at..].chars().take_while(char::is_ascii_hexdigit).collect();
     u32::from_str_radix(&hex, 16).unwrap()
+}
+
+/// The mode, owner and group of `path`, as `debugfs` says.
+fn debugfs_access(image: &[u8], path: &str) -> (u16, u32, u32) {
+    let mut image = image.to_vec();
+    let text = debugfs(&mut image, false, &format!("stat \"/{path}\""));
+    let after = |label: &str| {
+        let at = text.find(label).unwrap_or_else(|| panic!("{path}: no {label} in {text}"));
+        String::from(text[at + label.len()..].split_whitespace().next().unwrap())
+    };
+    let mode = u16::from_str_radix(&after("Mode:"), 8).unwrap();
+    (mode, after("User:").parse().unwrap(), after("Group:").parse().unwrap())
+}
+
+#[test]
+fn owners_and_modes_are_kept_as_linux_keeps_them() {
+    let chmod = |mode| AccessChange { mode: Some(mode), ..AccessChange::default() };
+    let mine = Access { owner: 1000, group: 100, mode: 0o640 };
+    // A chown past 16 bits takes the set-user-ID bit away.
+    let chowned = Access { owner: 70_000, group: 100, mode: 0o755 };
+    for (what, mib, args) in [VOLUMES[0], VOLUMES[6]] {
+        let volume = Volume::new(&mkfs(mib, args));
+        let root = volume.root();
+        let file = root.create("file", Kind::File, mine).unwrap();
+        assert_eq!(file.access(), mine, "{what}");
+        root.create("dir", Kind::Directory, Access { mode: 0o2775, ..mine }).unwrap();
+        let link = root.make_link("link", "file", LINK).unwrap();
+        file.set_access(&chmod(0o4755)).unwrap();
+        file.set_access(&AccessChange::chown(Kind::File, Some(70_000), None)).unwrap();
+        assert_eq!(file.access(), chowned, "{what}");
+        assert_eq!(link.set_access(&chmod(0o700)), Err(Error::NotSupported));
+        link.set_access(&AccessChange::chown(Kind::Symlink, None, Some(5))).unwrap();
+        let image = volume.unmount();
+        let (clean, text) = fsck_report(&image);
+        assert!(clean, "{what}: e2fsck found problems:\n{text}");
+        assert_eq!(debugfs_access(&image, "file"), (0o755, 70_000, 100), "{what}");
+        assert_eq!(debugfs_access(&image, "dir"), (0o2775, 1000, 100), "{what}");
+        assert_eq!(debugfs_access(&image, "link"), (0o777, 0, 5), "{what}");
+        let volume = Volume::mount(&image, true).unwrap();
+        let file = volume.root().lookup("file").unwrap();
+        assert_eq!(file.access(), chowned, "{what}");
+        assert_eq!(file.set_access(&chmod(0o600)), Err(Error::ReadOnly), "{what}");
+    }
+    // What Linux made has the owners and modes it gave.
+    let dir = host_dir(&sample_tree(5));
+    std::fs::write(dir.join("private"), b"x").unwrap();
+    let set = std::fs::Permissions::from_mode(0o4710);
+    std::fs::set_permissions(dir.join("private"), set).unwrap();
+    let image = mkfs_from(16, &[], Some(&dir));
+    let volume = Volume::mount(&image, true).unwrap();
+    let meta = std::fs::metadata(dir.join("private")).unwrap();
+    let access = Access { owner: meta.uid(), group: meta.gid(), mode: 0o4710 };
+    assert_eq!(volume.root().lookup("private").unwrap().access(), access);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -978,7 +1038,7 @@ fn a_full_volume_fails_writes_not_syncs() {
         let mut i = 0u32;
         let full = loop {
             let name = format!("f{i}");
-            let node = match root.create(&name, Kind::File) {
+            let node = match root.create(&name, Kind::File, FILE) {
                 Ok(node) => node,
                 Err(err) => break err,
             };
@@ -1026,7 +1086,7 @@ fn removed_open_files_live_until_closed() {
         let root = volume.root();
         let free = volume.fs().info().free;
         let node = make_file(&root, "open", &pattern(3, 2_000_000));
-        let dir = root.create("dir", Kind::Directory).unwrap();
+        let dir = root.create("dir", Kind::Directory, DIR).unwrap();
         volume.fs().sync().unwrap();
         root.remove("open").unwrap();
         root.remove("dir").unwrap();
@@ -1034,7 +1094,7 @@ fn removed_open_files_live_until_closed() {
         // Still there for those who have it.
         assert!(read_all(&node) == pattern(3, 2_000_000));
         write_all(&node, 100, b"still writable").unwrap();
-        assert_eq!(dir.create("x", Kind::File).err(), Some(Error::NotFound));
+        assert_eq!(dir.create("x", Kind::File, FILE).err(), Some(Error::NotFound));
         // A power cut now leaves it on the orphan list: the next mount
         // frees it.
         let cut = volume.synced();
@@ -1066,7 +1126,7 @@ fn fragmented_files_grow_deep_trees() {
         let bs = volume.fs().info().block_size as usize;
         // A block written every other block: an extent each, more than a
         // tree of one level holds.
-        let node = root.create("sparse", Kind::File).unwrap();
+        let node = root.create("sparse", Kind::File, FILE).unwrap();
         let mut want = Vec::new();
         for k in 0..1500usize {
             let data = pattern(k as u32, bs);
@@ -1151,11 +1211,11 @@ fn unwritten_extents_read_as_zeros_and_are_written() {
 fn renames_follow_posix() {
     let volume = Volume::new(&mkfs(16, &["-b", "1024"]));
     let root = volume.root();
-    let a = root.create("a", Kind::Directory).unwrap();
-    let b = a.create("b", Kind::Directory).unwrap();
-    let full = root.create("full", Kind::Directory).unwrap();
+    let a = root.create("a", Kind::Directory, DIR).unwrap();
+    let b = a.create("b", Kind::Directory, DIR).unwrap();
+    let full = root.create("full", Kind::Directory, DIR).unwrap();
     make_file(&full, "x", b"x");
-    root.create("empty", Kind::Directory).unwrap();
+    root.create("empty", Kind::Directory, DIR).unwrap();
     make_file(&root, "file", b"file");
     make_file(&root, "other", b"other");
     assert_eq!(root.rename("a", &*b, "inside").err(), Some(Error::BadName));
@@ -1191,9 +1251,9 @@ fn renames_follow_posix() {
 fn many_names_in_one_directory_list_from_any_cursor() {
     let volume = Volume::new(&mkfs(32, &["-b", "1024", "-N", "8192"]));
     let root = volume.root();
-    let dir = root.create("many", Kind::Directory).unwrap();
+    let dir = root.create("many", Kind::Directory, DIR).unwrap();
     for i in 0..5000 {
-        drop(dir.create(&format!("name number {i}"), Kind::File).unwrap());
+        drop(dir.create(&format!("name number {i}"), Kind::File, FILE).unwrap());
     }
     // Listing resumes where it stopped.
     let mut seen = Vec::new();
@@ -1311,7 +1371,7 @@ fn large_changes_commit_in_parts() {
     let root = volume.root();
     let mut want = Tree::new();
     for d in 0..40 {
-        let dir = root.create(&format!("d{d}"), Kind::Directory).unwrap();
+        let dir = root.create(&format!("d{d}"), Kind::Directory, DIR).unwrap();
         want.insert(format!("d{d}"), Thing::Dir);
         for f in 0..100 {
             drop(make_file(&dir, &format!("f{f}"), &pattern(d * 100 + f, 50)));
@@ -1488,11 +1548,11 @@ proptest! {
         if let Ok(volume) = Volume::mount(&image, false) {
             let root = volume.root();
             read_everything(&root, 0);
-            if let Ok(node) = root.create("new", Kind::File) {
+            if let Ok(node) = root.create("new", Kind::File, FILE) {
                 let _ = node.write(0, &Slice(&pattern(1, 20_000)));
             }
             let _ = root.remove("small");
-            let _ = root.create("d", Kind::Directory);
+            let _ = root.create("d", Kind::Directory, DIR);
             let _ = volume.fs().sync();
         }
     }
@@ -1589,7 +1649,7 @@ fn run_model(image: &[u8], ops: &[Op]) {
                     Ok(node) => node,
                     Err(_) => {
                         model.insert(path.clone(), Thing::File(Vec::new()));
-                        dir.create(&format!("f{f}"), Kind::File).unwrap()
+                        dir.create(&format!("f{f}"), Kind::File, FILE).unwrap()
                     }
                 };
                 if node.kind() != Kind::File {
@@ -1637,7 +1697,7 @@ fn run_model(image: &[u8], ops: &[Op]) {
                 let parent = if d == 3 { 1 } else { 0 };
                 if !model.contains_key(MODEL_DIRS[d]) && dir_of(&root, &model, parent).is_some() {
                     let (dir, name) = super::tests::parent(&root, MODEL_DIRS[d]);
-                    dir.create(name, Kind::Directory).unwrap();
+                    dir.create(name, Kind::Directory, DIR).unwrap();
                     model.insert(String::from(MODEL_DIRS[d]), Thing::Dir);
                 }
             }
@@ -1664,7 +1724,7 @@ fn run_model(image: &[u8], ops: &[Op]) {
                     continue;
                 }
                 let target = format!("f{to}{}", "/x".repeat(to * 20));
-                dir.make_link(&format!("l{f}"), &target).unwrap();
+                dir.make_link(&format!("l{f}"), &target, LINK).unwrap();
                 model.insert(path, Thing::Link(target));
             }
             Op::Sync => volume.fs().sync().unwrap(),

@@ -306,6 +306,13 @@ fn requirements() -> Vec<Requirement> {
             fallback: None,
         },
         Requirement {
+            name: "fakeroot",
+            purpose: "makes the image's Dukovo root with its files root's when ob runs as a user",
+            found: |_| program_version("fakeroot", "--version"),
+            packages: all("fakeroot"),
+            fallback: None,
+        },
+        Requirement {
             name: "exfatprogs",
             purpose: "makes and checks the exFAT disks of the exFAT tests",
             // In /usr/sbin, as dosfstools is.

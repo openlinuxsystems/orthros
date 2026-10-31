@@ -475,7 +475,9 @@ pub fn init() {
     radix_block::mem::set_page_source(<Arch as Devices>::alloc_cache_page);
     radix_vfs::set_clock(|| <Arch as Timer>::wall_clock_ns().unwrap_or(0));
     radix_vfs::set_random(radix_random::fill);
-    let made = tmpfs(ROOT_MAX).and_then(|root| Vfs::new(fs_ref(root)?, "tmpfs"));
+    // The root's own mode is Linux's for its rootfs; Spark makes the
+    // directories in it.
+    let made = tmpfs(ROOT_MAX, 0o755).and_then(|root| Vfs::new(fs_ref(root)?, "tmpfs"));
     match made {
         Ok(tree) => {
             let _ = VFS.set(tree);
@@ -492,9 +494,10 @@ pub fn init() {
 pub fn scratch_tree(name: &str, max: u64) -> radix_vfs::Result<Location> {
     let tree = vfs().ok_or(Error::NotFound)?;
     let root = tree.root();
-    tree.make_directory(&root, name)?;
-    let mounted =
-        tmpfs(max).and_then(fs_ref).and_then(|fs| tree.mount(&root, name, fs, "tmpfs", false));
+    tree.make_directory(&root, name, radix_vfs::Access::default_for(Kind::Directory))?;
+    let mounted = tmpfs(max, TMPFS_MODE)
+        .and_then(fs_ref)
+        .and_then(|fs| tree.mount(&root, name, fs, "tmpfs", false));
     if let Err(err) = mounted {
         let _ = tree.remove(&root, name);
         return Err(err);
@@ -511,10 +514,16 @@ pub fn remove_scratch_tree(name: &str) -> radix_vfs::Result<()> {
     tree.remove(&root, name)
 }
 
-/// An empty tmpfs whose files may hold `max` bytes together. As on Linux,
-/// it may hold one file or directory for every two pages of memory.
-fn tmpfs(max: u64) -> radix_vfs::Result<radix_vfs::KArc<radix_vfs::tmpfs::Tmpfs>> {
-    radix_vfs::tmpfs::Tmpfs::new(max, FRAMES.managed_pages() / 2)
+/// The mode of a mounted tmpfs's root, as Linux has it: all may make
+/// files there, and remove only their own (ADR 0213). Spark narrows those
+/// that are not `/tmp`.
+const TMPFS_MODE: u16 = 0o1777;
+
+/// An empty tmpfs whose files may hold `max` bytes together, and whose
+/// root has `mode`. As on Linux, it may hold one file or directory for
+/// every two pages of memory.
+fn tmpfs(max: u64, mode: u16) -> radix_vfs::Result<radix_vfs::KArc<radix_vfs::tmpfs::Tmpfs>> {
+    radix_vfs::tmpfs::Tmpfs::new(max, FRAMES.managed_pages() / 2, mode)
 }
 
 /// A filesystem, as the mount table takes it.
@@ -554,7 +563,7 @@ pub fn make(kind: &str, source: Option<&NodeRef>, flags: Flags) -> radix_vfs::Re
         "tmpfs" => {
             // As on Linux, a tmpfs may fill half of memory.
             let max = FRAMES.managed_pages() * PAGE_SIZE as u64 / 2;
-            fs_ref(tmpfs(max)?)?
+            fs_ref(tmpfs(max, TMPFS_MODE)?)?
         }
         "fat" | "exfat" | "btrfs" | "ext4" => {
             let node = source.ok_or(Error::NotBlockDevice)?;

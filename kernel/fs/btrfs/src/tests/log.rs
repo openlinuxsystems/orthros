@@ -10,6 +10,7 @@ use core::fmt::Write as _;
 
 use radix_vfs::{Error, FileSystem, Kind, NodeRef, SliceMut};
 
+use super::FILE;
 use super::files::{contents, mount};
 use super::rw::mount_rw;
 use super::write::{assert_checks, image_of, writable};
@@ -188,7 +189,7 @@ fn a_read_only_mount_replays_the_log_and_a_read_only_disk_cannot() {
     let disk = writable(&image);
     let fs = BtrfsFs::mount(disk.clone()).unwrap();
     assert_eq!(list(&fs), linux_list());
-    assert_eq!(fs.root().create("more", Kind::File).err(), Some(Error::ReadOnly));
+    assert_eq!(fs.root().create("more", Kind::File, FILE).err(), Some(Error::ReadOnly));
     assert_checks(&image_of(&disk, image.len()));
     // Linux refuses too: the log must be replayed, which writes.
     assert_eq!(mount(&image).err(), Some(Error::ReadOnly));
