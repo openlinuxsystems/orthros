@@ -272,6 +272,7 @@ fn filesystem_kind(kind: FsKind) -> FilesystemKind {
         FsKind::Btrfs => FilesystemKind::Btrfs,
         FsKind::Exfat => FilesystemKind::Exfat,
         FsKind::Ext4 => FilesystemKind::Ext4,
+        FsKind::Ntfs => FilesystemKind::Ntfs,
         FsKind::Proc => FilesystemKind::Proc,
         FsKind::Sys => FilesystemKind::Sys,
         FsKind::Dev => FilesystemKind::Dev,
@@ -945,7 +946,7 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
         );
         return answer(label, 0, [0; 8]);
     }
-    let source = if matches!(kind, "fat" | "exfat" | "btrfs" | "ext4") {
+    let source = if matches!(kind, "fat" | "exfat" | "btrfs" | "ext4" | "ntfs") {
         Some(objects::file(cspace, a.source, rw)?.1)
     } else if a.source != 0 {
         return Err(Kernel::InvalidArgument.status(2));

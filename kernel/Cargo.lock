@@ -165,6 +165,7 @@ dependencies = [
  "radix-mca",
  "radix-mm",
  "radix-net",
+ "radix-ntfs",
  "radix-nvme",
  "radix-posix",
  "radix-pstate",
@@ -437,6 +438,19 @@ version = "0.10.4"
 dependencies = [
  "managed",
  "smoltcp",
+]
+
+[[package]]
+name = "radix-ntfs"
+version = "0.10.4"
+dependencies = [
+ "proptest",
+ "radix-block",
+ "radix-exfat",
+ "radix-fat",
+ "radix-hw",
+ "radix-sync",
+ "radix-vfs",
 ]
 
 [[package]]

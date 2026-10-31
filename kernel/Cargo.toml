@@ -37,6 +37,7 @@ members = [
     "fs/exfat",
     "fs/ext4",
     "fs/fat",
+    "fs/ntfs",
     "fs/vfs",
     "ipc",
     "net",

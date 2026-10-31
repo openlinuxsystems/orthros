@@ -99,6 +99,13 @@ path = "kernel/fs/ext4/src/fixtures/*.sectors"
 SPDX-FileCopyrightText = "2026 The Dukovo contributors"
 SPDX-License-Identifier = "Apache-2.0 OR MIT"
 
+# The sectors of an NTFS volume ntfs-3g filled, which the NTFS driver's
+# tests and the ntfs boot test read (kernel/fs/ntfs/src/tests.rs).
+[[annotations]]
+path = "kernel/fs/ntfs/src/fixtures/*.sectors"
+SPDX-FileCopyrightText = "2026 The Dukovo contributors"
+SPDX-License-Identifier = "Apache-2.0 OR MIT"
+
 # uACPI 7.0.0 at commit c0edece, https://github.com/uACPI/uACPI, unmodified
 # but for the build files left out: the AML interpreter the kernel links
 # (ADR 0200). Its files carry no headers; its license file is

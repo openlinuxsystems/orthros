@@ -21,7 +21,8 @@ _sda1_ or _/devices/sda1_, and prints what it finds as util-linux's
 blkid does, with libblkid's tags in its order:
 
 - *LABEL*, *UUID* and *TYPE* of a filesystem: *vfat* (FAT12, FAT16 and
-  FAT32, its UUID the volume serial number), *exfat*, *ext2*, *ext3*,
+  FAT32, its UUID the volume serial number), *exfat*, *ntfs* (its UUID
+  the volume serial number, 16 hexadecimal digits), *ext2*, *ext3*,
   *ext4*, *btrfs* (with *UUID_SUB*, the UUID of this disk of it) and
   *swap*, with the size of its sectors or blocks as *BLOCK_SIZE*;
 - *PTUUID* and *PTTYPE* (*gpt* or *dos*) of a disk's partition table;
