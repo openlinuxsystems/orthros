@@ -34,6 +34,7 @@ mod apic;
 mod boot;
 mod cpu;
 mod devices;
+mod ec;
 mod entry;
 mod firmware;
 mod fpu;
@@ -55,6 +56,7 @@ mod rtc;
 mod sci;
 mod sensors;
 mod serial;
+mod smbus;
 mod smp;
 mod space;
 mod thread;
@@ -478,6 +480,22 @@ impl Devices for Arch {
 
     fn watchdog_stop() {
         watchdog::stop();
+    }
+
+    fn find_smbus() -> bool {
+        smbus::find()
+    }
+
+    fn smbus_name(out: &mut dyn core::fmt::Write) -> core::fmt::Result {
+        smbus::name(out)
+    }
+
+    fn ec_read(port: u16) -> u8 {
+        ec::read(port)
+    }
+
+    fn ec_write(port: u16, value: u8) {
+        ec::write(port, value);
     }
 }
 

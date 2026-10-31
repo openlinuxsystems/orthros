@@ -21,6 +21,10 @@
 //! - `/kernel/bus/pci/devices/<address>/vendor`, `device`, `class`,
 //!   `revision`, `subsystem_vendor` and `subsystem_device`, in
 //!   hexadecimal, for every PCI function the scan found;
+//! - `/kernel/bus/i2c/devices/i2c-0/name`, when the kernel drives the
+//!   chipset's SMBus host controller (ADR 0206), as Linux names its
+//!   adapter (`SMBus I801 adapter at <port>`, or `SMBus PIIX4 adapter
+//!   port 0 at <port>` for AMD's FCH);
 //! - `/kernel/firmware/memmap/<n>/start`, `end` (its last byte, in
 //!   hexadecimal) and `type` (Linux's names: `System RAM`, `Reserved`,
 //!   `ACPI Tables`...), for each range of the firmware's memory map
@@ -57,7 +61,10 @@
 //!   `temp<k>_label` (`Tctl`, `Tccd1`...); and a `coretemp` for each of
 //!   Intel's packages, with each sensor's `temp<k>_label` (`Package id
 //!   0`, `Core 0`...), `temp<k>_input`, `temp<k>_crit` (TjMax),
-//!   `temp<k>_max` where the processor gives it and `temp<k>_crit_alarm`.
+//!   `temp<k>_max` where the processor gives it and `temp<k>_crit_alarm`;
+//!   and `cros_ec`, Framework's embedded controller's (ADR 0207), with
+//!   each fan's `fan<k>_input` and `fan<k>_fault` and each sensor's
+//!   `temp<k>_input`, `temp<k>_fault` and `temp<k>_label`.
 //!   Each `name` says which, and a sensor that gives no reading fails to
 //!   read (EIO);
 //! - `/kernel/devices/system/cpu`: `possible`, `present` and `online`, the
@@ -77,7 +84,7 @@
 use core::fmt::{self, Write};
 
 use radix_block::DeviceRef;
-use radix_hal::{MemoryKind, MemoryRegion, Smp, Watchdog};
+use radix_hal::{Devices, MemoryKind, MemoryRegion, Smp, Watchdog};
 use radix_klog::TextBuf;
 use radix_sync::Once;
 use radix_vfs::synthetic::{FixedDir, Generated, Generator, Link, ListedDir, Listing, SyntheticFs};
@@ -87,7 +94,7 @@ use radix_uacpi::thermal::STEPS;
 
 use super::disk;
 use crate::acpi::{devices, thermal};
-use crate::{Arch, hwmon, pstate};
+use crate::{Arch, hwmon, i2c, pstate};
 
 static COMMAND_LINE: Once<&'static str> = Once::new();
 static ROOT: Once<KArc<FixedDir>> = Once::new();
@@ -113,6 +120,17 @@ pub fn make() -> Result<FsRef> {
     let pci = bus.add_dir("pci", next_id())?;
     let devices: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(PciDevices)?;
     pci.add("devices", ListedDir::make(next_id(), devices)?)?;
+    if i2c::found() {
+        let i2c = bus.add_dir("i2c", next_id())?.add_dir("devices", next_id())?;
+        let adapter = i2c.add_dir("i2c-0", next_id())?;
+        adapter.add(
+            "name",
+            value(|text| {
+                Arch::smbus_name(text)?;
+                writeln!(text)
+            })?,
+        )?;
+    }
     let firmware = root.add_dir("firmware", next_id())?;
     let memmap: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(MemoryMap)?;
     firmware.add("memmap", ListedDir::make(next_id(), memmap)?)?;
@@ -279,7 +297,7 @@ fn hwmon_device(dir: &FixedDir, index: usize, device: hwmon::Device) -> Result<(
                 return;
             }
             let mut name = TextBuf::<32>::new();
-            let _ = write!(name, "temp{}_{}", channel.number(), file.suffix());
+            let _ = write!(name, "{}{}_{}", channel.kind(), channel.number(), file.suffix());
             result = value(move |text| hwmon::write_file(channel, file, text))
                 .and_then(|generated| device_dir.add(name.as_str(), generated));
         }

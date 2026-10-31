@@ -379,6 +379,25 @@ We implement these from their published descriptions. No code is copied.
   registers come from the zenpower project's experiments
   ([ADR 0205](docs/adr/0205-the-cpus-temperature-sensors.md)).
   No code is taken from them.
+- The chipset's SMBus controller: Intel's, from the ICH9 and PCH
+  datasheets, and that of AMD's FCH, from AMD's BIOS and Kernel
+  Developer's Guides and Processor Programming References. The FCH's
+  port selection and host semaphore, the adapters' names and leaving
+  the controller to the firmware's AML follow Linux's
+  `drivers/i2c/busses/i2c-piix4.c` and `i2c-i801.c` (GPL-2.0)
+  ([ADR 0206](docs/adr/0206-the-chipsets-smbus-controller.md)).
+  No code is taken from them.
+- Framework's embedded controller: the Chromium EC's host command
+  protocol, its memory map and its commands, from `include/ec_commands.h`
+  of the Chromium EC (BSD-3-Clause, The ChromiumOS Authors), and
+  Framework's fan configuration command and the Framework Desktop's fans,
+  LEDs and ARGB output, from Framework's fork of it
+  (github.com/FrameworkComputer/EmbeddedController, BSD-3-Clause). Where
+  each machine has the memory map and the files of `cros_ec`'s hwmon
+  device follow Linux's `drivers/platform/chrome/cros_ec_lpc.c` and
+  `drivers/hwmon/cros_ec_hwmon.c` (GPL-2.0)
+  ([ADR 0207](docs/adr/0207-framework-embedded-controller.md)).
+  No code is taken from them.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,
