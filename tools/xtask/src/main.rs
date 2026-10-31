@@ -256,6 +256,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   accounts         authd, user and passwd: accounts made and their files,
                    passwords checked with a wait after a wrong one, and alice
                    changing her own
+  signin           sign-in on the consoles: the owner's account at the first
+                   boot, two people side by side, neither in the other's home
   spark-network    Spark gives each service the network its file asks for
   page-fault       a page fault's panic report, on serial and on screen
   crash-log-uefi   the panic report survives a restart (UEFI)
