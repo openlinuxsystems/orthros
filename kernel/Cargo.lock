@@ -167,6 +167,7 @@ dependencies = [
  "radix-random",
  "radix-sched",
  "radix-scsi",
+ "radix-sensors",
  "radix-sync",
  "radix-tty",
  "radix-uacpi",
@@ -209,6 +210,7 @@ version = "0.10.4"
 dependencies = [
  "radix-hal",
  "radix-pstate",
+ "radix-sensors",
 ]
 
 [[package]]
@@ -228,6 +230,7 @@ dependencies = [
  "radix-pstate",
  "radix-random",
  "radix-relocs",
+ "radix-sensors",
  "radix-sync",
  "radix-vtd",
  "radix-watchdog",
@@ -326,6 +329,7 @@ version = "0.10.4"
 dependencies = [
  "radix-hw",
  "radix-pstate",
+ "radix-sensors",
 ]
 
 [[package]]
@@ -451,6 +455,13 @@ name = "radix-scsi"
 version = "0.10.4"
 dependencies = [
  "proptest",
+]
+
+[[package]]
+name = "radix-sensors"
+version = "0.10.4"
+dependencies = [
+ "radix-hw",
 ]
 
 [[package]]

@@ -150,6 +150,8 @@ _/system/resources/licenses/_
   hears the power button through it; see *ACPI*.
 . Each CPU then picks its own speed where it can; see *CPU FREQUENCY*.
   The firmware's thermal zones are watched from then on; see *ACPI*.
+  The kernel then looks for the CPUs' temperature sensors; see
+  *SENSORS*.
 . It checks that every CPU takes timer
   interrupts and answers an inter-processor interrupt, runs the self-test
   named by *selftest* if any, and prints *Boot complete.*
@@ -513,7 +515,7 @@ them to *init*, and the kernel does not read them.
 *selftest*=_name_
 	Run a self-test at the end of boot: *page-fault*, *crash-reboot*,
 	*breakpoint*, *mm-stress*, *stack-overflow*, *smep*, *smap*, *tlb*,
-	*caps*, *fpu*, *sched-fair*, *sched-rt*, *sched-pi*, *sched-balance*,
+	*msr*, *caps*, *fpu*, *sched-fair*, *sched-rt*, *sched-pi*, *sched-balance*,
 	*lockdep*, *rcu*, *oom*, *user*, *ipc*, *fuzz*, *iommu*, *net* or
 	*bench*.
 	See *radix-debug*(7). *ob test* uses these. The first program does
@@ -581,6 +583,19 @@ it was last read, such as *; 12 of them since the bank was read*. More than
 them, and reads the banks every second until 30 seconds go by without a
 corrected error, then unmasks them.
 
+AMD's Zen has banks of a scalable kind, which the log's line about the
+banks names (ADR 0204): each belongs to one block of the chip, which its
+errors name, with the block's extended code, its MCA_IPID and its
+MCA_SYND:
+
+	Machine check: CPU 0 bank 15: corrected error without an error code in
+	the unified memory controller on channel 1, a DRAM ECC error, address
+	0x12340 (status 0x8420000000000000, ipid 0x9600150f00, synd 0x5a00000000000001)
+
+An error that Zen could not correct but that nothing has used yet is
+logged as *deferred*. A memory controller's address is its own, not a
+physical one, so its errors retire no page.
+
 An uncorrected error raises a machine check. On a CPU that recovers from
 them (Intel's Xeons, with software error recovery, and AMD's Zen, with
 SUCCOR), bad memory that a program reads ends only that program, with
@@ -598,7 +613,8 @@ it no longer maps it. The log says so:
 and _/processes/meminfo_ counts it (*radix-proc*(5)).
 
 The memory controllers' errors are counted by the bank and channel they
-were on, in Linux's EDAC files under _/kernel/devices/system/edac_
+were on (on Zen, the channel a memory controller's bank serves), in
+Linux's EDAC files under _/kernel/devices/system/edac_
 (*radix-sysfs*(5)). Counts by DIMM, which need each chipset's map of
 addresses to DIMMs, come later (ADR 0169).
 
@@ -697,6 +713,27 @@ Each CPU's policy is in _/kernel/devices/system/cpu/cpufreq_, as on Linux
 keep the firmware's setting:
 
 	CPU frequency: left to the firmware: the CPUs have neither Intel's HWP nor AMD's CPPC
+
+# SENSORS
+
+The CPUs' own temperature sensors are read as Linux's _k10temp_ and
+_coretemp_ drivers read them (ADR 0205). AMD's Zen processors keep their
+control temperature, Tctl, and on most desktop and server models each
+core complex die's, in their System Management Unit, which the kernel
+reaches through the root complex; Intel's count each core's and each
+package's in registers every CPU reads for itself. The log says which:
+
+```
+Sensors: AMD's processor sensors (k10temp) read Tctl, Tccd1 and Tccd2
+Sensors: Intel's digital thermal sensors (coretemp) read 1 package and 4 cores, up to 100 °C
+```
+
+QEMU's CPUs have neither, even under KVM:
+
+	Sensors: the CPUs have no temperature sensor the kernel reads
+
+The sensors, and the thermal zones of *ACPI*, are in
+_/kernel/class/hwmon_, as on Linux (*radix-sysfs*(5)).
 
 # IOMMU
 

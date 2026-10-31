@@ -215,11 +215,22 @@ pub struct MemoryError {
     pub channel: Option<u8>,
 }
 
+/// The memory controller's error a bank holds: on Zen's scalable banks,
+/// any error of a memory controller's bank, the channel its instance ID
+/// names ([`crate::smca::Info::channel`]); elsewhere, from the status's
+/// compound error code ([`memory_error`]).
+pub fn memory(error: &BankError) -> Option<MemoryError> {
+    match error.smca {
+        Some(info) => info.channel().map(|channel| MemoryError { channel: Some(channel) }),
+        None => memory_error(error.status),
+    }
+}
+
 /// The memory controller's error a status holds, from its compound error
 /// code (0000 0000 1MMM CCCC, or Intel's extended 0000 0100 1MMM CCCC,
 /// with the channel in CCCC; 1111 says none), filtering bit 12 aside.
-/// AMD's Zen reports its memory errors in banks of their own instead,
-/// which their identity registers name (Phase 11e).
+/// AMD's Zen reports its memory errors in banks of their own instead
+/// ([`memory`]).
 pub fn memory_error(status: u64) -> Option<MemoryError> {
     let code = status as u16 & !0x1000;
     if code & 0xff80 != 0x0080 && code & 0xff80 != 0x0480 {
@@ -395,7 +406,7 @@ mod tests {
 
     #[test]
     fn cmci_counts_corrected_errors_in_the_status() {
-        let error = |status| BankError { status, address: None, misc: None };
+        let error = |status| BankError { status, address: None, misc: None, smca: None };
         // 5 errors since the bank was read, a memory read error on channel 1.
         let counted = error(0x9c00_0000_0000_0091 | 5 << STATUS_COUNT_SHIFT);
         assert_eq!(errors(&counted, true), 5);
@@ -495,6 +506,22 @@ mod tests {
         for code in [0x0134, 0x0e0f, 0x0800, 0x0100, 0x0005, 0x0880 | 0x8000] {
             assert_eq!(memory_error(0x9c00_0000_0000_0000 | code), None, "{code:#x}");
         }
+
+        // Zen's are its memory controllers' banks', whatever the code.
+        let zen = |status, ipid| BankError {
+            status,
+            address: None,
+            misc: None,
+            smca: Some(crate::smca::Info { ipid, synd: None, lsb_in_status: false }),
+        };
+        let umc = zen(0x9c00_0000_0000_0000, 0x0000_0096_0025_0f00);
+        assert_eq!(memory(&umc), Some(MemoryError { channel: Some(2) }));
+        assert_eq!(memory(&zen(0x9c00_0000_0000_0091, 0x0000_00b0_0000_0000)), None);
+        let legacy = BankError { smca: None, ..umc };
+        assert_eq!(
+            memory(&BankError { status: 0x9c00_0000_0000_0091, ..legacy }).unwrap().channel,
+            Some(1)
+        );
     }
 
     const SECOND: u64 = 1_000_000_000;

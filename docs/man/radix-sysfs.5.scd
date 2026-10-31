@@ -213,6 +213,31 @@ _/kernel/class/thermal/cooling_device_*n*_/type_, _max_state_, _cur_state_
 	FREQUENCY*), one for each: *Processor*; *3*; and how many steps,
 	each a fifth of their highest level, passive cooling slows them by.
 
+_/kernel/class/hwmon/hwmon_*n*_/name_
+	The temperature sensors, as Linux's hwmon class shows them, numbered
+	in this order: *acpitz*, the thermal zones, if the firmware has any;
+	*k10temp*, the sensors of AMD's Zen processors; and a *coretemp* for
+	each package of Intel's processors (*dukovo-boot*(7)'s *SENSORS*).
+	The sensors program of lm-sensors reads these.
+
+_/kernel/class/hwmon/hwmon_*n*_/temp_*k*_input_, _temp_*k*_label_
+	A sensor's temperature, in thousandths of a degree Celsius, read
+	when the file is opened, and its name. For *acpitz*, the _k_-th
+	zone's, without a label. For *k10temp*, *Tctl* (_temp1_), the
+	temperature the processor's cooling acts on, and on models whose
+	dies' registers Linux knows *Tccd1*, *Tccd2*... (from _temp3_), each
+	core complex die's. For *coretemp*, *Package id* _p_ (_temp1_) and
+	*Core* _c_ (_temp_*c+2*), read on a CPU of that package or core at
+	most once a second. A sensor that gives no reading, as Intel's below
+	the temperature they can measure, fails to read with EIO.
+
+_/kernel/class/hwmon/hwmon_*n*_/temp_*k*_crit_, _temp_*k*_max_, _temp_*k*_crit_alarm_
+	For *acpitz*, a zone's critical trip point, where it has one. For
+	*coretemp*: TjMax, where the processor's thermal control starts (100
+	°C where it does not say); where it gives one, the temperature the
+	control aims to keep below; and *1* once the critical temperature
+	was reached, else *0*.
+
 _/kernel/devices/system/cpu/possible_, _present_, _online_
 	The CPUs the machine has, and those that run threads, as Linux's
 	lists: *0-7*, which util-linux's lscpu reads.

@@ -50,6 +50,16 @@
 //!   passive in that order; and where the CPUs pick their own speed, a
 //!   `cooling_device<n>` for each (`type` `Processor`, `max_state` 3 and
 //!   `cur_state`, the steps passive cooling slows them by);
+//! - `/kernel/class/hwmon/hwmon<n>`, for the temperature sensors
+//!   (ADR 0205), as Linux's hwmon class shows them: an `acpitz` for the
+//!   thermal zones, a `temp<k>_input` (and `temp<k>_crit`) each; AMD's
+//!   processor sensors, `k10temp`, with `temp<k>_input` and
+//!   `temp<k>_label` (`Tctl`, `Tccd1`...); and a `coretemp` for each of
+//!   Intel's packages, with each sensor's `temp<k>_label` (`Package id
+//!   0`, `Core 0`...), `temp<k>_input`, `temp<k>_crit` (TjMax),
+//!   `temp<k>_max` where the processor gives it and `temp<k>_crit_alarm`.
+//!   Each `name` says which, and a sensor that gives no reading fails to
+//!   read (EIO);
 //! - `/kernel/devices/system/cpu`: `possible`, `present` and `online`, the
 //!   CPUs as Linux's lists (`0-7`), and where the CPUs pick their own
 //!   speed (ADR 0202), each CPU's `cpufreq/policy<n>`, as Linux's
@@ -77,7 +87,7 @@ use radix_uacpi::thermal::STEPS;
 
 use super::disk;
 use crate::acpi::{devices, thermal};
-use crate::{Arch, pstate};
+use crate::{Arch, hwmon, pstate};
 
 static COMMAND_LINE: Once<&'static str> = Once::new();
 static ROOT: Once<KArc<FixedDir>> = Once::new();
@@ -108,7 +118,9 @@ pub fn make() -> Result<FsRef> {
     firmware.add("memmap", ListedDir::make(next_id(), memmap)?)?;
     let power = devices::batteries().next().is_some() || devices::adapters().next().is_some();
     let thermal = thermal::zones().next().is_some();
-    let class = if crate::watchdog::found().is_some() || power || thermal {
+    let mut monitors = false;
+    hwmon::devices(&mut |_| monitors = true);
+    let class = if crate::watchdog::found().is_some() || power || thermal || monitors {
         Some(root.add_dir("class", next_id())?)
     } else {
         None
@@ -137,6 +149,9 @@ pub fn make() -> Result<FsRef> {
     }
     if thermal && let Some(class) = &class {
         thermal_class(class)?;
+    }
+    if monitors && let Some(class) = &class {
+        hwmon_class(class)?;
     }
     let system = root.add_dir("devices", next_id())?.add_dir("system", next_id())?;
     cpu(&system)?;
@@ -234,6 +249,42 @@ fn thermal_class(class: &FixedDir) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `/kernel/class/hwmon`: the temperature sensors.
+fn hwmon_class(class: &FixedDir) -> Result<()> {
+    let dir = class.add_dir("hwmon", next_id())?;
+    let mut index = 0;
+    let mut result = Ok(());
+    hwmon::devices(&mut |device| {
+        if result.is_ok() {
+            result = hwmon_device(&dir, index, device);
+            index += 1;
+        }
+    });
+    result
+}
+
+/// `hwmon<index>`, for `device`.
+fn hwmon_device(dir: &FixedDir, index: usize, device: hwmon::Device) -> Result<()> {
+    let mut name = TextBuf::<16>::new();
+    let _ = write!(name, "hwmon{index}");
+    let device_dir = dir.add_dir(name.as_str(), next_id())?;
+    let device_name = device.name();
+    device_dir.add("name", value(move |text| writeln!(text, "{device_name}"))?)?;
+    let mut result = Ok(());
+    hwmon::channels(device, &mut |channel| {
+        for &file in channel.files() {
+            if result.is_err() {
+                return;
+            }
+            let mut name = TextBuf::<32>::new();
+            let _ = write!(name, "temp{}_{}", channel.number(), file.suffix());
+            result = value(move |text| hwmon::write_file(channel, file, text))
+                .and_then(|generated| device_dir.add(name.as_str(), generated));
+        }
+    });
+    result
 }
 
 /// `/kernel/devices/system/cpu`: the CPUs' lists, and each CPU's

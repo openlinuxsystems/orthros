@@ -348,6 +348,14 @@ We implement these from their published descriptions. No code is copied.
   `Documentation/admin-guide/pm/intel_pstate.rst` and `amd-pstate.rst`
   ([ADR 0202](docs/adr/0202-cpu-frequency-through-hwp-and-cppc.md)).
   No code is taken from them.
+- Zen's scalable machine-check registers (MCA_CONFIG, MCA_IPID,
+  MCA_SYND, MCA_DESTAT and MCA_DEADDR) and the hardware IDs and types of
+  its banks' blocks are those of AMD's Processor Programming Reference
+  for family 19h and 1Ah. Setting `McaX`, reading a memory controller's
+  channel from its instance ID and clearing MCA_DESTAT follow Linux's
+  `arch/x86/kernel/cpu/mce/amd.c` and `drivers/edac/amd64_edac.c`
+  (GPL-2.0) ([ADR 0204](docs/adr/0204-zens-scalable-machine-check-banks.md)).
+  No code is taken from them.
 - Thermal zones, their trip points and the passive cooling's trend are
   those of the ACPI specification 6.5 (chapter 11). How `radix-uacpi`
   reads a zone, which trip points it leaves out as nonsense, the
@@ -358,6 +366,18 @@ We implement these from their published descriptions. No code is copied.
   `drivers/acpi/processor_thermal.c` and `kernel/reboot.c` (GPL-2.0) and
   its `Documentation/driver-api/thermal/sysfs-api.rst`
   ([ADR 0203](docs/adr/0203-thermal-zones-through-uacpi.md)).
+  No code is taken from them.
+- The CPUs' temperature sensors: AMD's System Management Network and the
+  SMU's thermal block, from AMD's Processor Programming Reference for
+  families 17h, 19h and 1Ah, and Intel's digital thermal sensors, from
+  Intel's SDM (volume 3, section 15.8). Which of AMD's models have which
+  die registers, the data fabric devices to look for, the root
+  complex's SMN index and data registers, TjMax's default and the files
+  of `/kernel/class/hwmon` follow Linux's `drivers/hwmon/k10temp.c`,
+  `drivers/hwmon/coretemp.c` and `arch/x86/kernel/amd_node.c` (GPL-2.0)
+  and its `Documentation/hwmon/sysfs-interface.rst`; `k10temp`'s die
+  registers come from the zenpower project's experiments
+  ([ADR 0205](docs/adr/0205-the-cpus-temperature-sensors.md)).
   No code is taken from them.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.

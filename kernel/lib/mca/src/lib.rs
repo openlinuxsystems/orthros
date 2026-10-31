@@ -19,12 +19,16 @@
 //! follows Linux's rules (`arch/x86/kernel/cpu/mce/severity.c`), cut to
 //! what the kernel does about an error.
 //!
+//! AMD's Zen has banks of a scalable architecture, whose registers of
+//! their own name the block of the chip each belongs to ([`smca`]).
+//!
 //! The architecture reads and writes the registers; this crate only reads
 //! their values, so its tests run on the host.
 
 #![cfg_attr(not(test), no_std)]
 
 pub mod corrected;
+pub mod smca;
 
 use core::fmt;
 
@@ -219,7 +223,9 @@ fn asks(error: &BankError, mcg_status: u64, mca: Mca, user: bool) -> Asks {
 /// names, if it is one the hardware did not correct (or AMD deferred) and
 /// the CPU says where it is to within a page: Intel's IA32_MCi_MISC gives
 /// the address's kind (physical) and its least significant valid bit;
-/// AMD's names poisoned data, and its IA32_MCi_ADDR the bit.
+/// AMD's names poisoned data, and its IA32_MCi_ADDR the bit (or, where
+/// Zen's MCA_CONFIG says so, its status). A Zen memory controller's
+/// address is its own, not a physical one, and names no page.
 pub fn bad_page(error: &BankError, mca: Mca) -> Option<u64> {
     let status = error.status;
     let bad = status & UNCORRECTED != 0 || mca.amd && status & AMD_DEFERRED != 0;
@@ -231,7 +237,12 @@ pub fn bad_page(error: &BankError, mca: Mca) -> Option<u64> {
         if status & (AMD_POISON | AMD_DEFERRED) == 0 {
             return None;
         }
-        (address & ((1 << 56) - 1), (address >> 56) & 0x3f)
+        let lsb = match error.smca {
+            Some(info) if info.block().is_some_and(|block| block.memory) => return None,
+            Some(info) => info.lsb(status, address),
+            None => (address >> 56) & 0x3f,
+        };
+        (address & ((1 << 56) - 1), lsb)
     } else {
         let misc = error.misc?;
         // Bits 8:6, the address mode: 2 is a physical address.
@@ -252,12 +263,22 @@ pub struct BankError {
     pub address: Option<u64>,
     /// IA32_MCi_MISC, when the status says it is valid.
     pub misc: Option<u64>,
+    /// What Zen's scalable registers say, on CPUs that have them.
+    pub smca: Option<smca::Info>,
 }
 
 impl BankError {
-    /// Whether the hardware corrected the error.
+    /// Whether the hardware corrected the error. On Zen, a deferred error
+    /// was not, though its status does not say it is uncorrected.
     pub fn corrected(&self) -> bool {
-        self.status & UNCORRECTED == 0
+        self.status & UNCORRECTED == 0 && !self.deferred()
+    }
+
+    /// Whether it is a deferred error of Zen's scalable banks: one the
+    /// hardware could not correct, and poisoned, but that nothing has
+    /// used yet.
+    pub fn deferred(&self) -> bool {
+        self.smca.is_some() && self.status & AMD_DEFERRED != 0
     }
 }
 
@@ -266,8 +287,17 @@ impl fmt::Display for BankError {
     /// address 0x12345000 (status 0x9c00000000000134, misc 0x86)`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let status = self.status;
-        f.write_str(if self.corrected() { "corrected " } else { "uncorrected " })?;
+        f.write_str(if self.deferred() {
+            "deferred "
+        } else if self.corrected() {
+            "corrected "
+        } else {
+            "uncorrected "
+        })?;
         describe_code(f, status as u16)?;
+        if let Some(info) = self.smca {
+            info.describe(f, status)?;
+        }
         if let Some(address) = self.address {
             write!(f, ", address {address:#x}")?;
         }
@@ -286,6 +316,12 @@ impl fmt::Display for BankError {
         write!(f, " (status {status:#018x}")?;
         if let Some(misc) = self.misc {
             write!(f, ", misc {misc:#x}")?;
+        }
+        if let Some(info) = self.smca {
+            write!(f, ", ipid {:#x}", info.ipid)?;
+            if let Some(synd) = info.synd {
+                write!(f, ", synd {synd:#x}")?;
+            }
         }
         f.write_str(")")
     }
@@ -388,7 +424,7 @@ mod tests {
     use super::*;
 
     fn text(status: u64, address: Option<u64>, misc: Option<u64>) -> String {
-        BankError { status, address, misc }.to_string()
+        BankError { status, address, misc, smca: None }.to_string()
     }
 
     #[test]
@@ -483,7 +519,7 @@ mod tests {
     const AMD: Mca = Mca { amd: true, recovery: true };
 
     fn error(status: u64, address: Option<u64>, misc: Option<u64>) -> BankError {
-        BankError { status, address, misc }
+        BankError { status, address, misc, smca: None }
     }
 
     /// An SRAR data load at 0x12345678, with a physical address valid to
@@ -588,5 +624,59 @@ mod tests {
         let older = Mca { amd: true, recovery: false };
         assert_eq!(triage(RIPV | MCIP, older, true, [poison]), Verdict::GoOn);
         assert_eq!(triage(RIPV | MCIP, older, false, [poison]), Verdict::Fatal);
+    }
+
+    /// Zen's identity of a unified memory controller's bank, channel 1,
+    /// and of a load-store unit's.
+    const UMC: u64 = 0x0000_0096_0015_0f00;
+    const LOAD_STORE: u64 = 0x0000_00b0_0000_0000;
+
+    fn zen(status: u64, address: Option<u64>, ipid: u64, lsb_in_status: bool) -> BankError {
+        let synd = (status & smca::STATUS_SYND_VALID != 0).then_some(0x5a00_0000_0000_0001);
+        let smca = Some(smca::Info { ipid, synd, lsb_in_status });
+        BankError { status, address, misc: None, smca }
+    }
+
+    #[test]
+    fn zens_scalable_banks_say_which_block_erred() {
+        let dram = VALID | ADDRESS_VALID | smca::STATUS_SYND_VALID;
+        assert_eq!(
+            zen(dram, Some(0x1_2340), UMC, false).to_string(),
+            "corrected error without an error code in the unified memory controller on channel \
+             1, a DRAM ECC error, address 0x12340 (status 0x8420000000000000, ipid \
+             0x9600150f00, synd 0x5a00000000000001)"
+        );
+        assert_eq!(
+            zen(VALID | 0x0005_0135, None, LOAD_STORE, false).to_string(),
+            "corrected data read error in the level 1 data cache in the load-store unit, \
+             extended code 5 (status 0x8000000000050135, ipid 0xb000000000)"
+        );
+        assert_eq!(
+            zen(VALID, None, 0x0000_0259_0000_0000, false).to_string(),
+            "corrected error without an error code in a block of hardware ID 0x259, type 0x0, \
+             extended code 0 (status 0x8000000000000000, ipid 0x25900000000)"
+        );
+    }
+
+    #[test]
+    fn zens_memory_controllers_name_no_page() {
+        let deferred = VALID | ADDRESS_VALID | AMD_DEFERRED;
+        // A memory controller's address is its own.
+        let dram = zen(deferred, Some(0x8_8000), UMC, false);
+        assert_eq!(bad_page(&dram, AMD), None);
+        assert!(dram.deferred() && !dram.corrected());
+        assert_eq!(
+            dram.to_string(),
+            "deferred error without an error code in the unified memory controller on channel 1, \
+             a DRAM ECC error, address 0x88000 (status 0x8400100000000000, ipid 0x9600150f00)"
+        );
+        // Elsewhere it is physical, its least significant bit where
+        // MCA_CONFIG says.
+        let poison = deferred | AMD_POISON | 12 << 24;
+        assert_eq!(bad_page(&zen(poison, Some(0x4_5678), LOAD_STORE, true), AMD), Some(0x4_5000));
+        let coarse = poison & !(0x3f << 24) | 20 << 24;
+        assert_eq!(bad_page(&zen(coarse, Some(0x4_5678), LOAD_STORE, true), AMD), None);
+        let legacy = zen(poison & !(0x3f << 24), Some(6 << 56 | 0x4_5678), LOAD_STORE, false);
+        assert_eq!(bad_page(&legacy, AMD), Some(0x4_5000));
     }
 }

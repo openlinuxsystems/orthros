@@ -18,6 +18,9 @@
 //!   which must panic with a report that says so.
 //! - `smep` and `smap` make the kernel run and read a user page, which must
 //!   fault (or report that the CPU lacks the feature).
+//! - `msr` reads a model-specific register every CPU has and one none
+//!   has, whose fault must only fail the read (the sensors' reads, ADR
+//!   0205).
 //! - `tlb` checks TLB shootdowns and address-space switches (with PCIDs
 //!   when the CPU has them) on every CPU.
 //! - `caps` runs the capability store's test suite (`captest`): no
@@ -53,6 +56,7 @@ pub fn run(name: &str) {
         "smep" => fault("smep", FaultTest::UserCode, "running code in a user page"),
         "smap" => fault("smap", FaultTest::UserData, "reading a user page"),
         "tlb" => tlb(),
+        "msr" => msr(),
         "caps" => captest::run(),
         "fpu" => schedtest::fpu(),
         "sched-fair" => schedtest::fair(),
@@ -248,6 +252,21 @@ fn stack_overflow() {
 }
 
 #[inline(never)]
+fn msr() {
+    match Arch::self_test_msr() {
+        Some(Ok(None)) => info!(
+            "selftest msr: passed; a register every CPU has reads, and a read of one none has \
+             faults and goes on"
+        ),
+        Some(Ok(Some(value))) => warn!(
+            "selftest msr: skipped; MSR 2FFF_FFFFh, which no processor has, read as {value:#x}, \
+             so this machine does not fault on unknown MSRs (QEMU without KVM does not)"
+        ),
+        Some(Err(what)) => error!("selftest msr: failed; {what}"),
+        None => warn!("selftest msr: skipped; this architecture has no model-specific registers"),
+    }
+}
+
 fn tlb() {
     let me = Arch::current_cpu();
     let on_others = |job: fn()| work::on_others(me, job);

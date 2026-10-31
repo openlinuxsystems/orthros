@@ -359,9 +359,10 @@ _target/userspace/_).
 		Boot normally under BIOS with an SSDT of the test's
 		(_tools/xtask/src/acpi/thermal.asl_), as QEMU has no thermal
 		zone: the kernel must say what its zone is, and at the console
-		the zone's files in _/sys/class/thermal_ must read as the table
-		says. Once the console has read its temperature twice, the zone
-		warms 5 °C a read: the kernel must say it cannot slow QEMU's
+		the zone's files in _/sys/class/thermal_, and hwmon's _acpitz_
+		in _/sys/class/hwmon_, must read as the table says. Once the
+		console has read its temperature three times, the zone warms
+		5 °C a read: the kernel must say it cannot slow QEMU's
 		CPUs at each step past the passive trip point, warn at the hot
 		one, and at the critical one Spark must power the machine off
 		(*radix-sysfs*(5), *dukovo-boot*(7)'s *ACPI*).
@@ -489,6 +490,12 @@ _target/userspace/_).
 		Boot 4 CPUs with *selftest=tlb*, which checks that every CPU
 		sees a changed kernel mapping after a TLB shootdown and that
 		address spaces switched on several CPUs keep their own mappings.
+
+	*msr*
+		Boot with *selftest=msr*: EFER must read, and with KVM a read
+		of an MSR no processor has must fault and go on, as the
+		temperature sensors' reads do. Without KVM, QEMU reads it as 0,
+		and the test must say it skipped.
 
 	*caps*
 		Boot 4 CPUs with *selftest=caps*, the capability store's test
