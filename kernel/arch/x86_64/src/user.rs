@@ -449,7 +449,7 @@ radix_user_copy_back_end:
 
 /// Copies of at least this many bytes go backward when the destination
 /// is a little ahead of the source within a page ([`BACKWARD_WINDOW`]).
-const BACKWARD_MIN: usize = 512;
+pub(crate) const BACKWARD_MIN: usize = 512;
 
 /// How far ahead of the source, modulo 4 KiB, the destination of a long
 /// copy may be for the copy to go backward, from the end, rather than
@@ -460,7 +460,7 @@ const BACKWARD_MIN: usize = 512;
 /// copy runs many times slower (glibc's bug 30994, and why its `memmove`
 /// copies backward in the same case). A copy from the end never loads
 /// from where it just stored. The window is glibc's for 32-byte vectors.
-const BACKWARD_WINDOW: usize = 512;
+pub(crate) const BACKWARD_WINDOW: usize = 512;
 
 unsafe extern "C" {
     /// The SYSCALL entry; see the assembly above.

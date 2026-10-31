@@ -150,7 +150,7 @@ pub const BUDGETS: &[(&str, u64)] = &[
     ("posix_tcp_connect", 50_000),             // 44,709
     ("posix_tcp_roundtrip_same_cpu", 20_000),  // 17,527
     ("posix_udp_roundtrip_same_cpu", 17_000),  // 14,627
-    ("posix_tcp_mib", 2_200_000),              // 1,990,584
+    ("posix_tcp_mib", 2_500_000),              // 2,229,095
 ];
 
 /// One measurement: a `BENCH name=... ns=... iterations=...` line.

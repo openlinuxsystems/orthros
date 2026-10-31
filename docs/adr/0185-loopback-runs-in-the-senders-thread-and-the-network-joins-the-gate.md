@@ -66,6 +66,15 @@ sat in LAST-ACK for that long.
   poll it, which on `lo` is now a whole poll in the reader's thread; a
   smaller change goes with the next ACK, and meanwhile the other end
   still has half the buffer to send into.
+- **The kernel's `memcpy` goes backward when a long copy's destination
+  is a little ahead of its source within a page**, as the copies to and
+  from user memory already do (1 to 511 bytes, copies of 512 or more).
+  AMD's Zen 3 and later run `rep movs` many times slower then, each load
+  waiting for an earlier store with the same low 12 bits, and the bytes
+  smoltcp takes from a socket's buffer into a packet for `lo` land a
+  header's length ahead of where they were, page for page, in every
+  segment. Otherwise it copies as compiler_builtins' `memcpy` did, whose
+  definition is weak so that the kernel's takes its place.
 - **The buffers of sockets that closed are kept for new ones**, up to
   eight of 64 KiB, four sockets' worth. A connection made and closed had
   the heap make and zero 256 KiB, its two sockets' buffers each way,
