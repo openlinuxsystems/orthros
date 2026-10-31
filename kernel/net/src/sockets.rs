@@ -151,3 +151,74 @@ impl<L: Link> Stack<L> {
         self.iface.get_source_address_ipv4(&to)
     }
 }
+
+/// A TCP or UDP socket of a stack's, as `/proc/net/tcp` and
+/// `/proc/net/udp` show one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shown {
+    /// Whether it is TCP's, or UDP's.
+    pub tcp: bool,
+    /// The address and port it is at: an address of 0.0.0.0 for any.
+    pub local: (Ipv4Address, u16),
+    /// Where it is connected: 0.0.0.0, port 0, for nowhere.
+    pub remote: (Ipv4Address, u16),
+    /// A TCP socket's state; for UDP's, Closed.
+    pub state: tcp::State,
+    /// The bytes it has to send, not yet acknowledged for TCP.
+    pub send_queue: usize,
+    /// The bytes that came, not yet read.
+    pub receive_queue: usize,
+}
+
+/// The IPv4 address of `address`, or of any for none.
+fn v4(address: Option<IpAddress>) -> Ipv4Address {
+    match address {
+        Some(IpAddress::Ipv4(address)) => address,
+        None => Ipv4Address::UNSPECIFIED,
+    }
+}
+
+impl Shown {
+    /// What `socket` shows: `None` for an ICMP socket, or a UDP or TCP
+    /// one not bound yet.
+    pub(crate) fn of(socket: &Socket<'_>) -> Option<Shown> {
+        match socket {
+            Socket::Tcp(socket) => {
+                let state = socket.state();
+                let (local, remote) = match (socket.local_endpoint(), socket.remote_endpoint()) {
+                    (Some(local), remote) => {
+                        let remote = remote.map_or((Ipv4Address::UNSPECIFIED, 0), |remote| {
+                            (v4(Some(remote.addr)), remote.port)
+                        });
+                        ((v4(Some(local.addr)), local.port), remote)
+                    }
+                    (None, _) if state == tcp::State::Listen => {
+                        let listen = socket.listen_endpoint();
+                        ((v4(listen.addr), listen.port), (Ipv4Address::UNSPECIFIED, 0))
+                    }
+                    (None, _) => return None,
+                };
+                Some(Shown {
+                    tcp: true,
+                    local,
+                    remote,
+                    state,
+                    send_queue: socket.send_queue(),
+                    receive_queue: socket.recv_queue(),
+                })
+            }
+            Socket::Udp(socket) => {
+                let IpListenEndpoint { addr, port } = socket.endpoint();
+                (port != 0).then(|| Shown {
+                    tcp: false,
+                    local: (v4(addr), port),
+                    remote: (Ipv4Address::UNSPECIFIED, 0),
+                    state: tcp::State::Closed,
+                    send_queue: socket.send_queue(),
+                    receive_queue: socket.recv_queue(),
+                })
+            }
+            Socket::Icmp(_) => None,
+        }
+    }
+}

@@ -1275,3 +1275,132 @@ fn frames_changed_at_random_break_neither_stack_without_checksums() {
     // the headers and the sockets behind them.
     fuzz(false, 0x9e37_79b9_7f4a_7c15);
 }
+
+#[test]
+fn counts_what_each_interface_sends_and_receives() {
+    let (mut a, mut b) = pair();
+    let pinger = Pinger::new(&mut a, ping_memory(), 0x55).ok().unwrap();
+    pinger.send(&mut a, Ipv4Address::new(10, 0, 0, 2), 1).unwrap();
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 5);
+    assert_eq!(pinger.reply(&mut a), Some((1, Ipv4Address::new(10, 0, 0, 2))));
+    // An ARP request and an echo request out, an ARP reply and an echo
+    // reply back: each frame, and its bytes, on both sides.
+    let (sent, received) = (a.counters(), b.counters());
+    let frames = a.link().sent.borrow().clone();
+    assert_eq!(sent.sent_packets, 2);
+    assert_eq!(sent.sent_bytes, frames.iter().map(|f| f.len() as u64).sum::<u64>());
+    assert_eq!((received.received_packets, received.received_bytes), (2, sent.sent_bytes));
+    assert_eq!((sent.received_packets, received.sent_packets), (2, 2));
+    assert_eq!(sent.received_bytes, received.sent_bytes);
+    assert_eq!(sent.send_dropped + received.send_dropped, 0);
+    // The loopback link counts its packets read in place too, each once.
+    let mut lo = loopback();
+    let pinger = Pinger::new(&mut lo, ping_memory(), 0x56).ok().unwrap();
+    pinger.send(&mut lo, Ipv4Address::new(127, 0, 0, 1), 1).unwrap();
+    lo.poll(1_000_000);
+    assert_eq!(pinger.reply(&mut lo), Some((1, Ipv4Address::new(127, 0, 0, 1))));
+    let counters = lo.counters();
+    assert_eq!((counters.sent_packets, counters.received_packets), (2, 2));
+    assert_eq!(counters.sent_bytes, counters.received_bytes);
+}
+
+#[test]
+fn takes_several_addresses_and_a_router_and_lets_them_go() {
+    let (mut a, mut b) = pair();
+    let first = Ipv4Cidr::new(Ipv4Address::new(10, 0, 0, 1), 24);
+    let second = Ipv4Cidr::new(Ipv4Address::new(192, 168, 7, 1), 24);
+    let router = Ipv4Address::new(10, 0, 0, 254);
+    a.configure(&[first, second], Some(router));
+    assert_eq!(a.ipv4_addresses().collect::<Vec<_>>(), [first, second]);
+    assert_eq!((a.ipv4(), a.router()), (Some(first), Some(router)));
+    assert!(
+        a.reaches(Ipv4Address::new(192, 168, 7, 9)) && a.routes_to(Ipv4Address::new(8, 8, 8, 8))
+    );
+    // It answers a ping to its second address, from the other's network.
+    b.configure(&[Ipv4Cidr::new(Ipv4Address::new(192, 168, 7, 2), 24)], None);
+    let pinger = Pinger::new(&mut b, ping_memory(), 0x77).ok().unwrap();
+    pinger.send(&mut b, second.address(), 3).unwrap();
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 5);
+    assert_eq!(pinger.reply(&mut b), Some((3, second.address())));
+    // None, as a DHCP client starts: no address, no router, no way out.
+    a.configure(&[], None);
+    assert_eq!((a.ipv4(), a.router()), (None, None));
+    assert!(!a.routes_to(Ipv4Address::new(8, 8, 8, 8)) && !a.has_address(first.address()));
+    assert_eq!(a.mac(), Some(crate::EthernetAddress([2, 0, 0, 0, 0, 1])));
+    assert_eq!(loopback().mac(), None);
+}
+
+#[test]
+fn an_interface_without_an_address_sends_and_takes_broadcasts() {
+    // DHCP's first exchange: the client, with no address, sends from
+    // 0.0.0.0 to everyone, and the server answers everyone.
+    let (mut client, mut server) = pair();
+    client.configure(&[], None);
+    let on_client = client.add_socket(udp_memory().socket()).ok().unwrap();
+    let on_server = server.add_socket(udp_memory().socket()).ok().unwrap();
+    server.socket_mut::<udp::Socket<'static>>(on_server).unwrap().bind(67).unwrap();
+    let socket = client.socket_mut::<udp::Socket<'static>>(on_client).unwrap();
+    socket.bind(68).unwrap();
+    let everyone = IpAddress::Ipv4(Ipv4Address::BROADCAST);
+    let meta = udp::UdpMetadata {
+        local_address: Some(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED)),
+        ..IpEndpoint::new(everyone, 67).into()
+    };
+    socket.send_slice(b"discover", meta).unwrap();
+    let mut now = 0;
+    run(&mut client, &mut server, &mut now, 5);
+    let frame = client.link().sent.borrow()[0].clone();
+    assert_eq!(&frame[0..6], &[0xff; 6], "to every card");
+    assert_eq!(&frame[26..34], &[0, 0, 0, 0, 255, 255, 255, 255], "from 0.0.0.0 to everyone");
+    let socket = server.socket_mut::<udp::Socket<'static>>(on_server).unwrap();
+    let (data, meta) = socket.recv().unwrap();
+    assert_eq!((data, meta.endpoint.port), (&b"discover"[..], 68));
+    assert_eq!(meta.endpoint.addr, IpAddress::Ipv4(Ipv4Address::UNSPECIFIED));
+    socket.send_slice(b"offer", IpEndpoint::new(everyone, 68)).unwrap();
+    run(&mut client, &mut server, &mut now, 5);
+    let socket = client.socket_mut::<udp::Socket<'static>>(on_client).unwrap();
+    let (data, meta) = socket.recv().unwrap();
+    assert_eq!((data, meta.endpoint.port), (&b"offer"[..], 67));
+}
+
+#[test]
+fn lists_its_sockets_as_proc_net_does() {
+    let (mut a, mut b) = pair();
+    let listener = b.add_socket(tcp_memory().socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(listener).unwrap().listen(7).unwrap();
+    let datagrams = b.add_socket(udp_memory().socket()).ok().unwrap();
+    b.socket_mut::<udp::Socket<'static>>(datagrams).unwrap().bind(53).unwrap();
+    let _unbound = b.add_socket(udp_memory().socket()).ok().unwrap();
+    let client = a.add_socket(tcp_memory().socket()).ok().unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 5);
+    a.socket_mut::<tcp::Socket<'static>>(client).unwrap().send_slice(b"hi").unwrap();
+    let any = Ipv4Address::UNSPECIFIED;
+    let shown = b.sockets().collect::<Vec<_>>();
+    assert_eq!(shown.len(), 2, "the unbound socket is not shown");
+    // The listening socket took the connection: smoltcp's are one each.
+    assert_eq!(shown[0].local, (Ipv4Address::new(10, 0, 0, 2), 7));
+    assert_eq!(
+        (shown[0].remote, shown[0].state),
+        ((Ipv4Address::new(10, 0, 0, 1), 49152), tcp::State::Established)
+    );
+    assert!(shown[0].tcp && !shown[1].tcp);
+    assert_eq!((shown[1].local, shown[1].remote), ((any, 53), (any, 0)));
+    let mine = a.sockets().next().unwrap();
+    assert_eq!(
+        (mine.local, mine.remote),
+        ((Ipv4Address::new(10, 0, 0, 1), 49152), (Ipv4Address::new(10, 0, 0, 2), 7))
+    );
+    assert_eq!((mine.send_queue, mine.receive_queue), (2, 0));
+    // A socket that listens, before any connection.
+    let waiting = b.add_socket(tcp_memory().socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(waiting).unwrap().listen(8).unwrap();
+    let listening = b.sockets().find(|s| s.local.1 == 8).unwrap();
+    assert_eq!(
+        (listening.local, listening.remote, listening.state),
+        ((any, 8), (any, 0), tcp::State::Listen)
+    );
+}

@@ -333,9 +333,19 @@ and what has no room is lost. *recvfrom* and *recvmsg* give a datagram's
 sender, and no address for a stream.
 
 *getsockopt* and *setsockopt* take *SO_REUSEADDR* (kept, changing
-nothing), *SO_KEEPALIVE*, *SO_BROADCAST*, *SO_RCVBUF* and *SO_SNDBUF*
-(fixed sizes), *SO_RCVTIMEO*, *SO_SNDTIMEO*, *TCP_NODELAY*,
-*TCP_KEEPIDLE*, *TCP_KEEPINTVL*, *TCP_KEEPCNT* and *IP_TTL*. Keep-alive
+nothing), *SO_KEEPALIVE*, *SO_BROADCAST*, *SO_BINDTODEVICE*, *SO_RCVBUF*
+and *SO_SNDBUF* (fixed sizes), *SO_RCVTIMEO*, *SO_SNDTIMEO*,
+*TCP_NODELAY*, *TCP_KEEPIDLE*, *TCP_KEEPINTVL*, *TCP_KEEPCNT* and
+*IP_TTL*. A datagram to a broadcast address, 255.255.255.255 or its
+network's, fails with EACCES unless *SO_BROADCAST* is set, as on Linux.
+*SO_BINDTODEVICE* takes an interface's name, or an empty one for none,
+and keeps the socket's packets on that interface (ADR 0190); set it
+before a stream socket connects or listens, or it fails with EINVAL. A
+datagram socket bound to a card with no address sends from 0.0.0.0 and
+receives what is broadcast to the card, as a DHCP client needs.
+*if_nametoindex*, *if_indextoname* and *if_nameindex* read the
+interfaces' names and numbers from _/kernel/class/net_
+(*radix-sysfs*(5)); *getifaddrs* is not there yet. Keep-alive
 probes go as on Linux: after 7,200 seconds of quiet, then 75 seconds
 apart, and 9 unanswered reset the connection. TCP's congestion control
 is CUBIC, its loss recovery uses SACK, and PAWS drops segments with old

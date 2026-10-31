@@ -34,12 +34,16 @@ type RegionHandler = extern "C" fn(u32, Handle) -> Status;
 type GpeHandler = extern "C" fn(Handle, Handle, u16) -> u32;
 
 const OK: Status = 0;
+const OUT_OF_MEMORY: Status = 2;
 const NOT_FOUND: Status = 6;
 const INVALID_ARGUMENT: Status = 7;
 const ALREADY_EXISTS: Status = 9;
 const INTERNAL_ERROR: Status = 10;
 const HARDWARE_TIMEOUT: Status = 17;
 const TIMEOUT: Status = 18;
+
+/// `uacpi_object_type`: a string.
+const OBJECT_STRING: u32 = 2;
 
 /// `uacpi_interrupt_ret`: the interrupt was the handler's.
 const INTERRUPT_HANDLED: u32 = 1;
@@ -125,9 +129,17 @@ unsafe extern "C" {
     fn uacpi_enter_sleep_state(state: u32) -> Status;
     fn uacpi_eval_simple_integer(parent: Handle, path: *const c_char, out: *mut u64) -> Status;
     fn uacpi_eval_simple(parent: Handle, path: *const c_char, out: *mut Handle) -> Status;
+    fn uacpi_eval(
+        parent: Handle,
+        path: *const c_char,
+        args: *const ObjectArray,
+        out: *mut Handle,
+    ) -> Status;
+    fn uacpi_object_create_integer(value: u64) -> Handle;
     fn uacpi_object_unref(object: Handle);
     fn uacpi_object_get_integer(object: Handle, out: *mut u64) -> Status;
     fn uacpi_object_get_string_or_buffer(object: Handle, out: *mut DataView) -> Status;
+    fn uacpi_object_get_type(object: Handle) -> u32;
     fn uacpi_object_get_package(object: Handle, out: *mut ObjectArray) -> Status;
     fn uacpi_find_devices(hid: *const c_char, callback: IterationCallback, user: Handle) -> Status;
     fn uacpi_namespace_root() -> Handle;
@@ -140,6 +152,7 @@ unsafe extern "C" {
         user: Handle,
     ) -> Status;
     fn uacpi_namespace_node_name(node: Handle) -> u32;
+    fn uacpi_namespace_node_find(parent: Handle, path: *const c_char, out: *mut Handle) -> Status;
     fn uacpi_namespace_node_generate_absolute_path(node: Handle) -> *const c_char;
     fn uacpi_free_absolute_path(path: *const c_char);
     fn uacpi_install_notify_handler(node: Handle, handler: NotifyHandler, ctx: Handle) -> Status;
@@ -458,6 +471,47 @@ impl Node {
         self.eval(name).map(drop)
     }
 
+    /// Evaluates `name` with the integer `argument`, as `_EVT`, for what
+    /// it does; what it returns is dropped. From a thread that may sleep.
+    pub fn run_with(self, name: &CStr, argument: u64) -> Result<(), Error> {
+        // SAFETY: uACPI hands over a new integer object, or null.
+        let integer = NonNull::new(unsafe { uacpi_object_create_integer(argument) })
+            .map(Object)
+            .ok_or(Error(OUT_OF_MEMORY))?;
+        let objects = [integer.0.as_ptr()];
+        let args = ObjectArray { objects: objects.as_ptr(), count: objects.len() };
+        let mut object = ptr::null_mut();
+        // SAFETY: `name` is NUL-terminated and relative to the node; `args`
+        // holds a live object; uACPI writes `object` only on success, with
+        // a reference we then own.
+        check(unsafe {
+            uacpi_eval(self.0.as_ptr(), name.as_ptr(), &raw const args, &raw mut object)
+        })?;
+        drop(NonNull::new(object).map(Object));
+        Ok(())
+    }
+
+    /// The node at `path`, absolute (as `\_SB.PCI0.GPI0`) or from this
+    /// node (as `^I2C0`, or a child's name), as a resource source or a
+    /// method's name is given; `None` if there is none.
+    pub fn find(self, path: &str) -> Option<Node> {
+        let mut text = [0u8; 256];
+        if path.len() >= text.len() || path.as_bytes().contains(&0) {
+            return None;
+        }
+        text[..path.len()].copy_from_slice(path.as_bytes());
+        let mut found = ptr::null_mut();
+        // SAFETY: `text` is NUL-terminated; uACPI writes `found` only on
+        // success.
+        let status = unsafe {
+            uacpi_namespace_node_find(self.0.as_ptr(), text.as_ptr().cast(), &raw mut found)
+        };
+        if status != OK {
+            return None;
+        }
+        NonNull::new(found).map(Node)
+    }
+
     /// Calls `handler` in the notify thread with each value AML's
     /// `Notify` sends the node. Called once a node, from a thread that may
     /// sleep.
@@ -489,6 +543,11 @@ fn view<'a>(object: Handle) -> Option<&'a [u8]> {
     }
     // SAFETY: the object's bytes, alive as long as it is.
     let bytes = unsafe { core::slice::from_raw_parts(view.bytes, view.len) };
+    // SAFETY: as above. A buffer's last byte is its own, as a resource
+    // template's checksum.
+    if unsafe { uacpi_object_get_type(object) } != OBJECT_STRING {
+        return Some(bytes);
+    }
     Some(bytes.strip_suffix(&[0]).unwrap_or(bytes))
 }
 

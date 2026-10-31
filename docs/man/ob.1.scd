@@ -632,6 +632,14 @@ _target/userspace/_).
 		show the system, the board with their serial numbers, and the
 		memory device.
 
+	*gpio*
+		Boot with QEMU's _pc-testdev_ and an SSDT of the test's whose
+		AMD and Intel GPIO controllers have their registers in the test
+		device's memory and its ISA interrupts 5 and 6: the kernel must
+		set both up, route their interrupts, and ask for the firmware's
+		events on their pins that the controllers' _\_AEI_ list, then run
+		*selftest=gpio*, whose events must each run their method once.
+
 	*msr*
 		Boot with *selftest=msr*: EFER must read, and with KVM a read
 		of an MSR no processor has must fault and go on, as the
@@ -891,6 +899,20 @@ _target/userspace/_).
 		card to QEMU's *cat*, which must send back what it sent. Every
 		socket's memory must come back to the kernel (*radix-network*(2),
 		ADR 0183).
+
+	*interfaces*
+		Boot 2 CPUs under UEFI from the USB stick with a virtio network
+		card on QEMU's user network, as for *sockets*, but with no
+		address. Spark starts _/system/tests/posix/interfaces_ with its
+		network capability: the program finds the card as *net0*,
+		number 2, through the C library and _/kernel/class/net_; sends a
+		DHCPDISCOVER from 0.0.0.0 through a socket bound to the card
+		with SO_BINDTODEVICE, which QEMU's DHCP server must answer with
+		an offer of 10.0.2.15 that the socket receives; gives the card
+		that address and the router with *ip*(8), which must show them;
+		connects through the card to QEMU's *cat*, which *ss*(8) must
+		list; and takes the address and router away again with *ip*(8),
+		each change logged by the kernel (ADR 0190).
 
 	*disk-check*
 		Boot 2 CPUs under UEFI with a 128 MiB NVMe disk whose serial

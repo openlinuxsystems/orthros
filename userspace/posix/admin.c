@@ -6,13 +6,16 @@
 // in /bin: the process tools and their signals, sessions, memory and
 // disks, subvolumes, scrubs and replaced disks, swap areas, priorities, CPU affinity and I/O
 // classes, held files, traces, the kernel log, the dump and layout tools,
-// script, watch and pidstat, shutdown and service through Spark, and the
-// hardware tools. With them, what the kernel tells them: /processes
+// script, watch and pidstat, shutdown and service through Spark, the
+// hardware tools, and ip and ss. With them, what the kernel tells them: /processes
 // (radix-proc(5)), /devices/kmsg, /kernel (radix-sysfs(5)), getloadavg,
 // and the priorities a child inherits.
 
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 
 #include "check.h"
@@ -680,6 +683,44 @@ static void hardware(void) {
 	STATUS(1, "/bin/hwinfo", "nosuch");
 }
 
+// ip and ss (ADR 0190), of lo, the only interface this boot has, and of
+// sockets this test opens on it; the interfaces boot test sets a card up.
+static void network(void) {
+	OUTPUT("", "lo               UNKNOWN        127.0.0.1/8 \n", "/bin/ip", "-br", "address");
+	CONTAINS("1: lo: <LOOPBACK,UP,LOWER_UP> mtu ", "/bin/ip", "link");
+	CONTAINS("\n    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n", "/bin/ip", "l", "show",
+	         "lo");
+	CONTAINS("\n    inet 127.0.0.1/8 scope host lo\n", "/bin/ip", "a");
+	CONTAINS("    RX:  bytes packets errors dropped  missed   mcast\n", "/bin/ip", "-s", "link");
+	OUTPUT("", "", "/bin/ip", "route");
+	STATUS(0, "/bin/ip", "link", "set", "lo", "up");
+	STATUS(1, "/bin/ip", "link", "show", "nosuch");
+	STATUS(1, "/bin/ip", "-6", "address");
+	STATUS(1, "/bin/ip", "neigh");
+	STATUS(2, "/bin/ip", "address", "add", "127.0.0.2/8", "dev", "lo");
+	STATUS(2, "/bin/ip", "link", "set", "lo", "down");
+
+	int server = socket(AF_INET, SOCK_STREAM, 0);
+	int datagrams = socket(AF_INET, SOCK_DGRAM, 0);
+	struct sockaddr_in at = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	CHECK(bind(server, (struct sockaddr *)&at, sizeof(at)) == 0 && listen(server, 1) == 0);
+	CHECK(bind(datagrams, (struct sockaddr *)&at, sizeof(at)) == 0);
+	char line[64];
+	socklen_t len = sizeof(at);
+	CHECK(getsockname(server, (struct sockaddr *)&at, &len) == 0);
+	snprintf(line, sizeof(line), "LISTEN 0      0          127.0.0.1:%u ", ntohs(at.sin_port));
+	CONTAINS(line, "/bin/ss", "-tln");
+	len = sizeof(at);
+	CHECK(getsockname(datagrams, (struct sockaddr *)&at, &len) == 0);
+	snprintf(line, sizeof(line), "127.0.0.1:%u ", ntohs(at.sin_port));
+	CONTAINS(line, "/bin/ss", "-ua");
+	CONTAINS("Netid State ", "/bin/ss", "-a");
+	close(server);
+	close(datagrams);
+	STATUS(1, "/bin/ss", "-6");
+	STATUS(1, "/bin/ss", "-x");
+}
+
 // The storage tools on a disk and a mount that are not there, and on
 // tmpfs; the disk-health and storage-tools boot tests run them on disks.
 static void storage(void) {
@@ -729,6 +770,7 @@ int main(void) {
 	RUN(watching);
 	RUN(power);
 	RUN(hardware);
+	RUN(network);
 	RUN(storage);
 	RUN(links);
 	return check_end();

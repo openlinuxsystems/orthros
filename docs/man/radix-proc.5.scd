@@ -32,7 +32,9 @@ so that it cannot end its line early.
 Linux keeps its own _/proc_ formats, which programs read: Dukovo's own
 tools read these instead (*ps*(1), *top*(1), *free*(1), *lsof*(8) and the
 others of *systools*(1)), and the C library's *getloadavg*(3) reads
-_/processes/loadavg_ for programs ported from Linux.
+_/processes/loadavg_ for programs ported from Linux. The files of
+_/processes/net_ are the exception: they are in Linux's formats, which
+*ss*(8) and ported programs read.
 
 This page describes _/processes_ as of Phase 13 of the roadmap.
 
@@ -224,6 +226,30 @@ _/processes/loadavg_
 _/processes/uptime_
 	*uptime_ns*: nanoseconds since the kernel started.
 
+_/processes/net/dev_
+	What each interface received and sent, as Linux's _/proc/net/dev_
+	writes it: two lines of headings, then a line per interface (*lo*,
+	*net0*...) with its bytes, packets, errors and drops each way, and
+	Linux's other columns, which are 0 (ADR 0190).
+
+_/processes/net/route_
+	The cards' routes, as Linux's _/proc/net/route_ lists its main
+	table: a line of headings, then for each card the network of each
+	address but a /32, and its default route, if it has a router.
+	Addresses are in hexadecimal, as Linux writes them: an address's
+	four bytes, in network order, read as a little-endian number
+	(10.0.2.0 is *0002000A*). Each line is padded with spaces to 127
+	characters. *lo*'s routes, in Linux's local table, are not listed.
+
+_/processes/net/tcp_, _/processes/net/udp_
+	The TCP and UDP sockets, as Linux's _/proc/net/tcp_ and _udp_ list
+	them: a line of headings, then a line per socket with its two ends
+	and Linux's number for its state, as hexadecimal (*0A* listening,
+	*01* connected; *07* for every UDP socket), and the bytes queued to
+	send and received. A socket that listens on every interface is
+	listed once. The user is root's, and the timers, inode and other
+	fields are 0.
+
 _/processes/acpi/button/lid/_*name*_/state_
 	For each lid of the firmware's (_PNP0C0D_, through uACPI), by its
 	name in the ACPI namespace, as *LID0*, Linux's line: *state:* and six
@@ -298,5 +324,5 @@ vda /volumes/vda fat rw label=RADIX16
 
 # SEE ALSO
 
-*systools*(1), *ps*(1), *top*(1), *lsof*(8), *radix-sysfs*(5),
+*systools*(1), *ps*(1), *top*(1), *lsof*(8), *ss*(8), *radix-sysfs*(5),
 *radix-files*(7), *radix-processes*(7), *radix-scheduling*(7), *spark*(8)

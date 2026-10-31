@@ -188,6 +188,7 @@ fn setting(key: &str, value: &str) -> Result<(Table, Vec<String>), String> {
             }
             one(Table::Permissions, format!("network.listen = [{}]", items.join(", ")))
         }
+        "admin.network" => one(Table::Permissions, format!("admin.network = {}", yes_no(value)?)),
         "admin.hardware" => one(Table::Permissions, format!("admin.hardware = {}", yes_no(value)?)),
         _ => Err(format!("unknown key `{key}`")),
     }

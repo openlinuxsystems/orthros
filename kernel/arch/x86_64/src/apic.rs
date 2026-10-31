@@ -463,6 +463,15 @@ impl IoApic {
             ((self.base + 0x10) as *mut u32).write_volatile(value);
         }
     }
+
+    /// Reads register `index` through IOREGSEL and IOWIN.
+    fn read(&self, index: u32) -> u32 {
+        // SAFETY: as in `write`; the caller holds IOAPICS.
+        unsafe {
+            (self.base as *mut u32).write_volatile(index);
+            ((self.base + 0x10) as *const u32).read_volatile()
+        }
+    }
 }
 
 /// A redirection entry's bit for an active-low input.
@@ -513,6 +522,45 @@ fn route(madt: Option<&Madt<'_>>, irq: u8, vector: u8, destination: u32, sci: bo
     if (flags >> 2) & 3 == 3 || (sci && (flags >> 2) & 3 == 0) {
         low |= LEVEL;
     }
+    program(gsi, low, vector, destination)
+}
+
+/// Sends global system interrupt `gsi`, as a device's ACPI resources name
+/// it, to `vector` on the CPU whose APIC ID is `destination`, with the
+/// trigger mode and polarity they give: no override applies, as the MADT's
+/// are for ISA interrupts (ADR 0233). An input that is not masked already
+/// has another interrupt, and is left alone. Returns `gsi`, or `None` if
+/// no I/O APIC has it, it has another, or its IOMMU could not give it an
+/// entry.
+pub fn route_gsi(
+    gsi: u32,
+    level: bool,
+    active_low: bool,
+    vector: u8,
+    destination: u32,
+) -> Option<u32> {
+    let has = |io: &&IoApic| (io.gsi_base..io.gsi_base + io.inputs).contains(&gsi);
+    {
+        let list = IOAPICS.lock_irq();
+        let io = list.0.iter().flatten().find(has)?;
+        if io.read(0x10 + 2 * (gsi - io.gsi_base)) & MASKED == 0 {
+            return None;
+        }
+    }
+    let mut low = u32::from(vector);
+    if active_low {
+        low |= ACTIVE_LOW;
+    }
+    if level {
+        low |= LEVEL;
+    }
+    program(gsi, low, vector, destination)
+}
+
+/// Writes `gsi`'s redirection entry: `low` for its vector, polarity and
+/// trigger mode, sent to `destination`, through the IOMMU's interrupt
+/// remapping where it has one.
+fn program(gsi: u32, low: u32, vector: u8, destination: u32) -> Option<u32> {
     let has = |io: &&IoApic| (io.gsi_base..io.gsi_base + io.inputs).contains(&gsi);
     let id = IOAPICS.lock_irq().0.iter().flatten().find(has)?.id;
     // The boot CPU's, should the entry not name `destination`.

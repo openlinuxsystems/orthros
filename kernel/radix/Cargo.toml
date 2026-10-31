@@ -17,6 +17,7 @@ bench = false
 
 [dependencies]
 radix-abi = { path = "../abi" }
+radix-acpi = { path = "../lib/acpi" }
 radix-ahci = { path = "../drivers/ahci" }
 radix-nvme = { path = "../drivers/nvme" }
 radix-block = { path = "../fs/block" }
@@ -29,6 +30,7 @@ radix-exfat = { path = "../fs/exfat" }
 radix-ext4 = { path = "../fs/ext4" }
 radix-fat = { path = "../fs/fat" }
 radix-fbcon = { path = "../lib/fbcon" }
+radix-gpio = { path = "../drivers/gpio" }
 radix-hal = { path = "../hal" }
 radix-hw = { path = "../lib/hw" }
 radix-hid = { path = "../lib/hid" }

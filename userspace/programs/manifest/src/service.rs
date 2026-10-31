@@ -65,6 +65,7 @@ pub const KEYS: &[&str] = &[
     "files.mount",
     "files.shared",
     "runs-with-your-access",
+    "admin.network",
     "admin.hardware",
     "names",
 ];
@@ -139,10 +140,10 @@ pub struct Service {
 }
 
 impl Service {
-    /// How many network capabilities it gets: one to connect out, and one
-    /// for each range of ports it listens on.
+    /// How many network capabilities it gets: one to connect out, one for
+    /// each range of ports it listens on, and one for admin.network.
     pub fn network_grants(&self) -> usize {
-        self.permissions.network.grants()
+        self.permissions.network.grants() + usize::from(self.permissions.admin.network)
     }
 }
 
@@ -200,10 +201,15 @@ impl Permissions {
     }
 }
 
-/// The administration group: `admin.hardware`.
+/// The administration group: `admin.network` and `admin.hardware`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Admin {
+    /// Whether it may set the network interfaces up, their addresses and
+    /// routers, through a network capability with only the control right
+    /// (ADR 0190).
+    #[serde(default)]
+    pub network: bool,
     /// Whether it gets the platform capability, which sets the machine's
     /// fans, LEDs and ARGB header (ADR 0208).
     #[serde(default)]
@@ -311,6 +317,14 @@ impl TryFrom<RawPermissions> for Permissions {
             admin: raw.admin,
             names: raw.names,
         };
+        let grants = permissions.network.grants() + usize::from(permissions.admin.network);
+        if grants > NETWORK_SLOTS as usize {
+            return Err(format!(
+                "it asks for {grants} network capabilities, one to connect out, one for each \
+                 range of ports it listens on and one for admin.network; a program gets at most \
+                 {NETWORK_SLOTS}"
+            ));
+        }
         let places = permissions.places();
         if permissions.runs_with_your_access && !places.is_empty() {
             return Err("runs-with-your-access holds every file already: leave out files.*".into());
@@ -424,8 +438,8 @@ memory = "none"
 oom = "service"
 
 # What it may do beyond running: connect out to the network, listen on
-# ports and ranges of ports, such as 80 or "8000-8009", and set the
-# machine's fans, LEDs and ARGB header.
+# ports and ranges of ports, such as 80 or "8000-8009", set the network
+# interfaces up, and set the machine's fans, LEDs and ARGB header.
 [permissions]
 network.outbound = false
 network.listen = []
@@ -440,6 +454,9 @@ files.shared = []
 # The whole tree as Spark holds it, in place of files: only for a service
 # that starts other people's shells.
 runs-with-your-access = false
+# Whether it may set the network interfaces' addresses and routers, as
+# ip(8) does.
+admin.network = false
 # Whether it may set the machine's fans, LEDs and ARGB header.
 admin.hardware = false
 # Giving processes and files another user's name: only for authd, which

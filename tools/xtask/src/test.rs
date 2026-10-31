@@ -47,6 +47,9 @@ const THERMAL_TABLE: &str = "file=thermal.aml";
 /// The SSDT of the `framework-ec` case: a Framework EC's ACPI device.
 const CROSEC_AML: &[u8] = include_bytes!("acpi/crosec.aml");
 const CROSEC_TABLE: &str = "file=crosec.aml";
+/// The SSDT `gpio` gives QEMU (`src/acpi/gpio.asl`), likewise.
+const GPIO_AML: &[u8] = include_bytes!("acpi/gpio.aml");
+const GPIO_TABLE: &str = "file=gpio.aml";
 /// The SMBIOS memory device of the `smbus` case, which QEMU gives in place
 /// of its own ([`ddr4_device`]).
 const DDR4_DEVICE: &str = "file=ddr4.smbios";
@@ -75,6 +78,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-ext4",
     "radix-fat",
     "radix-fbcon",
+    "radix-gpio",
     "radix-hal",
     "radix-hid",
     "radix-hw",
@@ -1464,6 +1468,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "gpio",
+        about: "QEMU with a test device's memory as an AMD and an Intel GPIO controller's registers, which an ACPI table of the test's names: the kernel sets both up and routes their interrupts, asks for the firmware's events on their pins, and each event the table's AML fires runs its method once",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit selftest=gpio",
+        cpus: 1,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-device", "pc-testdev", "-acpitable", GPIO_TABLE],
+        script: gpio,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "msr",
         about: "a read of an MSR the CPU lacks faults and goes on",
         firmware: Firmware::Bios,
@@ -2284,6 +2304,22 @@ pub const CASES: &[Case] = &[
         disks: &[],
         second: None,
     },
+    Case {
+        name: "interfaces",
+        about: "a virtio network card with no address: a socket bound to it sends a DHCPDISCOVER from 0.0.0.0 and receives QEMU's offer, ip gives it the address and router offered and shows them, a connection goes through it, ss lists it, and ip takes them away again",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- --posix --network /system/tests/posix/interfaces",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-netdev", ECHO_NETDEV, "-device", "virtio-net-pci,netdev=n0"],
+        script: interfaces,
+        disks: &[],
+        second: None,
+    },
 ];
 
 /// `ob test`.
@@ -2577,6 +2613,7 @@ fn run_case(
             POWER_TABLE => ("power.aml", POWER_AML.to_vec()),
             THERMAL_TABLE => ("thermal.aml", THERMAL_AML.to_vec()),
             CROSEC_TABLE => ("crosec.aml", CROSEC_AML.to_vec()),
+            GPIO_TABLE => ("gpio.aml", GPIO_AML.to_vec()),
             DDR4_DEVICE => ("ddr4.smbios", ddr4_device()),
             _ => continue,
         };
@@ -4710,6 +4747,18 @@ fn ddr4_device() -> Vec<u8> {
     bytes
 }
 
+fn gpio(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect_anywhere("GPIO: AMD's controller \\_SB_.GPIO: 184 pins, interrupt 5 (rising edge)")?;
+    vm.expect_anywhere(
+        "GPIO: Intel Sunrise Point-LP's controller \\_SB_.GPI0: 152 pins, interrupt 6 (rising edge)",
+    )?;
+    vm.expect_anywhere("GPIO: the firmware's events on \\_SB_.GPIO: pins 9 (_E09), 42 (_EVT)")?;
+    vm.expect_anywhere("GPIO: the firmware's events on \\_SB_.GPI0: pins 53 (_L35)")?;
+    selftest_passed(vm, "gpio")?;
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
 fn smbios(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     // Said before the scheduler starts, among the lines the boot report
@@ -4810,6 +4859,40 @@ fn net(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// The `sockets` test (userspace/sockets): its program's steps over lo,
 /// through the card and refused, and every network socket's memory back
 /// in the kernel's.
+/// The `interfaces` test (userspace/posix/interfaces.c): the card comes
+/// up with no address, and ip(8) sets it up with what QEMU's DHCP server
+/// offered.
+fn interfaces(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_ahead("spark: started /system/tests/posix/interfaces as process ")?;
+    if let Some(line) = vm.log().lines().find(|line| line.contains("Net: net0 has the address")) {
+        return Err(format!("the card had an address before ip gave it one: {}", line.trim()));
+    }
+    vm.expect("interfaces: 10.0.2.2 offered 10.0.2.15 to net0, which had no address")?;
+    vm.expect("interfaces: a connection from 10.0.2.15 to 10.0.2.100 port 7 echoed what it sent")?;
+    let code = program_line(vm, "(/system/tests/posix/interfaces) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> =
+        log.lines().filter(|line| line.contains("interfaces: FAILED: ")).collect();
+    if !failed.is_empty() || !log.contains("interfaces: every check passed") || code != "0x0" {
+        return Err(format!("the interfaces test failed ({code}): {}", failed.join("; ")));
+    }
+    // ip's changes, each as the kernel logs it: the address, the router,
+    // the router gone and the address gone.
+    let set = |what: &str| log.lines().filter(|line| line.trim_end().ends_with(what)).count();
+    for (what, times) in [
+        ("Net: net0 is set to 1 address", 2),
+        ("Net: net0 is set to 1 address, with a router", 1),
+        ("Net: net0 is set to 0 addresses", 1),
+    ] {
+        if set(what) != times {
+            return Err(format!("the kernel logged \"{what}\" {} times, not {times}", set(what)));
+        }
+    }
+    vm.expect("spark: nothing more to do; waiting")
+}
+
 fn sockets(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("spark: built the hierarchy of 9 directories and mounted 9 filesystems")?;

@@ -103,9 +103,11 @@ rights listed, plus *copy* and *transfer*, which every kind has.
 
 *network*
 	A range of the network's ports (at most 65,536), to connect out
-	through and to listen on (see *radix-network*(2)). Rights: *send*,
-	to connect out to any address and send datagrams; *receive*, to bind
-	to and listen on the ports in the range.
+	through and to listen on, and the interfaces to set up (see
+	*radix-network*(2)). Rights: *send*, to connect out to any address
+	and send datagrams; *receive*, to bind to and listen on the ports in
+	the range; *control*, whatever the range, to set the interfaces'
+	addresses and routers (ADR 0190).
 
 *platform*
 	The machine's platform controls, which its embedded controller

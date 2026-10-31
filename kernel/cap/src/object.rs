@@ -145,8 +145,9 @@ impl ObjectKind {
             }
             ObjectKind::Power | ObjectKind::Names => Rights::CONTROL,
             // Sending is connecting out, to any port; receiving is taking
-            // what comes to the ports in the range.
-            ObjectKind::Network => Rights::SEND.union(Rights::RECEIVE),
+            // what comes to the ports in the range; control sets the
+            // interfaces up.
+            ObjectKind::Network => Rights::SEND.union(Rights::RECEIVE).union(Rights::CONTROL),
             // Reading asks what the controls are set to; control changes
             // them.
             ObjectKind::Platform => Rights::READ.union(Rights::CONTROL),
@@ -321,8 +322,9 @@ mod tests {
         }
         assert!(!ObjectKind::Frame.rights().contains(Rights::CONTROL));
         assert!(ObjectKind::Process.rights().contains(Rights::SIGNAL));
-        assert!(ObjectKind::Network.rights().contains(Rights::SEND | Rights::RECEIVE));
-        assert!(!ObjectKind::Network.rights().contains(Rights::CONTROL));
+        let network = Rights::SEND | Rights::RECEIVE | Rights::CONTROL;
+        assert!(ObjectKind::Network.rights().contains(network));
+        assert!(!ObjectKind::Network.rights().contains(Rights::WRITE));
         assert!(ObjectKind::Platform.rights().contains(Rights::READ | Rights::CONTROL));
         assert!(!ObjectKind::Platform.rights().contains(Rights::WRITE));
     }

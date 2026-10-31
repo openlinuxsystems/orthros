@@ -10,8 +10,10 @@
 //! adds the NUMA topology: the SRAT and the SLIT; Phase 9 the sleep types
 //! that powering off needs, from the DSDT's AML; Phase 11 the DMAR,
 //! which describes Intel's DMA remapping units, and the IVRS, which
-//! describes AMD's IOMMUs. Everything here works on byte slices and is unit-tested on the build host; the
-//! kernel supplies a [`Memory`] that maps physical addresses for it. The
+//! describes AMD's IOMMUs, and the resource templates devices' `_CRS`
+//! methods return ([`resources`]). Everything here works on byte slices
+//! and is unit-tested on the build host; the kernel supplies a [`Memory`]
+//! that maps physical addresses for it. The
 //! AML interpreter, which later phases need, is a separate decision (ADR
 //! 0013).
 //!
@@ -26,6 +28,7 @@ mod fadt;
 mod ivrs;
 mod madt;
 mod numa;
+pub mod resources;
 mod sleep;
 
 pub use dmar::{DeviceScope, Dmar, Reserved, ScopeKind, Unit as DmarUnit};

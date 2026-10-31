@@ -67,6 +67,7 @@ const OPERANDS: &[(&str, usize, &str)] = &[
     ("chgrp", 1, "group"),
     ("chown", 1, "user"),
     ("ionice", 1, "command"),
+    ("ip", 1, "words address link route help"),
     ("man", 0, "command"),
     ("nice", 1, "command"),
     ("nohup", 1, "command"),

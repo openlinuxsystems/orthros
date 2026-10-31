@@ -20,10 +20,12 @@
 //!
 //! A service reaches the network only as its file says (ADR 0183):
 //! `network.outbound = true` lets it connect out, and `network.listen`
-//! names the ports it may listen on. `admin.hardware = true` gives it the
-//! platform capability, which sets the fans, the LEDs and the ARGB header
-//! (ADR 0208). It reaches the tree only through the view Spark builds of
-//! what its file declares (`views`, ADR 0217).
+//! names the ports it may listen on. `admin.network = true` lets it set
+//! the interfaces up, their addresses and routers, as ip(8) does (ADR
+//! 0190). `admin.hardware = true` gives it the platform capability, which
+//! sets the fans, the LEDs and the ARGB header (ADR 0208). It reaches the
+//! tree only through the view Spark builds of what its file declares
+//! (`views`, ADR 0217).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -66,6 +68,8 @@ pub struct Spec {
     pub outbound: bool,
     /// The ranges of ports it may listen on, as (first, count).
     pub listen: Vec<(u32, u32)>,
+    /// Whether it may set the interfaces up: admin.network.
+    pub configure: bool,
     /// Whether it gets the platform capability: admin.hardware.
     pub hardware: bool,
     /// The places its view holds beyond what every service's does.
@@ -83,10 +87,11 @@ pub struct Spec {
 }
 
 impl Spec {
-    /// How many network capabilities it gets: one to connect out, and one
-    /// for each range of ports it listens on.
+    /// How many network capabilities it gets: one to connect out, one
+    /// for each range of ports it listens on, and one to set the
+    /// interfaces up.
     pub fn network_grants(&self) -> usize {
-        usize::from(self.outbound) + self.listen.len()
+        usize::from(self.outbound) + self.listen.len() + usize::from(self.configure)
     }
 }
 
@@ -116,6 +121,7 @@ pub fn parse(name: &str, text: &str) -> Result<Spec, String> {
         enabled: file.enabled,
         outbound: network.outbound,
         listen: network.listen.iter().map(|p| (u32::from(p.first), p.count())).collect(),
+        configure: file.permissions.admin.network,
         hardware: file.permissions.admin.hardware,
         places: file.permissions.places(),
         mounts: file.permissions.files.mount.clone(),

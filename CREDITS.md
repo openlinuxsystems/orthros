@@ -293,6 +293,15 @@ We implement these from their published descriptions. No code is copied.
   takes ([ADR 0232](docs/adr/0232-memory-modules-spd-eeproms-over-the-smbus.md)).
   We use no code of Linux's `ee1004`, `at24` or `spd5118` drivers, or of
   i2c-tools' `decode-dimms`.
+- AMD's Processor Programming References ("GPIO") and Intel's *100
+  Series Chipset Family PCH Datasheet*, volume 2 ("GPIO"), from which
+  `radix-gpio` drives AMD's and Sunrise Point-LP's GPIO controllers; the
+  ACPI Specification's resource descriptors and `_AEI`, from which
+  `radix-acpi` reads resource templates; and Linux's `pinctrl-amd`,
+  `pinctrl-intel` and `gpiolib-acpi`, whose way of setting the
+  controllers up and of running the firmware's GPIO events Radix takes
+  ([ADR 0233](docs/adr/0233-gpio-controllers-and-the-firmwares-gpio-events.md)).
+  We use no code of Linux's.
 - The block device `ioctl` requests of Linux's user API (`<linux/fs.h>`),
   BLKGETSIZE64 to BLKDISCARD, whose numbers and meanings Radix's block
   devices take ([ADR 0111](docs/adr/0111-one-queue-for-every-disk.md)).
