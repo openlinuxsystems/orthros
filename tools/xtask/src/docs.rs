@@ -66,6 +66,36 @@ fn generated_pages(ctx: &Ctx) -> Result<Vec<Page>> {
     Ok(pages)
 }
 
+/// dukovo-boot-tests(7), made from the `//!` lines of the boot tests in
+/// tools/xtask/src/test/cases, written as scdoc into `out/docs/man-src/`.
+fn boot_tests_page(ctx: &Ctx) -> Result<Page> {
+    let mut text = String::from(
+        "dukovo-boot-tests(7) \"Dukovo\" \"Dukovo Manual\"\n\n\
+         # NAME\n\n\
+         dukovo-boot-tests - the boot tests that have a file each\n\n\
+         # DESCRIPTION\n\n\
+         *ob test* runs these after those *ob*(1) describes. Each is a file of\n\
+         _tools/xtask/src/test/cases_, whose first lines this page is made from.\n\n",
+    );
+    for (case, doc) in test::described_cases() {
+        text.push_str(&format!("*{}*\n", case.name));
+        for line in doc.lines() {
+            if line.is_empty() {
+                text.push('\n');
+            } else {
+                text.push_str(&format!("\t{line}\n"));
+            }
+        }
+        text.push('\n');
+    }
+    text.push_str("# SEE ALSO\n\n*ob*(1)\n");
+    let dir = ctx.out.join("docs/man-src");
+    process::create_dir(&dir)?;
+    let path = dir.join("dukovo-boot-tests.7.scd");
+    std::fs::write(&path, text).context(|| format!("writing {}", path.display()))?;
+    Ok(Page::from_path(&path).expect("named <name>.<section>.scd"))
+}
+
 /// `ob docs [--check]`.
 pub fn build(ctx: &Ctx, check: bool) -> Result<()> {
     for tool in ["scdoc", "mandoc", "mdbook"] {
@@ -75,7 +105,8 @@ pub fn build(ctx: &Ctx, check: bool) -> Result<()> {
         }
     }
     let mut pages = pages(ctx)?;
-    let generated = generated_pages(ctx)?;
+    let mut generated = generated_pages(ctx)?;
+    generated.push(boot_tests_page(ctx)?);
     let man_dir = ctx.out.join("docs/man");
     step(&format!(
         "Building {} man pages, {} of them generated from abi/*.ridl",
@@ -208,7 +239,10 @@ fn check_title(ctx: &Ctx, page: &Page) -> Result<Vec<String>> {
 /// command and self-test must be documented, in bold, in its man page.
 fn check_coverage(ctx: &Ctx) -> Result<Vec<String>> {
     let ob_commands: Vec<&str> = COMMANDS.iter().map(|&(name, _)| name).collect();
-    let boot_tests: Vec<&str> = test::all_cases().map(|case| case.name).collect();
+    // The tests in test/cases are described by their files instead.
+    let own: Vec<&str> = test::described_cases().map(|(case, _)| case.name).collect();
+    let boot_tests: Vec<&str> =
+        test::all_cases().map(|case| case.name).filter(|name| !own.contains(name)).collect();
     let kernel_flags: Vec<&str> = radix_hal::cmdline::FLAGS.iter().map(|f| f.name).collect();
     let kdb_commands: Vec<&str> = radix_kdb::COMMANDS.iter().map(|c| c.name).collect();
     let lists: [(&str, &str, &[&str]); 7] = [

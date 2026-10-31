@@ -137,14 +137,17 @@ When more than one phase is built at once, each pull request keeps to its
 phase's places, so that two of them do not edit the same lines:
 
 - ADR numbers: each phase takes numbers from its own block.
-- Boot tests: a phase's new tests go in `tools/xtask/src/test/phaseNN.rs`,
-  and their descriptions in [ob(1)](docs/man/ob.1.scd) under the phase's
-  heading at the end of the boot tests. `./ob test --list` names them all.
+- Boot tests: a new test is a file of its own in
+  `tools/xtask/src/test/cases/`, described by its `//!` lines, which
+  `ob docs` makes into dukovo-boot-tests(7); no list names it (see the
+  README there). `./ob test --list` names every boot test.
 - ridl interface numbers: Phase 11 takes `0x0020` to `0x002f`, Phase 12
   `0x0030` to `0x003f` and Phase 13 `0x0040` to `0x004f`. Object kinds and
   Spark's slots are numbered without gaps, so the pull request that merges
   second takes the next free one.
-- The roadmap and CREDITS.md: add rows at the end of your phase's section
+- The roadmap: tick a phase's items in one pull request at the phase's
+  end (or a sub-phase's), not in each pull request, since neighbouring
+  lines conflict. CREDITS.md: add rows at the end of your phase's section
   only.
 - `Cargo.lock`: on a conflict, take main's and let Cargo update it, rather
   than merging its lines.

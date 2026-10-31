@@ -113,6 +113,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-tty",
     "radix-uacpi",
     "radix-usb",
+    "radix-usbhc",
     "radix-vfs",
     "radix-virtio",
     "radix-vtd",
@@ -882,9 +883,40 @@ mod phase11;
 mod phase12;
 mod phase13;
 
-/// Every boot test, in the order they run: CASES, then each phase's.
+/// The boot tests in test/cases, one file each, which build.rs lists (see
+/// test/cases/README.md): two pull requests that add a test each then
+/// touch no line in common, as they still did in a phase's file.
+mod cases {
+    #[allow(unused_imports)]
+    use super::*;
+    include!(concat!(env!("OUT_DIR"), "/cases.rs"));
+}
+
+/// Every boot test, in the order they run: CASES, each phase's, then
+/// those in test/cases.
 pub fn all_cases() -> impl Iterator<Item = &'static Case> {
-    CASES.iter().chain(phase11::CASES).chain(phase12::CASES).chain(phase13::CASES)
+    CASES
+        .iter()
+        .chain(phase11::CASES)
+        .chain(phase12::CASES)
+        .chain(phase13::CASES)
+        .chain(cases::FILES.iter().map(|&(_, case, _)| case))
+}
+
+/// The boot tests in test/cases, with the description their files'
+/// `//!` lines give, for dukovo-boot-tests(7).
+pub fn described_cases() -> impl Iterator<Item = (&'static Case, String)> {
+    cases::FILES.iter().map(|&(_, case, text)| (case, file_doc(text)))
+}
+
+/// The `//!` lines at the top of `text`, without their marker.
+fn file_doc(text: &str) -> String {
+    let mut doc = String::new();
+    for line in text.lines().filter_map(|line| line.strip_prefix("//!")) {
+        doc.push_str(line.strip_prefix(' ').unwrap_or(line));
+        doc.push('\n');
+    }
+    doc.trim().to_string()
 }
 
 /// `--shard <part>/<parts>`, as CI gives it to run the boot tests on
@@ -8357,6 +8389,15 @@ mod tests {
         let wide = String::from_utf8(with_cmdline(&image, "hostname=Dukovó").unwrap()).unwrap();
         assert_eq!(wide.len(), image.len());
         assert!(with_cmdline(&image, &"é".repeat(CMDLINE_SLOT)).is_err());
+    }
+
+    #[test]
+    fn case_files_are_named_as_their_cases_and_describe_them() {
+        for &(name, case, text) in cases::FILES {
+            assert_eq!(case.name, name, "test/cases/{name}.rs holds the case `{}`", case.name);
+            assert!(!file_doc(text).is_empty(), "test/cases/{name}.rs has no `//!` description");
+        }
+        assert_eq!(file_doc("// SPDX\n\n//! One\n//!\n//! two\nuse x;"), "One\n\ntwo");
     }
 
     #[test]

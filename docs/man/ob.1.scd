@@ -1215,8 +1215,9 @@ _target/userspace/_).
 		Boot an image with a generated microcode file on an emulated
 		Intel CPU, and check that the kernel finds the matching update.
 
-	The boot tests that Phases 11, 12 and 13 add from now on are
-	described below, each under its phase, which are built in parallel.
+	The boot tests that Phases 11, 12 and 13 added next are described
+	below, each under its phase. Newer ones have a file each, and
+	*dukovo-boot-tests*(7) describes them.
 
 	_Phase 11: hardware support_
 
@@ -1250,17 +1251,21 @@ _target/userspace/_).
 		*ntfscp*, which the second boot must read (ADR 0237). ntfs-3g and
 		The Sleuth Kit must be installed (*ob doctor* says how).
 
-	*ntfs-power-cut*
-		The power is cut while _/system/tests/storage churn_ writes,
-		syncs, renames and removes files on a 64 MiB virtio disk that
-		*mkntfs* made, of 4 KiB clusters, 0 to 1.5 seconds after its
-		thirtieth file is synced. The volume must be left marked dirty,
-		for Windows to check, and The Sleuth Kit (*fls* and *icat*) must
-		find every file synced whole. On the next boot Radix must mount
-		it read-only and say why, _/system/tests/storage churned-kept_
-		must read each file whole or a start of itself and have its
-		write refused, and the disk must not change (ADR 0238). ntfs-3g
-		and The Sleuth Kit must be installed (*ob doctor* says how).
+	*usb-ehci*
+		Boot with a keyboard and a tablet on QEMU's EHCI controller,
+		which has no companions: the keyboard types into the shell, and
+		*lsusb -t* shows the bus at 480M with its EHCI driver.
+
+	*usb-ohci*
+		Boot with a full-speed keyboard on QEMU's OHCI controller, and a
+		mouse behind a hub: the keyboard types into the shell, and
+		*lsusb -t* shows the bus at 12M with its OHCI driver.
+
+	*usb-companions*
+		Boot with QEMU's ICH9 EHCI controller and its three UHCI
+		companions: a high-speed keyboard stays on the EHCI controller
+		and types, a full-speed hub is handed to a companion, which
+		names the mouse behind it, and *lsusb -t* shows both buses.
 
 ; Phase 11's boot tests go above this line.
 

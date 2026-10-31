@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Phase 11's boot tests (hardware support), added after this file was made. A new
-//! test of the phase goes here, with its script, so that the phases built
-//! in parallel add theirs to different files. The test still needs its
-//! entry in ob(1)'s list (in Phase 11's part of it).
+//! Phase 11's boot tests from before tests got a file each. A new
+//! test goes in test/cases instead (see its README).
 
 #[allow(unused_imports)]
 use super::*;
@@ -48,24 +46,96 @@ pub const CASES: &[Case] = &[
         }),
     },
     Case {
-        name: "ntfs-power-cut",
-        about: "The power is cut while files are written, synced, renamed and removed on NTFS: the volume is left marked for Windows to check, The Sleuth Kit finds every synced file whole, and Radix then mounts it read-only, reads the files and changes nothing",
+        name: "usb-ehci",
+        about: "QEMU's EHCI controller, without companions, names a keyboard, which types, and a tablet, and lsusb shows its bus",
         firmware: Firmware::Uefi,
         media: Media::Usb,
-        cmdline: "lockdep -- /system/tests/storage churn",
+        cmdline: "lockdep console-sign-in=off",
         cpus: 2,
         memory: "1G",
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
-        qemu: &[],
-        script: power_cut,
-        disks: NTFS_CUT_DISKS,
-        second: Some(SecondBoot {
-            cmdline: "lockdep -- /system/tests/storage churned-kept",
-            before: ntfs_cut_host,
-            script: ntfs_cut_kept,
-        }),
+        // The keyboard takes QEMU's input from the screen, as in usb-input.
+        qemu: &[
+            "-vga",
+            "none",
+            "-device",
+            "VGA,id=video0",
+            "-device",
+            "usb-ehci,id=ehci,addr=0x1d",
+            "-device",
+            "usb-kbd,bus=ehci.0,port=1,id=ehcikbd,display=video0",
+            "-device",
+            "usb-tablet,bus=ehci.0,port=2",
+        ],
+        script: usb_ehci,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "usb-ohci",
+        about: "QEMU's OHCI controller names a full-speed keyboard, which types, and a mouse behind a hub, and lsusb shows its bus",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep console-sign-in=off",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[
+            "-vga",
+            "none",
+            "-device",
+            "VGA,id=video0",
+            "-device",
+            "pci-ohci,id=ohci,addr=0x1e",
+            "-device",
+            "usb-kbd,bus=ohci.0,port=1,id=ohcikbd,display=video0",
+            "-device",
+            "usb-hub,bus=ohci.0,port=2",
+            "-device",
+            "usb-mouse,bus=ohci.0,port=2.1",
+        ],
+        script: usb_ohci,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "usb-companions",
+        about: "QEMU's ICH9 EHCI controller keeps a high-speed keyboard, which types, and hands a full-speed hub to a UHCI companion, which names the mouse behind it, and lsusb shows both buses",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep console-sign-in=off",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[
+            "-vga",
+            "none",
+            "-device",
+            "VGA,id=video0",
+            "-device",
+            "ich9-usb-ehci1,id=ehci,addr=1d.7,multifunction=on",
+            "-device",
+            "ich9-usb-uhci1,masterbus=ehci.0,firstport=0,addr=1d.0,multifunction=on",
+            "-device",
+            "ich9-usb-uhci2,masterbus=ehci.0,firstport=2,addr=1d.1,multifunction=on",
+            "-device",
+            "ich9-usb-uhci3,masterbus=ehci.0,firstport=4,addr=1d.2,multifunction=on",
+            "-device",
+            "usb-kbd,bus=ehci.0,port=1,id=ehcikbd,display=video0",
+            "-device",
+            "usb-hub,bus=ehci.0,port=3",
+            "-device",
+            "usb-mouse,bus=ehci.0,port=3.1",
+        ],
+        script: usb_companions,
+        disks: &[],
+        second: None,
     },
 ];
 
@@ -116,111 +186,6 @@ const NTFS_WRITE_DISKS: &[Disk] = &[
     ntfs_disk(64 * 1024, NTFS, "RADIXNTFS", Bus::Nvme(0), 4096, 4096, ntfs_checked),
     ntfs_disk(32 * 1024, NTFS, "RADIXSMALL", Bus::Virtio, 512, 512, ntfs_checked),
 ];
-
-/// The `ntfs-power-cut` test's disk: a virtio disk of an empty NTFS
-/// that `mkntfs` made, of 4 KiB clusters, which only the churn fills.
-const NTFS_CUT_DISKS: &[Disk] =
-    &[ntfs_disk(64 * 1024, NTFS_EMPTY, "RADIXNTFS", Bus::Virtio, 512, 4096, ntfs_cut)];
-
-/// The flags `$Volume` has on the NTFS of `disk`, in `$MFT`'s copy of it,
-/// as The Sleuth Kit's `icat` reads its `$VOLUME_INFORMATION` (type 112).
-/// ntfs-3g's tools refuse a volume whose `$MFTMirr` differs, as a power
-/// cut between the two copies' writes leaves it, until Windows mends it.
-fn ntfs_flags(disk: &DiskImage) -> Result<u16, String> {
-    let image = disk.path.display();
-    let mut icat = std::process::Command::new("icat");
-    let info = host_tool(icat.args(["-f", "ntfs"]).arg(&disk.path).arg("3-112"))
-        .map_err(|err| format!("{image}: icat: {err}"))?;
-    match info.get(10..12) {
-        Some(flags) => Ok(u16::from_le_bytes([flags[0], flags[1]])),
-        None => Err(format!("{image}: $VOLUME_INFORMATION is {} bytes", info.len())),
-    }
-}
-
-/// The files of the NTFS of `disk` copied out to a directory, as The
-/// Sleuth Kit reads them (`fls` lists them and `icat` copies each), which
-/// reads a volume whatever its flags say.
-fn ntfs_restore(disk: &DiskImage) -> Result<PathBuf, String> {
-    let to = disk.path.with_extension("restored");
-    if to.exists() {
-        std::fs::remove_dir_all(&to).map_err(|err| format!("removing {}: {err}", to.display()))?;
-    }
-    std::fs::create_dir(&to).map_err(|err| format!("making {}: {err}", to.display()))?;
-    let mut fls = std::process::Command::new("fls");
-    fls.args(["-u", "-F", "-f", "ntfs"]).arg(&disk.path);
-    let listing = String::from_utf8_lossy(&host_tool(&mut fls)?).into_owned();
-    for line in listing.lines() {
-        // `r/r 64-128-2:\tfile-0003`, the root's files only.
-        let Some((number, name)) = line.split_once(":\t") else { continue };
-        let Some(number) = number.rsplit(' ').next() else { continue };
-        if name.starts_with('$') || name.contains('/') {
-            continue;
-        }
-        let mut icat = std::process::Command::new("icat");
-        let data = host_tool(icat.args(["-f", "ntfs"]).arg(&disk.path).arg(number))?;
-        std::fs::write(to.join(name), data).map_err(|err| format!("writing {name}: {err}"))?;
-    }
-    Ok(to)
-}
-
-/// Checks the `ntfs-power-cut` test's disk after a boot. After the one
-/// whose power was cut, the volume is marked dirty, for Windows to check,
-/// as Radix leaves it while it writes (ADR 0237), and The Sleuth Kit finds
-/// each file the program synced whole, as [`btrfs_cut`] checks Btrfs.
-/// After the next, which only reads it, it is as it was.
-fn ntfs_cut(disk: &DiskImage, log: &str) -> Result<(), String> {
-    let synced = churn_rounds(log, "synced");
-    let Some(&last) = synced.last() else { return btrfs_unchanged(disk, log) };
-    let image = disk.path.display();
-    if ntfs_flags(disk)? & 1 == 0 {
-        return Err(format!("{image} is not marked dirty after a power cut"));
-    }
-    let removed = churn_rounds(log, "removed");
-    let restored = ntfs_restore(disk)?;
-    let result = churn_left(&restored, &synced, &removed, last.checked_sub(CHURN_KEEP));
-    let _ = std::fs::remove_dir_all(&restored);
-    result
-        .map_err(|err| format!("{image}: {err}, after a power cut after file-{last:04} was synced"))
-}
-
-/// Between the boots of the `ntfs-power-cut` test: the disk's sum, which
-/// the boot that only reads it must leave as it is.
-fn ntfs_cut_host(_: &Case, disks: &[DiskImage]) -> Result<(), String> {
-    for disk in disks {
-        let sum = host_tool(std::process::Command::new("sha256sum").arg(&disk.path))?;
-        let sums = disk.path.with_extension("sha256");
-        std::fs::write(&sums, sum).map_err(|err| format!("writing {}: {err}", sums.display()))?;
-    }
-    Ok(())
-}
-
-/// The `ntfs-power-cut` test's second boot: Radix mounts the volume left
-/// dirty read-only and says why; the program finds the churn's files
-/// whole or a start of themselves, and its write is refused.
-fn ntfs_cut_kept(vm: &mut Vm, case: &Case) -> Result<(), String> {
-    // Mounted read-only, the kernel saying why first.
-    disks_found(vm, case)?;
-    for (disk, name) in case.disks.iter().zip(volume_names(case.disks)) {
-        let label = disk.label;
-        vm.expect(&format!("Files: the NTFS of {name} is only read: it is marked to be checked"))?;
-        vm.expect(&format!(
-            "Files: mounted ntfs from {name} on /volumes/{name}, read-only, labelled {label}"
-        ))?;
-        vm.expect(&format!(
-            "spark: mounted the NTFS filesystem of {name} at /volumes/{name}, read-only"
-        ))?;
-    }
-    vm.expect("spark: built the hierarchy of 9 directories and mounted 9 filesystems")?;
-    vm.expect_ahead("spark: started /system/tests/storage as process ")?;
-    for name in volume_names(case.disks) {
-        vm.expect(&format!("storage: /volumes/{name}: after the power cut, "))?;
-        vm.expect(&format!(
-            "storage: /volumes/{name}: only read after the power cut, for Windows to check it"
-        ))?;
-    }
-    vm.expect("storage: /processes lists ")?;
-    storage_end(vm, "churned-kept")
-}
 
 /// Checks an NTFS disk with ntfs-3g, changing nothing: `ntfsresize
 /// --info` finds each cluster in use held by one file and each file's
@@ -337,4 +302,96 @@ fn ntfs_list(vm: &mut Vm, case: &Case) -> Result<(), String> {
         vm.expect(&format!("storage: list {name}: nothing written"))?;
     }
     storage_end(vm, "list")
+}
+
+/// The `usb-ehci` case.
+fn usb_ehci(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    for line in [
+        "USB: bus 2 is the EHCI 1.0 controller at 0000:00:1d.0: 6 ports, 0 companion controllers, polled",
+        "USB: 2-1: QEMU USB Keyboard (0627:0001, QEMU), keyboard, high speed",
+        "USB: 2-1: interface 0: a keyboard, read into /devices/kbd",
+        "USB: 2-2: QEMU USB Tablet (0627:0001, QEMU), HID, high speed",
+        "USB: 2-2: interface 0: a tablet, read into /devices/mouse",
+    ] {
+        vm.expect_anywhere(line)?;
+    }
+    vm.expect("consoled: 6 consoles; tty1 is shown")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    vm.type_on(VIDEO, "echo $((6 * 7)) ehci\n")?;
+    vm.expect_screen(&["# echo $((6 * 7)) ehci", "42 ehci"])?;
+    vm.type_text("lsusb -t\n")?;
+    vm.expect_screen(&[
+        "/:  Bus 002.Port 001: Dev 001, Class=root_hub, Driver=ehci-pci/6p, 480M",
+        "    |__ Port 001: Dev 002, If 0, Class=Human Interface Device, Driver=usbhid, 480M",
+        "    |__ Port 002: Dev 003, If 0, Class=Human Interface Device, Driver=usbhid, 480M",
+    ])?;
+    vm.monitor("device_del ehcikbd")?;
+    vm.expect("USB: 2-1: QEMU USB Keyboard was unplugged")?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: asked to power off the machine")?;
+    vm.expect("spark: every service has stopped")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// The `usb-ohci` case.
+fn usb_ohci(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    for line in [
+        "USB: bus 2 is the OHCI 1.0 controller at 0000:00:1e.0: 3 ports, polled",
+        "USB: 2-1: QEMU USB Keyboard (0627:0001, QEMU), keyboard, full speed",
+        "USB: 2-1: interface 0: a keyboard, read into /devices/kbd",
+        "USB: 2-2.1: QEMU USB Mouse (0627:0001, QEMU), mouse, full speed",
+        "USB: 2-2.1: interface 0: a mouse, read into /devices/mouse",
+    ] {
+        vm.expect_anywhere(line)?;
+    }
+    vm.expect("consoled: 6 consoles; tty1 is shown")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    vm.type_on(VIDEO, "echo $((6 * 7)) ohci\n")?;
+    vm.expect_screen(&["# echo $((6 * 7)) ohci", "42 ohci"])?;
+    vm.type_text("lsusb -t\n")?;
+    vm.expect_screen(&[
+        "/:  Bus 002.Port 001: Dev 001, Class=root_hub, Driver=ohci-pci/3p, 12M",
+        "    |__ Port 001: Dev 002, If 0, Class=Human Interface Device, Driver=usbhid, 12M",
+    ])?;
+    vm.monitor("device_del ohcikbd")?;
+    vm.expect("USB: 2-1: QEMU USB Keyboard was unplugged")?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: asked to power off the machine")?;
+    vm.expect("spark: every service has stopped")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// The `usb-companions` case.
+fn usb_companions(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    for line in [
+        "USB: bus 2 is the EHCI 1.0 controller at 0000:00:1d.7: 6 ports, 3 companion controllers, polled",
+        "USB: bus 3 is the UHCI controller at 0000:00:1d.0: 2 ports, polled",
+        "USB: 2-1: QEMU USB Keyboard (0627:0001, QEMU), keyboard, high speed",
+        "USB: 2-3: a low- or full-speed device, handed to the companion controller",
+        "USB: 4-1: QEMU USB Hub (0409:55aa, QEMU), hub, full speed",
+        "USB: 4-1.1: QEMU USB Mouse (0627:0001, QEMU), mouse, full speed",
+        "USB: 4-1.1: interface 0: a mouse, read into /devices/mouse",
+    ] {
+        vm.expect_anywhere(line)?;
+    }
+    vm.expect("consoled: 6 consoles; tty1 is shown")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    vm.type_on(VIDEO, "echo $((6 * 7)) companions\n")?;
+    vm.expect_screen(&["# echo $((6 * 7)) companions", "42 companions"])?;
+    vm.type_text("lsusb -t\n")?;
+    vm.expect_screen(&[
+        "/:  Bus 002.Port 001: Dev 001, Class=root_hub, Driver=ehci-pci/6p, 480M",
+        "/:  Bus 004.Port 001: Dev 001, Class=root_hub, Driver=uhci_hcd/2p, 12M",
+        "    |__ Port 001: Dev 002, If 0, Class=Hub, Driver=hub/8p, 12M",
+    ])?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: asked to power off the machine")?;
+    vm.expect("spark: every service has stopped")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }

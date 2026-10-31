@@ -110,10 +110,15 @@ impl Shown {
 pub struct RootHub {
     /// Its root ports.
     pub ports: u8,
-    /// Whether some of them are USB 3's.
-    pub usb3: bool,
     /// The controller's PCI address, its serial number as Linux gives it.
     pub address: Address,
+    /// What it says it is, as Linux's root hubs do: `xHCI Host
+    /// Controller`, `EHCI Host Controller`.
+    pub product: &'static str,
+    /// Its fastest speed in Mb/s, and the USB version its root hub
+    /// speaks, as Linux shows them: `480`, ` 2.00`.
+    pub speed: &'static str,
+    pub version: &'static str,
 }
 
 /// Each bus's root hub, by its bus less 1.
