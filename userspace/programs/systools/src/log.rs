@@ -475,7 +475,7 @@ fn disk_usage(journalctl: bool) -> Result<i32, Fail> {
 /// `tomorrow`; `-1h`, `+30min`, `2 days ago`; `YYYY-MM-DD [HH:MM[:SS]]`
 /// or `HH:MM[:SS]` (today), in local time unless `utc` or it ends with
 /// ` UTC` or `Z`.
-fn parse_time(text: &str, now: u64, utc: bool) -> Result<u64, Fail> {
+pub fn parse_time(text: &str, now: u64, utc: bool) -> Result<u64, Fail> {
     let bad = || usage(format!("'{text}' is not a time"));
     let text = text.trim();
     let midnight = |days_from_today: i64| -> Result<u64, Fail> {

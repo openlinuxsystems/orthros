@@ -29,6 +29,8 @@ use crate::inode::flags;
 use crate::sb::{self, at, incompat};
 use crate::{le16, le32, put16, put32};
 
+mod xattrs;
+
 /// The owner, group and mode of the directories, files and links the
 /// tests make: user 0's, with Linux's usual modes.
 const DIR: Access = Access::default_for(Kind::Directory);

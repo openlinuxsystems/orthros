@@ -165,7 +165,9 @@ fn open_from(process: &ProcessObject, path: &[u8]) -> Result<File> {
     let (root, bypass) = root_of(process)?;
     let vfs = fs::vfs().ok_or(error(Kernel::Gone))?;
     let flags = OpenFlags { want: want::EXECUTE, ..OpenFlags::default() };
-    let at = vfs.open(&root.name.who(bypass), &root.at, path, flags).map_err(fs::status)?;
+    // A root whose user was ended runs nothing more (ADR 0220).
+    let who = root.name.who(bypass).ok_or_else(|| fs::status(radix_vfs::Error::Denied))?;
+    let at = vfs.open(&who, &root.at, path, flags).map_err(fs::status)?;
     File::open(&at)
 }
 
@@ -314,6 +316,7 @@ pub fn exec(
     let (cap, file) = objects::file(user.process.cspace(), file, Rights::READ)?;
     // The name the file was opened for must be able to run it.
     let who = file.name.who(cap.rights().contains(Rights::BYPASS));
+    let who = who.ok_or_else(|| fs::status(radix_vfs::Error::Denied))?;
     who.check(&*file.at.node, want::EXECUTE).map_err(fs::status)?;
     let bytes = copy_block(block)?;
     let block = Block::read(&bytes).map_err(|err| match err {

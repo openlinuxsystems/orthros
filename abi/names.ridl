@@ -15,18 +15,22 @@
 //! Names pass on and do not change: a process `create` or `fork` makes acts
 //! for its maker's, and `exec` keeps it; a file or directory opened through
 //! a directory acts for that directory's, and a pipe, socket or terminal a
-//! process makes for the process's. Only a holder of the names capability
-//! gives another name, with the two methods below. The kernel gives Spark
-//! the one capability to it, acting for root with its root's bypass
-//! right (spark(8)); from Phase 13b.5 Spark gives a copy to authd, which
-//! signs users in.
+//! process makes for the process's. Only a holder of the names
+//! capability gives another name, with the first two methods below. The
+//! kernel gives Spark the one capability to it, acting for root with its
+//! root's bypass right (spark(8)); from Phase 13b.5 Spark gives a copy to
+//! authd, which signs users in.
+//!
+//! The third method takes a name away (ADR 0220): when an account is
+//! disabled or removed, everything that acts for it ends at once.
 
 module names;
 
 /// The most groups a name has beyond its own.
 const GROUPS_MAX: u32 = 32;
 
-/// The authority to give names. Every method needs the control right.
+/// The authority to give names and to take them away. Every method needs
+/// the control right.
 interface names = 0x0011 version 1 {
     kind = names;
     /// Has the process in slot `process`, which `create` made and which
@@ -45,4 +49,17 @@ interface names = 0x0011 version 1 {
     method stamp = 2 (directory: slot, to: slot, user: u32, group: u32, groups: in bytes) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, occupied, invalid_argument,
                 bad_address, no_memory];
+    /// Ends user `user`: every process that acts for it ends, as SIGKILL
+    /// ends it, and every directory and file capability that acts for a
+    /// name of it given until now fails the second gate with `denied`
+    /// from then on, whoever holds it, so that nothing more opens or
+    /// changes through one it handed out. A file it opened already reads
+    /// and writes as before, until it is closed, as on Linux. Names given
+    /// to `user` afterwards, by the two methods above, work. How many
+    /// processes it ended: those acting for `user` that were not ending
+    /// already. A process one of them made while it ended can still
+    /// start, so a caller calls this until it answers 0. User 0 fails with
+    /// invalid_argument.
+    method end = 3 (user: u32) -> (ended: u32)
+        raises [invalid_argument, no_memory];
 }

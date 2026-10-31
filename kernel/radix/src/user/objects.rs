@@ -619,6 +619,29 @@ pub fn process_numbers() -> Vec<u64, Kmalloc> {
     numbers
 }
 
+/// The processes the registry holds, taken out so that what is done
+/// with them takes no lock of theirs under the registry's (radix-names(2)'s
+/// `end`); none if there is no memory for them.
+pub fn processes() -> Option<Vec<ProcessRef, Kmalloc>> {
+    let mut processes = Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+    let mut room = true;
+    caps::with_registry(|registry| {
+        let table = &registry.table;
+        let count =
+            table.iter().flatten().filter(|e| matches!(e.object, Object::Process(_))).count();
+        if processes.try_reserve_exact(count).is_err() {
+            room = false;
+            return;
+        }
+        for entry in table.iter().flatten() {
+            if let Object::Process(process) = &entry.object {
+                let _ = processes.push_within_capacity(process.clone());
+            }
+        }
+    });
+    room.then_some(processes)
+}
+
 /// The process numbered `number`, if the registry holds it.
 pub fn process_by_number(number: u64) -> Option<ProcessRef> {
     caps::with_registry(|registry| {

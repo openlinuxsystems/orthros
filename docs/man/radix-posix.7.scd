@@ -457,8 +457,8 @@ by default, so a process can only lower itself.
 defaults; *fork* copies them and *exec* keeps them. A hard limit can
 only be lowered. The kernel enforces *RLIMIT_STACK*, *RLIMIT_NICE* and
 *RLIMIT_RTPRIO*, and the C library *RLIMIT_NOFILE*. The others are kept for programs to read, and enforce
-nothing yet. *umask* is kept and inherited, but has no effect until
-files have permissions.
+nothing yet. *umask* is kept and inherited, and applied by the kernel
+(see USERS).
 
 # FILE LOCKS
 
@@ -565,6 +565,25 @@ has, passes all of it but for running a file with no execute bit, as
 Linux's root does. *opendir* and *chdir* need the directory's read and
 execute bits, as on Linux; a directory opened with *O_PATH* needs
 neither.
+
+A file may have an access list too (ADR 0256), which gives other users
+and groups by name their own permissions, as Linux's POSIX ACLs do:
+the kernel reads it for anyone but the owner, while the mode's group
+bits are not all zero, and the group bits are the list's mask. A
+directory's default list is what a file or directory made in it takes,
+in place of the umask. *setxattr*, *getxattr*, *listxattr*,
+*removexattr* and their *l* and *f* forms keep Linux's extended
+attributes: *user.* names on files and directories, changed with write
+permission (in a sticky directory, by its owner); *trusted.* names,
+which need the bypass right to see or change; *security.* names,
+changed with it; and the lists, *system.posix_acl_access* and
+*system.posix_acl_default*, in Linux's *posix_acl_xattr* form, changed
+by the owner. Linux's limits and errors hold: ENODATA for a name a file
+has not, ERANGE for a buffer too short or a name past 255 bytes, E2BIG
+for a value past 64 KiB, EOPNOTSUPP for another namespace or a
+filesystem that keeps none, as FAT and exFAT. tmpfs, Btrfs and ext4
+keep them, Btrfs and ext4 as Linux keeps them on the disk;
+*getfacl*(1) and *setfacl*(1) show and change the lists.
 
 A process's root may be a view (*radix-directory*(2), ADR 0215): a
 directory the kernel makes, with directories, files and device nodes

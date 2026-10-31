@@ -40,6 +40,21 @@ own, so two people can work side by side, one on Alt+F1 and one on
 Alt+F2, and `who` lists them. A wrong name or password gets the same
 answer, after a wait.
 
+Your `/tmp` is your own: what you leave there, nobody else sees, and
+nobody can take a name there before your programs do. Your sessions
+share it, so `tmux attach` on a second console finds the server you
+started on the first. It is cleared when the computer stops, as `/tmp`
+always is. An administrator finds it at
+`/system/live/authd/tmp/NUMBER`; `elevate` itself sees the system's
+`/tmp`.
+
+Your session uses the network as anyone may on Linux: it connects
+out, and its programs listen on the ports from 1024, such as a web
+server you try out on port 8080. Ports below 1024, and setting up the
+network cards with `ip`, are an administrator's, through `elevate`
+(below); binding a low port otherwise fails with "Permission denied",
+as on Linux.
+
 Ctrl+Alt+Delete is the secure attention key: no program ever gets it,
 so whatever it shows is the system's own. With no password prompt on
 the console it shows a menu on the bottom line, where Enter takes you
@@ -101,7 +116,8 @@ The password is asked once in each terminal pane, and that pane stays
 unlocked for 15 minutes from its last elevated command; another pane,
 or another console, asks again. `elevate -k` locks the pane at once,
 and `elevate -s` gives root's own shell, whose prompt ends in `#`, for
-a run of work.
+a run of work. `elevate ip link set net0 up` sets a network card up,
+and an elevated server listens on port 80.
 
 An elevated command runs with root's environment, not yours: `PATH` is
 always `/system/commands:/applications/commands`, so a command of your
@@ -139,6 +155,121 @@ the password's hash, never the password; the home is made at the first
 boot. `--password-file` takes the password from a file instead, for
 scripts.
 
+## Disabling, removing and renaming accounts
+
+Disabling an account ends everything it runs at once, its sessions on
+every console, what it left running and the commands it runs through
+elevate, and nobody signs in to it until it is enabled again, with the
+password it had:
+
+```
+$ elevate user disable bob
+bob is disabled: 3 of its processes ended. user enable bob enables it again.
+$ elevate user enable bob
+bob is enabled again.
+```
+
+A folder the account handed to another program opens nothing more
+either, since the system itself takes the account's access away, not a
+command that hunts down its programs one by one. Someone who knows the
+password of a disabled account is told it is disabled when they sign
+in; anyone else is told the password is wrong.
+
+Removing an account disables it the same way and takes it out of the
+account files. `user` asks what becomes of its home:
+
+- **keep** leaves it where it is, for an administrator to see to;
+- **archive** packs it into one compressed file in `/users/.removed`,
+  which only administrators open, and deletes it;
+- **delete** deletes it, after asking again.
+
+In a script, `--keep-home`, `--archive-home` or `--delete-home` says
+which. A removed account's number is never given to another account, so
+the files it left anywhere stay out of everyone else's reach.
+
+```
+$ elevate user remove --archive-home bob
+bob is removed: its home is archived in /users/.removed/bob-2026-10-31.tar.zst,
+for administrators only.
+```
+
+`elevate user rename bob robert` renames an account, with its group and
+its home, once it runs nothing: after bob signs out and what he left
+running ends, or once it is disabled. `user set` changes an account's
+full name, which anyone changes for themselves, or whether it is an
+administrator's: `elevate user set --admin bob`. Someone who is no
+longer an administrator keeps nothing of it, not an elevated shell they
+left open.
+
+You do not disable, remove or rename the account you are signed in
+with: another administrator does, so that your own session does not end
+under you. Disabling or removing the last administrator who can sign
+in, or making them no longer one, asks first, since nobody could
+elevate afterwards; the startup-trouble menu (below) enables a disabled
+administrator again.
+
+## Who signed in, and when
+
+As you sign in, Dukovo says when you last did, and whether anyone typed
+a wrong password for your account since:
+
+```
+Last sign-in: Sat Oct 31 12:40 2026 on pts/0
+Since then, 1 wrong password was typed for bob, the last on Sat Oct 31 12:44 2026 on pts/1.
+```
+
+`last` lists your sign-ins, newest first, with how long each lasted,
+and when the computer started; `lastb` lists the wrong passwords typed
+for your account, and `lastlog` your last sign-in. They are Linux's
+commands, with their options:
+
+```
+$ last
+bob      pts/1                         Sat Oct 31 12:46   still logged in
+bob      pts/1                         Sat Oct 31 12:41 - 12:45  (00:04)
+reboot   system boot  0.13.0           Sat Oct 31 12:39   still running
+
+sign-in records begin Sat Oct 31 12:39:01 2026
+```
+
+Your sign-ins are yours: on Linux anyone reads everyone's, but here each
+person sees only their own, and an administrator sees everyone's, with
+`elevate last`, `elevate lastb` and `elevate lastlog`. The wrong
+passwords typed for names that are no account's are for administrators
+alone.
+
+## Sharing files with each other
+
+Each home is its owner's alone. To share a folder with someone, without
+an administrator making a group for the two of you, give them an entry
+in its access list with `setfacl`, as on Linux. Alice lets bob through
+her home, but not list it, then lets him read `shared` and gives him a
+default entry there, which everything made in it later takes:
+
+```
+$ setfacl -m u:bob:x .
+$ mkdir shared
+$ setfacl -m u:bob:rx shared
+$ setfacl -d -m u:bob:rw shared
+$ echo icing > shared/cake
+$ getfacl shared/cake
+# file: shared/cake
+# owner: alice
+# group: alice
+user::rw-
+user:bob:rw-
+group::r-x                      #effective:r--
+mask::rw-
+other::r--
+```
+
+Bob now reads and changes `/users/alice/shared/cake`, and nothing else of
+hers. `setfacl -x u:bob shared` takes his entry away, and `setfacl -b`
+the whole list. A default list decides the permissions of what is made
+under it, in place of your umask. The lists are kept on the disk as
+Linux keeps them, so they go with a Btrfs or ext4 disk moved between the
+two; FAT and exFAT keep none. See setfacl(1) and getfacl(1).
+
 ## Changing a password
 
 `passwd` changes yours, given the one you have; an administrator,
@@ -161,7 +292,7 @@ startup-trouble menu:
 ```
 
 Choose 1, name the administrator, and type the new password twice; then
-choose 2 and sign in with it. Nobody resets a password unseen: the audit
+choose 2 and sign in with it. A disabled administrator is enabled too. Nobody resets a password unseen: the audit
 log keeps each reset, and every administrator is told at their next
 sign-in, before their shell starts. The menu gives nothing that the boot
 menu did not give already, since anyone at it can start root's shell; a
@@ -177,6 +308,10 @@ recovery key.
 | `/system/settings/group` | The groups, in Linux's format |
 | `/system/state/authd/passwords` | The passwords' Argon2id hashes, which only the authd service reads |
 | `/system/state/authd/notices` | What each person is told at their next sign-in, such as a password reset |
+| `/system/state/authd/retired` | The numbers of removed accounts, which no account gets again |
+| `/system/state/sign-ins` | Who signed in, when, and the wrong passwords typed: a file for each account, which that person reads, and one of the computer's starts and stops |
+| `/system/live/authd/tmp` | Each person's own `/tmp`, a folder named by their account's number |
+| `/users/.removed` | The archived homes of removed accounts |
 
 `/etc/passwd` and `/etc/group` lead to the first two, so programs from
 Linux find them where they look. Only authd changes these files, and it
@@ -184,6 +319,7 @@ keeps any line it does not read, so a comment an administrator adds by
 hand stays. A hash is in the format Linux's libxcrypt reads, so a
 password hash can move between Dukovo and Linux.
 
-Making an account, changing a password and each wrong password are
-security events in the audit log: `log --audit` shows them (see
+Making, disabling, enabling, removing, renaming and changing an
+account, changing a password and each wrong password are security
+events in the audit log: `log --audit` shows them (see
 [Logs, monitoring and troubleshooting](logs.md)).

@@ -256,7 +256,8 @@ on it at every boot. Each folder is named for what it holds:
 |  _/shared_
 :< files that users and services share
 |  _/tmp_
-:< a tmpfs: temporary files
+:< a tmpfs: temporary files; a person's sessions see their own,
+   _/system/live/authd/tmp/_*number*, in its place (*authd*(8))
 |  _/devices_
 :< the devices
 |  _/processes_

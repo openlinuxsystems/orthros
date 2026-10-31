@@ -27,7 +27,7 @@ is named for what it holds:
 | `/applications` | Applications |
 | `/users` | Each user's home |
 | `/shared` | Files that users and services share |
-| `/tmp` | Temporary files, in memory, gone at the next boot |
+| `/tmp` | Temporary files, in memory, gone at the next boot; each person has their own |
 | `/devices` | Devices: `null`, `zero`, `random`, `urandom`, one per disk and partition, and the terminals (`ptmx`, `tty`, `pts/`) |
 | `/processes` | The processes, the mounts, memory and uptime, as text |
 | `/kernel` | The kernel's view of the hardware and its settings, one value per file |

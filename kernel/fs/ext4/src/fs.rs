@@ -821,7 +821,7 @@ impl Inner {
 
     /// Drops a file's reference to its block of extended attributes,
     /// freeing the block with the last.
-    fn drop_attributes(&self, txn: &mut Txn, block: u64) -> Result<()> {
+    pub(crate) fn drop_attributes(&self, txn: &mut Txn, block: u64) -> Result<()> {
         if block < self.geo.first_data_block || block >= self.geo.blocks {
             return Err(Error::Corrupt);
         }

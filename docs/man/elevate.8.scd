@@ -18,11 +18,13 @@ elevate - run a command as an administrator
 # DESCRIPTION
 
 *elevate* runs one command, or root's shell, with the admin set: as
-root, past the owners and modes of every file, and with the platform
-capability that *ectool*(8) uses (ADR 0219). It is how an administrator,
-a member of the *admins* group, does what only root may: make accounts
-with *user*(8), read the hashes' file or another user's home, run
-*ectool*. *sudo*(8) is the same command, for the habits and scripts
+root, past the owners and modes of every file, with the platform
+capability that *ectool*(8) uses (ADR 0219), and with the network as
+root has it, every port and the interfaces' setup (ADR 0257). It is how
+an administrator, a member of the *admins* group, does what only root
+may: make accounts with *user*(8), read the hashes' file or another
+user's home, run *ectool*, set a network card up with *ip*(8), or
+listen on a port below 1024. *sudo*(8) is the same command, for the habits and scripts
 that use that name.
 
 There is no setuid program. elevate asks *authd*(8), which checks that

@@ -24,11 +24,12 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use radix_block::mem::CachePage;
 use radix_block::{PAGE_SIZE, Page, SECTOR, Segment, SegmentMut};
 use radix_sync::{Mutex, Once};
+use radix_vfs::acl::{self, Acl, AclCell};
 use radix_vfs::cache::{Backing, FileCache, page_len};
 use radix_vfs::mem::{self, Alloc, KArc, KVec};
 use radix_vfs::path::check_name;
 use radix_vfs::{
-    Access, AccessChange, Error, In, Kind, ListFn, Node, NodeRef, Out, Result, Stat, now,
+    Access, AccessChange, Error, In, Kind, ListFn, Node, NodeRef, Out, Result, Setting, Stat, now,
 };
 
 use crate::dir;
@@ -36,6 +37,7 @@ use crate::extent::{self, Extent, Extents, Found, MAX_LEN, TreeIo};
 use crate::fs::{Inner, Scratch, Txn, zeroed};
 use crate::inode::{self, Inode, flags, mode};
 use crate::sb::{self, incompat, ro_compat};
+use crate::xattr;
 
 const PAGE: u64 = PAGE_SIZE as u64;
 
@@ -94,6 +96,10 @@ pub struct Ext4Node {
     cache: Option<FileCache>,
     me: Once<Weak<Ext4Node, Alloc>>,
     pinned: AtomicBool,
+    /// Its access list, once read.
+    acl: AclCell,
+    /// A directory's default access list, once read.
+    default_acl: AclCell,
 }
 
 /// Where a directory entry is.
@@ -145,7 +151,16 @@ fn drop_dir_link(links: u16) -> u16 {
 }
 
 impl Ext4Node {
-    fn new(fs: KArc<Inner>, ino: u32, kind: Kind, meta: Meta) -> Result<KArc<Ext4Node>> {
+    fn new(
+        fs: KArc<Inner>,
+        ino: u32,
+        kind: Kind,
+        meta: Meta,
+        made: bool,
+    ) -> Result<KArc<Ext4Node>> {
+        // One just made has no lists until its directory's default gives
+        // them, which sets them as attributes and so forgets these.
+        let list = || if made { AclCell::none() } else { AclCell::unread() };
         let cache = (kind == Kind::File).then(|| FileCache::new(meta.inode.size, meta.inode.mtime));
         let node = mem::arc(Ext4Node {
             fs,
@@ -155,6 +170,8 @@ impl Ext4Node {
             cache,
             me: Once::new(),
             pinned: AtomicBool::new(false),
+            acl: list(),
+            default_acl: list(),
         })?;
         let _ = node.me.set(KArc::downgrade(&node));
         Ok(node)
@@ -194,7 +211,7 @@ impl Ext4Node {
             dirty: false,
             changes: 0,
         };
-        Ext4Node::new(fs, ino, kind, meta)
+        Ext4Node::new(fs, ino, kind, meta, false)
     }
 
     pub(crate) fn ino(&self) -> u32 {
@@ -299,6 +316,36 @@ impl Ext4Node {
         let Meta { inode, raw, .. } = &mut *meta;
         inode.encode(&fs.geo, self.ino, raw);
         fs.write(txn, fs.inode_offset(self.ino)?, raw)
+    }
+
+    /// Sets its attribute of index `index` named `name` to `value`, or
+    /// removes it given none ([`xattr::change`]), and its change time
+    /// with it. The access list it keeps is read again after a change of
+    /// the one that decides.
+    fn change_attribute(
+        &self,
+        index: u8,
+        name: &[u8],
+        value: Option<(&[u8], Setting)>,
+    ) -> Result<()> {
+        self.fs.writable()?;
+        let changed = (|| {
+            let mut txn = self.fs.begin()?;
+            let mut meta = self.meta.lock();
+            let home = self.home();
+            let Meta { raw, inode, .. } = &mut *meta;
+            if !xattr::change(&self.fs, &mut txn, raw, inode, home, index, name, value)? {
+                return Ok(());
+            }
+            meta.inode.ctime = now();
+            self.save(&mut txn, &mut meta)
+        })();
+        if xattr::is_access(index) {
+            self.acl.forget();
+        } else if xattr::is_default(index) {
+            self.default_acl.forget();
+        }
+        changed
     }
 
     /// Notes that its inode is behind, and keeps it in memory until the
@@ -726,7 +773,7 @@ impl Ext4Node {
                 dirty: false,
                 changes: 0,
             };
-            let node = Ext4Node::new(fs.clone(), ino, kind, meta)?;
+            let node = Ext4Node::new(fs.clone(), ino, kind, meta, true)?;
             {
                 let mut meta = node.meta.lock();
                 if dir || slow {
@@ -1143,6 +1190,46 @@ impl Node for Ext4Node {
         inode.mode = (inode.mode & !radix_vfs::mode::ALL) | access.mode;
         inode.ctime = now();
         self.save(&mut txn, &mut meta)
+    }
+
+    fn get_attribute(&self, name: &[u8]) -> Result<KVec<u8>> {
+        let (index, rest) = xattr::split(name)?;
+        let value = {
+            let meta = self.meta.lock();
+            xattr::get(&self.fs, &meta.raw, meta.inode.file_acl, index, rest)?
+        };
+        if xattr::is_list(index) { xattr::acl_from_disk(&value) } else { Ok(value) }
+    }
+
+    fn set_attribute(&self, name: &[u8], value: &[u8], how: Setting) -> Result<()> {
+        let (index, rest) = xattr::split(name)?;
+        if xattr::is_list(index) {
+            let disk = xattr::acl_to_disk(value)?;
+            self.change_attribute(index, rest, Some((&disk, how)))
+        } else {
+            self.change_attribute(index, rest, Some((value, how)))
+        }
+    }
+
+    fn list_attributes(&self) -> Result<KVec<u8>> {
+        let meta = self.meta.lock();
+        xattr::list(&self.fs, &meta.raw, meta.inode.file_acl)
+    }
+
+    fn remove_attribute(&self, name: &[u8]) -> Result<()> {
+        let (index, rest) = xattr::split(name)?;
+        self.change_attribute(index, rest, None)
+    }
+
+    fn access_list(&self) -> Result<Option<KArc<Acl>>> {
+        self.acl.get(|| self.get_attribute(acl::ACCESS))
+    }
+
+    fn default_list(&self) -> Result<Option<KArc<Acl>>> {
+        if self.kind != Kind::Directory {
+            return Ok(None);
+        }
+        self.default_acl.get(|| self.get_attribute(acl::DEFAULT))
     }
 
     fn create(&self, name: &str, kind: Kind, access: Access) -> Result<NodeRef> {

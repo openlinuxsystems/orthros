@@ -36,6 +36,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use radix_sync::Mutex;
 
+use crate::attributes::{self, Inherited};
 use crate::mem::{self, KArc, KVec};
 use crate::path::{self, Component};
 use crate::{
@@ -221,17 +222,57 @@ impl Location {
     }
 }
 
-/// What a node of `kind` made in directory `dir` with `access` gets: in
-/// a directory with the set-group-ID bit, as POSIX lets Linux have it,
-/// the directory's group, and for a directory that bit too, so that a
-/// shared folder's files all take its group.
-pub fn made_with(dir: &Location, access: Access, kind: Kind) -> Access {
+/// What a node of `kind` that `who` makes in directory `dir` with
+/// `access` gets, and what it takes of the directory's default access
+/// list, to set once it is made ([`Made::finish`]). Its mode loses the
+/// bits of `who`'s file mode mask, unless the directory has a default
+/// list, which the mode is masked with in its place, as Linux's
+/// `posix_acl_create` has it (ADR 0256); a symbolic link's mode stays
+/// 0777. In a directory with the set-group-ID bit, as POSIX lets Linux
+/// have it, it takes the directory's group, and a directory that bit
+/// too, so that a shared folder's files all take its group.
+pub fn made_with(who: &Who, dir: &Location, access: Access, kind: Kind) -> Result<Made> {
     let parent = dir.node.access();
-    if parent.mode & mode::SET_GROUP == 0 {
-        return access;
+    let mut access = access;
+    let mut inherited = Inherited::default();
+    if kind != Kind::Symlink {
+        match attributes::default_list(&*dir.node)? {
+            Some(default) => {
+                let (mode, takes) = Inherited::from(&default, kind, access.mode)?;
+                access.mode = mode;
+                inherited = takes;
+            }
+            None => access.mode &= !(who.file_mask & 0o777),
+        }
     }
-    let extra = if kind == Kind::Directory { mode::SET_GROUP } else { 0 };
-    Access { group: parent.group, mode: access.mode | extra, ..access }
+    if parent.mode & mode::SET_GROUP != 0 {
+        let extra = if kind == Kind::Directory { mode::SET_GROUP } else { 0 };
+        access = Access { group: parent.group, mode: access.mode | extra, ..access };
+    }
+    Ok(Made { access, inherited })
+}
+
+/// What [`made_with`] gives a node about to be made: its access, and what
+/// it takes of its directory's default access list.
+pub struct Made {
+    /// Its owner, group and mode.
+    pub access: Access,
+    inherited: Inherited,
+}
+
+impl Made {
+    /// Sets on `node`, just made as `name` in `dir`, the access lists it
+    /// takes. If that fails the node goes again, as Linux makes none it
+    /// cannot give its lists: without them its group bits, which are the
+    /// list's mask, would be its group's.
+    pub fn finish(&self, dir: &dyn crate::Node, name: &str, node: &NodeRef) -> Result<()> {
+        if self.inherited.is_empty() {
+            return Ok(());
+        }
+        self.inherited.apply(&**node).inspect_err(|_| {
+            let _ = dir.remove(name);
+        })
+    }
 }
 
 /// Whether `who` may look names up in `node`: search it, if it is a
@@ -591,8 +632,9 @@ impl Vfs {
                     Err(Error::NotFound) => {
                         dir.writable()?;
                         who.check(&*dir.node, want::WRITE | want::EXECUTE)?;
-                        let access = made_with(&dir, access, Kind::File);
-                        let node = dir.node.create(name, Kind::File, access)?;
+                        let made_as = made_with(who, &dir, access, Kind::File)?;
+                        let node = dir.node.create(name, Kind::File, made_as.access)?;
+                        made_as.finish(&*dir.node, name, &node)?;
                         made = true;
                         break dir.beneath(node);
                     }
@@ -653,8 +695,8 @@ impl Vfs {
         }
         dir.writable()?;
         may_change(who, &dir)?;
-        let access = made_with(&dir, Access { mode: 0o777, ..access }, Kind::Symlink);
-        dir.node.make_link(name, target, access).map(drop)
+        let made = made_with(who, &dir, Access { mode: 0o777, ..access }, Kind::Symlink)?;
+        dir.node.make_link(name, target, made.access).map(drop)
     }
 
     /// Makes `to` beneath `to_base` another name of the file `path`
@@ -691,8 +733,8 @@ impl Vfs {
         }
         if !who.bypass {
             let access = from.node.access();
-            let kind = from.node.kind();
-            let usable = kind == Kind::File && who.may(access, kind, want::READ | want::WRITE);
+            let usable = from.node.kind() == Kind::File
+                && who.check(&*from.node, want::READ | want::WRITE).is_ok();
             if !who.owns(access) && !usable {
                 return Err(Error::NotPermitted);
             }
@@ -718,8 +760,9 @@ impl Vfs {
         }
         dir.writable()?;
         may_change(who, &dir)?;
-        let access = made_with(&dir, access, kind);
-        dir.node.make_node(name, kind, device, access).map(drop)
+        let made = made_with(who, &dir, access, kind)?;
+        let node = dir.node.make_node(name, kind, device, made.access)?;
+        made.finish(&*dir.node, name, &node)
     }
 
     /// Makes a socket's name `path` beneath `base`, which holds `binding`
@@ -739,8 +782,9 @@ impl Vfs {
         }
         dir.writable()?;
         may_change(who, &dir)?;
-        let access = made_with(&dir, access, Kind::Socket);
-        dir.node.make_socket(name, binding, access).map(drop)
+        let made = made_with(who, &dir, access, Kind::Socket)?;
+        let node = dir.node.make_socket(name, binding, made.access)?;
+        made.finish(&*dir.node, name, &node)
     }
 
     /// Reads where the symbolic link `path` beneath `base` points into
@@ -803,8 +847,9 @@ impl Vfs {
         }
         dir.writable()?;
         may_change(who, &dir)?;
-        let access = made_with(&dir, access, Kind::Directory);
-        dir.node.create(name, Kind::Directory, access).map(drop)
+        let made = made_with(who, &dir, access, Kind::Directory)?;
+        let node = dir.node.create(name, Kind::Directory, made.access)?;
+        made.finish(&*dir.node, name, &node)
     }
 
     /// Removes the file or empty directory `path` beneath `base`.

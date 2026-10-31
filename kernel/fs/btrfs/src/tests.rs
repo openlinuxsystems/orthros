@@ -576,3 +576,4 @@ mod scrub;
 mod snapshots;
 mod trim;
 mod write;
+mod xattrs;

@@ -492,7 +492,11 @@ _target/userspace/_).
 		only their *status* in _/processes_. Root, whose root has the
 		bypass right, then reads both homes, and a capability stamped
 		for bob makes files that are his and reaches alice's only with
-		the bypass right (ADR 0214).
+		the bypass right (ADR 0214). Last, root starts itself as carol,
+		who starts a child, and ends her (*radix-names*(2)'s *end*): both
+		end, the kernel answers 0 the second time, a capability stamped
+		for her before is denied even with the bypass right, one stamped
+		after is not, and root cannot be ended (ADR 0220).
 
 	*views*
 		Boot 2 CPUs with _/system/tests/posix/views_ as a program that
@@ -547,7 +551,16 @@ _target/userspace/_).
 		starts itself as alice, who changes her own password given hers
 		but not bob's, makes no account, checks no password but hers,
 		and can neither read the hashes nor change the account files
-		(ADR 0218).
+		(ADR 0218). Then root changes bob's full name and makes him an
+		administrator and not; is asked for a yes before disabling or
+		demoting alice, the last administrator; starts bob with a child
+		and cannot rename his account while they run; disables it, which
+		ends both, after which his password answers that it is disabled
+		and *user list* says so; enables it; renames it to robert, with
+		his group and his home; removes it, deleting the home, after
+		which its number is retired and carol, made next, gets the one
+		after; archives carol's home in _/users/.removed_ and keeps
+		dave's, and a new dave is told whose the kept home is (ADR 0220).
 
 	*signin*
 		Boot 2 CPUs under UEFI from USB with the shipped services and
@@ -558,16 +571,30 @@ _target/userspace/_).
 		her shell. signintest makes bob through *authd*(8); the test
 		signs him in on tty2, where he cannot list alice's home,
 		*who*(1) lists both, and *signintest mount* finds that he
-		mounts and unmounts nothing; he writes a line with *logger*(1), and
+		mounts and unmounts nothing; *signintest network* listens on
+		port 8080 and connects to it, but may not bind port 80 (ADR
+		0257); he leaves a note in his _/tmp_,
+		which is his, mode 1777 (ADR 0255); he writes a line with
+		*logger*(1), and
 		*log*(1) shows him that line alone, with its hint, while
 		*dmesg*(1) and *log --audit* are refused him (ADR 0252);
 		signintest checks that each session's
 		leader acts for its user on a terminal of its own, and that
 		*authd*(8) resets no password outside the startup-trouble menu. Bob signs out
-		and the sign-in comes back; a wrong password is refused after a
-		wait and the right one signs him in again; alice, still signed
-		in on tty1, cannot list bob's home. The power button ends it
-		(ADR 0250).
+		and the sign-in comes back; a name that is no account's and a
+		wrong password are refused, the second after a wait, and the
+		right one signs him in again, told of his last sign-in and the
+		wrong password since, and his note is still in his _/tmp_.
+		*last*(1), *lastb*(1) and *lastlog*(8) show him his own sign-ins
+		alone, with a hint; alice, still signed in on tty1, cannot list
+		bob's home, reads every wrong password, the unknown name's too,
+		with *elevate lastb*, and finds bob's note neither in her _/tmp_
+		nor in the system's, but *elevate cat* reads it at its real
+		path. Then she shares a folder with bob with *setfacl*(1): he
+		may pass through her home, read her file and write the one she
+		makes after, which takes the folder's default list, as
+		*getfacl*(1) shows, but not list her home or write her file. The
+		power button ends it (ADRs 0250, 0254, 0255, 0256 and 0257).
 
 	*elevate*
 		Boot 2 CPUs under BIOS from USB with the shipped services and
@@ -581,14 +608,21 @@ _target/userspace/_).
 		root's environment with the fixed *PATH* and *SUDO_USER*, and the
 		hashes' file, which she cannot read herself, and the kernel log
 		and the audit log through *elevate dmesg* and
-		*elevate log --audit*. Ctrl+C stops an
+		*elevate log --audit*; elevated, *signintest network --low*
+		also listens on port 80. Ctrl+C stops an
 		elevated *sleep*(1) through its own terminal; *elevate -s* gives
 		root's shell on a terminal of its own; *elevate -k* locks the
 		pane again, *-n* then will not ask, a wrong password is asked
 		again, Esc closes the prompt, and *-S* reads the password from the
 		input. Ctrl+Alt+Delete with no prompt shows consoled's menu; Esc
 		closes it, and Enter shows the sign-in on tty3, where nobody is
-		signed in. The power button ends it (ADRs 0219, 0251 and 0252).
+		signed in. Alice cannot disable her own account; she disables
+		bob's, which ends his session on tty2 at once, and his password
+		then gets that it is disabled, until she enables it and he signs
+		in again. *elevate last* and *elevate lastlog* show her everyone's
+		sign-ins: both of bob's, hers, the computer's start, and root's
+		none. The power button ends it (ADRs 0219, 0220, 0251, 0252,
+		0254 and 0257).
 
 	*startup-trouble*
 		Boot 2 CPUs under UEFI from USB with *startup-trouble*, as the

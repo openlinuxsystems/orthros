@@ -43,8 +43,9 @@ interfaces and sockets from *radix-sysfs*(5) and *radix-proc*(5), and
 ask Spark over its control socket (*spark*(8)); *authd*(8) keeps the
 accounts, which *user*(8) makes and lists and whose passwords
 *passwd*(1) changes, starts the sessions of those who sign in with
-*login*(1), and runs the commands an administrator runs with
-*elevate*(8), or *sudo*(8), as root. The user columns show the user each
+*login*(1), records them for *last*(1), *lastb*(1) and *lastlog*(8),
+and runs the commands an administrator runs with *elevate*(8), or
+*sudo*(8), as root. The user columns show the user each
 process acts for (*radix-names*(2)).
 
 A mistake in the command line makes a tool fail with exit status 2 (1
@@ -85,6 +86,8 @@ error that starts with the tool's name.
 :  discard what a mounted filesystem does not use
 |  *free*(1)
 :  memory in use and free
+|  *getfacl*(1), *setfacl*(1)
+:  show and change files' access lists
 |  *halt*(8), *poweroff*(8), *reboot*(8)
 :  halt, power off or restart the machine
 |  *hexdump*(1), *hd*(1)
@@ -103,6 +106,10 @@ error that starts with the tool's name.
 :  the keyboard layout the consoles type in
 |  *kill*(1)
 :  send a signal
+|  *last*(1), *lastb*(1)
+:  who signed in, when and for how long, and the wrong passwords
+|  *lastlog*(8)
+:  each account's last sign-in
 |  *logd*(8)
 :  keep the system's log
 |  *logger*(1)

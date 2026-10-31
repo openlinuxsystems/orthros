@@ -1294,7 +1294,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "principals",
-        about: "processes and capabilities act for names: alice, with a root stamped for her and no bypass right, cannot read bob's 0700 home, give her files away, remove bob's files from a sticky directory, run a file without an execute bit, or signal, trace or read more than the status of bob's processes, while root's bypass right reaches them all",
+        about: "processes and capabilities act for names: alice, with a root stamped for her and no bypass right, cannot read bob's 0700 home, give her files away, remove bob's files from a sticky directory, run a file without an execute bit, or signal, trace or read more than the status of bob's processes, while root's bypass right reaches them all; ending carol ends her processes and denies what was stamped for her before",
         firmware: Firmware::Bios,
         media: Media::Usb,
         cmdline: "lockdep -- --posix --names /system/tests/posix/principals",
@@ -1342,7 +1342,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "accounts",
-        about: "authd keeps the accounts: user add makes an administrator and an account with an empty password, with their groups, homes and Argon2id hashes in files of the right modes, which getpwnam, getgrnam, id and user list read; a right password opens an account, a wrong one or a name there is not is answered alike after a wait, and tries at once wait their turn; root changes a password with passwd, and alice changes hers given hers, but not bob's, makes no account, checks no one else's password and reads no hash",
+        about: "authd keeps the accounts: user add makes an administrator and an account with an empty password, with their groups, homes and Argon2id hashes in files of the right modes, which getpwnam, getgrnam, id and user list read; a right password opens an account, a wrong one or a name there is not is answered alike after a wait, and tries at once wait their turn; root changes a password with passwd, and alice changes hers given hers, but not bob's, makes no account, checks no one else's password and reads no hash; root changes bob's settings, disables him, which ends what he runs, enables, renames and removes him, whose number is never given again, and archives and keeps homes",
         firmware: Firmware::Bios,
         media: Media::Usb,
         cmdline: "lockdep -- --services --posix --names /system/tests/posix/accounttest",
@@ -1358,7 +1358,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "signin",
-        about: "sign-in on the consoles: a machine with no account asks for its owner's, an administrator's, and signs her in; a second account signs in on Alt+F2 beside her; each session acts for its user on its own terminal, who lists both, neither reads the other's home, bob mounts and unmounts nothing, a user reads only their own programs' records of the log and not the kernel log or the audit log, a wrong password waits and fails, and signing out shows the sign-in again",
+        about: "sign-in on the consoles: a machine with no account asks for its owner's, an administrator's, and signs her in; a second account signs in on Alt+F2 beside her; each session acts for its user on its own terminal, who lists both, neither reads the other's home, bob mounts and unmounts nothing and has a /tmp of his own that lasts from one of his sessions to the next, a user reads only their own programs' records of the log and not the kernel log or the audit log, a wrong password waits and fails, and signing out shows the sign-in again; signing in tells of the last sign-in and the wrong passwords since, and last, lastb and lastlog show bob his own sign-ins and an administrator everyone's; alice shares a folder with bob through access lists, which setfacl sets and getfacl shows",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // Spark starts the services, consoled among them with sign-in, and
@@ -1376,7 +1376,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "elevate",
-        about: "elevate and sudo run commands as an administrator: alice, an administrator, types her password once, at the console's own prompt that Ctrl+Alt+Delete clears and no program reads, and runs commands as root with a clean environment and the fixed path, reads the kernel log and the audit log, Ctrl+C reaches an elevated command, an elevated shell runs on a terminal of its own, a wrong password is asked again, Esc closes the prompt, -S reads the password, -k locks the pane and -n will not ask; bob, who is not one, cannot, and each use is in the audit log; Ctrl+Alt+Delete's menu shows the sign-in on a free console",
+        about: "elevate and sudo run commands as an administrator: alice, an administrator, types her password once, at the console's own prompt that Ctrl+Alt+Delete clears and no program reads, and runs commands as root with a clean environment and the fixed path, reads the kernel log and the audit log, Ctrl+C reaches an elevated command, an elevated shell runs on a terminal of its own, a wrong password is asked again, Esc closes the prompt, -S reads the password, -k locks the pane and -n will not ask; bob, who is not one, cannot, and each use is in the audit log; Ctrl+Alt+Delete's menu shows the sign-in on a free console; disabling bob's account ends his session at once and keeps him out until it is enabled; an administrator reads everyone's sign-ins with last and lastlog",
         firmware: Firmware::Bios,
         media: Media::Usb,
         // As signin: Spark starts the services and signintest, which makes
@@ -7665,7 +7665,8 @@ fn logging(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// The `principals` test: Spark starts principals
 /// (userspace/posix/principals.c) as root with the names capability,
 /// which starts itself as bob and as alice, each with a root of their own
-/// name, and checks the second gate between them (ADR 0214).
+/// name, and checks the second gate between them (ADR 0214), then as
+/// carol, whom it ends (ADR 0220).
 fn principals(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
@@ -7732,7 +7733,8 @@ fn services(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// and accounttest (userspace/posix/accounttest.c) as root with the
 /// names capability, which makes accounts with user(8), checks what
 /// authd wrote and how it answers, and starts itself as alice
-/// (ADR 0218).
+/// (ADR 0218); then changes, disables, renames and removes accounts
+/// (ADR 0220).
 fn accounts(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
@@ -7749,12 +7751,19 @@ fn accounts(vm: &mut Vm, case: &Case) -> Result<(), String> {
         return Err(format!("accounttest exited with code {code}"));
     }
     // What authd did is in the audit log: the accounts it made, the
-    // wrong passwords, and the password changed.
+    // wrong passwords, the password changed, and the accounts changed,
+    // disabled, enabled, renamed and removed.
     for said in [
         "authd: made the account alice (1000), an administrator's, for process ",
         "authd: made the account bob (1001), a user's, for process ",
         "authd: a wrong password for alice, from process ",
         "authd: a wrong password for nobody, from process ",
+        "authd: disabled the account bob (1001), for process ",
+        "authd: refused bob to process ",
+        "authd: enabled the account bob, for process ",
+        "authd: renamed the account bob (1001) to robert, its home /users/robert, for process ",
+        "authd: removed the account robert (1001), for process ",
+        "authd: changed the account bob (1001): an administrator, for process ",
     ] {
         if !log.contains(said) {
             return Err(format!("authd did not say \"{said}\""));
@@ -7768,7 +7777,13 @@ fn accounts(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// signed in; signintest (userspace/posix/signintest.c), as root, then
 /// makes bob, who signs in on tty2. Each sees only their own home, `who`
 /// lists both, signing out brings the sign-in back, and a wrong password
-/// is refused after a wait. The power button ends it.
+/// is refused after a wait. Signed in again, bob is told of his last
+/// sign-in and the wrong password since, and last, lastb and lastlog show
+/// him his own sign-ins alone, and alice, through elevate, every wrong
+/// password (ADR 0254). Bob's /tmp is his own, kept from one of his
+/// sessions to the next, and in neither alice's view nor the system's
+/// (ADR 0255). His session listens on port 8080 but not on port 80 (ADR
+/// 0257). The power button ends it.
 fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
     owner_signs_in(vm, case)?;
     answer_prompt(vm, "$", "clear; id; pwd; echo \"$USER $HOME $SHELL\"; tty")?;
@@ -7795,6 +7810,18 @@ fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
     // unmounts /processes for no one.
     answer_prompt(vm, "$", "clear; /system/tests/posix/signintest mount")?;
     vm.expect_screen(&["signintest-mount: every check passed"])?;
+    // His session uses the network as anyone may on Linux: it listens on
+    // port 8080 and connects to it, but not on port 80 (ADR 0257).
+    answer_prompt(vm, "$", "clear; /system/tests/posix/signintest network")?;
+    vm.expect_screen(&["signintest-network: every check passed"])?;
+    // His /tmp is his own (ADR 0255): his, mode 1777, and what he leaves
+    // there is in no one else's.
+    answer_prompt(
+        vm,
+        "$",
+        "clear; echo 'tea party' > /tmp/note; ls -ld /tmp | cut -c1-10; stat -c '%U' /tmp",
+    )?;
+    vm.expect_screen(&["drwxrwxrwt", "bob"])?;
     // The log is for administrators (ADR 0252). Bob reads his own
     // programs' records alone, with a hint unless -q, and the kernel log
     // and the audit log are refused him.
@@ -7816,22 +7843,112 @@ fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
         "log: the audit log is for administrators: run it with elevate",
         "audit 1",
     ])?;
-    // Bob signs out, and the sign-in comes back on a clear screen. A wrong
-    // password then waits and fails, and the right one signs him in again.
+    // Bob signs out, and the sign-in comes back on a clear screen. A name
+    // that is no account's fails as a wrong password does; a wrong
+    // password then waits and fails, and the right one signs him in
+    // again, told of his last sign-in and of the wrong one since (ADR
+    // 0254).
     answer_prompt(vm, "$", "clear; exit")?;
     vm.expect_anywhere("authd: bob signed out on pts/")?;
+    answer_prompt(vm, "Name:", "nobody")?;
+    answer_prompt(vm, "Password:", "dormouse")?;
+    vm.expect_anywhere("authd: a wrong password for nobody, from process ")?;
+    vm.expect_screen(&["The name or the password is wrong."])?;
     answer_prompt(vm, "Name:", "bob")?;
     answer_prompt(vm, "Password:", "cheshire cat")?;
     vm.expect_anywhere("authd: a wrong password for bob, from process ")?;
     vm.expect_screen(&["The name or the password is wrong."])?;
     answer_prompt(vm, "Name:", "bob")?;
     answer_prompt(vm, "Password:", "white rabbit")?;
-    answer_prompt(vm, "$", "clear; whoami")?;
-    vm.expect_screen(&["bob"])?;
-    // Back on tty1, alice's session ran on through all of it.
+    vm.expect_screen(&[
+        "Last sign-in: ",
+        "Since then, 1 wrong password was typed for bob, the last on ",
+    ])?;
+    // His /tmp outlived his first session, as tmux's sockets must.
+    answer_prompt(vm, "$", "clear; whoami; cat /tmp/note")?;
+    vm.expect_screen(&["bob", "tea party"])?;
+    // His sign-ins are his to read, and only his: the session that runs,
+    // the one before, the computer's start, the wrong password, and his
+    // last sign-in, each with a hint that an administrator sees all.
+    answer_prompt(
+        vm,
+        "$",
+        "clear; last; echo \"alice $(last 2>/dev/null | grep -c alice) wrong $(lastb 2>/dev/null \
+         | grep -c '^bob ')\"; lastlog 2>/dev/null",
+    )?;
+    vm.expect_screen(&[
+        "Hint: you see only your own sign-ins.",
+        "still logged in",
+        "reboot   system boot",
+        "still running",
+        "sign-in records begin ",
+        "alice 0 wrong 1",
+        "Username         Port     From             Latest",
+        "bob              pts/",
+    ])?;
+    vm.expect_screen_without("nobody")?;
+    // Back on tty1, alice's session ran on through all of it. Through
+    // elevate she reads every wrong password, the name with no account
+    // too.
     vm.press(&["alt-f1"])?;
-    answer_prompt(vm, "$", "clear; ls /users/bob; echo \"status $?\"")?;
-    vm.expect_screen(&["cannot open directory '/users/bob': Permission denied", "status 2"])?;
+    answer_prompt(
+        vm,
+        "$",
+        "clear; ls /users/bob; echo \"status $?\"; echo 'queen of hearts' | elevate -S lastb -R",
+    )?;
+    vm.expect_screen(&[
+        "cannot open directory '/users/bob': Permission denied",
+        "status 2",
+        "bob      pts/",
+        "nobody   pts/",
+    ])?;
+    vm.expect_screen_without("Hint:")?;
+    // Bob's note is in neither her /tmp nor the system's, which elevate
+    // sees; root finds it at its real path.
+    answer_prompt(
+        vm,
+        "$",
+        "clear; cat /tmp/note; echo 'queen of hearts' | elevate -S test -e /tmp/note; echo \
+         \"system $?\"; echo 'queen of hearts' | elevate -S cat /system/live/authd/tmp/1001/note",
+    )?;
+    vm.expect_screen(&["cat: /tmp/note: No such file or directory", "system 1", "tea party"])?;
+    // Alice shares a folder with bob through access lists (ADR 0256): he
+    // may pass through her home without reading it, read what she shares,
+    // and write what she makes in the folder after, which takes its
+    // default list, and the umask has no say.
+    answer_prompt(
+        vm,
+        "$",
+        "clear; cd; mkdir shared; echo 'drink me' > shared/bottle; setfacl -m u:bob:x .; \
+         setfacl -m u:bob:rx shared; setfacl -m u:bob:r shared/bottle; setfacl -d -m u:bob:rw \
+         shared; echo 'eat me' > shared/cake; getfacl shared/cake",
+    )?;
+    vm.expect_screen(&[
+        "# file: shared/cake",
+        "# owner: alice",
+        "user::rw-",
+        "user:bob:rw-",
+        "group::r-x",
+        "#effective:r--",
+        "mask::rw-",
+        "other::r--",
+    ])?;
+    vm.press(&["alt-f2"])?;
+    answer_prompt(
+        vm,
+        "$",
+        "clear; cat /users/alice/shared/bottle; ls /users/alice; echo 'and more' >> \
+         /users/alice/shared/cake; cat /users/alice/shared/cake; echo spilt > \
+         /users/alice/shared/bottle; echo \"listed $(ls /users/alice/shared | tr '\\n' ' ')\"",
+    )?;
+    vm.expect_screen(&[
+        "drink me",
+        "cannot open directory '/users/alice': Permission denied",
+        "eat me",
+        "and more",
+        "/users/alice/shared/bottle: Permission denied",
+        "listed bottle cake",
+    ])?;
     vm.press_power_button()?;
     vm.expect("spark: every service has stopped")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
@@ -7940,7 +8057,10 @@ fn bob_signs_in(vm: &mut Vm) -> Result<(), String> {
 /// reads; Ctrl+C stops an elevated command, an elevated shell runs on a
 /// terminal of its own, `elevate -k` locks the pane again, `-n` will not
 /// ask for the password, and a wrong one is asked again. authd's audit
-/// lines say each time. The power button ends it.
+/// lines say each time. Alice disables bob's account, which ends his
+/// session at once and keeps him out until she enables it (ADR 0220),
+/// but not her own. Through elevate she reads everyone's sign-ins (ADR
+/// 0254), and listens on port 80 (ADR 0257). The power button ends it.
 fn elevate(vm: &mut Vm, case: &Case) -> Result<(), String> {
     owner_signs_in(vm, case)?;
     bob_signs_in(vm)?;
@@ -8000,6 +8120,10 @@ fn elevate(vm: &mut Vm, case: &Case) -> Result<(), String> {
          | grep -c 'alice elevat[e]d' | sed 's/^[1-9][0-9]*$/audited/'",
     )?;
     vm.expect_screen(&["authd: alice elevated on", "audited"])?;
+    // An elevated command has the network as root has it: it listens on
+    // port 80 too (ADR 0257).
+    answer_prompt(vm, "$", "clear; elevate /system/tests/posix/signintest network --low")?;
+    vm.expect_screen(&["signintest-network-elevated: every check passed"])?;
     // Ctrl+C reaches the elevated command through its own terminal.
     answer_prompt(vm, "$", "clear; elevate sleep 1000; echo \"status $?\"")?;
     vm.expect_anywhere("runs /system/commands/sleep 1000, for process ")?;
@@ -8044,6 +8168,57 @@ fn elevate(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.press(&["ret"])?;
     vm.expect_anywhere("consoled: Ctrl+Alt+Delete menu: sign-in on tty3")?;
     vm.expect_screen(&["(tty3)", "Name:"])?;
+    // Disabling bob's account ends his session on tty2 at once, and he
+    // cannot sign in again until it is enabled (ADR 0220); alice's own is
+    // another administrator's to disable.
+    vm.press(&["alt-f1"])?;
+    answer_prompt(
+        vm,
+        "$",
+        "clear; echo 'queen of hearts' | elevate -S user disable alice; elevate user disable bob",
+    )?;
+    vm.expect_screen(&[
+        "user: alice is the account you are signed in with: another administrator disables it",
+        "bob is disabled: ",
+        " of its processes ended. user enable bob enables it again.",
+    ])?;
+    vm.expect_anywhere("authd: disabled the account bob (1001), for process ")?;
+    vm.expect_anywhere("authd: bob signed out on pts/")?;
+    vm.press(&["alt-f2"])?;
+    answer_prompt(vm, "Name:", "bob")?;
+    answer_prompt(vm, "Password:", "white rabbit")?;
+    vm.expect_screen(&[
+        "The account bob is disabled: an administrator enables it with elevate user enable bob.",
+    ])?;
+    vm.expect_anywhere("authd: refused bob to process ")?;
+    vm.press(&["alt-f1"])?;
+    answer_prompt(vm, "$", "clear; elevate user enable bob")?;
+    vm.expect_screen(&["bob is enabled again."])?;
+    vm.press(&["alt-f2"])?;
+    answer_prompt(vm, "Name:", "bob")?;
+    answer_prompt(vm, "Password:", "white rabbit")?;
+    answer_prompt(vm, "$", "clear; echo \"back $(id -un)\"")?;
+    vm.expect_screen(&["back bob"])?;
+    // An administrator reads everyone's sign-ins (ADR 0254): bob's that
+    // runs, the one disabling ended, alice's, the computer's start, and
+    // each account's last, root's never.
+    vm.press(&["alt-f1"])?;
+    answer_prompt(
+        vm,
+        "$",
+        "clear; elevate last -R; echo \"bob $(elevate last | grep -c '^bob ')\"; elevate lastlog",
+    )?;
+    vm.expect_screen(&[
+        "alice    pts/",
+        "still logged in",
+        "reboot   system boot",
+        "bob 2",
+        "Username         Port     From             Latest",
+        "root                                       **Never signed in**",
+        "alice            pts/",
+        "bob              pts/",
+    ])?;
+    vm.expect_screen_without("Hint:")?;
     vm.press_power_button()?;
     vm.expect("spark: every service has stopped")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
