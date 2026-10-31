@@ -112,7 +112,7 @@ These run on the build machine or in CI and are never part of an image.
 | [QEMU](https://www.qemu.org/) | Running Dukovo and the boot tests, and counting instructions for `ob bench --instructions` (`-icount`) | GPL-2.0-only |
 | [OVMF](https://github.com/tianocore/tianocore.github.io/wiki/OVMF) from [EDK II](https://github.com/tianocore/edk2) | UEFI firmware for QEMU | BSD-2-Clause-Patent |
 | [GNU GRUB](https://www.gnu.org/software/grub/) (grub-mkrescue) | Building boot images | GPL-3.0-or-later |
-| [GNU xorriso](https://www.gnu.org/software/xorriso/) | Writing the ISO 9660 image for grub-mkrescue | GPL-3.0-or-later |
+| [GNU xorriso](https://www.gnu.org/software/xorriso/) | Writing the ISO 9660 image for grub-mkrescue, and the discs Radix's ISO 9660 tests and the `discs` boot test read | GPL-3.0-or-later |
 | [GNU mtools](https://www.gnu.org/software/mtools/) | Writing the EFI system partition for grub-mkrescue, and reading and writing the FAT disks of the `storage` boot test on the host | GPL-3.0-or-later |
 | [dosfstools](https://github.com/dosfstools/dosfstools) (`mkfs.fat`, `fsck.fat`) | Making the FAT volumes Radix's FAT tests and the `storage` boot test use, and checking what Radix wrote to them | GPL-3.0-or-later |
 | [exfatprogs](https://github.com/exfatprogs/exfatprogs) (`mkfs.exfat`, `fsck.exfat`) | Making the exFAT volumes Radix's exFAT tests and the `exfat-write` boot test use, and checking what Radix wrote to them | GPL-2.0-or-later |
@@ -145,6 +145,9 @@ These run on the build machine or in CI and are never part of an image.
 | [taiki-e/install-action](https://github.com/taiki-e/install-action) | Installing cargo-deny in CI | Apache-2.0 OR MIT |
 | [ntfs-3g](https://github.com/tuxera/ntfs-3g) 2022.10.3, by Tuxera and contributors (`mkntfs`, `ntfscp`, `ntfscat`) | Making the NTFS volumes Radix's NTFS tests and the `ntfs` boot test read, writing files into them and reading back their bitmaps | GPL-2.0-or-later |
 | ntfs-3g's FUSE driver 2022.10.3, with `setfattr` from [attr](https://savannah.nongnu.org/projects/attr) | Writing, once, the NTFS volume Radix's NTFS tests and the `ntfs` boot test read (`kernel/fs/ntfs/src/fixtures`); none of its code is in the repository | GPL-2.0-or-later |
+| [udftools](https://github.com/pali/udftools) (`mkudffs`) | Making the UDF volumes of each kind of partition and revision that Radix's UDF tests read | GPL-2.0-or-later |
+| [UDFclient](https://www.13thmonkey.org/udfclient/), by Reinoud Zandijk (`udfclient`) | Writing files into the UDF volumes Radix's UDF tests read | Clarified Artistic License, BSD-2-Clause (parts) |
+| genisoimage, of [cdrkit](https://en.wikipedia.org/wiki/Cdrkit) | Making the UDF disc with an ISO 9660 bridge that Radix's UDF tests and the `discs` boot test read | GPL-2.0-or-later |
 
 ## The shell corpus
 
@@ -459,6 +462,24 @@ We implement these from their published descriptions. No code is copied.
   beside an Intel EHCI controller follows Linux's
   `drivers/usb/host/pci-quirks.c` (GPL-2.0)
   ([ADR 0243](docs/adr/0243-usb-2-and-1-1-controllers-are-polled-by-a-kernel-thread-each.md)).
+  No code is taken from them.
+- The "Programming Interface for Bus Master IDE Controller", revision
+  1.0 (1994), and ATA/ATAPI Command Set 4 (ACS-4, INCITS 529), from which
+  `radix-ide` drives IDE channels with bus-master DMA. The order of a
+  channel's reset and probe follows FreeBSD's `sys/dev/ata`
+  (BSD-2-Clause)
+  ([ADR 0244](docs/adr/0244-ide-disks-are-one-polled-queue-per-channel.md)).
+  No code is taken from it.
+- ECMA-119 4th edition (ISO 9660), Microsoft's Joliet specification
+  (1995), and the System Use Sharing Protocol and Rock Ridge Interchange
+  Protocol 1.12 (IEEE P1281 and P1282), from which `radix-iso9660` reads
+  CD and DVD images; and ECMA-167 3rd edition (ISO/IEC 13346) and OSTA's
+  Universal Disk Format specification, revision 2.60, from which
+  `radix-udf` reads DVDs, Blu-ray discs and their images. What is shown
+  where the formats leave it open (lower-case plain names, `r-x` for all
+  without Rock Ridge, hidden UDF entries left out) follows Linux's
+  `isofs` and `udf` (GPL-2.0)
+  ([ADR 0245](docs/adr/0245-iso-9660-and-udf-are-read-only-and-tried-after-the-disks-filesystems.md)).
   No code is taken from them.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.

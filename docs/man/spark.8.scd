@@ -96,8 +96,9 @@ Init: /system/commands/spark is process 1
   *proc* and *sys* trees on _/devices_, _/processes_ and _/kernel_
   (*radix-proc*(5), *radix-sysfs*(5)).
 . It looks for disks in _/devices_ and mounts the FAT, exFAT, NTFS,
-  Btrfs or ext4 filesystem of each partition, or of each disk with no
-  partition table, at _/volumes/_*name*, read-write, or read-only when
+  Btrfs, ext4, UDF or ISO 9660 filesystem of each partition, or of each
+  disk with no partition table, at _/volumes/_*name*, read-write, or
+  read-only when
   the device is or when the kernel refuses to write it (*read_only* from
   the disk, or *invalid_argument* for what Radix does not write: an
   NTFS that Windows left dirty, hibernated or with a log to replay, an
@@ -106,7 +107,10 @@ Init: /system/commands/spark is process 1
   and NTFS are tried first, in that order, as *mkfs.btrfs* and
   *mkfs.ext4* clear the sectors they start in while *mkfs.fat*,
   *mkfs.exfat* and *mkntfs* may leave an older Btrfs or ext4
-  superblock. A Btrfs of several disks is mounted
+  superblock. UDF and ISO 9660, the filesystems of discs and of the
+  images written from them to USB sticks, are tried last and always
+  mounted read-only (ADR 0245); UDF first, since a DVD's ISO 9660 is
+  only a bridge to it. A Btrfs of several disks is mounted
   once, from the first of them found; the kernel refuses the others with
   *in_use*, and they are left alone (ADR 0153). A
   device that holds none of them is left alone, and so is every device
@@ -568,11 +572,12 @@ _/volumes/_*name*
 *spark: cannot make /*_name_*:* _error_, *spark: cannot mount* _kind_ *on /*_path_*:* _error_, *spark: cannot link /*_name_ *to /*_target_*:* _error_
 	Building the hierarchy failed; Spark starts nothing.
 
-_name_ *holds no FAT, exFAT, NTFS, Btrfs or ext4 filesystem; left alone*
+_name_ *holds no FAT, exFAT, NTFS, Btrfs, ext4, UDF or ISO 9660 filesystem; left alone*
 	A disk or partition that holds none of them is not mounted.
 
 *spark: cannot mount* _name_*:* _error_
-	A FAT, exFAT, NTFS, Btrfs or ext4 filesystem that could not be mounted:
+	A FAT, exFAT, NTFS, Btrfs, ext4, UDF or ISO 9660 filesystem that could
+	not be mounted:
 	*corrupt* when its boot sector, tables, superblock, trees or journal
 	are damaged, and
 	*invalid_argument* for a Btrfs filesystem Radix cannot read yet (on
@@ -580,6 +585,8 @@ _name_ *holds no FAT, exFAT, NTFS, Btrfs or ext4 filesystem; left alone*
 	one (with clusters of several blocks, *bigalloc*, blocks larger than
 	4 KiB or inodes larger than 1 KiB) or an NTFS one (with sectors
 	larger than 4 KiB, or smaller than the disk's), and
+	*not_supported* for a UDF one with a kind of partition Radix does not
+	read, and
 	*read_only* for a Btrfs filesystem with a log of fsyncs to replay on
 	a disk that cannot be written.
 

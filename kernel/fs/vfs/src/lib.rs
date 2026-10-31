@@ -968,6 +968,11 @@ pub enum FsKind {
     Ext4,
     /// NTFS on a disk.
     Ntfs,
+    /// ISO 9660 on a CD, DVD or disc image, with Joliet and Rock Ridge,
+    /// read-only.
+    Iso9660,
+    /// UDF on a DVD, Blu-ray disc, disc image or disk, read-only.
+    Udf,
     /// The processes (`/processes`).
     Proc,
     /// The kernel's devices and settings (`/kernel`).
@@ -991,6 +996,8 @@ impl FsKind {
             FsKind::Exfat => "exfat",
             FsKind::Ext4 => "ext4",
             FsKind::Ntfs => "ntfs",
+            FsKind::Iso9660 => "iso9660",
+            FsKind::Udf => "udf",
             FsKind::Proc => "proc",
             FsKind::Sys => "sys",
             FsKind::Dev => "dev",

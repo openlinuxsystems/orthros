@@ -36,13 +36,16 @@ const PERIOD: Duration = Duration::from_secs(1);
 const EFI_SYSTEM: [&str; 2] = ["c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "0xef"];
 
 /// The filesystems tried, in Spark's order: FAT, exFAT and NTFS before
-/// the others, whose superblocks their `mkfs` can leave behind.
-const KINDS: [(&[u8], &str); 5] = [
+/// the others, whose superblocks their `mkfs` can leave behind, and discs
+/// last, UDF before the ISO 9660 a DVD has as a bridge to it.
+const KINDS: [(&[u8], &str); 7] = [
     (b"fat", "FAT"),
     (b"exfat", "exFAT"),
     (b"ntfs", "NTFS"),
     (b"btrfs", "Btrfs"),
     (b"ext4", "ext4"),
+    (b"udf", "UDF"),
+    (b"iso9660", "ISO 9660"),
 ];
 
 /// The disks and partitions there are now.
@@ -152,7 +155,9 @@ fn mount(name: &str) -> String {
     }
     let _ = std::fs::remove_dir(format!("/volumes/{at}"));
     match last {
-        None => format!("{name} holds no FAT, exFAT, NTFS, Btrfs or ext4 filesystem; left alone"),
+        None => format!(
+            "{name} holds no FAT, exFAT, NTFS, Btrfs, ext4, UDF or ISO 9660 filesystem; left alone"
+        ),
         Some(status) if FileError::from_status(status) == Some(FileError::InUse) => {
             format!("{name} is in use already; left alone")
         }

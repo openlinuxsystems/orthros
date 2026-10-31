@@ -678,6 +678,11 @@ fn mount_disk(root: &Dir, name: &str, compress: bool) -> Option<MountFlags> {
         (FilesystemKind::Ntfs, "NTFS", flags),
         (FilesystemKind::Btrfs, "Btrfs", packed),
         (FilesystemKind::Ext4, "ext4", flags),
+        // Discs and their images, read-only: after the others, which an
+        // image written over one of them could leave a superblock of, and
+        // UDF first, which a DVD's ISO 9660 is a bridge to.
+        (FilesystemKind::Udf, "UDF", flags),
+        (FilesystemKind::Iso9660, "ISO 9660", flags),
     ] {
         if matches!(mounted, Err(err) if err.is(FileError::UnknownFilesystem)) {
             mounted = mount(kind, said, flags);
@@ -695,7 +700,7 @@ fn mount_disk(root: &Dir, name: &str, compress: bool) -> Option<MountFlags> {
             let _ = root.remove(&at);
             if err.is(FileError::UnknownFilesystem) {
                 println!(
-                    "spark: {name} holds no FAT, exFAT, NTFS, Btrfs or ext4 filesystem; left alone"
+                    "spark: {name} holds no FAT, exFAT, NTFS, Btrfs, ext4, UDF or ISO 9660 filesystem; left alone"
                 );
             } else if err.is(FileError::InUse) {
                 // A disk of a Btrfs mounted from another (ADR 0153), or

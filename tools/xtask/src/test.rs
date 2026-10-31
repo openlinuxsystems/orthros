@@ -83,12 +83,14 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-fbcon",
     "radix-gpio",
     "radix-i2c",
+    "radix-ide",
     "radix-hal",
     "radix-hid",
     "radix-hw",
     "radix-input",
     "radix-iopt",
     "radix-ipc",
+    "radix-iso9660",
     "radix-kdb",
     "radix-klog",
     "radix-lockdep",
@@ -112,6 +114,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-sync",
     "radix-tty",
     "radix-uacpi",
+    "radix-udf",
     "radix-usb",
     "radix-usbhc",
     "radix-vfs",
@@ -243,6 +246,15 @@ const NTFS: u8 = 9;
 /// fixture ntfs-3g` keeps it ([`ntfs_3g_files`], ADR 0236).
 const NTFS_3G: u8 = 10;
 
+/// [`Disk::fat`] for an ISO 9660 disc image of [`disc_files`], with Rock
+/// Ridge and Joliet, that xorriso makes (ADR 0245).
+const ISO9660: u8 = 11;
+
+/// [`Disk::fat`] for a UDF disc image of [`disc_files`], with the ISO
+/// 9660 bridge a DVD has, that genisoimage makes (ADR 0245): not 12,
+/// which is FAT12.
+const UDF: u8 = 13;
+
 /// The partition table of a test disk with a filesystem.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Table {
@@ -275,6 +287,11 @@ enum Bus {
     /// SATA disks and the boot stick, in the order the controller finds
     /// them: the root ports in order, then the hubs' ports.
     Usb(&'static str),
+    /// An end of a channel of a PCI IDE controller of the case's own
+    /// (QEMU's `piix3-ide`, in compatibility mode), in order: the primary
+    /// channel's master and slave, then the secondary's. Named `sd` and a
+    /// letter, as SATA disks are, in that order.
+    Ide,
     /// Logical unit `n` of a USB disk that speaks USB Attached SCSI
     /// (QEMU's `usb-uas`, with a `scsi-hd` for each unit), at this QEMU
     /// port of a case with [`UAS_PORTS`]: port `1` or `2` at SuperSpeed,
@@ -304,6 +321,11 @@ impl Disk {
         matches!(self.fat, NTFS | NTFS_3G)
     }
 
+    /// Whether it is a disc image, ISO 9660 or UDF.
+    fn disc(&self) -> bool {
+        matches!(self.fat, ISO9660 | UDF)
+    }
+
     /// The filesystem's name, as the kernel and Spark give it.
     fn kind(&self) -> (&'static str, &'static str) {
         if self.btrfs() {
@@ -314,6 +336,10 @@ impl Disk {
             ("ext4", "ext4")
         } else if self.ntfs() {
             ("ntfs", "NTFS")
+        } else if self.fat == ISO9660 {
+            ("iso9660", "ISO 9660")
+        } else if self.fat == UDF {
+            ("udf", "UDF")
         } else {
             ("fat", "FAT")
         }
@@ -386,7 +412,8 @@ pub struct DiskImage {
 /// the boot stick's, each in their order, and `nvme<n>n1` and on for
 /// each NVMe controller's namespaces.
 fn disk_names(disks: &[Disk]) -> Vec<String> {
-    let sata_disks = disks.iter().filter(|disk| disk.bus == Bus::Sata).count() as u8;
+    let sata_disks =
+        disks.iter().filter(|disk| matches!(disk.bus, Bus::Sata | Bus::Ide)).count() as u8;
     let (mut virtio, mut sata, mut usb) = (b'a', b'a', b'a' + sata_disks + 1);
     let mut namespaces = [0u32; 256];
     disks
@@ -394,7 +421,7 @@ fn disk_names(disks: &[Disk]) -> Vec<String> {
         .map(|disk| {
             let (prefix, letter) = match disk.bus {
                 Bus::Virtio => ("vd", &mut virtio),
-                Bus::Sata => ("sd", &mut sata),
+                Bus::Sata | Bus::Ide => ("sd", &mut sata),
                 Bus::Usb(_) | Bus::Uas(..) => ("sd", &mut usb),
                 Bus::Nvme(n) => {
                     namespaces[usize::from(n)] += 1;
@@ -2801,6 +2828,9 @@ fn run_case(
     if case.disks.iter().any(|disk| disk.bus == Bus::Sata) {
         extra.extend(["-device".into(), "ich9-ahci,id=sata".into()]);
     }
+    if case.disks.iter().any(|disk| disk.bus == Bus::Ide) {
+        extra.extend(["-device".into(), "piix3-ide,id=pata".into()]);
+    }
     if case.disks.iter().any(|disk| matches!(disk.bus, Bus::Usb(_) | Bus::Uas(..)))
         && case.media != Media::Usb
     {
@@ -2815,7 +2845,7 @@ fn run_case(
         extra.extend(["-device".into(), format!("nvme,id=nvme{n},serial=dukovo-test-{n}")]);
     }
     let mut namespaces = [0u32; 256];
-    let mut port = 0;
+    let (mut port, mut end) = (0, 0);
     for (i, (disk, image)) in case.disks.iter().zip(&disks).enumerate() {
         let mut file = qemu::option_value(&image.path);
         if disk.errors.is_some() {
@@ -2836,6 +2866,11 @@ fn run_case(
             Bus::Sata => {
                 port += 1;
                 format!("ide-hd,drive=disk{i},bus=sata.{}{device}", port - 1)
+            }
+            Bus::Ide => {
+                end += 1;
+                let (channel, unit) = ((end - 1) / 2, (end - 1) % 2);
+                format!("ide-hd,drive=disk{i},bus=pata.{channel},unit={unit}{device}")
             }
             Bus::Nvme(n) => {
                 namespaces[usize::from(n)] += 1;
@@ -2999,6 +3034,11 @@ fn make_disks(
         }
         if disk.ntfs() {
             make_ntfs(ctx, disk, &image.path)?;
+            made.push(image);
+            continue;
+        }
+        if disk.disc() {
+            make_disc(disk, &image.path)?;
             made.push(image);
             continue;
         }
@@ -3368,6 +3408,72 @@ fn ntfs_files() -> Vec<(String, Made)> {
         ("big.bin".to_string(), Made::File(bytes(0, (1 << 20) + 123))),
         ("\u{dc}n\u{ef}c\u{f6}d\u{e9} \u{2713}.txt".to_string(), Made::File(bytes(9, 5000))),
     ]
+}
+
+/// Makes the disc image of [`disc_files`] at `path`: ISO 9660 with Rock
+/// Ridge and Joliet from xorriso, or for [`UDF`] UDF with an ISO 9660
+/// bridge from genisoimage, labelled as `disk` says and padded to its
+/// size; with its SHA-256 beside it, for [`btrfs_unchanged`].
+fn make_disc(disk: &Disk, path: &Path) -> Result<(), String> {
+    let tree = path.with_extension("tree");
+    let _ = std::fs::remove_dir_all(&tree);
+    let failed = |at: &Path, err: std::io::Error| format!("writing {}: {err}", at.display());
+    std::fs::create_dir_all(&tree).map_err(|err| failed(&tree, err))?;
+    for (name, made) in disc_files(disk.fat) {
+        let at = tree.join(&name);
+        match made {
+            Made::Dir => std::fs::create_dir(&at),
+            Made::Link(target) => std::os::unix::fs::symlink(target, &at),
+            made => std::fs::write(&at, made_bytes(&made)),
+        }
+        .map_err(|err| failed(&at, err))?;
+    }
+    let mut make = if disk.fat == ISO9660 {
+        let mut xorriso = std::process::Command::new("xorriso");
+        xorriso.args(["-as", "mkisofs", "-quiet", "-R", "-J", "-joliet-long"]);
+        xorriso
+    } else {
+        let mut genisoimage = std::process::Command::new(fat_tool("genisoimage"));
+        genisoimage.args(["-quiet", "-input-charset", "utf-8", "-udf", "-R", "-J"]);
+        genisoimage
+    };
+    make.env("LC_ALL", "C.UTF-8").args(["-V", disk.label, "-o"]).arg(path).arg(&tree);
+    host_tool(&mut make)?;
+    let _ = std::fs::remove_dir_all(&tree);
+    let file =
+        std::fs::OpenOptions::new().write(true).open(path).map_err(|err| failed(path, err))?;
+    let len = file.metadata().map_err(|err| failed(path, err))?.len();
+    file.set_len(len.max(disk.kib * 1024)).map_err(|err| failed(path, err))?;
+    let sum = host_tool(std::process::Command::new("sha256sum").arg(path))?;
+    let sums = path.with_extension("sha256");
+    std::fs::write(&sums, sum).map_err(|err| failed(&sums, err))
+}
+
+/// What the `discs` test's disc images hold, each path after its
+/// directory: files around a sector and a page and larger, a name that
+/// is not ASCII, directories in directories, and on the ISO 9660 one,
+/// whose Rock Ridge keeps them, symbolic links.
+fn disc_files(kind: u8) -> Vec<(String, Made)> {
+    let bytes = |from: usize, len: usize| (from..from + len).map(storage_big_byte).collect();
+    let file = |path: &str, made: Vec<u8>| (path.to_string(), Made::File(made));
+    let dir = |path: &str| (path.to_string(), Made::Dir);
+    let mut files = vec![
+        file("hello.txt", b"Read from a disc.\n".to_vec()),
+        file("empty", Vec::new()),
+        file("sector.bin", bytes(3, 2048)),
+        file("odd.bin", bytes(5, 4097)),
+        file("big.bin", bytes(0, (1 << 20) + 123)),
+        file("\u{dc}n\u{ef}c\u{f6}d\u{e9} \u{2713}.txt", bytes(9, 5000)),
+        dir("Deep"),
+        dir("Deep/er"),
+        dir("Deep/er/still"),
+        file("Deep/er/still/file.txt", b"deep\n".to_vec()),
+    ];
+    if kind == ISO9660 {
+        files.push(("link to big".to_string(), Made::Link("big.bin")));
+        files.push(("Deep/er/up".to_string(), Made::Link("../../hello.txt")));
+    }
+    files
 }
 
 /// The file of the `ntfs` test's disk of [`NTFS_3G`] whose data is
@@ -5685,7 +5791,7 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
             return Err(format!("the kernel described nvme{n} as \"{line}\""));
         }
     }
-    let mut port = 0;
+    let (mut port, mut end) = (0, 0);
     for (disk, name) in case.disks.iter().zip(disk_names(case.disks)) {
         let size = disk_size(disk.kib);
         // A disk of 512-byte sectors says nothing of them.
@@ -5712,6 +5818,17 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
                     "512 bytes a block, NCQ depth 32, write cache, TRIM".to_string(),
                 )
             }
+            Bus::Ide => {
+                end += 1;
+                let channel = if end <= 2 { "primary" } else { "secondary" };
+                let unit = if end % 2 == 1 { "master" } else { "slave" };
+                (
+                    line_of(&format!(
+                        "Disk: {name} is an ATA disk of {size} on the IDE {channel} channel at "
+                    ))?,
+                    format!(", {unit}: QEMU HARDDISK, 512 bytes a block, write cache"),
+                )
+            }
             Bus::Nvme(_) => (
                 line_of(&format!("Disk: {name} is an NVMe namespace of {size}: QEMU NVMe Ctrl, "))?,
                 format!("{} bytes a block{sectors}{ro}, write cache, deallocates", disk.sector),
@@ -5734,8 +5851,8 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
                 ),
             ),
         };
-        // Only a SATA disk's line says whether it is solid state.
-        let says_solid = disk.bus == Bus::Sata && disk.solid();
+        // Only a SATA or IDE disk's line says whether it is solid state.
+        let says_solid = matches!(disk.bus, Bus::Sata | Bus::Ide) && disk.solid();
         if !line.contains(&want) || line.ends_with(", solid state") != says_solid {
             return Err(format!("the kernel described {name} as \"{line}\""));
         }
@@ -5760,8 +5877,12 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
     let on = |bus: Bus| case.disks.iter().filter(|disk| disk.bus == bus).count();
     let plural =
         |count: usize, what: &str| format!("{count} {what}{}", if count == 1 { "" } else { "s" });
+    let ide = match on(Bus::Ide) {
+        0 => String::new(),
+        count => format!(", {}", plural(count, "IDE disk")),
+    };
     line_of(&format!(
-        "; {}, {}, {}",
+        "; {}, {}, {}{ide}",
         plural(on(Bus::Virtio), "virtio disk"),
         plural(on(Bus::Sata), "SATA disk"),
         plural(nvme_controllers(case.disks).len(), "NVMe controller")
@@ -5883,7 +6004,7 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     for (name, disk) in volumes.iter().zip(&filesystems) {
         vm.expect(&format!("storage: /kernel/block/{name}/size: "))?;
         let model = match disk.bus {
-            Bus::Sata => "QEMU HARDDISK",
+            Bus::Sata | Bus::Ide => "QEMU HARDDISK",
             Bus::Nvme(_) => "QEMU NVMe Ctrl",
             Bus::Usb(_) | Bus::Uas(..) => "QEMU QEMU HARDDISK",
             Bus::Virtio => "",
@@ -7417,14 +7538,14 @@ fn raid_boot(vm: &mut Vm, case: &Case, pulled: bool, behind: bool) -> Result<(),
     vm.expect(&format!("spark: mounted the Btrfs filesystem of {first} at /volumes/{first}"))?;
     if pulled {
         vm.expect(&format!(
-            "spark: {second} holds no FAT, exFAT, NTFS, Btrfs or ext4 filesystem; left alone"
+            "spark: {second} holds no FAT, exFAT, NTFS, Btrfs, ext4, UDF or ISO 9660 filesystem; left alone"
         ))?;
     } else {
         vm.expect(&format!("spark: {second} is in use already; left alone"))?;
     }
     for other in names.iter().skip(2) {
         vm.expect(&format!(
-            "spark: {other} holds no FAT, exFAT, NTFS, Btrfs or ext4 filesystem; left alone"
+            "spark: {other} holds no FAT, exFAT, NTFS, Btrfs, ext4, UDF or ISO 9660 filesystem; left alone"
         ))?;
     }
     vm.expect("spark: built the hierarchy of 9 directories and mounted 9 filesystems")?;
@@ -7483,7 +7604,9 @@ fn raid_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
 fn swap(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
-    vm.expect("spark: vda holds no FAT, exFAT, NTFS, Btrfs or ext4 filesystem; left alone")?;
+    vm.expect(
+        "spark: vda holds no FAT, exFAT, NTFS, Btrfs, ext4, UDF or ISO 9660 filesystem; left alone",
+    )?;
     vm.expect_ahead("spark: started /system/tests/posix/swaptest as process ")?;
     let slots = SWAP_KIB / 4 - 1;
     vm.expect(&format!("Swap: vda: {} MiB in {slots} slots, priority -2", slots * 4 / 1024))?;
