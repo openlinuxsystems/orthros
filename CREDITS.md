@@ -141,6 +141,8 @@ These run on the build machine or in CI and are never part of an image.
 | [GitHub Actions](https://github.com/features/actions): [checkout](https://github.com/actions/checkout), [cache](https://github.com/actions/cache), [upload-artifact](https://github.com/actions/upload-artifact), [setup-java](https://github.com/actions/setup-java) | CI | MIT |
 | [Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) | Caching builds in CI | LGPL-3.0-only |
 | [taiki-e/install-action](https://github.com/taiki-e/install-action) | Installing cargo-deny in CI | Apache-2.0 OR MIT |
+| [ntfs-3g](https://github.com/tuxera/ntfs-3g) 2022.10.3, by Tuxera and contributors (`mkntfs`, `ntfscp`, `ntfscat`) | Making the NTFS volumes Radix's NTFS tests and the `ntfs` boot test read, writing files into them and reading back their bitmaps | GPL-2.0-or-later |
+| ntfs-3g's FUSE driver 2022.10.3, with `setfattr` from [attr](https://savannah.nongnu.org/projects/attr) | Writing, once, the NTFS volume Radix's NTFS tests and the `ntfs` boot test read (`kernel/fs/ntfs/src/fixtures`); none of its code is in the repository | GPL-2.0-or-later |
 
 ## The shell corpus
 
@@ -466,6 +468,18 @@ We implement these from their published descriptions. No code is copied.
   of setting a device up Radix takes
   ([ADR 0235](docs/adr/0235-hid-over-i2c-touchpads-are-read-as-mice.md)).
   We use no code of Linux's.
+- NTFS's on-disk format, as the Linux-NTFS project's
+  ["NTFS Documentation"](https://flatcap.github.io/linux-ntfs/ntfs/), by
+  Richard Russon, Yuval Fledel and others, describes it, with Microsoft's
+  [[MS-FSCC]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/)
+  for reparse points and file attributes and
+  [[MS-XCA]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xca/)
+  for LZNT1 compression, and what ntfs-3g writes: `radix-ntfs`
+  ([ADR 0236](docs/adr/0236-ntfs-is-our-own-implementation-read-only-first.md)),
+  which writes NTFS as ntfs-3g does, emptying Windows' log before its
+  first change and refusing names Windows could not open
+  ([ADR 0237](docs/adr/0237-ntfs-is-written-as-ntfs-3g-writes-it-its-log-emptied.md)).
+  We use no code of Linux's ntfs3, of ntfs-3g or of the `ntfs` crate.
 
 ## Projects whose ideas we follow
 

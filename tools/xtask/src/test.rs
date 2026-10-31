@@ -97,6 +97,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-microcode",
     "radix-mm",
     "radix-net",
+    "radix-ntfs",
     "radix-nvme",
     "radix-posix",
     "radix-pstate",
@@ -233,6 +234,14 @@ const SWAP: u8 = 7;
 /// makes across each such disk of a case ([`make_btrfs_raid`], ADR 0153).
 const BTRFS_RAID: u8 = 8;
 
+/// [`Disk::fat`] for an NTFS disk `mkntfs` makes, holding [`ntfs_files`],
+/// which `ntfscp` writes.
+const NTFS: u8 = 9;
+
+/// [`Disk::fat`] for the NTFS disk ntfs-3g filled through FUSE, as `ob
+/// fixture ntfs-3g` keeps it ([`ntfs_3g_files`], ADR 0236).
+const NTFS_3G: u8 = 10;
+
 /// The partition table of a test disk with a filesystem.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Table {
@@ -289,6 +298,11 @@ impl Disk {
         self.fat == EXT4
     }
 
+    /// Whether it holds NTFS.
+    fn ntfs(&self) -> bool {
+        matches!(self.fat, NTFS | NTFS_3G)
+    }
+
     /// The filesystem's name, as the kernel and Spark give it.
     fn kind(&self) -> (&'static str, &'static str) {
         if self.btrfs() {
@@ -297,6 +311,8 @@ impl Disk {
             ("exfat", "exFAT")
         } else if self.ext4() {
             ("ext4", "ext4")
+        } else if self.ntfs() {
+            ("ntfs", "NTFS")
         } else {
             ("fat", "FAT")
         }
@@ -2533,6 +2549,7 @@ pub const PROVED_LIBRARIES: &[&str] = &[
     "radix-fat",
     "radix-exfat",
     "radix-ext4",
+    "radix-ntfs",
     "radix-ahci",
     "radix-nvme",
     "radix-net",
@@ -2948,6 +2965,11 @@ fn make_disks(
             made.push(image);
             continue;
         }
+        if disk.ntfs() {
+            make_ntfs(ctx, disk, &image.path)?;
+            made.push(image);
+            continue;
+        }
         let path = &image.path;
         let mut mkfs = std::process::Command::new(fat_tool("mkfs.fat"));
         // A fixed volume ID, so that runs match.
@@ -3263,6 +3285,123 @@ fn make_ext4(disk: &Disk, path: &Path) -> Result<(), String> {
     let made = host_tool(mkfs.arg(&tree).arg(path)).map(drop);
     let _ = std::fs::remove_dir_all(&tree);
     made
+}
+
+/// Makes an NTFS disk: for [`NTFS_3G`], the volume `ob fixture ntfs-3g`
+/// keeps; for [`NTFS`], one `mkntfs` formats and `ntfscp` writes
+/// [`ntfs_files`] to. Its SHA-256 is kept beside it, for
+/// [`btrfs_unchanged`].
+fn make_ntfs(ctx: &Ctx, disk: &Disk, path: &Path) -> Result<(), String> {
+    if disk.fat == NTFS_3G {
+        let kept = ctx.root.join(fixture::ntfs::FIXTURE);
+        let bytes =
+            std::fs::read(&kept).map_err(|err| format!("reading {}: {err}", kept.display()))?;
+        std::fs::write(path, fixture::ntfs::image(&bytes))
+            .map_err(|err| format!("writing {}: {err}", path.display()))?;
+    } else {
+        let file = std::fs::File::create(path)
+            .map_err(|err| format!("making {}: {err}", path.display()))?;
+        file.set_len(disk.kib * 1024).map_err(|err| format!("sizing {}: {err}", path.display()))?;
+        drop(file);
+        let mut mkntfs = std::process::Command::new(fat_tool("mkntfs"));
+        mkntfs.args(["-q", "-F", "-Q", "-L", disk.label, "-s", &disk.sector.to_string()]);
+        host_tool(mkntfs.args(["-c", &disk.cluster.to_string()]).arg(path))?;
+        let source = path.with_extension("file");
+        for (name, made) in ntfs_files() {
+            std::fs::write(&source, made_bytes(&made))
+                .map_err(|err| format!("writing {}: {err}", source.display()))?;
+            // ntfscp takes names as the locale has them.
+            let mut ntfscp = std::process::Command::new(fat_tool("ntfscp"));
+            ntfscp.env("LC_ALL", "C.UTF-8").arg("-q").arg(path).arg(&source);
+            host_tool(ntfscp.arg(format!("/{name}")))?;
+        }
+        let _ = std::fs::remove_file(&source);
+    }
+    let sum = host_tool(std::process::Command::new("sha256sum").arg(path))?;
+    let sums = path.with_extension("sha256");
+    std::fs::write(&sums, sum).map_err(|err| format!("writing {}: {err}", sums.display()))
+}
+
+/// What `ntfscp` writes to the `ntfs` test's disk of [`NTFS`]: files
+/// small enough for their record, around a page and a cluster, and
+/// larger, and a name that is not ASCII. `ntfscp` makes no directories.
+fn ntfs_files() -> Vec<(String, Made)> {
+    let bytes = |from: usize, len: usize| (from..from + len).map(storage_big_byte).collect();
+    vec![
+        ("hello.txt".to_string(), Made::File(b"Written by ntfscp.\n".to_vec())),
+        ("empty".to_string(), Made::File(Vec::new())),
+        ("resident.txt".to_string(), Made::File(b"resident ".repeat(40))),
+        ("page.bin".to_string(), Made::File(bytes(3, 4096))),
+        ("odd.bin".to_string(), Made::File(bytes(5, 4097))),
+        ("big.bin".to_string(), Made::File(bytes(0, (1 << 20) + 123))),
+        ("\u{dc}n\u{ef}c\u{f6}d\u{e9} \u{2713}.txt".to_string(), Made::File(bytes(9, 5000))),
+    ]
+}
+
+/// The file of the `ntfs` test's disk of [`NTFS_3G`] whose data is
+/// offline, elsewhere, which fails to read rather than read as zeros.
+const NTFS_OFFLINE: &str = "cloud.txt";
+
+/// What the `ntfs` test's disk of [`NTFS_3G`] holds, as `ob fixture
+/// ntfs-3g` filled it (`fixture/ntfs.rs`), each path after its directory:
+/// what the storage program lists, which leaves out the short name and
+/// the system's files, and reads the links and the junction as on their
+/// own volume.
+fn ntfs_3g_files() -> Vec<(String, Made)> {
+    use fixture::ntfs::{mixed, pattern, text};
+    let file = |path: &str, bytes: &[u8]| (path.to_string(), Made::File(bytes.to_vec()));
+    let dir = |path: &str| (path.to_string(), Made::Dir);
+    let link = |path: &str, target: &'static str| (path.to_string(), Made::Link(target));
+    let mut files = vec![
+        dir("Documents"),
+        file("Documents/report.txt", b"Written by ntfs-3g.\n"),
+        file("Documents/big.bin", &pattern(1, 40_000)),
+        file("Documents/\u{dc}n\u{ef}c\u{f6}d\u{e9} \u{2713}.txt", &pattern(3, 1000)),
+        file("Documents/emoji \u{1f600}\u{1f680}.bin", b"emoji\n"),
+        dir("Documents/Deep"),
+        dir("Documents/Deep/er"),
+        link("Documents/Deep/er/absolute link", "../../../Documents/Deep"),
+        dir("Documents/Deep/er/still"),
+        file("Documents/Deep/er/still/file.txt", b"deep\n"),
+        file("empty", b""),
+        dir("empty dir"),
+        dir("many"),
+    ];
+    for i in 0..40 {
+        files.push(file(&format!("many/file {i:02}.txt"), format!("file {i:02}\n").as_bytes()));
+    }
+    files.push(("report link.txt".to_string(), Made::Hard("Documents/report.txt")));
+    files.push(file("linked.txt", b"linked\n"));
+    files.push(dir("links"));
+    for i in 0..30 {
+        let name = format!("links/name number {i:02} of the linked file.txt");
+        files.push((name, Made::Hard("linked.txt")));
+    }
+    let sparse = vec![
+        (0, b"start".repeat(100)),
+        (3 << 20, b"middle".repeat(100)),
+        ((6 << 20) - 600, b"end.".repeat(150)),
+    ];
+    let pieces: Vec<u8> = (0..40u8).flat_map(|i| [0x40 + i; 512]).collect();
+    files.extend([
+        link("interix link", "Documents/report.txt"),
+        link("windows link", "Documents/report.txt"),
+        link("junction", "Documents"),
+        link("wsl link", "Documents/report.txt"),
+        dir("compressed"),
+        file("compressed/text.txt", &text()),
+        file("compressed/random.bin", &pattern(7, 12_000)),
+        file("compressed/mixed.bin", &mixed()),
+        ("sparse.bin".to_string(), Made::Sparse(6 << 20, sparse)),
+        file("streams.txt", b"main\n"),
+        file("read only.txt", b"ro\n"),
+        file(NTFS_OFFLINE, b"in the cloud\n"),
+        file("a long file name.txt", b"long\n"),
+        file("Case.txt", b"upper\n"),
+        file("case.txt", b"lower\n"),
+        file("pieces.bin", &pieces),
+    ]);
+    files
 }
 
 /// Checks an ext4 disk with e2fsprogs' `e2fsck`, changing nothing, both
@@ -5768,6 +5907,8 @@ fn storage_host(case: &Case, disks: &[DiskImage]) -> Result<(), String> {
                 exfat_written(disk, &name)
             } else if made.ext4() {
                 ext4_written(disk, &name)
+            } else if made.ntfs() {
+                phase11::ntfs_written(disk, &name, &source)
             } else {
                 fat_written(disk, &name, &source)
             }
@@ -6856,13 +6997,14 @@ fn power_cut_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
     storage_end(vm, "churned")
 }
 
-/// Checks that a Btrfs disk is as [`make_btrfs`] made it.
+/// Checks that a Btrfs or NTFS disk is as [`make_btrfs`] or [`make_ntfs`]
+/// made it.
 fn btrfs_unchanged(disk: &DiskImage, _log: &str) -> Result<(), String> {
     let sums = disk.path.with_extension("sha256");
     let made = std::fs::read(&sums).map_err(|err| format!("reading {}: {err}", sums.display()))?;
     let now = host_tool(std::process::Command::new("sha256sum").arg(&disk.path))?;
     if now != made {
-        return Err(format!("{} changed, though it was mounted read-only", disk.path.display()));
+        return Err(format!("{} changed, though it was only read", disk.path.display()));
     }
     Ok(())
 }
@@ -6871,7 +7013,16 @@ fn btrfs_unchanged(disk: &DiskImage, _log: &str) -> Result<(), String> {
 /// `btrfs` test ([`btrfs_files`]): as Linux would list them, but for the
 /// damaged file, which fails with `io`.
 fn btrfs_listing(volume: &str) -> Vec<String> {
-    let files = btrfs_files();
+    let mut lines = listing(&btrfs_files(), volume, &[(BTRFS_DAMAGED, "io")]);
+    lines.push(format!("storage: list {volume}: writes fail with read_only"));
+    lines
+}
+
+/// The lines the storage program's `list` prints for the volume `volume`
+/// that holds `files`, each path after its directory, up to its count of
+/// entries: but for the files `unreadable` names, which fail with the
+/// error it gives.
+fn listing(files: &[(String, Made)], volume: &str, unreadable: &[(&str, &str)]) -> Vec<String> {
     let mut lines = Vec::new();
     // The first path of each file with more than one name.
     let mut first: BTreeMap<&str, String> = BTreeMap::new();
@@ -6879,6 +7030,7 @@ fn btrfs_listing(volume: &str) -> Vec<String> {
         files: &'a [(String, Made)],
         at: &str,
         volume: &str,
+        unreadable: &[(&str, &str)],
         first: &mut BTreeMap<&'a str, String>,
         lines: &mut Vec<String>,
     ) {
@@ -6898,7 +7050,7 @@ fn btrfs_listing(volume: &str) -> Vec<String> {
             match made {
                 Made::Dir => {
                     lines.push(line(format!("dir /{path}")));
-                    walk(files, path, volume, first, lines);
+                    walk(files, path, volume, unreadable, first, lines);
                 }
                 Made::Link(target) => lines.push(line(format!("link /{path} -> {target}"))),
                 Made::Pipe => lines.push(line(format!("pipe /{path}"))),
@@ -6918,10 +7070,9 @@ fn btrfs_listing(volume: &str) -> Vec<String> {
                     }
                     None => {
                         first.insert(path.as_str(), format!("/{path}"));
-                        if path == BTRFS_DAMAGED {
-                            lines.push(line(format!("file /{path}: io")));
-                        } else {
-                            lines.push(line(file_line(path, &made_bytes(made))));
+                        match unreadable.iter().find(|(name, _)| name == path) {
+                            Some((_, error)) => lines.push(line(format!("file /{path}: {error}"))),
+                            None => lines.push(line(file_line(path, &made_bytes(made)))),
                         }
                     }
                 },
@@ -6935,9 +7086,8 @@ fn btrfs_listing(volume: &str) -> Vec<String> {
         });
         format!("file /{path}: {} bytes, FNV-1a {hash:016x}", bytes.len())
     }
-    walk(&files, "", volume, &mut first, &mut lines);
+    walk(files, "", volume, unreadable, &mut first, &mut lines);
     lines.push(format!("storage: list {volume}: {} entries", files.len()));
-    lines.push(format!("storage: list {volume}: writes fail with read_only"));
     lines
 }
 
@@ -7235,14 +7385,14 @@ fn raid_boot(vm: &mut Vm, case: &Case, pulled: bool, behind: bool) -> Result<(),
     vm.expect(&format!("spark: mounted the Btrfs filesystem of {first} at /volumes/{first}"))?;
     if pulled {
         vm.expect(&format!(
-            "spark: {second} holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone"
+            "spark: {second} holds no FAT, exFAT, NTFS, Btrfs or ext4 filesystem; left alone"
         ))?;
     } else {
         vm.expect(&format!("spark: {second} is in use already; left alone"))?;
     }
     for other in names.iter().skip(2) {
         vm.expect(&format!(
-            "spark: {other} holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone"
+            "spark: {other} holds no FAT, exFAT, NTFS, Btrfs or ext4 filesystem; left alone"
         ))?;
     }
     vm.expect("spark: built the hierarchy of 9 directories and mounted 9 filesystems")?;
@@ -7301,7 +7451,7 @@ fn raid_check(vm: &mut Vm, case: &Case) -> Result<(), String> {
 fn swap(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
-    vm.expect("spark: vda holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone")?;
+    vm.expect("spark: vda holds no FAT, exFAT, NTFS, Btrfs or ext4 filesystem; left alone")?;
     vm.expect_ahead("spark: started /system/tests/posix/swaptest as process ")?;
     let slots = SWAP_KIB / 4 - 1;
     vm.expect(&format!("Swap: vda: {} MiB in {slots} slots, priority -2", slots * 4 / 1024))?;

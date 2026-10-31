@@ -35,10 +35,15 @@ const PERIOD: Duration = Duration::from_secs(1);
 /// a GPT, and in an MBR. Spark leaves these alone, and so does volumed.
 const EFI_SYSTEM: [&str; 2] = ["c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "0xef"];
 
-/// The filesystems tried, in Spark's order: FAT and exFAT before the
-/// others, whose superblocks their `mkfs` can leave behind.
-const KINDS: [(&[u8], &str); 4] =
-    [(b"fat", "FAT"), (b"exfat", "exFAT"), (b"btrfs", "Btrfs"), (b"ext4", "ext4")];
+/// The filesystems tried, in Spark's order: FAT, exFAT and NTFS before
+/// the others, whose superblocks their `mkfs` can leave behind.
+const KINDS: [(&[u8], &str); 5] = [
+    (b"fat", "FAT"),
+    (b"exfat", "exFAT"),
+    (b"ntfs", "NTFS"),
+    (b"btrfs", "Btrfs"),
+    (b"ext4", "ext4"),
+];
 
 /// The disks and partitions there are now.
 fn present() -> BTreeSet<String> {
@@ -147,7 +152,7 @@ fn mount(name: &str) -> String {
     }
     let _ = std::fs::remove_dir(format!("/volumes/{at}"));
     match last {
-        None => format!("{name} holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone"),
+        None => format!("{name} holds no FAT, exFAT, NTFS, Btrfs or ext4 filesystem; left alone"),
         Some(status) if FileError::from_status(status) == Some(FileError::InUse) => {
             format!("{name} is in use already; left alone")
         }

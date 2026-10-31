@@ -302,9 +302,12 @@ emptied and each NVMe controller is shut down. Each
 appears in _/devices_ and _/kernel/block_. As on Linux, an entry that starts past
 the disk's end is skipped, an MBR one that reaches past it is cut to end
 there, and an extended partition shows only its first two sectors. Spark
-mounts the FAT, exFAT, Btrfs or ext4 filesystem of each partition, or of
-each disk with no partition table, at _/volumes/_*name*, read-write, or
-read-only when the device is, for exFAT when it has two tables (TexFAT)
+mounts the FAT, exFAT, NTFS, Btrfs or ext4 filesystem of each partition,
+or of each disk with no partition table, at _/volumes/_*name*,
+read-write, or read-only when the device is, for NTFS when Windows left
+it dirty, hibernated or with changes in its log to replay, or when
+Radix cannot grow its master file table (ADR 0237), for exFAT when it
+has two tables (TexFAT)
 or its medium reported a failure, for Btrfs when it uses a feature
 Radix does not write yet (named holes, without *no-holes*, or quotas),
 and for ext4 (and ext2 and ext3) when it does: no extents, quotas,
