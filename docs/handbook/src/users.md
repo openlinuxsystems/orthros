@@ -40,6 +40,12 @@ own, so two people can work side by side, one on Alt+F1 and one on
 Alt+F2, and `who` lists them. A wrong name or password gets the same
 answer, after a wait.
 
+Ctrl+Alt+Delete is the secure attention key: no program ever gets it,
+so whatever it shows is the system's own. With no password prompt on
+the console it shows a menu on the bottom line, where Enter takes you
+to a real sign-in, on a console where nobody is signed in, R restarts
+and P powers off.
+
 ### The first boot
 
 A machine made without an account in its image has none, and no
@@ -73,11 +79,23 @@ which is the same command by the name scripts and habits use:
 
 ```
 $ elevate user add bob
-[elevate] password for alice:
 Making a user's account for bob.
 ...
 $ sudo dmesg
 ```
+
+On a console the password is asked on the bottom line, by the consoles
+themselves, with the command it is for:
+
+```
+ [elevate] Password for alice, to run /system/commands/user add bob:
+```
+
+No program draws that line or sees what you type there, and
+Ctrl+Alt+Delete, which no program receives, brings it back empty: press
+it first if a prompt looks wrong, and type your password only into what
+comes up. Esc closes it. Over SSH elevate asks on the terminal, as sudo
+does.
 
 The password is asked once in each terminal pane, and that pane stays
 unlocked for 15 minutes from its last elevated command; another pane,

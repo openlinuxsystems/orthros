@@ -10,8 +10,12 @@
 //! `--shell`, root's shell and no sign-in, and turns the keys read from
 //! _/devices/kbd_ (radix-input(2)) into what the terminal sends (`keys`).
 //! Alt+F1 to Alt+F6 show a console, starting its session the first time;
-//! Shift+Page Up looks back; Scroll Lock holds the shown console's output;
-//! Ctrl+Alt+Delete runs reboot(8). The keys type in the layout
+//! Shift+Page Up looks back; Scroll Lock holds the shown console's output.
+//! elevate(8)'s password, in a pane on a console, is asked by consoled on
+//! the bottom line, where no program draws or reads (`prompts`, ADR
+//! 0251). Ctrl+Alt+Delete, which no program ever receives, brings that
+//! prompt back cleared, or else consoled's own menu: sign in, on a console
+//! where nobody is, restart or power off. The keys type in the layout
 //! _/system/settings/keyboard_ names (keymap(1), ADR 0149), read again on
 //! SIGHUP, which `service consoled reload` sends. Notifications from
 //! notifyd(8) show on the bottom line (`notices`, ADR 0212). When
@@ -20,6 +24,7 @@
 
 mod keys;
 mod notices;
+mod prompts;
 mod screen;
 mod session;
 mod sys;
@@ -36,6 +41,7 @@ use std::time::Instant;
 use keymap::Keymap;
 use keys::{Action, Keyboard};
 use notices::Notices;
+use prompts::{Prompts, Typed};
 use radix_abi::input::{Event, PRESSED, SET_LEDS};
 use screen::Screen;
 use session::{Console, Shell};
@@ -51,8 +57,11 @@ const ISSUE: &str = "/system/settings/issue";
 /// What is shown when /system/settings/issue is missing.
 const DEFAULT_ISSUE: &str = "\\s \\r (\\l)\n\n";
 
-/// What Ctrl+Alt+Delete runs.
+/// What the Ctrl+Alt+Delete menu's restart runs.
 const REBOOT: &str = "/system/commands/reboot";
+
+/// What the Ctrl+Alt+Delete menu's power off runs.
+const POWEROFF: &str = "/system/commands/poweroff";
 
 /// What runs on each console: the sign-in.
 const LOGIN: &str = "/system/commands/login";
@@ -202,6 +211,15 @@ fn run(path: &str) {
     }
 }
 
+/// What consoled's own bottom line shows, over a notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bar {
+    /// The Ctrl+Alt+Delete menu.
+    Menu,
+    /// A line that goes with the next key.
+    Note(&'static str),
+}
+
 struct Consoled {
     screen: Screen,
     consoles: Vec<Console>,
@@ -210,6 +228,9 @@ struct Consoled {
     kbd: Option<File>,
     shell: Shell,
     notices: Notices,
+    /// Passwords asked for authd, while sign-in is on.
+    prompts: Option<Prompts>,
+    bar: Option<Bar>,
 }
 
 impl Consoled {
@@ -265,6 +286,14 @@ impl Consoled {
         }
         match self.keyboard.key(code, value, modes) {
             Action::None => {}
+            // consoled's own line takes the keys first, as it shows: the
+            // shown console's password prompt, then the menu.
+            Action::Send(bytes)
+                if self
+                    .prompts
+                    .as_mut()
+                    .is_some_and(|p| p.key(self.active, &bytes) == Typed::Taken) => {}
+            Action::Send(bytes) if self.bar.is_some() => self.bar_key(&bytes),
             Action::Send(bytes) => {
                 let console = &mut self.consoles[self.active];
                 console.term.reset_view();
@@ -279,12 +308,81 @@ impl Consoled {
                 let half = (self.screen.rows() / 2).max(1) as isize;
                 self.consoles[self.active].term.scroll_view(direction * half);
             }
-            Action::Reboot => {
-                eprintln!("consoled: Ctrl+Alt+Delete: restarting the machine");
-                run(REBOOT);
-            }
+            Action::Attention => self.attention(),
             Action::Lights => self.lights(),
         }
+    }
+
+    /// Ctrl+Alt+Delete, which no program receives: the shown console's
+    /// password prompt, cleared, if one waits there; consoled's menu
+    /// otherwise.
+    fn attention(&mut self) {
+        let active = self.active;
+        if self.prompts.as_mut().is_some_and(|p| p.clear(active)) {
+            self.bar = None;
+            return;
+        }
+        self.bar = Some(Bar::Menu);
+    }
+
+    /// A key's bytes while consoled's own line shows.
+    fn bar_key(&mut self, bytes: &[u8]) {
+        if self.bar != Some(Bar::Menu) {
+            self.bar = None;
+            return;
+        }
+        match bytes {
+            b"\r" if self.shell.sign_in => {
+                self.bar = None;
+                self.sign_in();
+            }
+            b"r" | b"R" => {
+                self.bar = None;
+                eprintln!("consoled: Ctrl+Alt+Delete menu: restarting the machine");
+                run(REBOOT);
+            }
+            b"p" | b"P" => {
+                self.bar = None;
+                eprintln!("consoled: Ctrl+Alt+Delete menu: powering off the machine");
+                run(POWEROFF);
+            }
+            b"\x1b" | b"\x03" => self.bar = None,
+            _ => {}
+        }
+    }
+
+    /// Shows the sign-in: on the shown console if nobody is signed in
+    /// there, or else on the first one where nobody is, where consoled
+    /// alone runs on the terminal.
+    fn sign_in(&mut self) {
+        let free = |c: &Console| !c.signed_in();
+        let index = if free(&self.consoles[self.active]) {
+            Some(self.active)
+        } else {
+            self.consoles.iter().position(free)
+        };
+        match index {
+            Some(index) => {
+                eprintln!("consoled: Ctrl+Alt+Delete menu: sign-in on tty{}", index + 1);
+                self.switch(index);
+            }
+            None => self.bar = Some(Bar::Note("Someone is signed in on every console.")),
+        }
+    }
+
+    /// What consoled draws on the bottom line, if anything: the shown
+    /// console's prompt, its menu or note, or a notification.
+    fn bottom(&self) -> Option<Vec<term::Cell>> {
+        let cols = self.screen.cols();
+        if let Some(ask) = self.prompts.as_ref().and_then(|p| p.shown(self.active)) {
+            return Some(ask.cells(cols));
+        }
+        match self.bar {
+            Some(Bar::Menu) => return Some(prompts::menu_cells(cols, self.shell.sign_in)),
+            Some(Bar::Note(text)) => return Some(prompts::note_cells(cols, text)),
+            None => {}
+        }
+        self.notices.shown.as_ref().map(|shown| shown.cells(cols))
     }
 
     /// Reaps the ended children and starts new sessions for them.
@@ -308,8 +406,8 @@ impl Consoled {
     fn run(&mut self, wake: &mut File) -> io::Result<()> {
         let mut events = vec![0u8; Event::SIZE * 32];
         loop {
-            // The wake pipe, the keyboard, notifyd, then each console's
-            // master.
+            // The wake pipe, the keyboard, notifyd, authd's prompts, then
+            // each console's master.
             let mut fds =
                 vec![libc::pollfd { fd: wake.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
             fds.push(libc::pollfd {
@@ -318,17 +416,21 @@ impl Consoled {
                 revents: 0,
             });
             fds.push(libc::pollfd { fd: self.notices.fd(), events: libc::POLLIN, revents: 0 });
+            let prompts_fd = self.prompts.as_ref().map_or(-1, Prompts::fd);
+            fds.push(libc::pollfd { fd: prompts_fd, events: libc::POLLIN, revents: 0 });
             for (i, console) in self.consoles.iter().enumerate() {
                 let held = i == self.active && self.keyboard.scroll;
                 let fd = console.master_fd().filter(|_| !held).unwrap_or(-1);
                 fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
             }
             let now = Instant::now();
-            let retry = self.consoles.iter().filter_map(|c| c.retry_at).min();
-            let next = match (retry, self.notices.deadline()) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
+            let next = self
+                .consoles
+                .iter()
+                .filter_map(|c| c.retry_at)
+                .chain(self.notices.deadline())
+                .chain(self.prompts.as_ref().and_then(Prompts::deadline))
+                .min();
             let timeout =
                 next.map_or(-1, |at| at.saturating_duration_since(now).as_millis() as i32);
             // SAFETY: `fds` holds valid pollfds.
@@ -370,8 +472,16 @@ impl Consoled {
             if fds[2].revents != 0 {
                 self.notices.read(now);
             }
+            if fds[3].revents != 0
+                && let Some(prompts) = self.prompts.as_mut()
+            {
+                let consoles = &self.consoles;
+                prompts.read(now, |terminal| {
+                    consoles.iter().position(|c| c.terminal() == Some(terminal))
+                });
+            }
             for (i, console) in self.consoles.iter_mut().enumerate() {
-                if fds[3 + i].revents != 0 {
+                if fds[4 + i].revents != 0 {
                     console.read();
                 }
             }
@@ -381,8 +491,11 @@ impl Consoled {
                 }
             }
             self.notices.tick(now);
+            if let Some(prompts) = self.prompts.as_mut() {
+                prompts.tick(now);
+            }
             // Only the cells that changed are drawn.
-            let bottom = self.notices.shown.as_ref().map(|shown| shown.cells(self.screen.cols()));
+            let bottom = self.bottom();
             self.screen.draw(&self.consoles[self.active].term, bottom.as_deref())?;
         }
     }
@@ -437,7 +550,11 @@ fn main() -> ExitCode {
     let consoles = (1..=options.consoles).map(|n| Console::new(n, cols, rows)).collect();
     let keyboard = Keyboard::new(chosen_keymap());
     let notices = Notices::new(Instant::now());
-    let mut consoled = Consoled { screen, consoles, active: 0, keyboard, kbd, shell, notices };
+    // Passwords are asked on the consoles only where people sign in;
+    // root's shells need none.
+    let prompts = shell.sign_in.then(|| Prompts::new(Instant::now()));
+    let mut consoled =
+        Consoled { screen, consoles, active: 0, keyboard, kbd, shell, notices, prompts, bar: None };
     consoled.lights();
     consoled.switch(0);
     eprintln!("consoled: {} consoles; tty1 is shown", options.consoles);

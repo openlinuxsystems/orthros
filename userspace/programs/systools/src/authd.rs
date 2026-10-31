@@ -29,6 +29,13 @@
 //! pane typed it in the last 15 minutes, it starts the command as its
 //! own child with the admin set (`elevate::start`), passes it the
 //! signals elevate sends, and tells elevate when it stops and ends.
+//!
+//! The password for elevate, in a pane on one of the consoles, is asked
+//! by consoled (ADR 0251), drawn where no program can draw and typed
+//! where no program reads: consoled's `prompts` connection stays open,
+//! authd writes it an `ask` line for each password it wants, and holds
+//! the elevate request, with its descriptors, until consoled's
+//! `prompted` answer, or for at most [`PROMPT_TIME`].
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -41,7 +48,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use accounts::hash::{self, Cost};
-use accounts::request::{self, Answer, Mode, REQUEST_MAX, Relay, Request};
+use accounts::request::{self, Answer, Mode, Prompt, Prompted, REQUEST_MAX, Relay, Request};
 use accounts::{Group, Password, Table, User};
 
 use crate::args::Args;
@@ -63,6 +70,10 @@ const FREE_TRIES: u32 = 3;
 const LONGEST_WAIT: Duration = Duration::from_secs(60);
 /// A record of wrong passwords this old is forgotten.
 const FORGET: Duration = Duration::from_mins(15);
+
+/// How long a password asked on a console may take to be typed, as sudo's
+/// `passwd_timeout`.
+const PROMPT_TIME: Duration = Duration::from_mins(5);
 
 /// The process at the other end of a connection, as the kernel gives it.
 #[derive(Clone, Copy, Debug)]
@@ -129,7 +140,28 @@ struct Client {
     /// The pipe elevate passes signals on through, while its command
     /// runs, and what came of a line not whole yet.
     relay: Option<(OwnedFd, Vec<u8>)>,
+    /// Whether it is consoled's `prompts` connection.
+    prompter: bool,
+    /// Its request, while the password for it is asked on a console.
+    asked: Option<Asked>,
     done: bool,
+}
+
+/// A request held while its password is asked on a console.
+struct Asked {
+    /// The prompt's number.
+    id: u64,
+    request: Request,
+    /// When it is given up.
+    until: Instant,
+}
+
+/// A password to ask on a console, for the request being run: the
+/// terminal, whose it is, and what it runs.
+struct Prompting {
+    terminal: String,
+    name: String,
+    shown: String,
 }
 
 /// A terminal pane, as elevate unlocks it: a session's terminal, by the
@@ -175,6 +207,11 @@ struct Authd {
     sessions: HashMap<i32, Session>,
     /// The panes elevate is unlocked in, and until when.
     unlocked: HashMap<Pane, Instant>,
+    /// The number of the next password prompt on a console.
+    next_prompt: u64,
+    /// Set while running a request whose password is to be asked on a
+    /// console.
+    prompting: Option<Prompting>,
     /// The pipe's read end that SIGCHLD wakes it with.
     children: File,
 }
@@ -377,6 +414,8 @@ impl Authd {
                 descriptors: Vec::new(),
                 session: None,
                 relay: None,
+                prompter: false,
+                asked: None,
                 done: false,
             };
             if held >= CLIENTS_PER_PROCESS {
@@ -440,7 +479,8 @@ impl Authd {
         let checks = match &request {
             Request::Check { name, .. } | Request::Session { name, .. } => Some(name),
             Request::Passwd { name, .. } if !peer.is_root() => Some(name),
-            Request::Elevate { password: Some(_), .. } | Request::Unlock { password: Some(_) } => {
+            Request::Elevate { password: Some(_), .. }
+            | Request::Unlock { password: Some(_), .. } => {
                 own = util::user_name(peer.user);
                 Some(&own)
             }
@@ -502,21 +542,142 @@ impl Authd {
                     }
                     (answer, at)
                 }
-                Request::Elevate { mode, password, term, directory, language, command } => {
+                Request::Elevate { mode, password, ask, term, directory, language, command } => {
                     let asked = Elevation { mode: *mode, term, directory, language, command };
-                    self.elevate(i, &files, &asked, password.as_deref(), peer, now)
+                    self.elevate(i, &files, &asked, password.as_deref(), *ask, peer, now)
                 }
-                Request::Unlock { password } => self.unlock(&files, password.as_deref(), peer, now),
+                Request::Unlock { password, ask } => {
+                    self.unlock(&files, password.as_deref(), *ask, peer, now)
+                }
                 Request::Forget => {
                     if let Some(pane) = Pane::of(peer) {
                         self.unlocked.remove(&pane);
                     }
                     (Answer::Done(String::new()), now)
                 }
+                Request::Prompts => self.prompts(i, peer, now),
+                Request::Prompted { id, typed } => {
+                    let from =
+                        self.clients.iter().any(|c| c.prompter && c.peer.process == peer.process);
+                    if peer.is_root() && from {
+                        self.prompted(*id, typed, now);
+                        (Answer::Done(String::new()), now)
+                    } else {
+                        let why = "only the program that asks for passwords on the consoles answers \
+                                   them";
+                        (Answer::Refused(why.into()), now)
+                    }
+                }
             },
         };
+        // A password to ask on a console: the request waits for it.
+        if let Some(prompting) = self.prompting.take() {
+            self.ask_console(i, request, prompting, now);
+            return;
+        }
         request.wipe();
         self.clients[i].answer(&answer, at, now);
+    }
+
+    /// The `prompts` connection, client `i`'s: consoled's, which runs as
+    /// root. A later one takes over from an earlier one, whose prompts
+    /// are then asked by elevate.
+    fn prompts(&mut self, i: usize, peer: Peer, now: Instant) -> (Answer, Instant) {
+        if !peer.is_root() {
+            let why = "only consoled, which runs as root, asks for passwords on the consoles";
+            return (Answer::Refused(why.into()), now);
+        }
+        for (j, client) in self.clients.iter_mut().enumerate() {
+            if client.prompter && j != i {
+                client.done = true;
+            }
+        }
+        self.clients[i].prompter = true;
+        eprintln!("authd: process {} asks for passwords on the consoles", peer.process);
+        (Answer::Done(String::new()), now)
+    }
+
+    /// Whether a program asks for passwords on the consoles.
+    fn has_prompter(&self) -> bool {
+        self.clients.iter().any(|c| c.prompter && !c.done)
+    }
+
+    /// Has the line `prompt` go to the program that asks for passwords on
+    /// the consoles.
+    fn tell_prompter(&mut self, prompt: &Prompt, now: Instant) {
+        if let Some(prompter) = self.clients.iter_mut().find(|c| c.prompter && !c.done) {
+            prompter.tell(prompt.encode().as_bytes(), now);
+        }
+    }
+
+    /// Holds client `i`'s `request` while its password is asked on a
+    /// console.
+    fn ask_console(&mut self, i: usize, request: Request, prompting: Prompting, now: Instant) {
+        let id = self.next_prompt;
+        self.next_prompt += 1;
+        let Prompting { terminal, name, shown } = prompting;
+        self.tell_prompter(&Prompt::Ask { id, terminal, name, shown }, now);
+        let until = now + PROMPT_TIME;
+        let client = &mut self.clients[i];
+        client.asked = Some(Asked { id, request, until });
+        client.deadline = until + REQUEST_TIME;
+    }
+
+    /// What was typed at a console for prompt `id`: the request that waits
+    /// for it is taken with it as its password, or answered.
+    fn prompted(&mut self, id: u64, typed: &Prompted, now: Instant) {
+        let Some(j) =
+            self.clients.iter().position(|c| c.asked.as_ref().is_some_and(|a| a.id == id))
+        else {
+            return;
+        };
+        let Some(Asked { mut request, .. }) = self.clients[j].asked.take() else { return };
+        let client = &mut self.clients[j];
+        match typed {
+            Prompted::Password(typed) => {
+                if let Request::Elevate { password, ask, .. } | Request::Unlock { password, ask } =
+                    &mut request
+                {
+                    *password = Some(typed.clone());
+                    *ask = false;
+                }
+                client.deadline = now + REQUEST_TIME;
+                self.take(j, request, now);
+            }
+            Prompted::Cancelled => {
+                client.answer(&Answer::Refused("no password was typed".into()), now, now);
+            }
+            Prompted::Elsewhere => {
+                client.answer(&Answer::Done(request::NEEDS_PASSWORD.into()), now, now);
+            }
+        }
+    }
+
+    /// Gives up the prompts whose time is up, tells consoled of those
+    /// whose asker went, and has elevate ask for the rest itself when
+    /// consoled went.
+    fn tidy_prompts(&mut self, now: Instant) {
+        let prompter = self.has_prompter();
+        let mut gone = Vec::new();
+        for client in &mut self.clients {
+            let Some(asked) = &client.asked else { continue };
+            if client.done {
+                gone.push(asked.id);
+                client.asked = None;
+            } else if !prompter {
+                client.asked = None;
+                client.answer(&Answer::Done(request::NEEDS_PASSWORD.into()), now, now);
+            } else if asked.until <= now {
+                gone.push(asked.id);
+                client.asked = None;
+                let why =
+                    format!("no password was typed in {} minutes", PROMPT_TIME.as_secs() / 60);
+                client.answer(&Answer::Refused(why), now, now);
+            }
+        }
+        for id in gone {
+            self.tell_prompter(&Prompt::Done { id }, now);
+        }
     }
 
     /// Checks `password` against `name`'s, from `peer`: a wrong one, or
@@ -672,12 +833,17 @@ impl Authd {
     /// `user`, in `pane`: none is needed in a pane unlocked, or from root;
     /// otherwise one must come, and be `user`'s. Whether one was typed, or
     /// the answer to give: `ok password` when one is needed and none came.
+    /// When `ask` lets it and a program asks for passwords on the
+    /// consoles, the pane's console is to ask for it instead
+    /// ([`Authd::prompting`]).
+    #[allow(clippy::too_many_arguments)]
     fn authorize(
         &mut self,
         files: &Files,
         user: &User,
         pane: Option<&Pane>,
         password: Option<&[u8]>,
+        ask: bool,
         peer: Peer,
         now: Instant,
     ) -> Result<bool, (Answer, Instant)> {
@@ -686,6 +852,16 @@ impl Authd {
             return Ok(false);
         }
         let Some(password) = password else {
+            if ask
+                && let Some(pane) = pane
+                && self.has_prompter()
+            {
+                self.prompting = Some(Prompting {
+                    terminal: pane.terminal.clone(),
+                    name: user.name.clone(),
+                    shown: String::new(),
+                });
+            }
             return Err((Answer::Done(request::NEEDS_PASSWORD.into()), now));
         };
         self.check_password(files, &user.name, password, peer, now)?;
@@ -696,12 +872,14 @@ impl Authd {
     /// descriptors it sent: an administrator's to ask, with their
     /// password unless their pane is unlocked. The client then waits for
     /// the command's end, and passes signals on through its pipe.
+    #[allow(clippy::too_many_arguments)]
     fn elevate(
         &mut self,
         i: usize,
         files: &Files,
         asked: &Elevation<'_>,
         password: Option<&[u8]>,
+        ask: bool,
         peer: Peer,
         now: Instant,
     ) -> (Answer, Instant) {
@@ -729,9 +907,17 @@ impl Authd {
             let why = "an elevate request comes with the command's three descriptors and a pipe";
             return (Answer::Refused(why.into()), now);
         }
-        let typed = match self.authorize(files, &user, pane.as_ref(), password, peer, now) {
+        let typed = match self.authorize(files, &user, pane.as_ref(), password, ask, peer, now) {
             Ok(typed) => typed,
-            Err(answer) => return answer,
+            Err(answer) => {
+                // Asked on a console: the request keeps its descriptors
+                // until the password comes.
+                if let Some(prompting) = &mut self.prompting {
+                    prompting.shown.clone_from(&plan.shown);
+                    self.clients[i].descriptors = descriptors;
+                }
+                return answer;
+            }
         };
         let relay = descriptors.pop();
         let env = elevate::environment(&root, &user, asked.term, asked.language, &plan.shown);
@@ -766,6 +952,7 @@ impl Authd {
         &mut self,
         files: &Files,
         password: Option<&[u8]>,
+        ask: bool,
         peer: Peer,
         now: Instant,
     ) -> (Answer, Instant) {
@@ -777,7 +964,7 @@ impl Authd {
             let why = "elevate unlocks a terminal pane, and this program has no terminal";
             return (Answer::Refused(why.into()), now);
         };
-        match self.authorize(files, &user, Some(&pane), password, peer, now) {
+        match self.authorize(files, &user, Some(&pane), password, ask, peer, now) {
             Ok(typed) => {
                 if typed {
                     audit!(
@@ -1047,8 +1234,9 @@ impl Client {
             }
         }
         self.answer = None;
-        // One whose session runs waits for its end; the rest are done.
-        if sent && self.session.is_some() {
+        // One whose session runs waits for its end, and consoled's
+        // prompts connection for the next prompt; the rest are done.
+        if sent && (self.session.is_some() || self.prompter) {
             self.deadline = now + SESSION_TIME;
         } else {
             self.done = true;
@@ -1082,6 +1270,7 @@ impl Authd {
                 }
             }
             self.hang_up_orphans();
+            self.tidy_prompts(now);
             self.clients.retain(|c| !c.done);
             let listening = self.clients.len() < CLIENTS_MAX;
             let mut fds = vec![
@@ -1118,6 +1307,7 @@ impl Authd {
                         Some(c.deadline),
                         c.waiting.as_ref().map(|w| w.1),
                         c.answer.as_ref().map(|a| a.1),
+                        c.asked.as_ref().map(|a| a.until),
                     ]
                 })
                 .flatten()
@@ -1251,6 +1441,8 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         names,
         sessions: HashMap::new(),
         unlocked: HashMap::new(),
+        next_prompt: 1,
+        prompting: None,
         children,
     };
     authd.run_loop().map_err(|e| util::failed(&"authd", e))?;

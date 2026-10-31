@@ -1292,7 +1292,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "elevate",
-        about: "elevate and sudo run commands as an administrator: alice, an administrator, types her password once and runs commands as root with a clean environment and the fixed path, Ctrl+C reaches an elevated command, an elevated shell runs on a terminal of its own, a wrong password is asked again, -k locks the pane and -n will not ask; bob, who is not one, cannot, and each use is in the audit log",
+        about: "elevate and sudo run commands as an administrator: alice, an administrator, types her password once, at the console's own prompt that Ctrl+Alt+Delete clears and no program reads, and runs commands as root with a clean environment and the fixed path, Ctrl+C reaches an elevated command, an elevated shell runs on a terminal of its own, a wrong password is asked again, Esc closes the prompt, -S reads the password, -k locks the pane and -n will not ask; bob, who is not one, cannot, and each use is in the audit log; Ctrl+Alt+Delete's menu shows the sign-in on a free console",
         firmware: Firmware::Bios,
         media: Media::Usb,
         // As signin: Spark starts the services and signintest, which makes
@@ -7516,16 +7516,25 @@ fn elevate(vm: &mut Vm, case: &Case) -> Result<(), String> {
         "User bob is not an administrator, and may not elevate",
     ])?;
     vm.expect_anywhere("authd: bob, not an administrator, asked to elevate on pts/")?;
-    // Alice, on tty1, types her password once for that pane.
+    // Alice, on tty1, types her password once for that pane, at the
+    // console's own prompt on the bottom line (ADR 0251). What she typed
+    // first goes when she presses Ctrl+Alt+Delete, and none of it reaches
+    // her shell.
     vm.press(&["alt-f1"])?;
+    vm.expect_anywhere("consoled: asking for passwords on the consoles for authd")?;
     answer_prompt(vm, "$", "clear; cat /system/state/authd/passwords; elevate id")?;
-    answer_prompt(vm, "[elevate] password for alice:", "queen of hearts")?;
+    vm.expect_screen(&["[elevate] Password for alice, to run /system/commands/id:"])?;
+    vm.type_text("mad hatter")?;
+    vm.press(&["ctrl-alt-delete"])?;
+    answer_prompt(vm, "to run /system/commands/id:", "queen of hearts")?;
     vm.expect_anywhere("authd: alice elevated on pts/")?;
     vm.expect_anywhere("(password typed): process ")?;
     vm.expect_screen(&[
         "cat: /system/state/authd/passwords: Permission denied",
         "uid=0(root) gid=0(root)",
     ])?;
+    vm.expect_screen_without("hatter")?;
+    vm.expect_screen_without("queen")?;
     // Within the 15 minutes the pane asks no more: sudo, root's
     // environment with the fixed path, and what only root reads.
     answer_prompt(
@@ -7560,10 +7569,35 @@ fn elevate(vm: &mut Vm, case: &Case) -> Result<(), String> {
     answer_prompt(vm, "$", "clear; elevate -k; elevate -n true; echo \"status $?\"")?;
     vm.expect_screen(&["a password is needed, and -n says not to ask for one", "status 1"])?;
     answer_prompt(vm, "$", "clear; sudo true; echo \"status $?\"")?;
-    answer_prompt(vm, "[sudo] password for alice:", "cheshire cat")?;
+    answer_prompt(vm, "to run /system/commands/true:", "cheshire cat")?;
     vm.expect_anywhere("authd: a wrong password for alice, from process ")?;
-    answer_prompt(vm, "[sudo] password for alice:", "queen of hearts")?;
+    vm.expect_screen(&["Sorry, try again."])?;
+    answer_prompt(vm, "to run /system/commands/true:", "queen of hearts")?;
     vm.expect_screen(&["Sorry, try again.", "status 0"])?;
+    // Esc closes the prompt, and elevate says no password was typed;
+    // with -S it reads the password itself, from its input.
+    answer_prompt(vm, "$", "clear; elevate -k; elevate true; echo \"status $?\"")?;
+    vm.expect_screen(&["to run /system/commands/true:"])?;
+    vm.press(&["esc"])?;
+    vm.expect_screen(&["elevate: no password was typed", "status 1"])?;
+    answer_prompt(
+        vm,
+        "$",
+        "clear; echo 'queen of hearts' | elevate -S whoami; echo \"status $?\"",
+    )?;
+    vm.expect_screen(&["root", "status 0"])?;
+    // Ctrl+Alt+Delete with no prompt: consoled's own menu. Esc closes it;
+    // Enter shows the sign-in on a console where nobody is signed in,
+    // tty3, as alice is on tty1 and bob on tty2.
+    vm.press(&["ctrl-alt-delete"])?;
+    vm.expect_screen(&["Ctrl+Alt+Delete    Enter: sign in    R: restart    P: power off"])?;
+    vm.press(&["esc"])?;
+    vm.expect_screen_without("Enter: sign in")?;
+    vm.press(&["ctrl-alt-delete"])?;
+    vm.expect_screen(&["Enter: sign in"])?;
+    vm.press(&["ret"])?;
+    vm.expect_anywhere("consoled: Ctrl+Alt+Delete menu: sign-in on tty3")?;
+    vm.expect_screen(&["(tty3)", "Name:"])?;
     vm.press_power_button()?;
     vm.expect("spark: every service has stopped")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;

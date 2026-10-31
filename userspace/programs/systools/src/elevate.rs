@@ -600,7 +600,7 @@ fn done(answer: Answer) -> Result<String, Fail> {
 /// Asks for the password, as `prompt` or `[elevate] password for NAME: `:
 /// on the terminal, with its echo off, or from the standard input with
 /// -S.
-fn password(options: &Options, tool: &str) -> Result<Vec<u8>, Fail> {
+fn password_typed(options: &Options, tool: &str) -> Result<Vec<u8>, Fail> {
     if options.non_interactive {
         return Err(fail("a password is needed, and -n says not to ask for one".into()));
     }
@@ -638,11 +638,17 @@ fn password(options: &Options, tool: &str) -> Result<Vec<u8>, Fail> {
 fn unlock(options: &Options) -> Result<i32, Fail> {
     let tool = tool_name();
     let mut typed: Option<Vec<u8>> = None;
+    let mut console = console_asks(options);
     let mut wrong = 0;
     loop {
-        let request = Request::Unlock { password: typed.take() };
+        let password = typed.take();
+        let asks = console && password.is_none();
+        let request = Request::Unlock { password, ask: asks };
         match ask(&request, &[])? {
-            Answer::Done(text) if text == NEEDS_PASSWORD => typed = Some(password(options, &tool)?),
+            Answer::Done(text) if text == NEEDS_PASSWORD => {
+                console = false;
+                typed = Some(password_typed(options, &tool)?);
+            }
             Answer::Done(_) => return Ok(0),
             Answer::Refused(why) if why == WRONG_PASSWORD => {
                 wrong += 1;
@@ -650,11 +656,20 @@ fn unlock(options: &Options) -> Result<i32, Fail> {
                     return Err(fail(format!("{TRIES} wrong passwords")));
                 }
                 eprintln!("Sorry, try again.");
-                typed = Some(password(options, &tool)?);
+                if !console {
+                    typed = Some(password_typed(options, &tool)?);
+                }
             }
             Answer::Refused(why) => return Err(fail(why)),
         }
     }
+}
+
+/// Whether the console may ask for the password (ADR 0251): unless -n
+/// says not to ask or -S to read it from the standard input. On a pane
+/// that is not a console's, authd answers that elevate is to ask.
+fn console_asks(options: &Options) -> bool {
+    !options.non_interactive && !options.stdin
 }
 
 /// The name this program was run by, for its prompt.
@@ -845,19 +860,25 @@ fn run(options: &Options) -> Result<i32, Fail> {
     let term = std::env::var("TERM").unwrap_or_default();
     let language = own_language();
     let mut typed: Option<Vec<u8>> = None;
+    let mut console = console_asks(options);
     let mut wrong = 0;
     let (process, mut reader) = loop {
+        let password = typed.take();
+        let asks = console && password.is_none();
         let request = Request::Elevate {
             mode: options.mode,
-            password: typed.take(),
+            password,
+            ask: asks,
             term: term.clone(),
             directory: here.clone(),
             language: language.clone(),
             command: options.command.clone(),
         };
         match ask_with(&request, &fds)? {
+            // Not a console's pane, or no consoled: elevate asks.
             (Answer::Done(text), _) if text == NEEDS_PASSWORD => {
-                typed = Some(password(options, &tool)?);
+                console = false;
+                typed = Some(password_typed(options, &tool)?);
             }
             (Answer::Done(text), reader) => match text.parse::<u64>() {
                 Ok(process) => break (process, reader),
@@ -869,7 +890,9 @@ fn run(options: &Options) -> Result<i32, Fail> {
                     return Err(fail(format!("{TRIES} wrong passwords")));
                 }
                 eprintln!("Sorry, try again.");
-                typed = Some(password(options, &tool)?);
+                if !console {
+                    typed = Some(password_typed(options, &tool)?);
+                }
             }
             (Answer::Refused(why), _) => return Err(fail(why)),
         }

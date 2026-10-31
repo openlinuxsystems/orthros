@@ -570,14 +570,19 @@ _target/userspace/_).
 		_/system/tests/posix/signintest_ as root, and sign alice, the
 		owner, in on tty1 and bob on tty2, as *signin* does. Bob, no
 		administrator, cannot *elevate*(8), and *authd*(8)'s audit line
-		says so. Alice types her password once on tty1 and runs commands
-		as root: *id*(1), *sudo*(8), *env*(1), which shows root's
-		environment with the fixed *PATH* and *SUDO_USER*, and the hashes'
-		file, which she cannot read herself. Ctrl+C stops an elevated
-		*sleep*(1) through its own terminal; *elevate -s* gives root's
-		shell on a terminal of its own; *elevate -k* locks the pane
-		again, *-n* then will not ask, and a wrong password is asked
-		again. The power button ends it (ADR 0219).
+		says so. Alice types her password once on tty1, at *consoled*(8)'s
+		own prompt on the bottom line, after Ctrl+Alt+Delete clears what
+		she typed there first, and none of it reaches her shell; then she
+		runs commands as root: *id*(1), *sudo*(8), *env*(1), which shows
+		root's environment with the fixed *PATH* and *SUDO_USER*, and the
+		hashes' file, which she cannot read herself. Ctrl+C stops an
+		elevated *sleep*(1) through its own terminal; *elevate -s* gives
+		root's shell on a terminal of its own; *elevate -k* locks the
+		pane again, *-n* then will not ask, a wrong password is asked
+		again, Esc closes the prompt, and *-S* reads the password from the
+		input. Ctrl+Alt+Delete with no prompt shows consoled's menu; Esc
+		closes it, and Enter shows the sign-in on tty3, where nobody is
+		signed in. The power button ends it (ADRs 0219 and 0251).
 
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test

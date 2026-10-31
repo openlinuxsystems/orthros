@@ -33,10 +33,15 @@ not an administrator, authd refuses before any password, and says so
 in the audit log. A command that is not found is refused before any
 password too.
 
-The password is asked on the terminal, unseen, as *[elevate] password
-for* _name_*:* (*[sudo]* for sudo); a wrong one is asked again, *Sorry,
-try again.*, up to three times in all, each answered only after authd's
-wait for wrong passwords. Once typed, the pane, which is the terminal
+In a pane on one of the consoles, the password is asked by
+*consoled*(8), on the bottom line, where no program draws it or reads
+what is typed, with the command it is for: *[elevate] Password for*
+_name_*, to run* _command_*:*. Ctrl+Alt+Delete clears what was typed
+there, and Esc closes it (ADR 0251). On any other terminal, as over
+SSH, elevate asks on the terminal, unseen, as *[elevate]
+password for* _name_*:* (*[sudo]* for sudo). A wrong one is asked
+again, *Sorry, try again.*, up to three times in all, each answered
+only after authd's wait for wrong passwords. Once typed, the pane, which is the terminal
 of the session that asked, stays unlocked for 15 minutes from its last
 elevated command, as sudo's per-terminal tickets do on Ubuntu: neither
 another pane, another session on the same terminal, nor a program with
@@ -106,11 +111,12 @@ the command itself, with the same path and environment, and *-v* and
 
 *-S*, *--stdin*
 	Read the password as a line of the standard input, with no prompt
-	on the terminal, for scripts.
+	on the terminal or the console, for scripts.
 
 *-p*, *--prompt* _prompt_
 	Ask with _prompt_, where *%p* and *%u* are the user's name, *%h* the
-	host's, and *%%* a *%*.
+	host's, and *%%* a *%*, when elevate asks; consoled's prompt on a
+	console keeps its own words.
 
 *-u*, *--user* _user_
 	Only *root*, *0* or *#0*: elevate runs commands as root alone. A
@@ -146,9 +152,12 @@ write _/system/settings_ can have a service run anything. That is
 intended, as the owner owns the machine; what elevate buys is that
 nothing runs with that power by accident, and that each use is in the
 audit log. A program running in an unlocked pane can elevate in its
-15 minutes, as with sudo; *elevate -k* ends them. The password prompt
-is drawn by elevate on the terminal for now; the consoles' own prompt,
-which no program can draw or read, comes in Phase 13b.6b.
+15 minutes, as with sudo; *elevate -k* ends them. On the consoles the
+password goes from the keyboard to consoled and authd only: a program
+that draws a prompt like it cannot keep it up through Ctrl+Alt+Delete,
+which brings the real one back, or consoled's menu. Elsewhere elevate
+draws its own prompt, as sudo does, and a program of the user's could
+draw one like it.
 
 An elevated command is authd's child, in authd's resource domain, and
 ends if authd does.

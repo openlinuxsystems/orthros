@@ -98,7 +98,8 @@ closes the connection, but for a session (below):
 	_mode_ *shell* or *login* (*command* runs the command), in
 	_directory_, for an administrator, after their password unless
 	their pane is unlocked: _password-kind_ is *password*, with the
-	password after it, or *none*, with an empty field. Each
+	password after it, or *none* or *ask*, with an empty field; *ask*
+	lets consoled ask for it on a console (PROMPTS). Each
 	_language_ is a setting *NAME=value* to keep. The request comes
 	with four descriptors: the command's standard input, output and
 	error, and the read end of a pipe. The answer is *ok password*
@@ -111,6 +112,16 @@ closes the connection, but for a session (below):
 
 *forget*
 	Locks the asker's pane again. Anyone may ask.
+
+*prompts*
+	Asks for the passwords to be asked on the consoles: *ok*, then the
+	connection stays open for *ask* and *done* lines (PROMPTS). Only
+	root may, as *consoled*(8) runs; a later one takes over.
+
+*prompted* _number_ *password*|*cancelled*|*elsewhere* _password_
+	What came of prompt _number_: the password typed, a prompt closed,
+	or a terminal that is not a console's, with an empty _password_ for
+	the last two. Only the process that asked *prompts* may.
 
 authd knows who asks by the connection: the kernel gives it the process
 at the other end, and the user and group it acted for when it connected
@@ -223,6 +234,30 @@ authd: bob, not an administrator, asked to elevate on pts/1: dmesg, for process 
 A command line shows as at most 256 characters, with *?* for each
 control character. An elevated command runs in authd's resource domain
 and ends when authd does.
+
+# PROMPTS
+
+*consoled*(8) asks *prompts* when it starts, so that the password for
+elevate, in a pane on a console, is asked where no program draws or
+reads (ADR 0251). An *elevate* or *unlock* request whose
+_password-kind_ is *ask*, from a locked pane, is then not answered *ok
+password*: authd keeps it, with its descriptors, and writes on
+consoled's connection
+
+```
+ask 12 pts/0 alice /system/commands/user add bob
+```
+
+the prompt's number, the pane's terminal, whose password it is and the
+command line, empty for *unlock*. consoled answers with a *prompted*
+request: authd takes the password typed as the one the request came
+with, waiting after a wrong one as ever, and elevate asks again; a
+closed prompt is answered *no no password was typed*, and *elsewhere*,
+for a terminal that is not a console's, *ok password*, so that elevate
+asks itself. A prompt not answered in 5 minutes is given up. When its
+elevate goes away first, authd writes *done* _number_, and consoled
+takes the prompt off. While no program asks *prompts*, and when it
+goes away, *ask* is answered as *none* is.
 
 # ACCOUNTS
 
