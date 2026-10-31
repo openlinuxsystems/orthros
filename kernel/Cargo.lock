@@ -144,6 +144,7 @@ dependencies = [
  "radix-bootfs",
  "radix-btrfs",
  "radix-cap",
+ "radix-crosec",
  "radix-elf",
  "radix-exfat",
  "radix-ext4",
@@ -231,6 +232,7 @@ dependencies = [
  "radix-random",
  "radix-relocs",
  "radix-sensors",
+ "radix-smbus",
  "radix-sync",
  "radix-vtd",
  "radix-watchdog",
@@ -273,6 +275,10 @@ version = "0.10.4"
 dependencies = [
  "proptest",
 ]
+
+[[package]]
+name = "radix-crosec"
+version = "0.10.4"
 
 [[package]]
 name = "radix-elf"
@@ -459,6 +465,13 @@ dependencies = [
 
 [[package]]
 name = "radix-sensors"
+version = "0.10.4"
+dependencies = [
+ "radix-hw",
+]
+
+[[package]]
+name = "radix-smbus"
 version = "0.10.4"
 dependencies = [
  "radix-hw",

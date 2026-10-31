@@ -11,7 +11,10 @@
 //!   complex die's where the model has them);
 //! - `coretemp`, one for each of Intel's packages: its package's sensor,
 //!   then each core's, numbered as Linux numbers them (`temp1` for the
-//!   package, `temp<core + 2>` for each core).
+//!   package, `temp<core + 2>` for each core);
+//! - `cros_ec`, the fans and temperature sensors of Framework's embedded
+//!   controller (ADR 0207), numbered by their places in its memory map
+//!   from 1, as Linux's `cros_ec_hwmon` numbers them.
 //!
 //! [`find`] looks for them once the CPUs run. Intel's sensors are read on
 //! each CPU, which a reader has all of them do at most once a second, as
@@ -26,8 +29,10 @@ use radix_sensors::coretemp::{Reading, Sample};
 use radix_sensors::k10temp::{MAX_DIES, Sensor};
 use radix_sync::{Mutex, Once, SpinLock};
 
+use radix_crosec::{Fan, Temperature};
+
 use crate::acpi::thermal;
-use crate::{Arch, work};
+use crate::{Arch, crosec, work};
 
 /// How long a reading of Intel's sensors lasts, as Linux's.
 const SAMPLE_LIFE_NS: u64 = 1_000_000_000;
@@ -81,6 +86,8 @@ pub enum Device {
     Chipset,
     /// `coretemp`, of this package.
     Package(u32),
+    /// `cros_ec`.
+    Ec,
 }
 
 impl Device {
@@ -90,11 +97,12 @@ impl Device {
             Device::Zones => "acpitz",
             Device::Chipset => "k10temp",
             Device::Package(_) => "coretemp",
+            Device::Ec => "cros_ec",
         }
     }
 }
 
-/// One of a device's temperatures.
+/// One of a device's temperatures, or fans.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {
     /// A thermal zone, by its index.
@@ -105,9 +113,13 @@ pub enum Channel {
     Package { cpu: usize, package: u32 },
     /// An Intel core's, read by `cpu`.
     Core { cpu: usize, core: u32 },
+    /// One of the EC's fans, by its place in the EC's memory map.
+    EcFan(u8),
+    /// One of the EC's temperature sensors.
+    EcTemperature(u8),
 }
 
-/// A channel's file: `temp<n>_<suffix>`.
+/// A channel's file: `temp<n>_<suffix>` or `fan<n>_<suffix>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum File {
     Input,
@@ -115,6 +127,7 @@ pub enum File {
     Crit,
     Max,
     CritAlarm,
+    Fault,
 }
 
 impl File {
@@ -126,11 +139,20 @@ impl File {
             File::Crit => "crit",
             File::Max => "max",
             File::CritAlarm => "crit_alarm",
+            File::Fault => "fault",
         }
     }
 }
 
 impl Channel {
+    /// What its files start with: `temp`, or `fan`.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Channel::EcFan(_) => "fan",
+            _ => "temp",
+        }
+    }
+
     /// Its number, the `<n>` of `temp<n>_input`.
     pub fn number(self) -> u32 {
         match self {
@@ -138,6 +160,7 @@ impl Channel {
             Channel::Chipset(sensor) => u32::from(sensor.number()),
             Channel::Package { .. } => 1,
             Channel::Core { core, .. } => core + 2,
+            Channel::EcFan(index) | Channel::EcTemperature(index) => u32::from(index) + 1,
         }
     }
 
@@ -150,6 +173,8 @@ impl Channel {
                 if critical { &[File::Input, File::Crit] } else { &[File::Input] }
             }
             Channel::Chipset(_) => &[File::Input, File::Label],
+            Channel::EcFan(_) => &[File::Input, File::Fault],
+            Channel::EcTemperature(_) => &[File::Input, File::Fault, File::Label],
             Channel::Package { cpu, .. } | Channel::Core { cpu, .. } => {
                 let max = SAMPLES[cpu].lock().is_some_and(|sample| sample.target.max.is_some());
                 if max {
@@ -233,11 +258,15 @@ pub fn devices(found: &mut dyn FnMut(Device)) {
     if CHIPSET.get().is_some() {
         found(Device::Chipset);
     }
-    let Some(cores) = CORES.get() else { return };
-    for (index, core) in cores.iter().enumerate() {
-        if !cores.iter().take(index).any(|c| c.package == core.package) {
-            found(Device::Package(core.package));
+    if let Some(cores) = CORES.get() {
+        for (index, core) in cores.iter().enumerate() {
+            if !cores.iter().take(index).any(|c| c.package == core.package) {
+                found(Device::Package(core.package));
+            }
         }
+    }
+    if crosec::found() {
+        found(Device::Ec);
     }
 }
 
@@ -261,6 +290,10 @@ pub fn channels(device: Device, found: &mut dyn FnMut(Channel)) {
             for core in cores.iter().filter(|core| core.package == package) {
                 found(Channel::Core { cpu: core.cpu, core: core.core });
             }
+        }
+        Device::Ec => {
+            crosec::fans().for_each(|fan| found(Channel::EcFan(fan)));
+            crosec::sensors().for_each(|sensor| found(Channel::EcTemperature(sensor)));
         }
     }
 }
@@ -295,6 +328,19 @@ pub fn write_file(channel: Channel, file: File, out: &mut dyn Write) -> fmt::Res
             let sample = sample(cpu).ok_or(fmt::Error)?;
             write_reading(sample, sample.core, file, out)
         }
+        Channel::EcFan(fan) => match (crosec::fan(fan), file) {
+            (Fan::Rpm(rpm), File::Input) => writeln!(out, "{rpm}"),
+            (Fan::Stalled, File::Input) => writeln!(out, "0"),
+            (Fan::Absent, _) => Err(fmt::Error),
+            (state, _) => writeln!(out, "{}", u8::from(state == Fan::Stalled)),
+        },
+        Channel::EcTemperature(sensor) => match (file, crosec::temperature(sensor)) {
+            (File::Label, _) => crosec::write_sensor_name(sensor, out),
+            (File::Input, Temperature::Millicelsius(at)) => writeln!(out, "{at}"),
+            (File::Fault, Temperature::Millicelsius(_)) => writeln!(out, "0"),
+            (File::Fault, Temperature::Fault) => writeln!(out, "1"),
+            _ => Err(fmt::Error),
+        },
     }
 }
 
@@ -304,7 +350,7 @@ fn write_reading(sample: Sample, reading: Reading, file: File, out: &mut dyn Wri
         File::Crit => writeln!(out, "{}", sample.target.tjmax),
         File::Max => writeln!(out, "{}", sample.target.max.ok_or(fmt::Error)?),
         File::CritAlarm => writeln!(out, "{}", u8::from(reading.alarm)),
-        File::Label => Err(fmt::Error),
+        File::Label | File::Fault => Err(fmt::Error),
     }
 }
 

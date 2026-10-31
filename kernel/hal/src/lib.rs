@@ -501,6 +501,27 @@ pub trait Devices {
 
     /// Stops the watchdog.
     fn watchdog_stop();
+
+    /// Finds the chipset's SMBus host controller, Intel's or that of AMD's
+    /// FCH (Phase 11e, ADR 0206), and logs it and the memory modules'
+    /// EEPROMs that answer on it. Called once, after the PCI scan; whether
+    /// there is one.
+    fn find_smbus() -> bool;
+
+    /// Writes the name of the controller [`Devices::find_smbus`] found, as
+    /// Linux names its adapter; fails if there is none.
+    fn smbus_name(out: &mut dyn core::fmt::Write) -> core::fmt::Result;
+
+    /// Reads I/O port `port` of the Chromium EC's host interface (Phase
+    /// 11e, ADR 0207): its data and command ports (0x200 and 0x204), its
+    /// packet (0x800 to 0x8ff) and its memory map (255 bytes from 0x900 or
+    /// 0xe00). All ones for any other port, and where there are no I/O
+    /// ports.
+    fn ec_read(port: u16) -> u8;
+
+    /// Writes the EC's command port or packet; does nothing for any other
+    /// port.
+    fn ec_write(port: u16, value: u8);
 }
 
 /// What the interpreter of the firmware's AML needs from the machine

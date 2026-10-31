@@ -29,6 +29,7 @@ radix-pstate = { path = "../../lib/pstate" }
 radix-random = { path = "../../lib/random" }
 radix-relocs = { path = "../../lib/relocs" }
 radix-sensors = { path = "../../lib/sensors" }
+radix-smbus = { path = "../../drivers/smbus" }
 radix-sync = { path = "../../lib/sync" }
 radix-vtd = { path = "../../drivers/vtd" }
 radix-watchdog = { path = "../../drivers/watchdog" }

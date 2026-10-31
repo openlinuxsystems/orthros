@@ -502,6 +502,17 @@ _target/userspace/_).
 		sees a changed kernel mapping after a TLB shootdown and that
 		address spaces switched on several CPUs keep their own mappings.
 
+	*framework-ec*
+		Boot with an SSDT of the test's that names a Framework EC
+		(*FRMWC004*): the kernel must find the device, and, with no EC
+		behind it in QEMU, say so and leave it alone.
+
+	*smbus*
+		Boot to the console under BIOS: the kernel must find the SMBus
+		controller of q35's ICH9 at port 0x700 and the eight memory
+		modules' EEPROMs QEMU puts on it, and
+		_/sys/bus/i2c/devices/i2c-0/name_ must name its adapter.
+
 	*msr*
 		Boot with *selftest=msr*: EFER must read, and with KVM a read
 		of an MSR no processor has must fault and go on, as the
