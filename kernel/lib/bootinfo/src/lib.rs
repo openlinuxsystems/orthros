@@ -184,6 +184,13 @@ impl<'a> BootInfo<'a> {
             .map(|t| t.data)
     }
 
+    /// The physical address of the UEFI system table, whose configuration
+    /// tables say where the firmware's SMBIOS tables are, if the boot
+    /// loader passed it.
+    pub fn efi64_system_table(&self) -> Option<u64> {
+        read_u64(self.tag(tag_type::EFI64_SYSTEM_TABLE)?.data, 0).filter(|&address| address != 0)
+    }
+
     /// The modules the boot loader loaded.
     pub fn modules(&self) -> impl Iterator<Item = Module<'a>> + 'a {
         self.tags().filter(|tag| tag.typ == tag_type::MODULE).filter_map(|tag| {
@@ -380,6 +387,9 @@ mod tests {
         assert_eq!(info.command_line(), Some("qemu-exit verbose"));
         assert_eq!(info.boot_loader_name(), Some("GRUB 2.12"));
         assert_eq!(info.firmware(), Firmware::Uefi);
+        assert_eq!(info.efi64_system_table(), None);
+        let bytes = build(&[(tag_type::EFI64_SYSTEM_TABLE, 0x7f9e_e018u64.to_le_bytes().to_vec())]);
+        assert_eq!(BootInfo::parse(&bytes).unwrap().efi64_system_table(), Some(0x7f9e_e018));
     }
 
     #[test]

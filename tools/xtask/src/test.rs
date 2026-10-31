@@ -94,6 +94,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-sched",
     "radix-scsi",
     "radix-sensors",
+    "radix-smbios",
     "radix-smbus",
     "radix-sync",
     "radix-tty",
@@ -1331,7 +1332,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "smbus",
-        about: "the kernel drives the SMBus controller of q35's ICH9 and finds the eight memory modules' EEPROMs QEMU puts on it; Linux's /sys/bus/i2c names its adapter at the console",
+        about: "the kernel drives the SMBus controller of q35's ICH9 and finds the eight memory modules' EEPROMs QEMU puts on it; Linux's /sys/bus/i2c names its adapter at the console; SeaBIOS's SMBIOS tables are found in its area",
         firmware: Firmware::Bios,
         media: Media::Usb,
         cmdline: "",
@@ -1342,6 +1343,29 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: smbus,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "smbios",
+        about: "the kernel finds QEMU's SMBIOS tables through the UEFI system table, logs the machine as Linux does and shows its names in Linux's /sys/class/dmi/id, without the serial numbers; hwinfo shows them all at the console",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "",
+        cpus: 1,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[
+            "-smbios",
+            "type=1,manufacturer=Dukovo,product=Test Machine,version=2.0,serial=DK-0042,sku=DK-T1,family=Testers",
+            "-smbios",
+            "type=2,manufacturer=Dukovo,product=Test Board,serial=DB-0042",
+            "-smbios",
+            "type=17,part=DK-RAM-1,speed=3200",
+        ],
+        script: smbios,
         disks: &[],
         second: None,
     },
@@ -4536,6 +4560,8 @@ fn smbus(vm: &mut Vm, case: &Case) -> Result<(), String> {
         "SMBus: Intel's controller (8086:2930) at port 0x700 (SMBus I801 adapter at 0700); \
          memory modules' EEPROMs answer at 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57",
     )?;
+    // SeaBIOS keeps the SMBIOS entry point in its area (ADR 0231).
+    vm.expect_anywhere("DMI: QEMU Standard PC (Q35 + ICH9, 2009), BIOS ")?;
     vm.expect("Boot complete.")?;
     vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
     vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
@@ -4546,6 +4572,47 @@ fn smbus(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: asked to power off the machine")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
     // QEMU ends when the guest enters ACPI's S5.
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+fn smbios(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    // Said before the scheduler starts, among the lines the boot report
+    // reads past.
+    vm.expect_anywhere("SMBIOS 3.0.0 present.")?;
+    vm.expect_anywhere("DMI: Dukovo Test Machine/Test Board, BIOS ")?;
+    vm.expect_anywhere("DMI: Memory slots populated: 1/1")?;
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // `is` between name and value, so that no needle is in a typed line.
+    vm.type_text("echo \"product is $(cat /sys/class/dmi/id/product_name)\"\n")?;
+    vm.expect_screen(&["product is Test Machine"])?;
+    vm.type_text("test -e /sys/class/dmi/id/product_serial || echo \"no serial\" file\n")?;
+    vm.expect_screen(&["no serial file"])?;
+    // consoled's file asks for admin.hardware, so root's shell holds the
+    // platform capability, and hwinfo reads the tables whole.
+    vm.type_text("clear; hwinfo -s system board\n")?;
+    vm.expect_screen(&[
+        "System",
+        "  Manufacturer:     Dukovo",
+        "  Product:          Test Machine",
+        "  Version:          2.0",
+        "  Family:           Testers",
+        "  SKU:              DK-T1",
+        "  Serial number:    DK-0042",
+        "Board",
+        "  Product:          Test Board",
+        "  Serial number:    DB-0042",
+    ])?;
+    vm.type_text("clear; hwinfo memory\n")?;
+    vm.expect_screen(&[
+        "Memory",
+        "  Installed:        1 GiB in 1 of 1 slots",
+        "  DIMM 0:           1 GiB RAM DIMM, 3200 MT/s, QEMU DK-RAM-1",
+    ])?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: asked to power off the machine")?;
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 

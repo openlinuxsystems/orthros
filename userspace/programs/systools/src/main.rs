@@ -31,6 +31,7 @@ mod eject;
 mod findmnt;
 mod fstrim;
 mod hexdump;
+mod hwinfo;
 mod iostat;
 mod keymaps;
 mod log;
@@ -103,6 +104,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("halt", power::halt),
     ("hd", hexdump::hd),
     ("hexdump", hexdump::main),
+    ("hwinfo", hwinfo::main),
     ("ionice", priority::ionice),
     ("iostat", iostat::main),
     ("journalctl", log::journalctl),

@@ -102,6 +102,7 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/commands/hd", "systools"),
     ("system/commands/halt", "systools"),
     ("system/commands/hexdump", "systools"),
+    ("system/commands/hwinfo", "systools"),
     ("system/commands/ionice", "systools"),
     ("system/commands/iostat", "systools"),
     ("system/commands/journalctl", "systools"),

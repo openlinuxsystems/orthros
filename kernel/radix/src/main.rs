@@ -56,6 +56,7 @@ mod console;
 mod crashlog;
 mod crosec;
 mod debug_console;
+mod dmi;
 mod domains;
 mod fs;
 mod hwmon;
@@ -215,6 +216,7 @@ pub extern "Rust" fn radix_kernel_main(mut params: BootParams) -> ! {
     HEAP.set_corruption_handler(on_heap_corruption);
     Arch::init(&params);
     report::frames();
+    dmi::init();
     domains::init();
     sched::init(settings.lockdep);
     oom::init();

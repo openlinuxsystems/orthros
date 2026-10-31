@@ -5,7 +5,8 @@
 //! machine that no device of its own has, which its embedded controller
 //! keeps: its fans' duties and curves, its LEDs, and the addressable LEDs
 //! of its ARGB header. On the Framework Desktop these are Framework's
-//! embedded controller's (ADR 0207).
+//! embedded controller's (ADR 0207). It also reads the firmware's SMBIOS
+//! tables whole, serial numbers and all (ADR 0231).
 //!
 //! The kernel gives Spark the one capability to them when it starts.
 //! Spark gives a service a copy in SLOT_PLATFORM, with the read and
@@ -55,9 +56,20 @@ enum Led: u32 {
     second_power = 7;
 }
 
+/// Which of the firmware's SMBIOS tables `smbios` copies.
+enum SmbiosTable: u32 {
+    /// The entry point, `_SM3_` or `_SM_`, which says the version of
+    /// SMBIOS the tables follow: as Linux's
+    /// /sys/firmware/dmi/tables/smbios_entry_point has it.
+    entry_point = 0;
+    /// The structures, up to and with the one that ends them: as Linux's
+    /// /sys/firmware/dmi/tables/DMI.
+    structures = 1;
+}
+
 /// The machine's platform controls. Each method needs the read right to
 /// ask, or the control right to change something.
-interface platform = 0x0010 version 1 {
+interface platform = 0x0010 version 2 {
     kind = platform;
     /// What the embedded controller has: its controls, its fans and its
     /// temperature sensors (a bit for each, by its number from 0 in the
@@ -120,4 +132,13 @@ interface platform = 0x0010 version 1 {
     method set_rgb = 9 (first: u32, colors: in bytes) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
                 bad_address, out_of_range, not_supported, timed_out, io];
+    /// Copies the firmware's SMBIOS table `table` into `buffer`, as
+    /// much as it holds, and returns the table's length. The structures
+    /// hold the serial numbers of the machine, its board and its chassis,
+    /// and its UUID, which /kernel/class/dmi/id leaves out, as Linux shows
+    /// them to root alone. Fails with not_supported where the kernel found
+    /// no SMBIOS tables. Needs the read right.
+    method smbios = 10 (table: SmbiosTable, buffer: out bytes) -> (length: u64)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                bad_address, not_supported];
 }

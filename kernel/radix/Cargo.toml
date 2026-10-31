@@ -47,6 +47,7 @@ radix-random = { path = "../lib/random" }
 radix-sched = { path = "../sched" }
 radix-scsi = { path = "../drivers/scsi" }
 radix-sensors = { path = "../lib/sensors" }
+radix-smbios = { path = "../lib/smbios" }
 radix-sync = { path = "../lib/sync" }
 radix-tty = { path = "../lib/tty" }
 radix-uacpi = { path = "../lib/uacpi" }

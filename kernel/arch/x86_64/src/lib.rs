@@ -56,6 +56,7 @@ mod rtc;
 mod sci;
 mod sensors;
 mod serial;
+mod smbios;
 mod smbus;
 mod smp;
 mod space;
@@ -975,6 +976,8 @@ impl Platform for Arch {
             }
         };
         acpi::describe(&mut |line| radix_klog::info!("{line}"));
+        // Before the frame allocator takes the memory the map calls free.
+        smbios::init(entry::EFI_SYSTEM_TABLE.get().copied());
         let madt = acpi.and_then(|acpi| acpi.madt.as_ref());
 
         apic::disable_pics();
@@ -1114,6 +1117,10 @@ impl Platform for Arch {
 
     fn describe_firmware(line: &mut dyn FnMut(fmt::Arguments<'_>)) {
         acpi::describe(line);
+    }
+
+    fn smbios() -> Option<radix_hal::Smbios> {
+        smbios::get()
     }
 
     fn has_debug_console() -> bool {

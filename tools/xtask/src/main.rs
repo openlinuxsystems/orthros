@@ -243,6 +243,7 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   tlb              TLB shootdowns and address-space switches
   framework-ec     a Framework EC's ACPI device with no EC behind it, and ectool
   smbus            q35's SMBus controller and its memory modules' EEPROMs
+  smbios           QEMU's SMBIOS tables under UEFI, /sys/class/dmi/id and hwinfo
   msr              a read of an MSR the CPU lacks faults and goes on
   caps             no capability forged or widened; revokes against 3 CPUs
   stack-overflow   a kernel stack overflow stops at its guard page

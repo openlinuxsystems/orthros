@@ -57,6 +57,7 @@ members = [
     "lib/random",
     "lib/relocs",
     "lib/sensors",
+    "lib/smbios",
     "lib/sync",
     "lib/tty",
     "lib/uacpi",

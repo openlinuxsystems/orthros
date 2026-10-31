@@ -625,6 +625,10 @@ impl Platform for Arch {
 
     fn describe_firmware(_line: &mut dyn FnMut(core::fmt::Arguments<'_>)) {}
 
+    fn smbios() -> Option<radix_hal::Smbios> {
+        None
+    }
+
     fn has_debug_console() -> bool {
         false
     }

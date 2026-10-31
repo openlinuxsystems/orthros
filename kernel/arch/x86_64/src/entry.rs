@@ -46,6 +46,9 @@ static BSP_IST: TakeOnce<IstStacks> = TakeOnce::new(IstStacks([[0; BSP_IST_SIZE]
 /// The RSDP copy from the boot information.
 pub static RSDP_COPY: Once<&'static [u8]> = Once::new();
 
+/// The UEFI system table's physical address, from the boot information.
+pub static EFI_SYSTEM_TABLE: Once<u64> = Once::new();
+
 /// Most boot modules the kernel hands on.
 const MAX_MODULES: usize = 8;
 
@@ -247,6 +250,9 @@ extern "C" fn radix_arch_entry(magic: u32, info_phys: u32, slide: u64) -> ! {
 
     if let Some(rsdp) = info.acpi_rsdp() {
         let _ = RSDP_COPY.set(rsdp);
+    }
+    if let Some(address) = info.efi64_system_table() {
+        let _ = EFI_SYSTEM_TABLE.set(address);
     }
     let (framebuffer, text_screen) = framebuffer(&info);
     let modules = MODULES.take().expect("the boot CPU starts once");
