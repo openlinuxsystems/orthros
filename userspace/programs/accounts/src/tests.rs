@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use super::request::{Answer, REQUEST_MAX, Request, ended, ended_status};
+use super::request::{
+    Answer, CONTINUE, Mode, PROMPT_SHOWN_MAX, Prompt, Prompted, REQUEST_MAX, Relay, Request, ended,
+    ended_status, signal, stopped, stopped_signal,
+};
 use super::*;
 
 const PASSWD_TEXT: &str = "root:x:0:0:root:/:/system/commands/nukesh
@@ -130,11 +133,49 @@ fn requests_go_and_come_back() {
         },
         Request::NeedsOwner,
         Request::Owner { name: "chase".into(), full_name: String::new(), password: Vec::new() },
+        Request::Reset { name: "alice".into(), password: b"queen of hearts".to_vec() },
+        Request::Reset { name: "alice".into(), password: Vec::new() },
         Request::Session {
             name: "alice".into(),
             password: b"s3cret".to_vec(),
             term: "linux".into(),
         },
+        Request::Elevate {
+            mode: Mode::Command,
+            password: None,
+            ask: false,
+            term: "linux".into(),
+            directory: b"/users/alice".to_vec(),
+            language: vec!["LANG=C.UTF-8".into()],
+            command: vec![b"dmesg".to_vec(), b"--".to_vec(), b"\xff".to_vec()],
+        },
+        Request::Elevate {
+            mode: Mode::Login,
+            password: Some(Vec::new()),
+            ask: false,
+            term: String::new(),
+            directory: b"/".to_vec(),
+            language: Vec::new(),
+            command: Vec::new(),
+        },
+        Request::Elevate {
+            mode: Mode::Shell,
+            password: None,
+            ask: true,
+            term: "linux".into(),
+            directory: b"/".to_vec(),
+            language: Vec::new(),
+            command: Vec::new(),
+        },
+        Request::Unlock { password: Some(b"s3cret".to_vec()), ask: false },
+        Request::Unlock { password: None, ask: false },
+        Request::Unlock { password: None, ask: true },
+        Request::Forget,
+        Request::Prompts,
+        Request::Prompted { id: 7, typed: Prompted::Password(b"s3cret".to_vec()) },
+        Request::Prompted { id: 0, typed: Prompted::Password(Vec::new()) },
+        Request::Prompted { id: u64::MAX, typed: Prompted::Cancelled },
+        Request::Prompted { id: 8, typed: Prompted::Elsewhere },
     ];
     for request in requests {
         assert_eq!(Request::decode(&request.encode()), Ok(request));
@@ -144,6 +185,26 @@ fn requests_go_and_come_back() {
         b"check\0a\0b\0"
     );
     assert_eq!(Request::NeedsOwner.encode(), b"needs-owner\0");
+    assert_eq!(
+        Request::Reset { name: "alice".into(), password: b"pw".to_vec() }.encode(),
+        b"reset\0alice\0pw\0"
+    );
+    let elevate = Request::Elevate {
+        mode: Mode::Shell,
+        password: Some(b"pw".to_vec()),
+        ask: true,
+        term: "linux".into(),
+        directory: b"/x".to_vec(),
+        language: vec!["LANG=C".into()],
+        command: vec![b"id".to_vec()],
+    };
+    // A password typed is sent whatever `ask` says.
+    assert_eq!(elevate.encode(), b"elevate\0shell\0password\0pw\0linux\0/x\0LANG=C\0--\0id\0");
+    assert_eq!(Request::Unlock { password: None, ask: true }.encode(), b"unlock\0ask\0\0");
+    assert_eq!(
+        Request::Prompted { id: 12, typed: Prompted::Password(b"pw".to_vec()) }.encode(),
+        b"prompted\x0012\0password\0pw\0"
+    );
     for bad in [
         &b"check\0a\0"[..],
         b"check\0a\0b",
@@ -152,6 +213,27 @@ fn requests_go_and_come_back() {
         b"session\0a\0b\0",
         b"needs-owner\0x\0",
         b"",
+        // A command, with nothing to run; no `--`; an unknown kind of
+        // password; a password with `none`; a language setting that is
+        // not one.
+        b"elevate\0command\0none\0\0linux\0/\0--\0",
+        b"elevate\0command\0none\0\0linux\0/\0id\0",
+        b"elevate\0command\0maybe\0\0linux\0/\0--\0id\0",
+        b"elevate\0command\0none\0x\0linux\0/\0--\0id\0",
+        b"elevate\0command\0none\0\0linux\0/\0LANG\0--\0id\0",
+        b"elevate\0root\0none\0\0linux\0/\0--\0id\0",
+        b"unlock\0none\0",
+        b"unlock\0ask\0x\0",
+        b"forget\0now\0",
+        // A prompt's number that is not one; an answer with words where
+        // none go, or of a kind there is not.
+        b"prompts\0x\0",
+        b"prompted\0seven\0cancelled\0\0",
+        b"prompted\0-1\0cancelled\0\0",
+        b"prompted\x007\0cancelled\0x\0",
+        b"prompted\x007\0elsewhere\0x\0",
+        b"prompted\x007\0maybe\0\0",
+        b"prompted\x007\0password\0",
     ] {
         assert!(Request::decode(bad).is_err(), "{bad:?}");
     }
@@ -168,6 +250,76 @@ fn debug_leaves_out_passwords() {
         term: "linux".into(),
     };
     assert!(!format!("{session:?}").contains("hunter2"));
+    let elevate = Request::Elevate {
+        mode: Mode::Command,
+        password: Some(b"hunter2".to_vec()),
+        ask: false,
+        term: "linux".into(),
+        directory: b"/".to_vec(),
+        language: Vec::new(),
+        command: vec![b"id".to_vec()],
+    };
+    assert!(!format!("{elevate:?}").contains("hunter2"));
+    assert!(
+        !format!("{:?}", Request::Unlock { password: Some(b"hunter2".to_vec()), ask: false })
+            .contains("hunter2")
+    );
+    let prompted = Request::Prompted { id: 3, typed: Prompted::Password(b"hunter2".to_vec()) };
+    assert!(!format!("{prompted:?}").contains("hunter2"));
+    let reset = Request::Reset { name: "alice".into(), password: b"hunter2".to_vec() };
+    assert_eq!(format!("{reset:?}"), r#"Reset { name: "alice" }"#);
+}
+
+#[test]
+fn prompt_lines() {
+    let ask = Prompt::Ask {
+        id: 4,
+        terminal: "pts/2".into(),
+        name: "alice".into(),
+        shown: "/system/commands/user add bob".into(),
+    };
+    assert_eq!(ask.encode(), "ask 4 pts/2 alice /system/commands/user add bob\n");
+    assert_eq!(Prompt::decode(&ask.encode()), Some(ask));
+    // An unlock shows no command.
+    let unlock =
+        Prompt::Ask { id: 5, terminal: "pts/0".into(), name: "bob".into(), shown: String::new() };
+    assert_eq!(unlock.encode(), "ask 5 pts/0 bob \n");
+    assert_eq!(Prompt::decode(&unlock.encode()), Some(unlock));
+    assert_eq!(Prompt::decode("done 4\n"), Some(Prompt::Done { id: 4 }));
+    assert_eq!(Prompt::Done { id: 9 }.encode(), "done 9\n");
+    // A control character in the command, or a space in a name, cannot
+    // make a line of its own or move a field.
+    let odd = Prompt::Ask {
+        id: 6,
+        terminal: "pts/1".into(),
+        name: "a b".into(),
+        shown: "echo\nask 7 pts/1 root x".into(),
+    };
+    assert_eq!(odd.encode(), "ask 6 pts/1 a?b echo?ask 7 pts/1 root x\n");
+    let long = Prompt::Ask {
+        id: 1,
+        terminal: "pts/1".into(),
+        name: "a".into(),
+        shown: "x".repeat(PROMPT_SHOWN_MAX + 10),
+    };
+    assert_eq!(long.encode().len(), "ask 1 pts/1 a \n".len() + PROMPT_SHOWN_MAX);
+    for bad in
+        ["ask", "ask 1 pts/1", "ask x pts/1 a b", "ask 1  a b", "done", "done x", "wait 1", ""]
+    {
+        assert_eq!(Prompt::decode(bad), None, "{bad}");
+    }
+}
+
+#[test]
+fn elevate_s_lines() {
+    assert_eq!(stopped(20), "stopped 20\n");
+    assert_eq!(stopped_signal(&stopped(20)), Some(20));
+    assert_eq!(stopped_signal(&ended(0)), None);
+    assert_eq!(Relay::decode(signal(2).trim_end()), Some(Relay::Signal(2)));
+    assert_eq!(Relay::decode(CONTINUE.trim_end()), Some(Relay::Continue));
+    for bad in ["signal 0", "signal 65", "signal -9", "signal", "go on", ""] {
+        assert_eq!(Relay::decode(bad), None, "{bad}");
+    }
 }
 
 #[test]

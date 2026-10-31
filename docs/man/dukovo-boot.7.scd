@@ -61,7 +61,8 @@ _/system/resources/licenses/_
 
 . The firmware loads GRUB from the boot medium.
 . GRUB shows its menu for *boot.timeout* seconds, on the screen and on the
-  first serial port.
+  first serial port: Dukovo Server, then the same with *startup-trouble*,
+  for a lost administrator's password.
 . GRUB loads _/boot/radix_ through the Multiboot2 protocol, the
   microcode file as a module if the image has one, the boot archive
   (_/boot/bootfs_, the programs the system starts with) as a module with
@@ -548,6 +549,16 @@ them to *init*, and the kernel does not read them.
 	boot tests that type commands at a console use it. It opens nothing
 	that the command line could not open already: the words after *--*
 	start any program as root.
+
+*startup-trouble*
+	Read by *login*(1) and *authd*(8), not the kernel: the sign-in at
+	each console first shows the startup-trouble menu, which resets an
+	administrator's password, restarts or powers off (ADR 0253), as
+	Ubuntu's recovery mode does. The boot menu's second entry,
+	*Dukovo Server* _version_*: startup trouble*, starts the computer
+	with it, as the first word of the command line. Every administrator is told of a reset at their next
+	sign-in, and the audit log keeps it. Like *console-sign-in=off*, it
+	gives no one more than the boot menu does already.
 
 # MICROCODE
 

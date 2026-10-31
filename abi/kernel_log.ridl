@@ -17,11 +17,12 @@
 //! their `<N>` gave, or the user facility, 1, as Linux marks the lines
 //! written to its _/dev/kmsg_; authpriv, 10, marks a security event,
 //! which logd(8) keeps in the audit log if the kernel or Spark wrote it.
-//! A program's line names the process that wrote it after the flags, as
-//! Linux's `caller=` field does:
-//! `priority,sequence,microseconds,-,process=N;text`, its text starting
-//! with the writing thread's name. The kernel sets the process, so
-//! logd(8) can tell Spark's lines from the rest. The sequence numbers
+//! A program's line names the process that wrote it and the user that
+//! process acts for after the flags, as Linux's `caller=` field does:
+//! `priority,sequence,microseconds,-,process=N,user=N;text`, its text
+//! starting with the writing thread's name. The kernel sets both, so
+//! logd(8) can tell Spark's lines from the rest, and show each user the
+//! lines of their own programs. The sequence numbers
 //! every record since boot, and the microseconds are the time since boot.
 //! A read waits for a record unless the file is non-blocking, and fails
 //! with invalid_argument if the buffer cannot hold the line; one that
@@ -31,6 +32,8 @@
 //! cleared, and to the end skips all of them; no other offset is taken.
 //! Writing a line logs it, as `debug_log` does, at the level and facility
 //! a `<N>` before it gives, or information of the user facility.
+//! _/devices/kmsg_ is root's, mode 0622: root reads it, and anyone may
+//! write a line to it (ADR 0252), as Linux's with `dmesg_restrict` set.
 
 module kernel_log;
 
@@ -40,7 +43,8 @@ const WRITE_MAX: u64 = 256;
 /// radix-file(2)'s `control` request on _/devices/kmsg_ that clears the log
 /// (as `dmesg -C` does): readers that open it or seek to its start
 /// later skip the records it holds; a security event of the kernel's
-/// then says which process cleared it. Needs the write right.
+/// then says which process cleared it. Needs the read and write rights,
+/// so only a reader of the log, root, clears it.
 const CLEAR: u32 = 0x4b4d0001;
 
 /// The kernel log. Writing needs the write right.

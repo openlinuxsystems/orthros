@@ -8,7 +8,7 @@
 //! cursor, editing, function and keypad keys. The keys consoled keeps for
 //! itself: Alt+F1 to Alt+F6 (with or without Ctrl) and Alt+Left and
 //! Alt+Right switch consoles, Shift+Page Up and Shift+Page Down look back,
-//! and Ctrl+Alt+Delete restarts the machine.
+//! and Ctrl+Alt+Delete is the secure attention key (ADR 0251).
 
 use keymap::{Dead, Keymap, Sym, compose};
 use radix_abi::input::*;
@@ -28,8 +28,9 @@ pub enum Action {
     SwitchBy(isize),
     /// Look back half a screen (1) or forward (-1).
     Page(isize),
-    /// Restart the machine.
-    Reboot,
+    /// Ctrl+Alt+Delete, the secure attention key: consoled's own prompt
+    /// or menu.
+    Attention,
     /// A lock key changed: light the keyboard's lights again.
     Lights,
 }
@@ -239,7 +240,7 @@ impl Keyboard {
             KEY_LEFT => cursor(b'D'),
             KEY_HOME => send(b"\x1b[1~"),
             KEY_INSERT => send(b"\x1b[2~"),
-            KEY_DELETE if ctrl && alt => Action::Reboot,
+            KEY_DELETE if ctrl && alt => Action::Attention,
             KEY_DELETE => send(b"\x1b[3~"),
             KEY_END => send(b"\x1b[4~"),
             KEY_PAGEUP if shift => Action::Page(1),
@@ -256,7 +257,7 @@ impl Keyboard {
             KEY_KP7 => keypad('7', b'w', send(b"\x1b[1~")),
             KEY_KP8 => keypad('8', b'x', cursor(b'A')),
             KEY_KP9 => keypad('9', b'y', send(b"\x1b[5~")),
-            KEY_KPDOT if ctrl && alt => Action::Reboot,
+            KEY_KPDOT if ctrl && alt => Action::Attention,
             KEY_KPDOT => keypad(self.keymap.keypad_decimal(), b'n', send(b"\x1b[3~")),
             KEY_KPSLASH if applic => send(b"\x1bOo"),
             KEY_KPASTERISK if applic => send(b"\x1bOj"),
@@ -388,7 +389,7 @@ mod tests {
         assert_eq!(typed(&mut keyboard, &[KEY_F2])[0], Action::Switch(1));
         assert_eq!(typed(&mut keyboard, &[KEY_LEFT])[0], Action::SwitchBy(-1));
         keyboard.key(KEY_LEFTCTRL, PRESSED, PLAIN);
-        assert_eq!(typed(&mut keyboard, &[KEY_DELETE])[0], Action::Reboot);
+        assert_eq!(typed(&mut keyboard, &[KEY_DELETE])[0], Action::Attention);
         assert_eq!(typed(&mut keyboard, &[KEY_F3])[0], Action::Switch(2));
     }
 

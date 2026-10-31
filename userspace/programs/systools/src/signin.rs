@@ -16,8 +16,8 @@
 //! not the names capability, not the bypass right.
 
 use std::fs::File;
-use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::io::{self, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 
 use radix_abi::capability::{self, ObjectKind, Rights};
@@ -33,7 +33,7 @@ use crate::sys::{self, SYS};
 pub const FIRST_PROGRAM: &str = "/system/commands/login";
 
 /// The slots a session's process has, as a POSIX program Spark starts.
-const SLOTS: u32 = 128;
+pub const SLOTS: u32 = 128;
 
 /// The environment variable that says which descriptor holds the names
 /// capability Spark gave authd (service.toml(5), `names`).
@@ -47,16 +47,20 @@ pub fn names_slot() -> Option<u32> {
     (info.kind == ObjectKind::Names).then_some(slot)
 }
 
+/// The most descriptors a request comes with: an `elevate` request's
+/// three for the command and its pipe.
+pub const DESCRIPTORS_MAX: usize = 4;
+
 /// Reads from `stream` into `buffer`, as read(2) does, and keeps the
-/// first descriptor sent with the bytes (SCM_RIGHTS) in `fd` if it has
-/// none; any other is closed.
+/// descriptors sent with the bytes (SCM_RIGHTS) in `fds`, up to
+/// [`DESCRIPTORS_MAX`] in all; any more are closed.
 pub fn receive(
     stream: &UnixStream,
     buffer: &mut [u8],
-    fd: &mut Option<OwnedFd>,
+    fds: &mut Vec<OwnedFd>,
 ) -> io::Result<usize> {
     let mut iov = libc::iovec { iov_base: buffer.as_mut_ptr().cast(), iov_len: buffer.len() };
-    // Room for a few descriptors, aligned for the headers.
+    // Room for more descriptors than are kept, aligned for the headers.
     let mut control = [0u64; 8];
     // SAFETY: all zeros is a valid msghdr: numbers and null pointers.
     let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
@@ -81,8 +85,8 @@ pub fn receive(
                 for k in 0..bytes / size_of::<libc::c_int>() {
                     let at = data.add(k * size_of::<libc::c_int>());
                     let received = OwnedFd::from_raw_fd(at.cast::<libc::c_int>().read_unaligned());
-                    if fd.is_none() {
-                        *fd = Some(received);
+                    if fds.len() < DESCRIPTORS_MAX {
+                        fds.push(received);
                     }
                 }
             }
@@ -90,6 +94,41 @@ pub fn receive(
         }
     }
     Ok(n as usize)
+}
+
+/// Sends `bytes` on `stream` with the descriptors `fds` (SCM_RIGHTS) in
+/// the first message, as [`receive`] reads them.
+pub fn send_with_fds(stream: &UnixStream, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
+    let mut iov = libc::iovec { iov_base: bytes.as_ptr().cast_mut().cast(), iov_len: bytes.len() };
+    let mut control = [0u64; 8];
+    let room = size_of_val(&fds[..fds.len().min(DESCRIPTORS_MAX)]) as u32;
+    // SAFETY: all zeros is a valid msghdr: numbers and null pointers.
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &raw mut iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    // SAFETY: CMSG_SPACE only computes a size, which fits `control` for
+    // DESCRIPTORS_MAX descriptors.
+    message.msg_controllen = unsafe { libc::CMSG_SPACE(room) } as _;
+    // SAFETY: the control space holds one header and the descriptors, as
+    // CMSG_SPACE said; the macros point into it.
+    let sent = unsafe {
+        let header = libc::CMSG_FIRSTHDR(&raw const message);
+        (*header).cmsg_level = libc::SOL_SOCKET;
+        (*header).cmsg_type = libc::SCM_RIGHTS;
+        (*header).cmsg_len = libc::CMSG_LEN(room) as _;
+        let data = libc::CMSG_DATA(header);
+        for (k, fd) in fds.iter().take(DESCRIPTORS_MAX).enumerate() {
+            data.add(k * size_of::<libc::c_int>()).cast::<libc::c_int>().write_unaligned(*fd);
+        }
+        libc::sendmsg(stream.as_raw_fd(), &raw const message, 0)
+    };
+    if sent < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // What the first message did not take goes after it, as a write.
+    let rest = &bytes[sent as usize..];
+    if rest.is_empty() { Ok(()) } else { (&mut &*stream).write_all(rest) }
 }
 
 /// Whether `fd` is a terminal.
@@ -113,7 +152,7 @@ pub fn terminal_name(fd: &OwnedFd) -> String {
 
 /// `term` if it is a terminal type a session may be given, `dumb` if not:
 /// letters, digits, `-`, `_`, `.` and `+`, at most 64.
-fn terminal_type(term: &str) -> &str {
+pub fn terminal_type(term: &str) -> &str {
     let fine = |c: char| c.is_ascii_alphanumeric() || "-_.+".contains(c);
     if !term.is_empty() && term.len() <= 64 && term.chars().all(fine) { term } else { "dumb" }
 }
@@ -134,15 +173,16 @@ pub fn environment(user: &User, term: &str) -> Vec<String> {
 }
 
 /// The block `exec` takes (radix-process(2)): `args` with `env`, in `/`.
-pub fn exec_block(path: &str, args: &[&str], env: &[String]) -> Vec<u8> {
+pub fn exec_block(path: &[u8], args: &[&[u8]], env: &[String]) -> Vec<u8> {
     let mut block = Vec::new();
     let header = [process::EXEC_VERSION, args.len() as u32, env.len() as u32, 2];
     for word in header {
         block.extend_from_slice(&word.to_le_bytes());
     }
-    let strings = args.iter().copied().chain(env.iter().map(String::as_str)).chain(["/", path]);
+    let strings =
+        args.iter().copied().chain(env.iter().map(String::as_bytes)).chain([b"/".as_slice(), path]);
     for string in strings {
-        block.extend_from_slice(string.as_bytes());
+        block.extend_from_slice(string);
         block.push(0);
     }
     block
@@ -153,10 +193,10 @@ pub fn exec_block(path: &str, args: &[&str], env: &[String]) -> Vec<u8> {
 /// empty slot is a free descriptor to the C library, which the next open
 /// would take, so emptying each as it opened would give the same slot
 /// every time. Closing the descriptors deletes what is in them.
-struct Spares(Vec<File>);
+pub struct Spares(Vec<File>);
 
 impl Spares {
-    fn new(count: usize) -> io::Result<Spares> {
+    pub fn new(count: usize) -> io::Result<Spares> {
         let files =
             (0..count).map(|_| File::open("/devices/null")).collect::<io::Result<Vec<_>>>()?;
         for file in &files {
@@ -165,7 +205,7 @@ impl Spares {
         Ok(Spares(files))
     }
 
-    fn slot(&self, index: usize) -> u32 {
+    pub fn slot(&self, index: usize) -> u32 {
         sys::slot_of(self.0[index].as_raw_fd())
     }
 }
@@ -219,7 +259,8 @@ pub fn start(
         process::share(&SYS, child, from, to, Rights::ALL, 0)
             .map_err(failed("giving it its capabilities"))?;
     }
-    let block = exec_block(FIRST_PROGRAM, &["login", "--session"], &environment(user, term));
+    let block =
+        exec_block(FIRST_PROGRAM.as_bytes(), &[b"login", b"--session"], &environment(user, term));
     process::exec(&SYS, child, program, &block).map_err(failed("starting login"))?;
     // The child stays in the tree after its capability goes, for wait.
     let number = process::info(&SYS, child).map_err(failed("its number"))?.number;
@@ -250,7 +291,7 @@ mod tests {
 
     #[test]
     fn the_block_holds_the_arguments_then_the_environment() {
-        let block = exec_block("/p", &["p", "-s"], &["A=1".into()]);
+        let block = exec_block(b"/p", &[b"p", b"-s"], &["A=1".into()]);
         let words: Vec<u32> =
             block[..16].chunks(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
         assert_eq!(words, [process::EXEC_VERSION, 2, 1, 2]);

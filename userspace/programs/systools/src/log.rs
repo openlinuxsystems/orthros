@@ -13,6 +13,10 @@
 //! `_TRANSPORT=audit`, reads the audit log's security events (ADR 0211),
 //! and journalctl's `--vacuum-size` and `--vacuum-time` trim the log as
 //! logtrim(8) does.
+//!
+//! Root reads every record; anyone else, only the records of their own
+//! programs, as logd(8) answers them (ADR 0252), and is told so unless
+//! `-q`. An administrator reads the rest with `elevate log`.
 
 use std::ffi::OsStr;
 use std::io::{self, Write};
@@ -147,6 +151,7 @@ fn run(args: &mut Args, journalctl: bool) -> Result<i32, Fail> {
     let mut utc = false;
     let mut hostname = true;
     let mut mode = Mode::Records;
+    let mut quiet = false;
     let mut vacuum = Request { ask: "trim".into(), ..Request::default() };
     while let Some(arg) = args.next()? {
         match arg {
@@ -200,10 +205,11 @@ fn run(args: &mut Args, journalctl: bool) -> Result<i32, Fail> {
             // last thousand here; and the ones that change nothing here.
             Arg::Short('e') if journalctl => pager_end = true,
             Arg::Long(l) if l == "pager-end" && journalctl => pager_end = true,
-            Arg::Short('a' | 'l' | 'm' | 'q' | 'x') if journalctl => {}
+            Arg::Short('q') => quiet = true,
+            Arg::Long(l) if l == "quiet" => quiet = true,
+            Arg::Short('a' | 'l' | 'm' | 'x') if journalctl => {}
             Arg::Long(l)
-                if journalctl
-                    && ["all", "full", "merge", "quiet", "catalog", "system"].contains(&&*l) => {}
+                if journalctl && ["all", "full", "merge", "catalog", "system"].contains(&&*l) => {}
             Arg::Operand(operand) => {
                 let operand = operand.to_string_lossy().into_owned();
                 match journalctl.then(|| field_match(&operand)).transpose()? {
@@ -245,6 +251,14 @@ fn run(args: &mut Args, journalctl: bool) -> Result<i32, Fail> {
         }
     }
 
+    // As journalctl's hint to a user outside its groups (ADR 0252).
+    if util::own_user() != 0 && !quiet {
+        eprintln!(
+            "Hint: you see only the records of your own programs. An administrator sees all of \
+             them with: elevate {}",
+            if journalctl { "journalctl" } else { "log" }
+        );
+    }
     let show =
         Show { output, utc, host: hostname.then(util::hostname), color: util::is_terminal(1) };
     let out = io::stdout();
@@ -682,6 +696,7 @@ mod tests {
             from: "program".into(),
             name: "logtest".into(),
             process: Some(42),
+            user: Some(1001),
             audit: false,
             text: "marker".into(),
         };

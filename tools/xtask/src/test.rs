@@ -1306,7 +1306,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "signin",
-        about: "sign-in on the consoles: a machine with no account asks for its owner's, an administrator's, and signs her in; a second account signs in on Alt+F2 beside her; each session acts for its user on its own terminal, who lists both, neither reads the other's home, bob mounts and unmounts nothing, a wrong password waits and fails, and signing out shows the sign-in again",
+        about: "sign-in on the consoles: a machine with no account asks for its owner's, an administrator's, and signs her in; a second account signs in on Alt+F2 beside her; each session acts for its user on its own terminal, who lists both, neither reads the other's home, bob mounts and unmounts nothing, a user reads only their own programs' records of the log and not the kernel log or the audit log, a wrong password waits and fails, and signing out shows the sign-in again",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         // Spark starts the services, consoled among them with sign-in, and
@@ -1319,6 +1319,41 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: signin,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "elevate",
+        about: "elevate and sudo run commands as an administrator: alice, an administrator, types her password once, at the console's own prompt that Ctrl+Alt+Delete clears and no program reads, and runs commands as root with a clean environment and the fixed path, reads the kernel log and the audit log, Ctrl+C reaches an elevated command, an elevated shell runs on a terminal of its own, a wrong password is asked again, Esc closes the prompt, -S reads the password, -k locks the pane and -n will not ask; bob, who is not one, cannot, and each use is in the audit log; Ctrl+Alt+Delete's menu shows the sign-in on a free console",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        // As signin: Spark starts the services and signintest, which makes
+        // bob once alice is made.
+        cmdline: "lockdep -- --services --posix /system/tests/posix/signintest",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: elevate,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "startup-trouble",
+        about: "the boot menu's startup-trouble entry: the sign-in first shows its menu, which has no password to reset before the owner's account is made; once it is, the menu resets her password, which the old one no longer opens, and she is told at her next sign-in; the audit log keeps it, and the menu powers the computer off",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        // A normal boot, as from the boot menu's second entry.
+        cmdline: "lockdep startup-trouble",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: startup_trouble,
         disks: &[],
         second: None,
     },
@@ -2549,7 +2584,12 @@ fn cmdline_slot() -> String {
     format!("{:-<CMDLINE_SLOT$}", "ob-test-cmdline")
 }
 
-/// A copy of a test image with `cmdline` in its command-line slot.
+/// How many of a test image's boot menu entries hold the command line:
+/// the system's and its startup-trouble entry (dukovo-boot(7)).
+const CMDLINE_ENTRIES: usize = 2;
+
+/// A copy of a test image with `cmdline` in its command-line slots, one
+/// in each menu entry that holds it.
 pub fn with_cmdline(image: &[u8], cmdline: &str) -> Result<Vec<u8>, String> {
     let slot = cmdline_slot();
     let found: Vec<usize> = image
@@ -2558,20 +2598,22 @@ pub fn with_cmdline(image: &[u8], cmdline: &str) -> Result<Vec<u8>, String> {
         .filter(|(_, window)| *window == slot.as_bytes())
         .map(|(at, _)| at)
         .collect();
-    let [at] = found[..] else {
+    if found.is_empty() || found.len() > CMDLINE_ENTRIES {
         return Err(format!(
-            "the test image holds the command-line slot {} times, not once",
+            "the test image holds the command-line slot {} times, not once or twice",
             found.len()
         ));
-    };
+    }
     if cmdline.len() > CMDLINE_SLOT {
         return Err(format!("the command line is longer than {CMDLINE_SLOT} bytes"));
     }
     // Padded with spaces by bytes: a character may take more than one.
     let mut copy = image.to_vec();
-    let field = &mut copy[at..at + CMDLINE_SLOT];
-    field.fill(b' ');
-    field[..cmdline.len()].copy_from_slice(cmdline.as_bytes());
+    for at in found {
+        let field = &mut copy[at..at + CMDLINE_SLOT];
+        field.fill(b' ');
+        field[..cmdline.len()].copy_from_slice(cmdline.as_bytes());
+    }
     Ok(copy)
 }
 
@@ -7446,36 +7488,14 @@ fn accounts(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// lists both, signing out brings the sign-in back, and a wrong password
 /// is refused after a wait. The power button ends it.
 fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
-    boot_report(vm, case)?;
-    vm.expect("Boot complete.")?;
-    vm.expect_anywhere("authd: 0 accounts; answering at /system/live/authd/socket")?;
-    vm.expect_anywhere("consoled: started /system/commands/login on tty1 as process ")?;
-    // No account can sign in yet: the owner's comes first.
-    vm.expect_screen(&[
-        &format!("{RELEASE} {VERSION} (tty1)"),
-        "This computer has no account yet: make yours, the owner's,",
-    ])?;
-    answer_prompt(vm, "Name:", "alice")?;
-    answer_prompt(vm, "Full name (may be empty):", "Alice Liddell")?;
-    answer_prompt(vm, "New password:", "queen of hearts")?;
-    answer_prompt(vm, "The same again:", "queen of hearts")?;
-    vm.expect_anywhere("authd: made the account alice (1000), an administrator's, for process ")?;
-    vm.expect_anywhere("authd: alice signed in on pts/")?;
-    vm.expect_screen(&["Made alice, number 1000, home /users/alice"])?;
+    owner_signs_in(vm, case)?;
     answer_prompt(vm, "$", "clear; id; pwd; echo \"$USER $HOME $SHELL\"; tty")?;
     vm.expect_screen(&[
         "uid=1000(alice) gid=1000(alice) groups=1000(alice),10(admins)",
         "alice /users/alice /system/commands/nukesh",
         "/devices/pts/",
     ])?;
-    // Bob, whom signintest made, signs in on the second console.
-    vm.expect_anywhere("signintest: bob is made")?;
-    vm.press(&["alt-f2"])?;
-    vm.expect_anywhere("consoled: started /system/commands/login on tty2 as process ")?;
-    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty2)")])?;
-    answer_prompt(vm, "Name:", "bob")?;
-    answer_prompt(vm, "Password:", "white rabbit")?;
-    vm.expect_anywhere("authd: bob signed in on pts/")?;
+    bob_signs_in(vm)?;
     // Which pseudo-terminals the consoles got depends on what opened one
     // first; signintest checks that they differ.
     vm.expect_anywhere("signintest: alice on pts/")?;
@@ -7493,6 +7513,27 @@ fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
     // unmounts /processes for no one.
     answer_prompt(vm, "$", "clear; /system/tests/posix/signintest mount")?;
     vm.expect_screen(&["signintest-mount: every check passed"])?;
+    // The log is for administrators (ADR 0252). Bob reads his own
+    // programs' records alone, with a hint unless -q, and the kernel log
+    // and the audit log are refused him.
+    answer_prompt(
+        vm,
+        "$",
+        "clear; logger -t mine 'a line of bob'; sleep 2; log; echo \"records $(log -q | wc -l)\"",
+    )?;
+    vm.expect_screen(&[
+        "Hint: you see only the records of your own programs.",
+        " mine[",
+        "]: a line of bob",
+        "records 1",
+    ])?;
+    answer_prompt(vm, "$", "clear; dmesg; echo \"dmesg $?\"; log --audit; echo \"audit $?\"")?;
+    vm.expect_screen(&[
+        "dmesg: the kernel log is for administrators: run elevate dmesg",
+        "dmesg 1",
+        "log: the audit log is for administrators: run it with elevate",
+        "audit 1",
+    ])?;
     // Bob signs out, and the sign-in comes back on a clear screen. A wrong
     // password then waits and fails, and the right one signs him in again.
     answer_prompt(vm, "$", "clear; exit")?;
@@ -7509,6 +7550,218 @@ fn signin(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.press(&["alt-f1"])?;
     answer_prompt(vm, "$", "clear; ls /users/bob; echo \"status $?\"")?;
     vm.expect_screen(&["cannot open directory '/users/bob': Permission denied", "status 2"])?;
+    vm.press_power_button()?;
+    vm.expect("spark: every service has stopped")?;
+    vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// The start of the `signin` and `elevate` tests: the machine boots with
+/// no account, so tty1 asks for its owner's, and the test makes alice's,
+/// an administrator's, and signs her in.
+fn owner_signs_in(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_anywhere("authd: 0 accounts; answering at /system/live/authd/socket")?;
+    vm.expect_anywhere("consoled: started /system/commands/login on tty1 as process ")?;
+    // No account can sign in yet: the owner's comes first.
+    vm.expect_screen(&[
+        &format!("{RELEASE} {VERSION} (tty1)"),
+        "This computer has no account yet: make yours, the owner's,",
+    ])?;
+    answer_prompt(vm, "Name:", "alice")?;
+    answer_prompt(vm, "Full name (may be empty):", "Alice Liddell")?;
+    answer_prompt(vm, "New password:", "queen of hearts")?;
+    answer_prompt(vm, "The same again:", "queen of hearts")?;
+    vm.expect_anywhere("authd: made the account alice (1000), an administrator's, for process ")?;
+    vm.expect_anywhere("authd: alice signed in on pts/")?;
+    vm.expect_screen(&["Made alice, number 1000, home /users/alice"])
+}
+
+/// The `startup-trouble` test (ADR 0253): the computer starts as from its
+/// boot menu's startup-trouble entry, so tty1's sign-in shows that menu
+/// first. With no account there is no password to reset; signing in
+/// makes alice's, the owner's. Signed out, the menu comes back and resets
+/// her password: the old one no longer opens her account, the new one
+/// does, and she is told so once. The menu then powers the computer off.
+fn startup_trouble(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_anywhere("authd: 0 accounts; answering at /system/live/authd/socket")?;
+    vm.expect_screen(&[
+        &format!("{RELEASE} {VERSION} (tty1)"),
+        "Startup trouble: this computer was started from its boot menu's",
+        "1  Reset an administrator's password",
+        "4  Power off",
+    ])?;
+    answer_prompt(vm, "Choose 1 to 4:", "1")?;
+    vm.expect_screen(&["No administrator's account yet: signing in makes the owner's."])?;
+    answer_prompt(vm, "Choose 1 to 4:", "2")?;
+    answer_prompt(vm, "Name:", "alice")?;
+    answer_prompt(vm, "Full name (may be empty):", "Alice Liddell")?;
+    answer_prompt(vm, "New password:", "queen of hearts")?;
+    answer_prompt(vm, "The same again:", "queen of hearts")?;
+    vm.expect("authd: alice signed in on pts/")?;
+    answer_prompt(vm, "$", "exit")?;
+    vm.expect("authd: alice signed out on pts/")?;
+    // The menu comes back with the sign-in, and resets her password.
+    answer_prompt(vm, "Choose 1 to 4:", "1")?;
+    vm.expect_screen(&["Administrators: alice"])?;
+    answer_prompt(vm, "Whose password?", "alice")?;
+    answer_prompt(vm, "New password:", "march hare")?;
+    answer_prompt(vm, "The same again:", "march hare")?;
+    vm.expect("authd: the password of alice was reset from the startup-trouble menu, by process ")?;
+    vm.expect_screen(&["The password of alice is reset."])?;
+    // The old password opens nothing now; the new one does, and she is
+    // told what happened, once.
+    answer_prompt(vm, "Choose 1 to 4:", "2")?;
+    answer_prompt(vm, "Name:", "alice")?;
+    answer_prompt(vm, "Password:", "queen of hearts")?;
+    vm.expect("authd: a wrong password for alice, from process ")?;
+    vm.expect_screen(&["The name or the password is wrong."])?;
+    answer_prompt(vm, "Name:", "alice")?;
+    answer_prompt(vm, "Password:", "march hare")?;
+    vm.expect("authd: alice signed in on pts/")?;
+    vm.expect_screen(&["Your password was reset from the startup-trouble menu on "])?;
+    answer_prompt(vm, "$", "exit")?;
+    vm.expect("authd: alice signed out on pts/")?;
+    // Signed in again, on a cleared console, she is not told twice.
+    answer_prompt(vm, "Choose 1 to 4:", "2")?;
+    answer_prompt(vm, "Name:", "alice")?;
+    answer_prompt(vm, "Password:", "march hare")?;
+    answer_prompt(vm, "$", "whoami")?;
+    vm.expect_screen(&["alice"])?;
+    vm.expect_screen_without("was reset")?;
+    answer_prompt(vm, "$", "exit")?;
+    answer_prompt(vm, "Choose 1 to 4:", "4")?;
+    vm.expect("spark: every service has stopped")?;
+    vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// Bob, whom signintest made once alice was, signs in on the second
+/// console.
+fn bob_signs_in(vm: &mut Vm) -> Result<(), String> {
+    vm.expect_anywhere("signintest: bob is made")?;
+    vm.press(&["alt-f2"])?;
+    vm.expect_anywhere("consoled: started /system/commands/login on tty2 as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty2)")])?;
+    answer_prompt(vm, "Name:", "bob")?;
+    answer_prompt(vm, "Password:", "white rabbit")?;
+    vm.expect_anywhere("authd: bob signed in on pts/")
+}
+
+/// The `elevate` test (ADR 0219): alice, the owner and an administrator,
+/// and bob, who is not one, sign in as in `signin`. Bob cannot elevate.
+/// Alice types her password once on tty1 and runs commands as root, with
+/// root's environment and the fixed path, and reads what only root
+/// reads; Ctrl+C stops an elevated command, an elevated shell runs on a
+/// terminal of its own, `elevate -k` locks the pane again, `-n` will not
+/// ask for the password, and a wrong one is asked again. authd's audit
+/// lines say each time. The power button ends it.
+fn elevate(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    owner_signs_in(vm, case)?;
+    bob_signs_in(vm)?;
+    vm.expect_anywhere("signintest: every check passed")?;
+    // Bob is no administrator: refused before any password, and logged.
+    answer_prompt(vm, "$", "clear; elevate id -u; echo \"status $?\"; sudo -l")?;
+    vm.expect_screen(&[
+        "elevate: bob is not an administrator: only members of the admins group may elevate",
+        "status 1",
+        "User bob is not an administrator, and may not elevate",
+    ])?;
+    vm.expect_anywhere("authd: bob, not an administrator, asked to elevate on pts/")?;
+    // Alice, on tty1, types her password once for that pane, at the
+    // console's own prompt on the bottom line (ADR 0251). What she typed
+    // first goes when she presses Ctrl+Alt+Delete, and none of it reaches
+    // her shell.
+    vm.press(&["alt-f1"])?;
+    vm.expect_anywhere("consoled: asking for passwords on the consoles for authd")?;
+    answer_prompt(vm, "$", "clear; cat /system/state/authd/passwords; elevate id")?;
+    vm.expect_screen(&["[elevate] Password for alice, to run /system/commands/id:"])?;
+    vm.type_text("mad hatter")?;
+    vm.press(&["ctrl-alt-delete"])?;
+    answer_prompt(vm, "to run /system/commands/id:", "queen of hearts")?;
+    vm.expect_anywhere("authd: alice elevated on pts/")?;
+    vm.expect_anywhere("(password typed): process ")?;
+    vm.expect_screen(&[
+        "cat: /system/state/authd/passwords: Permission denied",
+        "uid=0(root) gid=0(root)",
+    ])?;
+    vm.expect_screen_without("hatter")?;
+    vm.expect_screen_without("queen")?;
+    // Within the 15 minutes the pane asks no more: sudo, root's
+    // environment with the fixed path, and what only root reads.
+    answer_prompt(
+        vm,
+        "$",
+        "clear; sudo whoami; elevate env | sort; elevate cut -c1-13 /system/state/authd/passwords",
+    )?;
+    vm.expect_screen(&[
+        "root",
+        "HOME=/",
+        "LOGNAME=root",
+        "PATH=/system/commands:/applications/commands",
+        "SUDO_USER=alice",
+        "USER=root",
+        "alice:$argon2",
+        "bob:$argon2id",
+    ])?;
+    vm.expect_anywhere("(unlocked): process ")?;
+    vm.expect_anywhere("authd: alice's elevated process ")?;
+    // The kernel log and the audit log are hers through elevate (ADR
+    // 0252); the brackets keep the command line itself from matching.
+    answer_prompt(
+        vm,
+        "$",
+        "clear; elevate dmesg | grep -m1 -o 'authd: alice elevat[e]d on'; elevate log -q --audit \
+         | grep -c 'alice elevat[e]d' | sed 's/^[1-9][0-9]*$/audited/'",
+    )?;
+    vm.expect_screen(&["authd: alice elevated on", "audited"])?;
+    // Ctrl+C reaches the elevated command through its own terminal.
+    answer_prompt(vm, "$", "clear; elevate sleep 1000; echo \"status $?\"")?;
+    vm.expect_anywhere("runs /system/commands/sleep 1000, for process ")?;
+    std::thread::sleep(Duration::from_secs(1));
+    vm.press(&["ctrl-c"])?;
+    vm.expect_screen(&["status 130"])?;
+    // An elevated shell: root's, marked by its prompt, on a terminal of
+    // its own.
+    answer_prompt(vm, "$", "clear; elevate -s")?;
+    answer_prompt(vm, "#", "clear; echo \"id $(id -u)\"; tty; exit")?;
+    vm.expect_screen(&["id 0", "/devices/pts/"])?;
+    // Locked again: -n will not ask, and a wrong password is asked again.
+    answer_prompt(vm, "$", "clear; elevate -k; elevate -n true; echo \"status $?\"")?;
+    vm.expect_screen(&["a password is needed, and -n says not to ask for one", "status 1"])?;
+    answer_prompt(vm, "$", "clear; sudo true; echo \"status $?\"")?;
+    answer_prompt(vm, "to run /system/commands/true:", "cheshire cat")?;
+    vm.expect_anywhere("authd: a wrong password for alice, from process ")?;
+    vm.expect_screen(&["Sorry, try again."])?;
+    answer_prompt(vm, "to run /system/commands/true:", "queen of hearts")?;
+    vm.expect_screen(&["Sorry, try again.", "status 0"])?;
+    // Esc closes the prompt, and elevate says no password was typed;
+    // with -S it reads the password itself, from its input.
+    answer_prompt(vm, "$", "clear; elevate -k; elevate true; echo \"status $?\"")?;
+    vm.expect_screen(&["to run /system/commands/true:"])?;
+    vm.press(&["esc"])?;
+    vm.expect_screen(&["elevate: no password was typed", "status 1"])?;
+    answer_prompt(
+        vm,
+        "$",
+        "clear; echo 'queen of hearts' | elevate -S whoami; echo \"status $?\"",
+    )?;
+    vm.expect_screen(&["root", "status 0"])?;
+    // Ctrl+Alt+Delete with no prompt: consoled's own menu. Esc closes it;
+    // Enter shows the sign-in on a console where nobody is signed in,
+    // tty3, as alice is on tty1 and bob on tty2.
+    vm.press(&["ctrl-alt-delete"])?;
+    vm.expect_screen(&["Ctrl+Alt+Delete    Enter: sign in    R: restart    P: power off"])?;
+    vm.press(&["esc"])?;
+    vm.expect_screen_without("Enter: sign in")?;
+    vm.press(&["ctrl-alt-delete"])?;
+    vm.expect_screen(&["Enter: sign in"])?;
+    vm.press(&["ret"])?;
+    vm.expect_anywhere("consoled: Ctrl+Alt+Delete menu: sign-in on tty3")?;
+    vm.expect_screen(&["(tty3)", "Name:"])?;
     vm.press_power_button()?;
     vm.expect("spark: every service has stopped")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
@@ -7838,8 +8091,13 @@ mod tests {
         assert!(text.contains("/boot/radix qemu-exit kdb   "));
         assert_eq!(text.len(), image.len());
         assert!(with_cmdline(b"no slot", "x").is_err());
-        let twice = format!("{slot}{slot}").into_bytes();
-        assert!(with_cmdline(&twice, "x").is_err());
+        // Both menu entries' slots are filled, but no more are taken.
+        let twice = format!("radix {slot}\nradix startup-trouble {slot}\n").into_bytes();
+        let filled = String::from_utf8(with_cmdline(&twice, "kdb").unwrap()).unwrap();
+        assert_eq!(filled.matches("kdb ").count(), 2);
+        assert!(filled.contains("radix startup-trouble kdb "));
+        let thrice = format!("{slot}{slot}{slot}").into_bytes();
+        assert!(with_cmdline(&thrice, "x").is_err());
         // Padded by bytes, so a line with wider characters fills it too.
         let wide = String::from_utf8(with_cmdline(&image, "hostname=Dukovó").unwrap()).unwrap();
         assert_eq!(wide.len(), image.len());

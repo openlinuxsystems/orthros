@@ -29,6 +29,13 @@ facility, but for its security events, of authpriv (ADR 0211).
 with the services' lines named by service, kept across boots by
 *logd*(8).
 
+The kernel log is for administrators, as Linux's is with
+*kernel.dmesg_restrict* set: _/devices/kmsg_ is root's, mode 0622, so
+only root reads it or clears it, and anyone may write a line to it, as
+*logger*(1) does (ADR 0252). An administrator reads it with *elevate
+dmesg*; dmesg tells anyone else so. *log*(1) shows everyone the lines
+their own programs wrote.
+
 # OPTIONS
 
 *-l*, *--level* _list_
@@ -92,7 +99,11 @@ Watch the log:
 
 	dmesg -w
 
+As an administrator, from a session:
+
+	elevate dmesg
+
 # SEE ALSO
 
-*log*(1), *logd*(8), *systools*(1), *radix-kernel-log*(2),
+*log*(1), *logger*(1), *logd*(8), *elevate*(8), *systools*(1), *radix-kernel-log*(2),
 *radix-debug*(7), *radix-files*(7)

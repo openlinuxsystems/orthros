@@ -102,6 +102,10 @@ int main(int argc, char **argv) {
 	read_answer(send_request(REQUEST("add\0bob\0Bob\0user\0white rabbit\0")), answer,
 			sizeof(answer));
 	CHECK(!strcmp(answer, "ok made bob, number 1001, home /users/bob\n"));
+	// Outside the startup-trouble menu not even root resets a password
+	// (ADR 0253); root changes one with passwd, as an administrator does.
+	read_answer(send_request(REQUEST("reset\0alice\0x\0")), answer, sizeof(answer));
+	CHECK(!strncmp(answer, "no ", 3) && strstr(answer, "only from the startup-trouble menu"));
 	printf("signintest: bob is made\n");
 	fflush(stdout);
 	char alice_tty[64], bob_tty[64];

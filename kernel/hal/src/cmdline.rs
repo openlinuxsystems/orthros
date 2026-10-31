@@ -146,6 +146,13 @@ pub const FLAGS: &[Flag] = &[
         summary: "for consoled, not the kernel: root's shell on each console with no sign-in, \
                   as the boot tests run it",
     },
+    Flag {
+        name: "startup-trouble",
+        value: None,
+        summary: "for login and authd, not the kernel: the consoles' sign-in offers the \
+                  startup-trouble menu, which resets an administrator's password; the boot \
+                  menu's startup-trouble entry sets it",
+    },
 ];
 
 /// The self-tests `selftest=name` runs; radix-debug(7) describes them.

@@ -108,6 +108,7 @@ dependencies = [
 name = "consoled"
 version = "0.10.4"
 dependencies = [
+ "accounts",
  "keymap",
  "libc",
  "radix-abi",

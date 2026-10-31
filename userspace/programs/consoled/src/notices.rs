@@ -31,10 +31,10 @@ const FOLLOW: &[u8] = b"{\"ask\":\"list\",\"count\":0,\"follow\":true}\n";
 /// The most bytes of a line from notifyd; a longer one is dropped.
 const LINE_MAX: usize = 64 * 1024;
 
-/// A non-blocking connection to notifyd's socket, made at once or not
-/// at all: consoled's loop must never wait, not even for a notifyd that
-/// does not accept.
-fn connect_now() -> io::Result<UnixStream> {
+/// A non-blocking connection to the socket at `path`, made at once or
+/// not at all: consoled's loop must never wait, not even for a notifyd
+/// or an authd that does not accept.
+pub fn connect_now(path: &str) -> io::Result<UnixStream> {
     // SAFETY: socket(2) takes no pointers.
     let fd = unsafe {
         libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0)
@@ -47,7 +47,10 @@ fn connect_now() -> io::Result<UnixStream> {
     // SAFETY: all zeros is a valid sockaddr_un.
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    for (to, &from) in address.sun_path.iter_mut().zip(SOCKET.as_bytes()) {
+    if path.len() >= address.sun_path.len() {
+        return Err(io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+    }
+    for (to, &from) in address.sun_path.iter_mut().zip(path.as_bytes()) {
         *to = from as libc::c_char;
     }
     let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
@@ -204,7 +207,7 @@ impl Notices {
     }
 
     fn connect(&mut self, now: Instant) {
-        let connected = connect_now().and_then(|mut stream| {
+        let connected = connect_now(SOCKET).and_then(|mut stream| {
             stream.write_all(FOLLOW)?;
             Ok(stream)
         });
