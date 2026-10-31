@@ -1236,6 +1236,13 @@ _target/userspace/_).
 		and types, a full-speed hub is handed to a companion, which
 		names the mouse behind it, and *lsusb -t* shows both buses.
 
+	*storage-ide*
+		The storage test on four disks on the two channels of QEMU's
+		PIIX3 IDE controller, the last solid state and partitioned
+		with a GPT: the kernel names each disk with its channel and
+		end, and the files written in the first boot are checked in
+		the second.
+
 ; Phase 11's boot tests go above this line.
 
 	_Phase 12: networking_

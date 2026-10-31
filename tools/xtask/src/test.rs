@@ -83,6 +83,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-fbcon",
     "radix-gpio",
     "radix-i2c",
+    "radix-ide",
     "radix-hal",
     "radix-hid",
     "radix-hw",
@@ -266,6 +267,11 @@ enum Bus {
     /// SATA disks and the boot stick, in the order the controller finds
     /// them: the root ports in order, then the hubs' ports.
     Usb(&'static str),
+    /// An end of a channel of a PCI IDE controller of the case's own
+    /// (QEMU's `piix3-ide`, in compatibility mode), in order: the primary
+    /// channel's master and slave, then the secondary's. Named `sd` and a
+    /// letter, as SATA disks are, in that order.
+    Ide,
     /// Logical unit `n` of a USB disk that speaks USB Attached SCSI
     /// (QEMU's `usb-uas`, with a `scsi-hd` for each unit), at this QEMU
     /// port of a case with [`UAS_PORTS`]: port `1` or `2` at SuperSpeed,
@@ -370,7 +376,8 @@ pub struct DiskImage {
 /// the boot stick's, each in their order, and `nvme<n>n1` and on for
 /// each NVMe controller's namespaces.
 fn disk_names(disks: &[Disk]) -> Vec<String> {
-    let sata_disks = disks.iter().filter(|disk| disk.bus == Bus::Sata).count() as u8;
+    let sata_disks =
+        disks.iter().filter(|disk| matches!(disk.bus, Bus::Sata | Bus::Ide)).count() as u8;
     let (mut virtio, mut sata, mut usb) = (b'a', b'a', b'a' + sata_disks + 1);
     let mut namespaces = [0u32; 256];
     disks
@@ -378,7 +385,7 @@ fn disk_names(disks: &[Disk]) -> Vec<String> {
         .map(|disk| {
             let (prefix, letter) = match disk.bus {
                 Bus::Virtio => ("vd", &mut virtio),
-                Bus::Sata => ("sd", &mut sata),
+                Bus::Sata | Bus::Ide => ("sd", &mut sata),
                 Bus::Usb(_) | Bus::Uas(..) => ("sd", &mut usb),
                 Bus::Nvme(n) => {
                     namespaces[usize::from(n)] += 1;
@@ -2753,6 +2760,9 @@ fn run_case(
     if case.disks.iter().any(|disk| disk.bus == Bus::Sata) {
         extra.extend(["-device".into(), "ich9-ahci,id=sata".into()]);
     }
+    if case.disks.iter().any(|disk| disk.bus == Bus::Ide) {
+        extra.extend(["-device".into(), "piix3-ide,id=pata".into()]);
+    }
     if case.disks.iter().any(|disk| matches!(disk.bus, Bus::Usb(_) | Bus::Uas(..)))
         && case.media != Media::Usb
     {
@@ -2767,7 +2777,7 @@ fn run_case(
         extra.extend(["-device".into(), format!("nvme,id=nvme{n},serial=dukovo-test-{n}")]);
     }
     let mut namespaces = [0u32; 256];
-    let mut port = 0;
+    let (mut port, mut end) = (0, 0);
     for (i, (disk, image)) in case.disks.iter().zip(&disks).enumerate() {
         let mut file = qemu::option_value(&image.path);
         if disk.errors.is_some() {
@@ -2788,6 +2798,11 @@ fn run_case(
             Bus::Sata => {
                 port += 1;
                 format!("ide-hd,drive=disk{i},bus=sata.{}{device}", port - 1)
+            }
+            Bus::Ide => {
+                end += 1;
+                let (channel, unit) = ((end - 1) / 2, (end - 1) % 2);
+                format!("ide-hd,drive=disk{i},bus=pata.{channel},unit={unit}{device}")
             }
             Bus::Nvme(n) => {
                 namespaces[usize::from(n)] += 1;
@@ -5515,7 +5530,7 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
             return Err(format!("the kernel described nvme{n} as \"{line}\""));
         }
     }
-    let mut port = 0;
+    let (mut port, mut end) = (0, 0);
     for (disk, name) in case.disks.iter().zip(disk_names(case.disks)) {
         let size = disk_size(disk.kib);
         // A disk of 512-byte sectors says nothing of them.
@@ -5542,6 +5557,17 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
                     "512 bytes a block, NCQ depth 32, write cache, TRIM".to_string(),
                 )
             }
+            Bus::Ide => {
+                end += 1;
+                let channel = if end <= 2 { "primary" } else { "secondary" };
+                let unit = if end % 2 == 1 { "master" } else { "slave" };
+                (
+                    line_of(&format!(
+                        "Disk: {name} is an ATA disk of {size} on the IDE {channel} channel at "
+                    ))?,
+                    format!(", {unit}: QEMU HARDDISK, 512 bytes a block, write cache"),
+                )
+            }
             Bus::Nvme(_) => (
                 line_of(&format!("Disk: {name} is an NVMe namespace of {size}: QEMU NVMe Ctrl, "))?,
                 format!("{} bytes a block{sectors}{ro}, write cache, deallocates", disk.sector),
@@ -5564,8 +5590,8 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
                 ),
             ),
         };
-        // Only a SATA disk's line says whether it is solid state.
-        let says_solid = disk.bus == Bus::Sata && disk.solid();
+        // Only a SATA or IDE disk's line says whether it is solid state.
+        let says_solid = matches!(disk.bus, Bus::Sata | Bus::Ide) && disk.solid();
         if !line.contains(&want) || line.ends_with(", solid state") != says_solid {
             return Err(format!("the kernel described {name} as \"{line}\""));
         }
@@ -5590,8 +5616,12 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
     let on = |bus: Bus| case.disks.iter().filter(|disk| disk.bus == bus).count();
     let plural =
         |count: usize, what: &str| format!("{count} {what}{}", if count == 1 { "" } else { "s" });
+    let ide = match on(Bus::Ide) {
+        0 => String::new(),
+        count => format!(", {}", plural(count, "IDE disk")),
+    };
     line_of(&format!(
-        "; {}, {}, {}",
+        "; {}, {}, {}{ide}",
         plural(on(Bus::Virtio), "virtio disk"),
         plural(on(Bus::Sata), "SATA disk"),
         plural(nvme_controllers(case.disks).len(), "NVMe controller")
@@ -5713,7 +5743,7 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     for (name, disk) in volumes.iter().zip(&filesystems) {
         vm.expect(&format!("storage: /kernel/block/{name}/size: "))?;
         let model = match disk.bus {
-            Bus::Sata => "QEMU HARDDISK",
+            Bus::Sata | Bus::Ide => "QEMU HARDDISK",
             Bus::Nvme(_) => "QEMU NVMe Ctrl",
             Bus::Usb(_) | Bus::Uas(..) => "QEMU QEMU HARDDISK",
             Bus::Virtio => "",

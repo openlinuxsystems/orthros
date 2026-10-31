@@ -156,6 +156,7 @@ dependencies = [
  "radix-hid",
  "radix-hw",
  "radix-i2c",
+ "radix-ide",
  "radix-input",
  "radix-ipc",
  "radix-kdb",
@@ -368,6 +369,14 @@ version = "0.10.4"
 name = "radix-i2c"
 version = "0.10.4"
 dependencies = [
+ "radix-hw",
+]
+
+[[package]]
+name = "radix-ide"
+version = "0.10.4"
+dependencies = [
+ "radix-ahci",
  "radix-hw",
 ]
 

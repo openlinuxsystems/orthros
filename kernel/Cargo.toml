@@ -23,6 +23,7 @@ members = [
     "drivers/crosec",
     "drivers/gpio",
     "drivers/i2c",
+    "drivers/ide",
     "drivers/nvme",
     "drivers/scsi",
     "drivers/smbus",

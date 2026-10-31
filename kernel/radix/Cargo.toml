@@ -19,6 +19,7 @@ bench = false
 radix-abi = { path = "../abi" }
 radix-acpi = { path = "../lib/acpi" }
 radix-ahci = { path = "../drivers/ahci" }
+radix-ide = { path = "../drivers/ide" }
 radix-nvme = { path = "../drivers/nvme" }
 radix-block = { path = "../fs/block" }
 radix-bootfs = { path = "../lib/bootfs" }

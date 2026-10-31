@@ -456,6 +456,13 @@ We implement these from their published descriptions. No code is copied.
   `drivers/usb/host/pci-quirks.c` (GPL-2.0)
   ([ADR 0243](docs/adr/0243-usb-2-and-1-1-controllers-are-polled-by-a-kernel-thread-each.md)).
   No code is taken from them.
+- The "Programming Interface for Bus Master IDE Controller", revision
+  1.0 (1994), and ATA/ATAPI Command Set 4 (ACS-4, INCITS 529), from which
+  `radix-ide` drives IDE channels with bus-master DMA. The order of a
+  channel's reset and probe follows FreeBSD's `sys/dev/ata`
+  (BSD-2-Clause)
+  ([ADR 0244](docs/adr/0244-ide-disks-are-one-polled-queue-per-channel.md)).
+  No code is taken from it.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,
