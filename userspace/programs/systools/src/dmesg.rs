@@ -44,12 +44,14 @@ pub struct Line {
     pub seq: u64,
     /// The process that wrote it, for a program's record.
     pub process: Option<u64>,
+    /// The user the writer acted for, for a program's record.
+    pub user: Option<u32>,
     pub usec: u64,
     pub text: String,
 }
 
 /// Parses `/devices/kmsg`'s `PRIORITY,SEQUENCE,MICROSECONDS,-;TEXT`,
-/// with `,process=N` after the flags for a program's record.
+/// with `,process=N,user=N` after the flags for a program's record.
 pub fn parse(record: &[u8]) -> Option<Line> {
     let text = String::from_utf8_lossy(record);
     let (head, body) = text.split_once(';')?;
@@ -57,12 +59,20 @@ pub fn parse(record: &[u8]) -> Option<Line> {
     let priority: u32 = fields.next()?.parse().ok()?;
     let seq: u64 = fields.next()?.parse().ok()?;
     let usec: u64 = fields.next()?.parse().ok()?;
-    let process = fields.find_map(|f| f.strip_prefix("process=")?.parse().ok());
+    let (mut process, mut user) = (None, None);
+    for field in fields {
+        if let Some(n) = field.strip_prefix("process=") {
+            process = n.parse().ok();
+        } else if let Some(n) = field.strip_prefix("user=") {
+            user = n.parse().ok();
+        }
+    }
     Some(Line {
         level: (priority & 7) as u8,
         facility: (priority >> 3).min(u32::from(u8::MAX)) as u8,
         seq,
         process,
+        user,
         usec,
         text: body.trim_end_matches('\n').to_string(),
     })
@@ -185,7 +195,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         .read(true)
         .custom_flags(if follow || follow_new { 0 } else { libc::O_NONBLOCK })
         .open(KMSG)
-        .map_err(|e| util::failed(&KMSG, e))?;
+        .map_err(refused)?;
     if follow_new {
         // SAFETY: lseek on our own descriptor.
         unsafe { libc::lseek(kmsg.as_raw_fd(), 0, libc::SEEK_END) };
@@ -257,10 +267,20 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     Ok(0)
 }
 
+/// The kernel log is root's to read (ADR 0252), as Linux's is with
+/// `kernel.dmesg_restrict`: says how an administrator reads it.
+fn refused(error: io::Error) -> Fail {
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        return fail("the kernel log is for administrators: run elevate dmesg".into());
+    }
+    util::failed(&KMSG, error)
+}
+
 /// Clears the log (`dmesg -C`): later reads start after what it holds.
+/// Clearing needs the log open for reading and writing, as only root
+/// may open it for reading.
 fn clear_log() -> Result<(), Fail> {
-    let kmsg: File =
-        OpenOptions::new().write(true).open(KMSG).map_err(|e| util::failed(&KMSG, e))?;
+    let kmsg: File = OpenOptions::new().read(true).write(true).open(KMSG).map_err(refused)?;
     file::control(&SYS, sys::slot_of(kmsg.as_raw_fd()), CLEAR, 0, 0, 0).map_err(|s| {
         fail(format!("clear kernel buffer failed: {}", util::strip_os_error(&sys::io_error(s))))
     })?;
@@ -280,7 +300,11 @@ mod tests {
         assert_eq!(line.text, "spark: started");
         let line = parse(b"14,13,1500001,-,process=1;spark[3]: started\n").unwrap();
         assert_eq!((line.level, line.facility, line.seq, line.process), (6, 1, 13, Some(1)));
+        assert_eq!(line.user, None);
         assert_eq!(line.text, "spark[3]: started");
+        let line = parse(b"13,15,1500003,-,process=58,user=1001;bob: hello; world\n").unwrap();
+        assert_eq!((line.process, line.user), (Some(58), Some(1001)));
+        assert_eq!(line.text, "bob: hello; world");
         let line = parse(b"86,14,1500002,-;kmsg: the kernel log was cleared\n").unwrap();
         assert_eq!((line.level, line.facility, line.process), (6, 10, None));
         assert_eq!(facility_list("kern,authpriv").unwrap(), [0, 10]);

@@ -15,7 +15,10 @@ journalctl - read the system's log, with journalctl's options
 
 journalctl is *log*(1) with the options of systemd's journalctl and its
 defaults, for the scripts and the habits that come from Linux: without
-*-b* or *-k* it shows every boot the log keeps. What it shows comes from
+*-b* or *-k* it shows every boot the log keeps. A user who is not root
+sees only the records of their own programs, as *log*(1) says; an
+administrator sees all of them with *elevate journalctl*. What it
+shows comes from
 *logd*(8), which keeps no journal files: *--vacuum-size* and the other
 options that change the journal's files are not taken.
 
@@ -58,7 +61,11 @@ _pattern_, *-n*, *--lines* [_n_], *-f*, *--follow*, *-r*, *--reverse*,
 	*1G*), or those older than _span_ (*2weeks*, *10d*, *6months*,
 	*1y*). The audit log keeps to its own setting (*log*(5)).
 
-*-a*, *--all*, *-l*, *--full*, *-m*, *--merge*, *-q*, *--quiet*, *-x*, *--catalog*, *--system*, *--no-pager*
+*-q*, *--quiet*
+	Say nothing of what a user who is not root does not see, as
+	journalctl's hint to a user outside its groups.
+
+*-a*, *--all*, *-l*, *--full*, *-m*, *--merge*, *-x*, *--catalog*, *--system*, *--no-pager*
 	Change nothing.
 
 # MATCHES
@@ -75,4 +82,4 @@ is wrong.
 
 # SEE ALSO
 
-*log*(1), *dmesg*(1), *logd*(8), *logtrim*(8), *systools*(1)
+*log*(1), *dmesg*(1), *logger*(1), *logd*(8), *logtrim*(8), *systools*(1)

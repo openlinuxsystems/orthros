@@ -24,7 +24,7 @@ use radix_abi::errors::Kernel;
 use radix_abi::file::Whence;
 use radix_abi::kernel_log::WRITE_MAX;
 use radix_klog::{Level, Origin, TextBuf, error};
-use radix_vfs::{In, Kind, Node, NodeRef, Out, Stat};
+use radix_vfs::{Access, In, Kind, Node, NodeRef, Out, Stat};
 
 use super::FileObject;
 use crate::sched::{self, Options, Policy, wait};
@@ -48,6 +48,13 @@ const LOOK_NS: u64 = 10_000_000;
 pub struct Kmsg(pub u64);
 
 impl Node for Kmsg {
+    // Root's to read, as Linux's with `dmesg_restrict`, which Ubuntu
+    // sets; anyone's to write a line to, which the kernel marks with the
+    // writer's process and user (ADR 0252).
+    fn access(&self) -> Access {
+        Access { owner: 0, group: 0, mode: 0o622 }
+    }
+
     fn stat(&self) -> Stat {
         Stat {
             kind: Kind::CharDevice,
@@ -147,10 +154,10 @@ pub fn read(file: &FileObject, out: &mut dyn Out, non_blocking: bool) -> Result<
             return Err(Kernel::Gone.status(0));
         }
         if let Some(record) = radix_klog::record(seq) {
-            let mut line = TextBuf::<{ radix_klog::RECORD_TEXT + 48 }>::new();
+            let mut line = TextBuf::<{ radix_klog::RECORD_TEXT + 64 }>::new();
             // The facility times eight and the level, as Linux's; a
-            // program's record names its process after the flags, as
-            // Linux's `caller=` field does.
+            // program's record names its process and its user after the
+            // flags, as Linux's `caller=` field does (ADR 0252).
             let priority = u32::from(record.facility) * 8 + u32::from(priority(record.level));
             let _ = if record.process == 0 {
                 writeln!(
@@ -163,10 +170,11 @@ pub fn read(file: &FileObject, out: &mut dyn Out, non_blocking: bool) -> Result<
             } else {
                 writeln!(
                     line,
-                    "{priority},{},{},-,process={};{}",
+                    "{priority},{},{},-,process={},user={};{}",
                     record.seq,
                     record.time_ns / 1000,
                     record.process,
+                    record.user,
                     record.text()
                 )
             };
@@ -236,6 +244,7 @@ pub fn write(data: &dyn In) -> Result<usize, Status> {
     let (level, facility, text) = priority_of(text);
     let me = sched::running();
     let process = me.as_ref().and_then(|me| me.user()).map_or(0, |user| user.process.number());
+    let user = me.as_ref().and_then(|me| me.user()).map_or(0, |user| user.process.user());
     let name = me.as_ref().map(|me| me.name());
     let name = name.as_ref().map_or("?", |name| name.as_str());
     // Saturating, so that no process passes for another (logd trusts
@@ -243,7 +252,7 @@ pub fn write(data: &dyn In) -> Result<usize, Status> {
     let process = u32::try_from(process).unwrap_or(u32::MAX);
     radix_klog::log_from(
         level,
-        Origin { process, facility },
+        Origin { process, user, facility },
         format_args!("{}: {}", Shown(name.as_bytes()), Shown(text)),
     );
     Ok(len)

@@ -1228,7 +1228,12 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                     0
                 }
                 Target::Kmsg if a.request == radix_abi::kernel_log::CLEAR => {
-                    found.cap.check(ObjectKind::File, Rights::WRITE).map_err(cap_error)?;
+                    // Anyone may write to the log; only its reader may
+                    // clear it (ADR 0252).
+                    found
+                        .cap
+                        .check(ObjectKind::File, Rights::READ.union(Rights::WRITE))
+                        .map_err(cap_error)?;
                     fs::kmsg::clear();
                     0
                 }

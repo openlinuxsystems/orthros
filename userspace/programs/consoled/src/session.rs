@@ -51,6 +51,8 @@ pub struct Console {
     quick_exits: u32,
     /// When to start the next session, while it waits after quick exits.
     pub retry_at: Option<Instant>,
+    /// The terminal's name, as `pts/N`, while it has one.
+    terminal: Option<String>,
 }
 
 /// An argument or environment string as C wants it; one with a NUL in it
@@ -71,7 +73,20 @@ impl Console {
             started: Instant::now(),
             quick_exits: 0,
             retry_at: None,
+            terminal: None,
         }
+    }
+
+    /// The terminal's name, as /processes gives it: `pts/N`.
+    pub fn terminal(&self) -> Option<&str> {
+        self.terminal.as_deref()
+    }
+
+    /// Whether someone is signed in: a session has the terminal as its
+    /// controlling terminal. Sign-in itself does not take it (ADR 0250).
+    pub fn signed_in(&self) -> bool {
+        // SAFETY: tcgetsid only reads the terminal's session.
+        self.master_fd().is_some_and(|fd| unsafe { libc::tcgetsid(fd) } > 0)
     }
 
     /// Whether a session runs or waits to run.
@@ -103,12 +118,14 @@ impl Console {
             ws_ypixel: 0,
         };
         let (mut master, mut slave) = (-1, -1);
-        // SAFETY: openpty writes the two descriptors; the name may be null.
+        let mut pts = [0 as libc::c_char; 64];
+        // SAFETY: openpty writes the two descriptors and the terminal's
+        // name, which is far shorter than the buffer.
         let opened = unsafe {
             libc::openpty(
                 &raw mut master,
                 &raw mut slave,
-                std::ptr::null_mut(),
+                pts.as_mut_ptr(),
                 std::ptr::null(),
                 &raw const size,
             )
@@ -160,6 +177,7 @@ impl Console {
             }
         }
         drop(slave);
+        self.terminal = pts_name(&pts);
         self.master = Some(master);
         self.child = Some(pid);
         self.hung_up = false;
@@ -222,6 +240,7 @@ impl Console {
     pub fn ended(&mut self, status: i32, shell: &Shell) -> Option<String> {
         self.child = None;
         self.master = None;
+        self.terminal = None;
         self.hung_up = false;
         if self.started.elapsed() < QUICK {
             self.quick_exits += 1;
@@ -249,6 +268,14 @@ impl Console {
             }
         }
     }
+}
+
+/// The `pts/N` in a terminal's path, as openpty wrote it.
+fn pts_name(name: &[libc::c_char]) -> Option<String> {
+    let bytes: Vec<u8> = name.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+    let path = String::from_utf8(bytes).ok()?;
+    let at = path.rfind("pts/")?;
+    Some(path[at..].to_string())
 }
 
 /// Makes the master non-blocking and closed on exec.
@@ -301,6 +328,16 @@ pub fn expand_issue(issue: &str, number: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminals_are_named_as_processes_names_them() {
+        let name = |text: &str| -> Vec<libc::c_char> {
+            text.bytes().map(|b| b as libc::c_char).chain([0, 7]).collect()
+        };
+        assert_eq!(pts_name(&name("/devices/pts/3")).as_deref(), Some("pts/3"));
+        assert_eq!(pts_name(&name("/dev/pts/12")).as_deref(), Some("pts/12"));
+        assert_eq!(pts_name(&name("")), None);
+    }
 
     #[test]
     fn expands_the_issue_escapes() {

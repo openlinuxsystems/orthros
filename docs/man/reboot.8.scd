@@ -55,7 +55,8 @@ reached, 2 for an option it does not know.
 
 # KEYS
 
-On the virtual consoles (*consoled*(8)), Ctrl+Alt+Del runs *reboot*.
+On the virtual consoles (*consoled*(8)), Ctrl+Alt+Delete shows a menu
+whose *R* runs *reboot* and whose *P* runs *poweroff*.
 
 # FILES
 

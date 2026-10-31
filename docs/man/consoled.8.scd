@@ -87,6 +87,35 @@ and *notifications*(1) lists them all. consoled logs *showing
 notifications from notifyd* when it finds notifyd, and tries again every
 5 seconds while it is not running.
 
+# PASSWORDS
+
+When *elevate*(8), or *sudo*(8), needs its person's password in a pane
+on one of the consoles, consoled asks for it, not elevate (ADR 0251).
+*authd*(8) tells consoled, which shows the prompt on that console's
+bottom line, in black on cyan:
+
+```
+ [elevate] Password for alice, to run /system/commands/user add bob:
+```
+
+The keys typed while it shows are consoled's: what is typed never
+shows and never reaches the console's programs, *Enter* sends it to
+authd alone, on a connection of its own, *Backspace* takes back a
+character and *Ctrl+U* all of them, and *Esc* or *Ctrl+C* close the
+prompt, and elevate says no password was typed. Alt+F1 to Alt+F6 still
+show the other consoles; the prompt waits on its own. No program can
+read the password, and none can draw this prompt so that it takes
+keys: *Ctrl+Alt+Delete*, which no program receives, brings the real one
+back cleared, or shows consoled's menu if there is none. A wrong
+password is asked again by a new prompt, after authd's wait, and
+elevate says *Sorry, try again.* on the terminal.
+
+consoled logs *asking for passwords on the consoles for authd* when it
+finds authd, and tries again every 5 seconds while it is not running;
+meanwhile, and on any other terminal, as over SSH, elevate asks itself.
+With root's shell on each console and no sign-in, consoled asks for no
+passwords.
+
 # KEYS
 
 *Alt+F1* to *Alt+F6*
@@ -102,7 +131,14 @@ notifications from notifyd* when it finds notifyd, and tries again every
 	Lock is pressed again.
 
 *Ctrl+Alt+Delete*
-	Run *reboot*(8).
+	The secure attention key, which no program ever receives (ADR
+	0251). When the shown console asks for a password, it clears what
+	was typed there, so that what is typed next goes to consoled alone.
+	Otherwise it shows consoled's menu on the bottom line: *Enter*
+	shows the sign-in, on the shown console if nobody is signed in
+	there, or else on the first console where nobody is; *R* runs
+	*reboot*(8) and *P* *poweroff*(8); *Esc* closes it. With root's
+	shell on each console and no sign-in, the menu has no *Enter*.
 
 *Caps Lock*, *Num Lock*
 	As on any keyboard; every keyboard's lights follow them. The keypad
@@ -168,8 +204,12 @@ _/system/settings/spark/services/consoled.toml_
 _/system/live/notify/socket_
 	notifyd's socket, which consoled follows.
 
+_/system/live/authd/socket_
+	authd's socket, which consoled asks for prompts and answers them on.
+
 # SEE ALSO
 
-*login*(1), *authd*(8), *spark*(8), *reboot*(8), *keymap*(1), *keymap*(5), *nukesh*(1), *dmesg*(1),
+*login*(1), *authd*(8), *elevate*(8), *spark*(8), *reboot*(8),
+*keymap*(1), *keymap*(5), *nukesh*(1), *dmesg*(1),
 *notifyd*(8), *notify-send*(1), *dukovo-boot*(7),
 *radix-framebuffer*(2), *radix-input*(2), *radix-files*(7)

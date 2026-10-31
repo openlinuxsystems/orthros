@@ -310,6 +310,19 @@ fn with_user<T>(uid: u32, read: impl FnOnce(&libc::passwd) -> T) -> Option<T> {
     (e == 0 && !found.is_null()).then(|| read(&pw))
 }
 
+/// Whether the kernel was started with `flag` (dukovo-boot(7)): one of
+/// the words of `/kernel/cmdline` before a lone `--`, which are the
+/// kernel's, the rest being Spark's.
+pub fn kernel_flag(flag: &str) -> bool {
+    let line = std::fs::read_to_string("/kernel/cmdline").unwrap_or_default();
+    kernel_flag_in(&line, flag)
+}
+
+/// Whether the kernel flags of command line `line` have `flag`.
+fn kernel_flag_in(line: &str, flag: &str) -> bool {
+    line.split_whitespace().take_while(|w| *w != "--").any(|w| w == flag)
+}
+
 /// The user this program runs as.
 pub fn own_user() -> u32 {
     // SAFETY: geteuid has no preconditions.
@@ -555,6 +568,15 @@ pub fn escape(bytes: &[u8], hex: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kernel_flags() {
+        assert!(kernel_flag_in("lockdep startup-trouble -- --services", "startup-trouble"));
+        assert!(kernel_flag_in("startup-trouble", "startup-trouble"));
+        assert!(!kernel_flag_in("lockdep -- startup-trouble", "startup-trouble"));
+        assert!(!kernel_flag_in("startup-trouble=no", "startup-trouble"));
+        assert!(!kernel_flag_in("", "startup-trouble"));
+    }
 
     #[test]
     fn sizes_read_as_coreutils_prints_them() {

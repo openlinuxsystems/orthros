@@ -4,8 +4,9 @@
 # Accounts: authd(8) alone changes the account files: the names in
 # /system/settings/passwd and group, and the passwords' Argon2id hashes
 # in /system/state/authd, which no other program reads. user(8) and
-# passwd(1) ask it (ADR 0218), and login(1) signs people in through it
-# (ADR 0250).
+# passwd(1) ask it (ADR 0218), login(1) signs people in through it
+# (ADR 0250), and elevate(8) runs commands as an administrator through it
+# (ADR 0219).
 #
 # service.toml(5) explains each setting. `service check authd` checks
 # this file, and `service edit authd` checks it as you save.
@@ -35,3 +36,7 @@ runs-with-your-access = true
 # The names capability: it starts each session as the person who signs
 # in (ADR 0250). No other service holds it.
 names = true
+# The platform capability, which it hands to an administrator's command
+# inside elevate (ADR 0219), so that ectool(8) works there as at root's
+# shell.
+admin.hardware = true

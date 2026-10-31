@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 This chapter describes the system's log and its notifications as of
 Phase 13 of the roadmap. The full references are logd(8), log(1),
-journalctl(1), logtrim(8), log(5), dmesg(1), notifyd(8),
+journalctl(1), logger(1), logtrim(8), log(5), dmesg(1), notifyd(8),
 notify-send(1) and notifications(1).
 
 ## What the log holds
@@ -21,9 +21,29 @@ line of JSON.
 
 Each record says when it was made, in which boot, how urgent it is
 (error, warning, info or debug), and who wrote it: the kernel, a service
-by its name, or a program by its name and process number. Who wrote a
-record is what the kernel says, not what the record says, so a program
-cannot pass its lines off as a service's.
+by its name, or a program by its name, its process number and the user
+it ran as. Who wrote a record is what the kernel says, not what the
+record says, so a program cannot pass its lines off as a service's, or
+as another user's.
+
+A script writes a line with `logger`: `logger -t backup "All 3 disks are
+copied."` and `log backup` shows it.
+
+## Who reads what
+
+The log is for administrators, as on Ubuntu, where only the `adm` group
+reads the whole journal and `dmesg` needs root. Everyone reads the
+records of their own programs:
+
+| Who | `log` and `journalctl` | `log --audit`, `log --disk-usage`, `logtrim` | `dmesg` |
+| --- | --- | --- | --- |
+| Anyone | The records of their own programs | No | No |
+| An administrator, with `elevate` | Every record | Yes | Yes |
+
+So an administrator types `elevate log -p error` or `elevate dmesg`.
+Without `elevate`, `log` adds a hint on its standard error that it shows
+only your own programs' records; `-q` leaves it out. Anyone can still
+write to the log.
 
 ## Reading it
 
@@ -53,9 +73,9 @@ Narrow it down with options, which all must hold together:
 
 `journalctl` takes systemd's options, so what you type on Linux works:
 `journalctl -u volumed.service -b`, `journalctl -k`, `journalctl -f`,
-`journalctl -p err --since today`. `dmesg` still reads the kernel's ring
-directly, and `dmesg -k` or `dmesg -u` shows only the kernel's records or
-only the programs'.
+`journalctl -p err --since today`. `elevate dmesg` still reads the
+kernel's ring directly, and `dmesg -k` or `dmesg -u` shows only the
+kernel's records or only the programs'.
 
 ## The audit log
 
@@ -64,11 +84,13 @@ keeps them for a year in `/system/state/log/audit`. Today they are
 Spark's answers to requests that change something (a service started,
 stopped or restarted, the machine powered off), each with the process
 that asked; the power button; the kernel log cleared; records the
-kernel's ring lost before logd read them; and the log trimmed. Signing
-in, `elevate` and permissions will be, as they come.
+kernel's ring lost before logd read them; the log trimmed; accounts
+made, passwords changed and wrong passwords; signing in and out; and
+each command run with `elevate`, and each refusal. Permissions will be,
+as they come.
 
 ```
-$ log --audit
+$ elevate log --audit
 Oct 30 21:40:12 dukovo spark: asked to restart volumed, by process 57
 ```
 
@@ -122,6 +144,6 @@ refuses more than 10 in 10 seconds from one program.
 ## When logd is not running
 
 `log` and `journalctl` read through logd. If it has stopped, `service
-logd status` says why, `service logd start` starts it again, and `dmesg`
-still shows the kernel's newest records. Started again, logd goes on
+logd status` says why, `service logd start` starts it again, and
+`elevate dmesg` still shows the kernel's newest records. Started again, logd goes on
 from the last record it kept, so nothing is kept twice.
