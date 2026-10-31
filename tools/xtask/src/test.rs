@@ -1249,6 +1249,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "accounts",
+        about: "authd keeps the accounts: user add makes an administrator and an account with an empty password, with their groups, homes and Argon2id hashes in files of the right modes, which getpwnam, getgrnam, id and user list read; a right password opens an account, a wrong one or a name there is not is answered alike after a wait, and tries at once wait their turn; root changes a password with passwd, and alice changes hers given hers, but not bob's, makes no account, checks no one else's password and reads no hash",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "lockdep -- --services --posix --names /system/tests/posix/accounttest",
+        cpus: 2,
+        memory: "512M",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: accounts,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "spark-network",
         about: "Spark gives each service the network its file asks for, and none to one that asks for nothing",
         firmware: Firmware::Uefi,
@@ -2457,7 +2473,7 @@ fn boot_tests(ctx: &Ctx, built: &Built, cases: &[&Case], timeout: Duration) -> R
 
     let root = if cases.iter().any(|case| case.disks.iter().any(|disk| disk.fat == ROOT)) {
         let path = dir.join("root.btrfs");
-        image::make_root(ctx, &built.programs.bootfs, &dir.join("root-staging"), &path)?;
+        image::make_root(ctx, &built.programs.bootfs, &dir.join("root-staging"), &path, None)?;
         Some(path)
     } else {
         None
@@ -3870,7 +3886,7 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Boot complete.")?;
     vm.expect("spark: Spark v2 is process ")?;
     vm.expect("spark: listening at /system/live/spark/control")?;
-    vm.expect("spark: 5 services in /system/settings/spark/services, 5 enabled")?;
+    vm.expect("spark: 6 services in /system/settings/spark/services, 6 enabled")?;
     vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
     vm.expect("consoled: console of ")?;
     vm.expect("consoled: started /system/commands/nukesh on tty1 as process ")?;
@@ -7146,7 +7162,7 @@ fn principals(vm: &mut Vm, case: &Case) -> Result<(), String> {
 fn services(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
-    vm.expect_anywhere("spark: 5 services in /system/settings/spark/services, 5 enabled")?;
+    vm.expect_anywhere("spark: 6 services in /system/settings/spark/services, 6 enabled")?;
     vm.expect_ahead("spark: started /system/tests/posix/servicetest as process ")?;
     let code = program_line(vm, "(/system/tests/posix/servicetest) exited with code ")?;
     let log = vm.log();
@@ -7179,6 +7195,41 @@ fn services(vm: &mut Vm, case: &Case) -> Result<(), String> {
     ] {
         if !log.contains(said) {
             return Err(format!("Spark did not say \"{said}\""));
+        }
+    }
+    Ok(())
+}
+
+/// The `accounts` test: Spark starts the services, authd among them,
+/// and accounttest (userspace/posix/accounttest.c) as root with the
+/// names capability, which makes accounts with user(8), checks what
+/// authd wrote and how it answers, and starts itself as alice
+/// (ADR 0218).
+fn accounts(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_anywhere("authd: 0 accounts; answering at /system/live/authd/socket")?;
+    vm.expect_ahead("spark: started /system/tests/posix/accounttest as process ")?;
+    let code = program_line(vm, "(/system/tests/posix/accounttest) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> =
+        log.lines().filter(|line| line.contains("accounttest: FAILED")).map(str::trim).collect();
+    if !failed.is_empty() {
+        return Err(format!("accounttest failed: {}", failed.join("; ")));
+    }
+    if code != "0x0" || !log.contains("accounttest: every check passed") {
+        return Err(format!("accounttest exited with code {code}"));
+    }
+    // What authd did is in the audit log: the accounts it made, the
+    // wrong passwords, and the password changed.
+    for said in [
+        "authd: made the account alice (1000), an administrator's, for process ",
+        "authd: made the account bob (1001), a user's, for process ",
+        "authd: a wrong password for alice, from process ",
+        "authd: a wrong password for nobody, from process ",
+    ] {
+        if !log.contains(said) {
+            return Err(format!("authd did not say \"{said}\""));
         }
     }
     Ok(())

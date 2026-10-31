@@ -188,7 +188,7 @@ const BACKLOG_MAX: u64 = 4096;
 const SOCKET_NAME_MAX: u64 = 107;
 
 /// A file.
-interface file = 0x000c version 7 {
+interface file = 0x000c version 8 {
     kind = file;
     /// Reads from byte `offset` into `buffer`; returns how many bytes it
     /// read, fewer than asked at the end of the file. Needs the read right.
@@ -320,12 +320,15 @@ interface file = 0x000c version 7 {
     method socket_name = 17 (peer: bool, buffer: out bytes) -> (len: u64)
         raises [no_such_slot, empty_slot, bad_address, not_socket, not_connected];
     /// What a socket is: whether it listens (SO_ACCEPTCONN), whether it
-    /// is connected, and for a connected one the number of the process at
-    /// the other end (SO_PEERCRED's `pid`): the one that connected, or for
+    /// is connected, and for a connected one the process at the other end,
+    /// SO_PEERCRED: its number, the user it acted for and that user's
+    /// group (radix-names(2)). That is the process that connected, or for
     /// the connecting end, the one that listened, as each was when the
-    /// connection was made; for a pair's ends, the process that made the
-    /// pair; for a network socket, 0.
-    method socket_state = 18 () -> (listening: bool, connected: bool, peer: u64)
+    /// connection was made or the listening began; for a pair's ends, the
+    /// process that made the pair; for a network socket, 0 for all three.
+    /// A service such as authd tells who asks it so.
+    method socket_state = 18 () -> (listening: bool, connected: bool, peer: u64, user: u32,
+                                    group: u32)
         raises [no_such_slot, empty_slot, not_socket];
     /// Sends `data` as `send` does, with the files whose slots `slots`
     /// holds (u32 each, at most SEND_FILES_MAX): copies of their

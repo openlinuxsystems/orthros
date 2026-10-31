@@ -18,7 +18,9 @@
 //! Every process is root's until users come
 //! (Phase 13), so the user columns all say root.
 
+mod account;
 mod args;
+mod authd;
 mod balance;
 mod blkid;
 mod column;
@@ -52,6 +54,7 @@ mod power;
 mod priority;
 mod probe;
 mod proc;
+mod prompt;
 mod ps;
 mod quota;
 mod replace;
@@ -87,6 +90,7 @@ type Tool = fn(&mut Args) -> Result<i32, Fail>;
 
 /// The tools, by name, in order.
 const TOOLS: &[(&str, Tool)] = &[
+    ("authd", authd::main),
     ("balance", balance::main),
     ("blkid", blkid::main),
     ("chgrp", modes::chgrp),
@@ -125,6 +129,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("notify-send", notifyd::notify_send),
     ("notifyd", notifyd::main),
     ("nvme", nvme::main),
+    ("passwd", account::passwd),
     ("pgrep", signals::pgrep),
     ("pidstat", pidstat::main),
     ("pkill", signals::pkill),
@@ -147,6 +152,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("top", top::main),
     ("tree", tree::main),
     ("uptime", sessions::uptime),
+    ("user", account::user),
     ("users", sessions::users),
     ("vmstat", memory::vmstat),
     ("volumed", volumed::main),

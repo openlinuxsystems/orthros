@@ -440,6 +440,7 @@ static void named(void) {
 	size = sizeof(cred);
 	CHECK(getsockopt(a, SOL_SOCKET, SO_PEERCRED, &cred, &size) == 0);
 	CHECK(size == sizeof(cred) && cred.pid == getpid());
+	CHECK(cred.uid == getuid() && cred.gid == getgid());
 	// Connected and listening sockets stay so.
 	CHECK_ERROR(connect(second, (struct sockaddr *)&addr, addr_len), EISCONN);
 	CHECK_ERROR(listen(second, 1), EINVAL);
