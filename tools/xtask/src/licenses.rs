@@ -54,6 +54,9 @@ const FIRMWARE_ALLOW: &[&str] = &["LicenseRef-Intel-Microcode"];
 /// tmux's allocation wrappers are under Tatu Ylonen's short notice from
 /// ssh, and the base64 code it builds in, as the C library has none, also
 /// under IBM's notice, which SPDX has no identifier for (ADR 0091).
+/// The root certificates Mozilla trusts come as data under the Community
+/// Data License Agreement - Permissive 2.0, which asks only that its text
+/// go with them (ADR 0192).
 const PORT_EXTRA_ALLOW: &[&str] = &[
     "CC0-1.0",
     "GPL-2.0-or-later",
@@ -69,6 +72,7 @@ const PORT_EXTRA_ALLOW: &[&str] = &[
     "LGPL-2.1-or-later",
     "SSH-short",
     "LicenseRef-IBM-base64",
+    "CDLA-Permissive-2.0",
 ];
 
 /// Crates from crates.io that compile another project's C code into what

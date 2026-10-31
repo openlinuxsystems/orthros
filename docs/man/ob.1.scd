@@ -448,10 +448,11 @@ _target/userspace/_).
 		on twice and that the disk refuses writes, fill 384 MiB with a
 		pattern and read it all back, fork a child that checks half of
 		it and changes a quarter while the parent's stays, and turn the
-		area off with *swapoff*(8) while some of the 64 MiB it keeps is
-		still on it, all without the out-of-memory policy stopping a
-		domain. The area's header must be as *mkswap* made it after the
-		boot.
+		area off with *swapoff*(8) while some of what it keeps is still
+		on it: the first 16 MiB, or as much of them as half the memory
+		left free has room for. All without the out-of-memory policy
+		stopping a domain. The area's header must be as *mkswap* made
+		it after the boot.
 
 	*spark-stop*
 		Point Spark at three test services: _stubborn_ ignores SIGTERM,
@@ -1304,6 +1305,25 @@ _target/userspace/_).
 ; Phase 11's boot tests go above this line.
 
 	_Phase 12: networking_
+
+	*tls*
+		Boot 2 CPUs under UEFI from the USB stick, and have Spark start
+		_/system/tests/posix/tls-test_ with its network capability
+		(ADR 0192). ring's SHA-2, HMAC and HKDF must give their
+		standards' answers, its AES-GCM and ChaCha20-Poly1305 seal 36
+		messages as OpenSSL does and refuse each with a changed tag, and
+		OpenSSL's ECDSA, Ed25519 and RSA signatures must check out.
+		rustls must then make 19 handshakes over *lo*, each with the
+		version, cipher suite, key exchange group and kind of server key
+		asked for, every one TLS 1.2 and 1.3 offer on ring, and carry 4
+		MiB each way through one connection; and refuse a certificate for
+		another name, from an unknown authority, expired, or without its
+		intermediate, and a server of TLS 1.2 alone, ask for and check a
+		client's certificate, and not trust the test authority by the
+		system's roots. At least 100 root certificates must parse from
+		_/system/resources/certificates/ca-certificates.crt_, which
+		_/etc/ssl/certs/ca-certificates.crt_ and _/etc/ssl/cert.pem_ must
+		lead to.
 
 ; Phase 12's boot tests go above this line.
 

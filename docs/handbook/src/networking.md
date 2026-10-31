@@ -103,6 +103,12 @@ WireGuard. This page grows with each.
   ([ADR 0191](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0191-netd-sets-each-card-up-by-dhcp-or-as-its-settings-say.md)).
   What a DHCP server says is checked before it reaches the routes or
   the resolver.
+- **TLS for programs in Rust**, rustls on ring, and the root
+  certificates Mozilla trusts in
+  `/system/resources/certificates/ca-certificates.crt`, which
+  `/etc/ssl/certs/ca-certificates.crt` and `/etc/ssl/cert.pem` lead to
+  ([ADR 0192](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0192-tls-is-rustls-on-ring-and-mozillas-roots-are-a-file-of-the-systems.md)).
+  dukovo-certificates(7) says how to trust an authority of your own.
 
 Native programs use the sockets through radix-network(2) and
 radix-file(2).
@@ -111,11 +117,14 @@ radix-file(2).
 
 A service file asks for what it needs, and gets nothing else:
 
-```
-description = A web server
-program = /system/commands/httpd
-network.outbound = no
-network.listen = 80, 443
+```toml
+service_version = 1
+description = "A web server"
+program = "/system/commands/httpd"
+
+[permissions]
+network.outbound = false
+network.listen = [80, 443]
 ```
 
 Spark derives one capability for each range from its own and puts them
@@ -217,6 +226,18 @@ server offers, which a socket bound to the bare card asks for:
 
 ```
 ./ob test --case interfaces
+```
+
+## Trying TLS
+
+The `tls` boot test runs `tls-test`, which checks ring's hashes and
+ciphers against answers OpenSSL gave, OpenSSL's signatures, rustls's
+handshakes over `lo` with each version, cipher suite, key exchange
+group and kind of key, the certificates a client must refuse, and the
+system's root certificates:
+
+```
+./ob test --case tls
 ```
 
 ## Trying the sockets
