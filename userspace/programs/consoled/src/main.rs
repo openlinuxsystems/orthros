@@ -29,6 +29,7 @@ mod screen;
 mod session;
 mod sys;
 mod term;
+mod welcome;
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
@@ -65,6 +66,20 @@ const POWEROFF: &str = "/system/commands/poweroff";
 
 /// What runs on each console: the sign-in.
 const LOGIN: &str = "/system/commands/login";
+
+/// welcome.toml(5), when the banner shows on this boot. A file that is not
+/// there is the defaults; its mistakes are logged, and leave their keys at
+/// the defaults.
+fn read_welcome() -> Option<welcome::Welcome> {
+    let (welcome, problems) = match std::fs::read_to_string(welcome::SETTINGS) {
+        Ok(text) => welcome::Welcome::parse(&text),
+        Err(_) => (welcome::Welcome::default(), Vec::new()),
+    };
+    for problem in problems {
+        eprintln!("consoled: {}: {problem}", welcome::SETTINGS);
+    }
+    welcome::shows_this_boot(&welcome, welcome::SHOWN).then_some(welcome)
+}
 
 /// The write end of the pipe the SIGCHLD handler wakes the loop with.
 static WAKE: AtomicI32 = AtomicI32::new(-1);
@@ -538,7 +553,8 @@ fn main() -> ExitCode {
         None => (true, LOGIN.to_string(), "/".to_string()),
     };
     let issue = std::fs::read_to_string(ISSUE).unwrap_or_else(|_| DEFAULT_ISSUE.into());
-    let shell = Shell { env: session_env(&path, &home), path, sign_in, issue };
+    let welcome = sign_in.then(read_welcome).flatten();
+    let shell = Shell { env: session_env(&path, &home), path, sign_in, issue, welcome };
     let mut wake = match watch_children() {
         Ok(wake) => wake,
         Err(err) => {

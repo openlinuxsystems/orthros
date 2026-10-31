@@ -33,6 +33,9 @@ pub struct Shell {
     pub env: Vec<String>,
     /// The text shown before it starts: /system/settings/issue's.
     pub issue: String,
+    /// The welcome banner, shown in the issue's place above the sign-in
+    /// prompt when welcome.toml(5) says so (ADR 0261).
+    pub welcome: Option<crate::welcome::Welcome>,
 }
 
 /// One virtual console.
@@ -109,7 +112,15 @@ impl Console {
     pub fn start(&mut self, shell: &Shell) -> io::Result<()> {
         self.retry_at = None;
         self.term.reset();
-        let issue = expand_issue(&shell.issue, self.number);
+        let number = self.number;
+        let issue = match &shell.welcome {
+            Some(welcome) if shell.sign_in => {
+                welcome.render(self.term.cols(), self.term.rows(), &|text: &str| {
+                    expand_issue(text, number)
+                })
+            }
+            _ => expand_issue(&shell.issue, number),
+        };
         self.term.feed(issue.replace('\n', "\r\n").as_bytes());
         let size = libc::winsize {
             ws_row: self.term.rows() as u16,
