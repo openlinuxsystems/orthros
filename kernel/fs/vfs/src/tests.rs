@@ -2196,3 +2196,161 @@ fn the_change_time_follows_names_and_times() {
     let after = vfs.stat(&K, &root, "a").unwrap();
     assert!(after.changed > t && after.changed == after.modified);
 }
+
+/// What `path` beneath `base` really is, as realpath(3) gets it.
+fn real(vfs: &Vfs, base: &Location, path: &str) -> String {
+    let mut out = std::vec![0u8; 256];
+    let n = vfs.real_path(&ALICE, base, path, &mut SliceMut(&mut out[..])).unwrap();
+    String::from_utf8(out[..n].to_vec()).unwrap()
+}
+
+/// A view shows what is attached to it, at its names, and nothing past
+/// them (ADR 0215): `..`, links and real paths stay in it.
+#[test]
+fn a_view_is_made_of_attached_places() {
+    let vfs = vfs();
+    let root = vfs.root();
+    vfs.make_directory(&K, &root, "system", DIR).unwrap();
+    vfs.make_directory(&K, &root, "system/libraries", DIR).unwrap();
+    write(&vfs, &root, "system/libraries/libc.so", b"elf").unwrap();
+    write(&vfs, &root, "system/secret", b"no").unwrap();
+    vfs.make_directory(&K, &root, "home", DIR).unwrap();
+    vfs.make_directory(&K, &root, "home/alice", owned(&ALICE, 0o700)).unwrap();
+    vfs.make_directory(&K, &root, "tmp", Access { mode: 0o1777, ..DIR }).unwrap();
+    vfs.make_directory(&K, &root, "tmp/session-1", owned(&ALICE, 0o700)).unwrap();
+    write(&vfs, &root, "tmp/shared", b"everyone's").unwrap();
+    write(&vfs, &root, "motd", b"hello").unwrap();
+    let place = |path: &str| vfs.open(&ALICE, &root, path, OpenFlags::default()).unwrap();
+
+    let view = vfs.make_view(&ALICE).unwrap();
+    assert!(view.in_view() && !place("home/alice").in_view());
+    vfs.attach(&view, "system/libraries", &place("system/libraries"), &ALICE, true).unwrap();
+    vfs.attach(&view, "home/alice", &place("home/alice"), &ALICE, false).unwrap();
+    vfs.attach(&view, "tmp", &place("tmp/session-1"), &ALICE, false).unwrap();
+    vfs.attach(&view, "etc/motd", &place("motd"), &ALICE, true).unwrap();
+    vfs.attach_link(&view, "lib", "system/libraries").unwrap();
+    vfs.attach_link(&view, "home/alice/../../escape", "/home").unwrap_err();
+    vfs.attach_link(&view, "here", "/tmp").unwrap();
+
+    // Its names, as directories and files of the kernel's.
+    let mut top = names(&vfs, &view);
+    top.sort_by(|a, b| a.0.cmp(&b.0));
+    let expected = [
+        ("etc", Kind::Directory),
+        ("here", Kind::Symlink),
+        ("home", Kind::Directory),
+        ("lib", Kind::Symlink),
+        ("system", Kind::Directory),
+        ("tmp", Kind::Directory),
+    ];
+    assert_eq!(top, expected.map(|(n, k)| (String::from(n), k)));
+    assert_eq!(
+        read_all(&vfs.open(&ALICE, &view, "lib/libc.so", OpenFlags::default()).unwrap().node),
+        b"elf"
+    );
+    assert_eq!(
+        read_all(&vfs.open(&ALICE, &view, "etc/motd", OpenFlags::default()).unwrap().node),
+        b"hello"
+    );
+    // Nothing past them: not the rest of /system, nor /tmp's other files.
+    assert_eq!(vfs.stat(&ALICE, &view, "system/secret").err(), Some(Error::NotFound));
+    assert_eq!(vfs.stat(&ALICE, &view, "tmp/shared").err(), Some(Error::NotFound));
+    // `..` goes back along the walk, and stays at the view's root.
+    assert_eq!(vfs.stat(&ALICE, &view, "tmp/../system/libraries/libc.so").unwrap().size, 3);
+    assert_eq!(vfs.stat(&ALICE, &view, "../../etc/motd").unwrap().size, 5);
+    assert_eq!(vfs.stat(&ALICE, &view, "system/libraries/..").unwrap().kind, Kind::Directory);
+    assert_eq!(vfs.stat(&ALICE, &view, "system/libraries/../secret").err(), Some(Error::NotFound));
+    // A link to `/` starts again at the view's root.
+    write(&vfs, &view, "tmp/mine", b"m").unwrap();
+    vfs.make_link(&ALICE, &view, "home/alice/back", "/here/mine", owned(&ALICE, 0)).unwrap();
+    assert_eq!(
+        read_all(&vfs.open(&ALICE, &view, "home/alice/back", OpenFlags::default()).unwrap().node),
+        b"m"
+    );
+    assert_eq!(
+        read_all(
+            &root.node.lookup("tmp").unwrap().lookup("session-1").unwrap().lookup("mine").unwrap()
+        ),
+        b"m"
+    );
+    // Real paths are the view's.
+    assert_eq!(real(&vfs, &view, "home/alice/back"), "tmp/mine");
+    // `..` after a link goes on from where the link led, as on Linux.
+    assert_eq!(real(&vfs, &view, "lib/../../tmp/.."), ".");
+    assert_eq!(real(&vfs, &view, "lib/.."), "system");
+    // What is attached read-only stays so, and all beneath it.
+    assert_eq!(write(&vfs, &view, "system/libraries/new", b"x"), Err(Error::ReadOnly));
+    let cut = OpenFlags { truncate: true, ..OpenFlags::default() };
+    assert_eq!(vfs.open(&K, &view, "etc/motd", cut).err(), Some(Error::ReadOnly));
+    let motd = vfs.open(&ALICE, &view, "etc/motd", OpenFlags::default()).unwrap();
+    assert_eq!(motd.writable(), Err(Error::ReadOnly));
+    let libraries = vfs.open(&ALICE, &view, "system/libraries", OpenFlags::default()).unwrap();
+    assert!(libraries.read_only() && !libraries.in_view());
+    assert_eq!(write(&vfs, &libraries, "new", b"x"), Err(Error::ReadOnly));
+    // The view's own directories take no files, and no mounts.
+    assert_eq!(write(&vfs, &view, "new", b"x"), Err(Error::ReadOnly));
+    assert_eq!(vfs.make_directory(&ALICE, &view, "system/new", DIR), Err(Error::ReadOnly));
+    // What is there is there first, as on Linux, so `mkdir -p` passes a
+    // place attached to a view and a directory of a read-only one.
+    assert_eq!(vfs.make_directory(&ALICE, &view, "home/alice", DIR), Err(Error::Exists));
+    assert_eq!(vfs.make_directory(&ALICE, &view, "system", DIR), Err(Error::Exists));
+    assert_eq!(vfs.make_link(&ALICE, &view, "lib", "x", LINK), Err(Error::Exists));
+    assert_eq!(
+        vfs.mount(&K, &view, "tmp", tmpfs(4096), "t", false).err(),
+        Some(Error::NotSupported)
+    );
+    assert_eq!(vfs.unmount(&K, &view, "tmp"), Err(Error::NotSupported));
+}
+
+/// What a view takes, and from whom.
+#[test]
+fn a_view_takes_only_its_own_names_places() {
+    let vfs = vfs();
+    let root = vfs.root();
+    vfs.make_directory(&K, &root, "a", DIR).unwrap();
+    write(&vfs, &root, "f", b"f").unwrap();
+    vfs.make_link(&K, &root, "l", "a", LINK).unwrap();
+    let a = vfs.open(&K, &root, "a", OpenFlags::default()).unwrap();
+    let view = vfs.make_view(&ALICE).unwrap();
+    // Another name's place, or one reached with the bypass by a view
+    // without it, would let the view reach it as another name.
+    assert_eq!(vfs.attach(&view, "a", &a, &BOB, false), Err(Error::NotPermitted));
+    let alice_bypass = Who { bypass: true, ..ALICE };
+    vfs.attach(&view, "a", &a, &alice_bypass, false).unwrap();
+    let bypassing = vfs.make_view(&alice_bypass).unwrap();
+    assert_eq!(vfs.attach(&bypassing, "a", &a, &ALICE, false), Err(Error::NotPermitted));
+    vfs.attach(&bypassing, "a", &a, &alice_bypass, false).unwrap();
+    // A name is taken once; a path goes through no place attached.
+    assert_eq!(vfs.attach(&view, "a", &a, &ALICE, false), Err(Error::Exists));
+    assert_eq!(vfs.attach(&view, "a/b", &a, &ALICE, false), Err(Error::InUse));
+    assert_eq!(vfs.attach(&view, "x/../y", &a, &ALICE, false), Err(Error::BadName));
+    assert_eq!(vfs.attach(&view, "", &a, &ALICE, false), Err(Error::BadName));
+    // A view's own, a link and what is not a view are refused.
+    assert_eq!(vfs.attach(&view, "v", &bypassing, &ALICE, false), Err(Error::NotSupported));
+    let link = vfs.resolve_link(&K, &root, "l").unwrap();
+    assert_eq!(vfs.attach(&view, "l", &link, &ALICE, false), Err(Error::NotSupported));
+    assert_eq!(vfs.attach(&a, "x", &a, &ALICE, false), Err(Error::NotSupported));
+    assert_eq!(vfs.attach_link(&a, "x", "y"), Err(Error::NotSupported));
+    // A file is attached at a file of the view's.
+    let f = vfs.open(&K, &root, "f", OpenFlags::default()).unwrap();
+    vfs.attach(&view, "d/f", &f, &ALICE, false).unwrap();
+    assert_eq!(vfs.stat(&ALICE, &view, "d/f").unwrap().kind, Kind::File);
+    assert_eq!(vfs.attach(&view, "d/f/g", &a, &ALICE, false), Err(Error::InUse));
+    // A device node is attached at a node of its kind, and a walk reaches
+    // the device; a pipe's or a socket's name is refused.
+    let null = crate::device_number(1, 3);
+    let device = Access::default_for(Kind::CharDevice);
+    vfs.make_node(&K, &root, "null", Kind::CharDevice, null, device).unwrap();
+    let node = vfs.open(&K, &root, "null", OpenFlags::default()).unwrap();
+    vfs.attach(&view, "devices/null", &node, &ALICE, false).unwrap();
+    let stat = vfs.stat(&ALICE, &view, "devices/null").unwrap();
+    assert_eq!((stat.kind, stat.device), (Kind::CharDevice, null));
+    for (name, kind) in [("fifo", Kind::Pipe), ("socket", Kind::Socket)] {
+        vfs.make_node(&K, &root, name, kind, 0, Access::default_for(kind)).unwrap();
+        let node = vfs.resolve(&K, &root, name).unwrap();
+        assert_eq!(vfs.attach(&view, name, &node, &ALICE, false), Err(Error::NotSupported));
+    }
+    // The second gate looks at attached places as anywhere else.
+    vfs.make_directory(&K, &root, "a/closed", owned(&BOB, 0o700)).unwrap();
+    assert_eq!(vfs.stat(&ALICE, &view, "a/closed/x").err(), Some(Error::Denied));
+}

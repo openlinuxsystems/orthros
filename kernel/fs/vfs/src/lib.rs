@@ -46,6 +46,7 @@ pub mod path;
 pub mod raw;
 pub mod synthetic;
 pub mod tmpfs;
+pub mod view;
 
 #[cfg(test)]
 mod tests;

@@ -25,6 +25,11 @@
 //! so that a walk past a node whose bit is clear knows, without the mount
 //! table or its lock, that nothing is mounted there; Linux marks mount
 //! points in its directory cache for the same reason (`DCACHE_MOUNTED`).
+//!
+//! A view ([`crate::view`], ADR 0215) is a mount in no tree, of
+//! directories the kernel makes, with places of the tree attached to some
+//! of their names: a walk crosses onto what is attached as onto a mount's
+//! root, through the same filter.
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -61,8 +66,11 @@ pub struct Mount {
     /// The filter of its nodes that something is mounted on: bit
     /// [`filter_bit`] of each is set. Changed only under the table's lock;
     /// a bit is set before its mount is in the table, and cleared after it
-    /// has left.
+    /// has left. A view's are those of its attached places, set under its
+    /// own lock.
     covered: [AtomicU64; FILTER_WORDS],
+    /// What it attaches, if it is a view's.
+    pub(crate) view: Option<crate::view::View>,
 }
 
 /// The words of a mount's filter of mount points: 128 bits, enough that
@@ -97,6 +105,26 @@ impl Mount {
             source: mem::copy(source.as_bytes())?,
             lost: AtomicBool::new(false),
             covered: [const { AtomicU64::new(0) }; FILTER_WORDS],
+            view: None,
+        })?)
+    }
+
+    /// A view's mount of `fs`, in no tree and read-only to everything but
+    /// the view's own calls ([`crate::view`]).
+    pub(crate) fn of_view(fs: FsRef, view: crate::view::View) -> Result<MountRef> {
+        let root = fs.root();
+        Ok(mem::arc(Mount {
+            id: crate::next_id(),
+            fs,
+            root,
+            on: None,
+            read_only: true,
+            path: mem::vec(),
+            detached: true,
+            source: mem::copy(b"view")?,
+            lost: AtomicBool::new(false),
+            covered: [const { AtomicU64::new(0) }; FILTER_WORDS],
+            view: Some(view),
         })?)
     }
 
@@ -121,6 +149,17 @@ impl Mount {
         let (word, bit) = filter_bit(address);
         self.covered[word].load(Ordering::Acquire) & bit != 0
     }
+
+    /// Whether it is in no tree ([`Mount::detached`]).
+    pub(crate) fn is_detached(&self) -> bool {
+        self.detached
+    }
+
+    /// Marks its node at `address` as one something may be on.
+    pub(crate) fn cover(&self, address: usize) {
+        let (word, bit) = filter_bit(address);
+        self.covered[word].fetch_or(bit, Ordering::Release);
+    }
 }
 
 /// A place in the tree.
@@ -130,9 +169,39 @@ pub struct Location {
     pub mount: MountRef,
     /// The node.
     pub node: NodeRef,
+    /// Whether it was reached through a view's read-only entry, which
+    /// makes it, and every place beneath it, read-only too (ADR 0215).
+    pub(crate) read_only: bool,
 }
 
 impl Location {
+    /// `node` of `mount`.
+    pub fn new(mount: MountRef, node: NodeRef) -> Location {
+        Location { mount, node, read_only: false }
+    }
+
+    /// The node `node` beneath it, on its mount: read-only if it is.
+    fn beneath(&self, node: NodeRef) -> Location {
+        Location { mount: self.mount.clone(), node, read_only: self.read_only }
+    }
+
+    /// Whether nothing may be written here: its mount is read-only, or it
+    /// was reached through a view's read-only entry.
+    pub fn read_only(&self) -> bool {
+        self.read_only || self.mount.read_only()
+    }
+
+    /// Whether it is a view's own directory or file, not a place one
+    /// attaches (ADR 0215).
+    pub fn in_view(&self) -> bool {
+        self.mount.view.is_some()
+    }
+
+    /// Whether it is a view's root.
+    fn is_view_root(&self) -> bool {
+        self.in_view() && address(&self.node) == address(&self.mount.root)
+    }
+
     /// Whether it is the same place as `other`.
     pub fn same(&self, other: &Location) -> bool {
         KArc::ptr_eq(&self.mount, &other.mount) && address(&self.node) == address(&other.node)
@@ -148,7 +217,7 @@ impl Location {
     /// Fails with [`Error::ReadOnly`] if its mount, or the node itself, is
     /// read-only.
     pub fn writable(&self) -> Result<()> {
-        if self.mount.read_only() || self.node.read_only() { Err(Error::ReadOnly) } else { Ok(()) }
+        if self.read_only() || self.node.read_only() { Err(Error::ReadOnly) } else { Ok(()) }
     }
 }
 
@@ -244,10 +313,11 @@ impl Vfs {
             source: mem::copy(source.as_bytes())?,
             lost: AtomicBool::new(false),
             covered: [const { AtomicU64::new(0) }; FILTER_WORDS],
+            view: None,
         })?;
         let mut mounts = mem::vec();
         mem::push(&mut mounts, mount.clone())?;
-        Ok(Vfs { root: Location { mount, node: root }, mounts: Mutex::new(mounts) })
+        Ok(Vfs { root: Location::new(mount, root), mounts: Mutex::new(mounts) })
     }
 
     /// The root of the tree.
@@ -279,13 +349,33 @@ impl Vfs {
         while let Some(next) = self.mounted_on(&top, &top.root) {
             top = next;
         }
-        Some(Location { node: top.root.clone(), mount: top })
+        Some(Location::new(top.clone(), top.root.clone()))
     }
 
-    /// `at`, or the root of what is mounted there, and so on up a stack of
-    /// mounts.
+    /// What is on `node` of `mount`: the root of what is mounted there,
+    /// and so on up a stack of mounts; or, on a view's, the place it
+    /// attached there, read-only if attached so, or what is mounted on
+    /// that place since. None if nothing is.
+    fn over(&self, mount: &Mount, node: &NodeRef) -> Option<Location> {
+        let Some(view) = &mount.view else {
+            return self.mounted_root(mount, node);
+        };
+        if !mount.may_cover(address(node)) {
+            return None;
+        }
+        let attached = view.attached(address(node))?;
+        Some(match self.mounted_root(&attached.mount, &attached.node) {
+            Some(top) => Location { read_only: attached.read_only, ..top },
+            None => attached,
+        })
+    }
+
+    /// `at`, or what is on it ([`Vfs::over`]), read-only if `at` is.
     fn cross(&self, at: Location) -> Location {
-        self.mounted_root(&at.mount, &at.node).unwrap_or(at)
+        match self.over(&at.mount, &at.node) {
+            Some(top) => Location { read_only: top.read_only || at.read_only, ..top },
+            None => at,
+        }
     }
 
     /// Walks `path` from `base`, calling `f` with the chain of steps: the
@@ -295,9 +385,9 @@ impl Vfs {
     /// link's directory with the link's target in its place, or, for a
     /// target that starts with `/`, from `base`, as if `base` were the
     /// root. At most [`MAX_LINKS`] are followed. `..` steps back along the
-    /// chain; at `base` it stays there when `base` is the tree's root, as
-    /// `/..` is `/`, and is refused anywhere else. Each directory it looks
-    /// in must let `who` search it (ADR 0214).
+    /// chain; at `base` it stays there when `base` is the tree's root or a
+    /// view's, as `/..` is `/`, and is refused anywhere else. Each
+    /// directory it looks in must let `who` search it (ADR 0214).
     fn walk<T>(
         &self,
         who: &Who,
@@ -309,7 +399,7 @@ impl Vfs {
         let mut chain: KVec<Step> = mem::vec_with_capacity(8)?;
         let mut names: KVec<u8> = mem::vec();
         mem::push(&mut chain, (base.clone(), 0..0))?;
-        let at_root = base.same(&self.root);
+        let at_root = base.same(&self.root) || base.is_view_root();
         // The path left to walk, once a link has replaced what was walked.
         let mut owned: Option<KVec<u8>> = None;
         let mut links = 0;
@@ -360,7 +450,7 @@ impl Vfs {
                             owned = Some(next);
                             continue 'walk;
                         }
-                        let next = self.cross(Location { mount: here.mount.clone(), node });
+                        let next = self.cross(here.beneath(node));
                         let start = names.len();
                         mem::extend(&mut names, name.as_bytes())?;
                         mem::push(&mut chain, (next, start..names.len()))?;
@@ -393,9 +483,11 @@ impl Vfs {
             return Ok(base.clone());
         }
         // Where the walk is, when it has left `base`: a name moves the
-        // node on, and a mount there the mount too.
+        // node on, and a mount there the mount too; a view's read-only
+        // entry makes the rest read-only.
         let mut mount: Option<MountRef> = None;
         let mut node: Option<NodeRef> = None;
+        let mut read_only = base.read_only;
         let mut components = path::components(path);
         while let Some(component) = components.next() {
             let component = component?;
@@ -413,8 +505,9 @@ impl Vfs {
                     {
                         return self.walk_to_end(who, base, path, follow);
                     }
-                    match self.mounted_root(mount.as_ref().unwrap_or(&base.mount), &found) {
+                    match self.over(mount.as_ref().unwrap_or(&base.mount), &found) {
                         Some(top) => {
+                            read_only |= top.read_only;
                             mount = Some(top.mount);
                             node = Some(top.node);
                         }
@@ -426,6 +519,7 @@ impl Vfs {
         Ok(Location {
             mount: mount.unwrap_or_else(|| base.mount.clone()),
             node: node.unwrap_or_else(|| base.node.clone()),
+            read_only,
         })
     }
 
@@ -493,14 +587,14 @@ impl Vfs {
                         let target = crate::link_target(&*node)?;
                         owned = Some(replace_last(text, &target)?);
                     }
-                    Ok(node) => break self.cross(Location { mount: dir.mount.clone(), node }),
+                    Ok(node) => break self.cross(dir.beneath(node)),
                     Err(Error::NotFound) => {
                         dir.writable()?;
                         who.check(&*dir.node, want::WRITE | want::EXECUTE)?;
                         let access = made_with(&dir, access, Kind::File);
                         let node = dir.node.create(name, Kind::File, access)?;
                         made = true;
-                        break Location { mount: dir.mount.clone(), node };
+                        break dir.beneath(node);
                     }
                     Err(err) => return Err(err),
                 }
@@ -531,7 +625,7 @@ impl Vfs {
             at.node.set_size(0)?;
         }
         let node = at.node.open()?.unwrap_or(at.node);
-        Ok(Location { mount: at.mount, node })
+        Ok(Location { mount: at.mount, node, read_only: at.read_only })
     }
 
     /// Makes a symbolic link `path` beneath `base` that points to
@@ -553,10 +647,11 @@ impl Vfs {
             return Err(Error::NameTooLong);
         }
         let (dir, name) = self.resolve_parent(who, base, path)?;
-        dir.writable()?;
+        // In Linux's order of errors, so `mkdir -p` passes what is there.
         if dir.node.lookup(name).is_ok() {
             return Err(Error::Exists);
         }
+        dir.writable()?;
         may_change(who, &dir)?;
         let access = made_with(&dir, Access { mode: 0o777, ..access }, Kind::Symlink);
         dir.node.make_link(name, target, access).map(drop)
@@ -617,10 +712,11 @@ impl Vfs {
         access: Access,
     ) -> Result<()> {
         let (dir, name) = self.resolve_parent(who, base, path)?;
-        dir.writable()?;
+        // In Linux's order of errors, so `mkdir -p` passes what is there.
         if dir.node.lookup(name).is_ok() {
             return Err(Error::Exists);
         }
+        dir.writable()?;
         may_change(who, &dir)?;
         let access = made_with(&dir, access, kind);
         dir.node.make_node(name, kind, device, access).map(drop)
@@ -637,10 +733,11 @@ impl Vfs {
         access: Access,
     ) -> Result<()> {
         let (dir, name) = self.resolve_parent(who, base, path)?;
-        dir.writable()?;
+        // In Linux's order of errors, so `mkdir -p` passes what is there.
         if dir.node.lookup(name).is_ok() {
             return Err(Error::Exists);
         }
+        dir.writable()?;
         may_change(who, &dir)?;
         let access = made_with(&dir, access, Kind::Socket);
         dir.node.make_socket(name, binding, access).map(drop)
@@ -699,10 +796,12 @@ impl Vfs {
         access: Access,
     ) -> Result<()> {
         let (dir, name) = self.resolve_parent(who, base, path)?;
-        dir.writable()?;
+        // In Linux's order of errors, so `mkdir -p` passes what is there,
+        // a place attached to a view among them.
         if dir.node.lookup(name).is_ok() {
             return Err(Error::Exists);
         }
+        dir.writable()?;
         may_change(who, &dir)?;
         let access = made_with(&dir, access, Kind::Directory);
         dir.node.create(name, Kind::Directory, access).map(drop)
@@ -876,7 +975,10 @@ impl Vfs {
         if from.node.kind() != Kind::Directory {
             return Err(Error::NotDirectory);
         }
-        let read_only = read_only || from.mount.read_only();
+        if from.in_view() {
+            return Err(Error::NotSupported);
+        }
+        let read_only = read_only || from.read_only();
         let (fs, root) = (from.mount.fs.clone(), from.node.clone());
         let mount = self.mount_at(who, base, path, fs, root, from.mount.source(), read_only)?;
         if from.mount.lost.load(Ordering::Acquire) {
@@ -898,6 +1000,10 @@ impl Vfs {
         source: &str,
         read_only: bool,
     ) -> Result<MountRef> {
+        // A view's places are the tree's, which a view does not change.
+        if base.in_view() {
+            return Err(Error::NotSupported);
+        }
         let (at, where_) = self.walk(who, base, path, true, |chain, names| {
             let at = chain.last().map(|(at, _)| at.clone()).ok_or(Error::Outside)?;
             let mut where_ = mem::vec();
@@ -924,6 +1030,7 @@ impl Vfs {
             source: mem::copy(source.as_bytes())?,
             lost: AtomicBool::new(false),
             covered: [const { AtomicU64::new(0) }; FILTER_WORDS],
+            view: None,
         })?;
         let mut mounts = self.mounts.lock();
         // `at` is what is on top already, so a second mount on the same
@@ -975,6 +1082,9 @@ impl Vfs {
     /// on it or any handle holds a place on it, and with the sync's error
     /// if it fails, unless the mount's disk is gone.
     pub fn unmount(&self, who: &Who, base: &Location, path: &str) -> Result<()> {
+        if base.in_view() {
+            return Err(Error::NotSupported);
+        }
         let at = self.resolve(who, base, path)?;
         if at.mount.on.is_none() || address(&at.node) != address(&at.mount.root) {
             return Err(Error::NotFound);
@@ -1003,6 +1113,9 @@ impl Vfs {
     /// in, once they have gone. Fails with [`Error::InUse`], unmounting
     /// none, while any handle holds a place on one of them.
     pub fn unmount_tree(&self, who: &Who, base: &Location, path: &str) -> Result<()> {
+        if base.in_view() {
+            return Err(Error::NotSupported);
+        }
         let at = self.resolve(who, base, path)?;
         if at.mount.on.is_none() || address(&at.node) != address(&at.mount.root) {
             return Err(Error::NotFound);

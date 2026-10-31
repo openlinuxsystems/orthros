@@ -573,7 +573,7 @@ pub fn make(
     let end = |write: bool| -> Result<FileRef, Status> {
         let node: NodeRef = mem::arc(End { pipe: pipe.clone(), write, reads_too: false })
             .map_err(|_| Kernel::NoMemory.status(0))?;
-        let at = Location { mount: mount.clone(), node };
+        let at = Location::new(mount.clone(), node);
         FileObject::with(at, description, name.clone()).ok_or(Kernel::NoMemory.status(0))
     };
     // Each end counts as open from here: if a step fails, its node goes,
@@ -613,7 +613,7 @@ pub(super) fn for_kernel() -> Result<(KArc<Pipe>, FileRef), Status> {
     let pipe = Pipe::new()?;
     let node: NodeRef = mem::arc(End { pipe: pipe.clone(), write: false, reads_too: false })
         .map_err(|_| Kernel::NoMemory.status(0))?;
-    let reader = FileObject::new(Location { mount, node }, Identity::ROOT)
+    let reader = FileObject::new(Location::new(mount, node), Identity::ROOT)
         .ok_or(Kernel::NoMemory.status(0))?;
     Ok((pipe, reader))
 }
