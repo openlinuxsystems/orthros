@@ -25,8 +25,8 @@ use crate::cache::{Backing, FileCache};
 use crate::mem::{self, Alloc, KArc, KVec};
 use crate::path::check_name;
 use crate::{
-    Error, FileSystem, FsInfo, FsKind, In, Kind, ListFn, Node, NodeRef, Out, Result, SocketBinding,
-    Stat, now,
+    Access, AccessChange, Error, FileSystem, FsInfo, FsKind, In, Kind, ListFn, Node, NodeRef, Out,
+    Result, SocketBinding, Stat, now,
 };
 
 /// What every node of one tmpfs shares.
@@ -181,6 +181,8 @@ pub struct TmpNode {
     changed: AtomicU64,
     /// How many names it has.
     links: AtomicU32,
+    /// Who it belongs to and its mode (ADR 0213).
+    access: Mutex<Access>,
     shared: KArc<Shared>,
     /// The directory it is in; none for the root, or once it is removed.
     parent: Mutex<Option<Weak<TmpNode, Alloc>>>,
@@ -192,8 +194,8 @@ pub struct TmpNode {
 impl Tmpfs {
     /// An empty tmpfs whose files may hold `max` bytes together, and
     /// which may hold `max_files` files and directories, its root
-    /// included.
-    pub fn new(max: u64, max_files: u64) -> Result<KArc<Tmpfs>> {
+    /// included. Its root belongs to user 0 and has mode `root_mode`.
+    pub fn new(max: u64, max_files: u64, root_mode: u16) -> Result<KArc<Tmpfs>> {
         let shared = mem::arc(Shared {
             max,
             used: AtomicU64::new(0),
@@ -202,7 +204,8 @@ impl Tmpfs {
             next_id: AtomicU64::new(2),
             namespace: Mutex::new(()),
         })?;
-        let root = TmpNode::new(1, shared.clone(), Kind::Directory)?;
+        let access = Access { owner: 0, group: 0, mode: root_mode & crate::mode::ALL };
+        let root = TmpNode::new(1, shared.clone(), Kind::Directory, access)?;
         Ok(mem::arc(Tmpfs { root, shared })?)
     }
 }
@@ -236,7 +239,7 @@ impl FileSystem for Tmpfs {
 }
 
 impl TmpNode {
-    fn new(id: u64, shared: KArc<Shared>, kind: Kind) -> Result<KArc<TmpNode>> {
+    fn new(id: u64, shared: KArc<Shared>, kind: Kind, access: Access) -> Result<KArc<TmpNode>> {
         let created = now();
         let body = match kind {
             Kind::Directory => Body::Dir(Mutex::new(DirState::new(created))),
@@ -245,11 +248,11 @@ impl TmpNode {
             }
             _ => return Err(Error::NotSupported),
         };
-        TmpNode::with_body(id, shared, created, body)
+        TmpNode::with_body(id, shared, created, body, access)
     }
 
     /// A symbolic link to `target`.
-    fn link(id: u64, shared: KArc<Shared>, target: &str) -> Result<KArc<TmpNode>> {
+    fn link(id: u64, shared: KArc<Shared>, target: &str, access: Access) -> Result<KArc<TmpNode>> {
         let bytes = target.len() as u64;
         let used = shared.used.fetch_add(bytes, Ordering::Relaxed);
         if used + bytes > shared.max {
@@ -264,7 +267,7 @@ impl TmpNode {
                 return Err(error.into());
             }
         };
-        TmpNode::with_body(id, shared, created, body)
+        TmpNode::with_body(id, shared, created, body, access)
     }
 
     /// A socket's name, holding `binding`.
@@ -272,15 +275,22 @@ impl TmpNode {
         id: u64,
         shared: KArc<Shared>,
         binding: Option<SocketBinding>,
+        access: Access,
     ) -> Result<KArc<TmpNode>> {
         let created = now();
         let body = Body::Socket { binding, modified: AtomicU64::new(created) };
-        TmpNode::with_body(id, shared, created, body)
+        TmpNode::with_body(id, shared, created, body, access)
     }
 
-    /// A node with `body`; a node that cannot be made hands back what
-    /// its body was charged, as one dropped does.
-    fn with_body(id: u64, shared: KArc<Shared>, created: u64, body: Body) -> Result<KArc<TmpNode>> {
+    /// A node with `body` and `access`; a node that cannot be made hands
+    /// back what its body was charged, as one dropped does.
+    fn with_body(
+        id: u64,
+        shared: KArc<Shared>,
+        created: u64,
+        body: Body,
+        access: Access,
+    ) -> Result<KArc<TmpNode>> {
         // Each counts against the limit until it is dropped, as with
         // Linux's nr_inodes, so that empty files cannot use up the heap.
         if shared.count_file().is_err() {
@@ -295,6 +305,7 @@ impl TmpNode {
             accessed: AtomicU64::new(created),
             changed: AtomicU64::new(created),
             links: AtomicU32::new(0),
+            access: Mutex::new(access),
             shared,
             parent: Mutex::new(None),
             me: radix_sync::Once::new(),
@@ -502,25 +513,39 @@ impl Node for TmpNode {
         Ok(dir.get(name)?.node.clone())
     }
 
-    fn create(&self, name: &str, kind: Kind) -> Result<NodeRef> {
-        check_name(name)?;
-        self.dir()?;
-        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
-        self.add(name, TmpNode::new(id, self.shared.clone(), kind)?)
+    fn access(&self) -> Access {
+        *self.access.lock()
     }
 
-    fn make_link(&self, name: &str, target: &str) -> Result<NodeRef> {
-        check_name(name)?;
-        self.dir()?;
-        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
-        self.add(name, TmpNode::link(id, self.shared.clone(), target)?)
+    fn set_access(&self, change: &AccessChange) -> Result<()> {
+        if change.mode.is_some() && matches!(self.body, Body::Link { .. }) {
+            return Err(Error::NotSupported);
+        }
+        let mut access = self.access.lock();
+        *access = change.apply(*access);
+        self.changed.store(now(), Ordering::Relaxed);
+        Ok(())
     }
 
-    fn make_socket(&self, name: &str, binding: SocketBinding) -> Result<NodeRef> {
+    fn create(&self, name: &str, kind: Kind, access: Access) -> Result<NodeRef> {
         check_name(name)?;
         self.dir()?;
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
-        self.add(name, TmpNode::socket(id, self.shared.clone(), Some(binding))?)
+        self.add(name, TmpNode::new(id, self.shared.clone(), kind, access)?)
+    }
+
+    fn make_link(&self, name: &str, target: &str, access: Access) -> Result<NodeRef> {
+        check_name(name)?;
+        self.dir()?;
+        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
+        self.add(name, TmpNode::link(id, self.shared.clone(), target, access)?)
+    }
+
+    fn make_socket(&self, name: &str, binding: SocketBinding, access: Access) -> Result<NodeRef> {
+        check_name(name)?;
+        self.dir()?;
+        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
+        self.add(name, TmpNode::socket(id, self.shared.clone(), Some(binding), access)?)
     }
 
     fn link(&self, name: &str, node: &NodeRef) -> Result<()> {
@@ -537,19 +562,19 @@ impl Node for TmpNode {
         self.add_name(name, me, true).map(drop)
     }
 
-    fn make_node(&self, name: &str, kind: Kind, device: u64) -> Result<NodeRef> {
+    fn make_node(&self, name: &str, kind: Kind, device: u64, access: Access) -> Result<NodeRef> {
         check_name(name)?;
         self.dir()?;
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let shared = self.shared.clone();
         let node = match kind {
-            Kind::File => TmpNode::new(id, shared, kind)?,
-            Kind::Socket => TmpNode::socket(id, shared, None)?,
+            Kind::File => TmpNode::new(id, shared, kind, access)?,
+            Kind::Socket => TmpNode::socket(id, shared, None, access)?,
             Kind::Pipe | Kind::CharDevice | Kind::BlockDevice => {
                 let created = now();
                 let device = if kind == Kind::Pipe { 0 } else { device };
                 let body = Body::Special { kind, device, modified: AtomicU64::new(created) };
-                TmpNode::with_body(id, shared, created, body)?
+                TmpNode::with_body(id, shared, created, body, access)?
             }
             _ => return Err(Error::NotSupported),
         };

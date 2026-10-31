@@ -19,6 +19,7 @@ use radix_block::DeviceRef;
 use radix_vfs::mem::KArc;
 use radix_vfs::{Error, FileSystem, Kind, Node, NodeRef, SliceMut, link_target};
 
+use super::FILE;
 use super::{XorShift, disk_of, mkfs, scratch};
 use crate::fs::BtrfsFs;
 use crate::node::{BtrfsNode, id_of};
@@ -215,7 +216,7 @@ fn reads_every_file_as_linux_made_it() {
         let file = root.lookup("size-100").unwrap();
         assert_eq!(file.lookup("x").err(), Some(Error::NotDirectory));
         assert_eq!(root.read(0, &mut SliceMut(&mut [0; 8])), Err(Error::IsDirectory));
-        assert_eq!(root.create("new", Kind::File).err(), Some(Error::ReadOnly));
+        assert_eq!(root.create("new", Kind::File, FILE).err(), Some(Error::ReadOnly));
         assert_eq!(root.remove("size-100"), Err(Error::ReadOnly));
         assert_eq!(file.set_size(0), Err(Error::ReadOnly));
         assert_eq!(root.lookup("missing").err(), Some(Error::NotFound));

@@ -98,6 +98,10 @@ pub fn call_capability(user: &UserRef, slot: u32, info: Info, words: [u64; 8]) -
 /// just found in `slot`, with the object [`takes_object`] wants. Messages
 /// to an endpoint do not come here (`syscall`), nor do the methods of
 /// radix-capability(2) ([`call_capability`]).
+///
+/// Each kind's interface is a function kept out of line, so that this
+/// frame, under every method and the deep ones like a mount's, holds only
+/// what the dispatch needs: inlined, the largest of them set its size.
 pub fn call(
     me: &ThreadRef,
     user: &UserRef,
@@ -410,7 +414,9 @@ fn pages_of(size: u64) -> Result<u64> {
 }
 
 /// The address space interface's methods since Phase 8 (`query` is
-/// answered in [`call`]): anonymous memory and futexes.
+/// answered in [`call`]): anonymous memory and futexes. Kept out of
+/// line, as [`call`] says.
+#[inline(never)]
 fn address_space_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<Answer> {
     let (_, space) = objects::space(user.cspace, slot, Rights::CONTROL)?;
     let aligned = |address: u64| address.is_multiple_of(address_space::PAGE_SIZE);
@@ -500,7 +506,8 @@ fn address_space_method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) 
     }
 }
 
-/// The thread interface.
+/// The thread interface, kept out of line, as [`call`] says.
+#[inline(never)]
 fn thread_method(
     me: &ThreadRef,
     user: &UserRef,

@@ -69,6 +69,8 @@ pub(crate) mod at {
     pub const SIZE: usize = 16;
     pub const NBYTES: usize = 24;
     pub const NLINK: usize = 40;
+    pub const UID: usize = 44;
+    pub const GID: usize = 48;
     pub const MODE: usize = 52;
     pub const RDEV: usize = 56;
     pub const FLAGS: usize = 64;
@@ -392,14 +394,16 @@ impl Files<'_> {
     }
 
     /// Makes inode `ino` with one name: `mode` (its type and permissions),
-    /// `flags`, `size` bytes and `nbytes` of extents, made `now`.
+    /// device number `rdev`, owner `uid` and group `gid`, `flags`, and
+    /// `size` bytes, all of them in extents (inline ones, as a link's
+    /// are), made `now`.
     pub(crate) fn make_inode(
         &mut self,
         ino: u64,
         (mode, rdev): (u32, u64),
+        (uid, gid): (u32, u32),
         flags: u64,
         size: u64,
-        nbytes: u64,
         now: u64,
     ) -> Result<()> {
         let generation = self.w.generation;
@@ -409,8 +413,10 @@ impl Files<'_> {
             put_u64(d, at::GENERATION, generation);
             put_u64(d, at::TRANSID, generation);
             put_u64(d, at::SIZE, size);
-            put_u64(d, at::NBYTES, nbytes);
+            put_u64(d, at::NBYTES, size);
             put_u32(d, at::NLINK, 1);
+            put_u32(d, at::UID, uid);
+            put_u32(d, at::GID, gid);
             put_u32(d, at::MODE, mode);
             put_u64(d, at::RDEV, rdev);
             put_u64(d, at::FLAGS, flags);

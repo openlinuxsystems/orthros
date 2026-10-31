@@ -27,7 +27,9 @@ use radix_sync::{Mutex, Once};
 use radix_vfs::cache::{Backing, FileCache, page_len};
 use radix_vfs::mem::{self, Alloc, KArc, KVec};
 use radix_vfs::path::check_name;
-use radix_vfs::{Error, In, Kind, ListFn, Node, NodeRef, Out, Result, Stat, now};
+use radix_vfs::{
+    Access, AccessChange, Error, In, Kind, ListFn, Node, NodeRef, Out, Result, Stat, now,
+};
 
 use crate::dir;
 use crate::extent::{self, Extent, Extents, Found, MAX_LEN, TreeIo};
@@ -649,12 +651,14 @@ impl Ext4Node {
         self.save(txn, &mut meta)
     }
 
-    /// Makes a file, directory or link `name` in it; `target` is a link's.
+    /// Makes a file, directory or link `name` in it, with `access`'s owner,
+    /// group and permissions; `target` is a link's.
     fn make(
         &self,
         ns: &mut Scratch,
         name: &str,
         kind: Kind,
+        access: Access,
         target: Option<&[u8]>,
     ) -> Result<KArc<Ext4Node>> {
         let fs = &self.fs;
@@ -681,10 +685,10 @@ impl Ext4Node {
             inode::fresh(geo, &mut raw);
             let generation = fs.next_generation();
             let time = now();
-            let (type_bits, perms, links) = match kind {
-                Kind::Directory => (mode::DIR, 0o755, 2),
-                Kind::Symlink => (mode::LINK, 0o777, 1),
-                _ => (mode::FILE, 0o644, 1),
+            let (type_bits, links) = match kind {
+                Kind::Directory => (mode::DIR, 2),
+                Kind::Symlink => (mode::LINK, 1),
+                _ => (mode::FILE, 1),
             };
             let fast = target.is_some() && !slow;
             let mut block = extent::empty_root();
@@ -693,7 +697,9 @@ impl Ext4Node {
                 block[..t.len()].copy_from_slice(t);
             }
             let inode = Inode {
-                mode: type_bits | perms,
+                mode: type_bits | (access.mode & radix_vfs::mode::ALL),
+                uid: access.owner,
+                gid: access.group,
                 links,
                 size: target.map_or(0, |t| t.len() as u64),
                 sectors: 0,
@@ -1113,7 +1119,33 @@ impl Node for Ext4Node {
         Ok(Inner::node_for(&self.fs, found.ino, &mut ns.b)?)
     }
 
-    fn create(&self, name: &str, kind: Kind) -> Result<NodeRef> {
+    fn access(&self) -> Access {
+        let meta = self.meta.lock();
+        let inode = &meta.inode;
+        Access { owner: inode.uid, group: inode.gid, mode: inode.mode & radix_vfs::mode::ALL }
+    }
+
+    fn set_access(&self, change: &AccessChange) -> Result<()> {
+        self.fs.writable()?;
+        if change.mode.is_some() && self.kind == Kind::Symlink {
+            return Err(Error::NotSupported);
+        }
+        let mut txn = self.fs.begin()?;
+        let mut meta = self.meta.lock();
+        let inode = &mut meta.inode;
+        let access = change.apply(Access {
+            owner: inode.uid,
+            group: inode.gid,
+            mode: inode.mode & radix_vfs::mode::ALL,
+        });
+        inode.uid = access.owner;
+        inode.gid = access.group;
+        inode.mode = (inode.mode & !radix_vfs::mode::ALL) | access.mode;
+        inode.ctime = now();
+        self.save(&mut txn, &mut meta)
+    }
+
+    fn create(&self, name: &str, kind: Kind, access: Access) -> Result<NodeRef> {
         self.fs.writable()?;
         check_name(name)?;
         self.is_dir()?;
@@ -1128,10 +1160,10 @@ impl Node for Ext4Node {
         if self.find_entry(&mut ns, name)?.is_some() {
             return Err(Error::Exists);
         }
-        Ok(self.make(&mut ns, name, kind, None)?)
+        Ok(self.make(&mut ns, name, kind, access, None)?)
     }
 
-    fn make_link(&self, name: &str, target: &str) -> Result<NodeRef> {
+    fn make_link(&self, name: &str, target: &str, access: Access) -> Result<NodeRef> {
         self.fs.writable()?;
         check_name(name)?;
         self.is_dir()?;
@@ -1145,7 +1177,7 @@ impl Node for Ext4Node {
         if self.find_entry(&mut ns, name)?.is_some() {
             return Err(Error::Exists);
         }
-        Ok(self.make(&mut ns, name, Kind::Symlink, Some(target.as_bytes()))?)
+        Ok(self.make(&mut ns, name, Kind::Symlink, access, Some(target.as_bytes()))?)
     }
 
     fn read_link(&self, out: &mut dyn Out) -> Result<usize> {

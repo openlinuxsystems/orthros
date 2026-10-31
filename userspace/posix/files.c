@@ -6,9 +6,9 @@
 // their descriptors, temporary files, renaming and removing, times,
 // symbolic links, `..` beneath directory descriptors and fchdir, reading
 // into and writing from memory not made yet, the root's folders by their
-// names and by Unix's, and descriptors by their names in /devices/fd, on
-// the tmpfs at /tmp and the read-only /system; and what each refuses,
-// with Linux's errors.
+// names and by Unix's, descriptors by their names in /devices/fd, and
+// owners, groups and modes, on the tmpfs at /tmp and the read-only
+// /system; and what each refuses, with Linux's errors.
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -838,6 +838,102 @@ static void named_descriptors(void) {
 	CHECK(unlink("/tmp/named") == 0);
 }
 
+// The permission bits and owners of `path` (without following a link
+// there) are `mode`, `uid` and `gid`.
+static int has(const char *path, mode_t mode, uid_t uid, gid_t gid) {
+	struct stat st;
+	return lstat(path, &st) == 0 && (st.st_mode & 07777) == mode && st.st_uid == uid
+			&& st.st_gid == gid;
+}
+
+// Owners, groups and modes (ADR 0213): what is made gets the mode asked
+// for less the umask, chmod and chown change them, a chown takes the
+// set-user-ID bit away, a set-group-ID directory passes on its group,
+// and a symbolic link's mode cannot change.
+static void modes(void) {
+	mode_t old = umask(022);
+	// The trees Spark makes: /tmp for all, the rest root's.
+	CHECK(has("/tmp", 01777, 0, 0));
+	CHECK(has("/system", 0755, 0, 0));
+	CHECK(has("/system/live", 0755, 0, 0));
+	CHECK(has("/system/tests/posix/files", 0755, 0, 0));
+	CHECK(has("/devices/null", 0666, 0, 0));
+	CHECK(mkdir("/tmp/files-m", 0777) == 0 && has("/tmp/files-m", 0755, 0, 0));
+	int fd = open("/tmp/files-m/f", O_RDWR | O_CREAT | O_EXCL, 0666);
+	CHECK(fd >= 0 && has("/tmp/files-m/f", 0644, 0, 0));
+	// The mask is the process's, and counts at once.
+	umask(077);
+	CHECK(close(open("/tmp/files-m/p", O_WRONLY | O_CREAT | O_EXCL, 0666)) == 0);
+	CHECK(has("/tmp/files-m/p", 0600, 0, 0));
+	umask(022);
+	// A file that is there keeps its mode, whatever open asks.
+	CHECK(close(open("/tmp/files-m/p", O_WRONLY | O_CREAT, 0777)) == 0);
+	CHECK(has("/tmp/files-m/p", 0600, 0, 0));
+	CHECK(mkfifo("/tmp/files-m/fifo", 0666) == 0 && has("/tmp/files-m/fifo", 0644, 0, 0));
+	CHECK(mknod("/tmp/files-m/node", S_IFREG | 0640, 0) == 0);
+	CHECK(has("/tmp/files-m/node", 0640, 0, 0));
+
+	// chmod, fchmod and fchmodat; bits past 07777 are dropped.
+	CHECK(chmod("/tmp/files-m/f", 04755) == 0 && has("/tmp/files-m/f", 04755, 0, 0));
+	CHECK(fchmod(fd, 0600) == 0 && has("/tmp/files-m/f", 0600, 0, 0));
+	CHECK(fchmodat(AT_FDCWD, "/tmp/files-m/f", 0640, 0) == 0);
+	CHECK(has("/tmp/files-m/f", 0640, 0, 0));
+	CHECK(chmod("/tmp/files-m/f", S_IFREG | 0644) == 0 && has("/tmp/files-m/f", 0644, 0, 0));
+	// fchmod and fchown need a descriptor open for writing.
+	int read_only = open("/tmp/files-m/f", O_RDONLY);
+	CHECK(read_only >= 0);
+	CHECK_ERROR(fchmod(read_only, 0600), EACCES);
+	CHECK_ERROR(fchown(read_only, 1000, 100), EACCES);
+	close(read_only);
+
+	// chown, with -1 leaving one; a chown takes the set-user-ID bit away,
+	// and the set-group-ID bit of a file its group may run, as Linux does,
+	// even when nothing else changes.
+	CHECK(chmod("/tmp/files-m/f", 06755) == 0);
+	CHECK(chown("/tmp/files-m/f", 1000, 100) == 0 && has("/tmp/files-m/f", 0755, 1000, 100));
+	CHECK(chown("/tmp/files-m/f", -1, 0) == 0 && has("/tmp/files-m/f", 0755, 1000, 0));
+	CHECK(fchown(fd, 0, -1) == 0 && has("/tmp/files-m/f", 0755, 0, 0));
+	CHECK(chmod("/tmp/files-m/f", 04755) == 0 && chown("/tmp/files-m/f", -1, -1) == 0);
+	CHECK(has("/tmp/files-m/f", 0755, 0, 0));
+	CHECK(chmod("/tmp/files-m/f", 02640) == 0 && chown("/tmp/files-m/f", -1, -1) == 0);
+	CHECK(has("/tmp/files-m/f", 02640, 0, 0));
+	close(fd);
+
+	// A set-group-ID directory keeps its bits through a chown, and passes
+	// its group on to what is made in it, and the bit to directories;
+	// mkdir takes no set-ID bit from its mode.
+	CHECK(chmod("/tmp/files-m", 02775) == 0 && chown("/tmp/files-m", -1, 100) == 0);
+	CHECK(has("/tmp/files-m", 02775, 0, 100));
+	CHECK(close(open("/tmp/files-m/g", O_WRONLY | O_CREAT, 0644)) == 0);
+	CHECK(has("/tmp/files-m/g", 0644, 0, 100));
+	CHECK(mkdir("/tmp/files-m/sub", 04777) == 0 && has("/tmp/files-m/sub", 02755, 0, 100));
+	CHECK(rmdir("/tmp/files-m/sub") == 0);
+	CHECK(chmod("/tmp/files-m", 0755) == 0 && chown("/tmp/files-m", -1, 0) == 0);
+
+	// A symbolic link is 0777; lchown changes it and chown its target,
+	// and its own mode cannot change.
+	CHECK(symlink("f", "/tmp/files-m/l") == 0 && has("/tmp/files-m/l", 0777, 0, 0));
+	CHECK(lchown("/tmp/files-m/l", 1000, -1) == 0 && has("/tmp/files-m/l", 0777, 1000, 0));
+	CHECK(has("/tmp/files-m/f", 02640, 0, 0));
+	CHECK(chown("/tmp/files-m/l", 1000, -1) == 0 && has("/tmp/files-m/f", 02640, 1000, 0));
+	CHECK_ERROR(fchmodat(AT_FDCWD, "/tmp/files-m/l", 0600, AT_SYMLINK_NOFOLLOW), EOPNOTSUPP);
+	CHECK(chmod("/tmp/files-m/l", 0600) == 0 && has("/tmp/files-m/f", 0600, 1000, 0));
+	CHECK_ERROR(fchmodat(AT_FDCWD, "/tmp/files-m/f", 0600, 0x4000), EINVAL);
+
+	// What cannot change: a read-only filesystem, and a missing file.
+	CHECK_ERROR(chmod("/system/tests/posix/files", 0700), EROFS);
+	CHECK_ERROR(chown("/system/tests/posix/files", 1000, -1), EROFS);
+	CHECK_ERROR(chmod("/tmp/files-m/nowhere", 0600), ENOENT);
+	static const char *const MADE[] = {"f", "p", "fifo", "node", "g", "l"};
+	for(size_t i = 0; i < sizeof(MADE) / sizeof(MADE[0]); i++) {
+		char path[64];
+		snprintf(path, sizeof(path), "/tmp/files-m/%s", MADE[i]);
+		CHECK(unlink(path) == 0);
+	}
+	CHECK(rmdir("/tmp/files-m") == 0);
+	umask(old);
+}
+
 // What open, truncation, preallocation and scattered reads and writes
 // refuse, with the errors Linux 6.8 gives.
 static void refusals(void) {
@@ -915,6 +1011,7 @@ int main(void) {
 	RUN(mapped);
 	RUN(folder_names);
 	RUN(named_descriptors);
+	RUN(modes);
 	RUN(refusals);
 	return check_end();
 }

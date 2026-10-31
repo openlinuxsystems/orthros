@@ -124,7 +124,7 @@ impl Files<'_> {
         })?;
         let mut inner =
             Files { w: &mut *self.w, volume: self.volume, subvol: id, changed: [None; 2] };
-        inner.make_inode(TOP, (0o40755, 0), 0, 0, 0, now)?;
+        inner.make_inode(TOP, (0o40755, 0), (0, 0), 0, 0, now)?;
         // The top directory's reference to itself, "..", at index 0.
         let mut reference = [0; 12];
         put_u16(&mut reference, 8, 2);

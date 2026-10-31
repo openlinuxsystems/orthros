@@ -19,6 +19,7 @@ use super::XorShift;
 use super::files::{mount, noise};
 use super::rw::{Model, Thing, mount_rw, put, snapshot as model_of, synced};
 use super::write::{image_of, mkfs_empty, writable};
+use super::{DIR, FILE};
 use crate::format::{Key, item, tree};
 use crate::refs::FULL_BACKREF;
 use crate::tree::Cursor;
@@ -68,7 +69,7 @@ fn forget(model: &mut Model, prefix: &str) {
 fn fill(dir: &NodeRef, path: &str, n: usize, max: usize, seed: u64, model: &mut Model) {
     for i in 0..n {
         let name = format!("f{i}");
-        let file = dir.create(&name, Kind::File).unwrap();
+        let file = dir.create(&name, Kind::File, FILE).unwrap();
         let data = noise(seed + i as u64, (i * 7919 + seed as usize * 31) % max);
         put(&file, 0, &data);
         model.insert(format!("{path}/{name}"), Thing::File(data));
@@ -100,7 +101,7 @@ fn a_snapshot_keeps_what_its_source_held_while_both_change() {
     let fs = mount_rw(&disk);
     let root = fs.root();
     let mut model = Model::new();
-    let d = root.create("d", Kind::Directory).unwrap();
+    let d = root.create("d", Kind::Directory, DIR).unwrap();
     model.insert("/d".into(), Thing::Dir);
     fill(&d, "/d", 300, 20_000, 1, &mut model);
     drop(d);
@@ -136,7 +137,10 @@ fn a_snapshot_keeps_what_its_source_held_while_both_change() {
     let file = node(&root, "/ro/d/f0");
     assert_eq!(file.write(0, &Slice(b"x")), Err(Error::ReadOnly));
     drop(file);
-    assert_eq!(node(&root, "/ro/d").create("new", Kind::File).map(|_| ()), Err(Error::ReadOnly));
+    assert_eq!(
+        node(&root, "/ro/d").create("new", Kind::File, FILE).map(|_| ()),
+        Err(Error::ReadOnly)
+    );
     // A snapshot of the top holds the subvolumes there as empty
     // directories, as on Linux.
     root.snapshot("again", &root, false).unwrap();
@@ -226,7 +230,7 @@ fn an_empty_subvolume_goes_as_an_empty_directory_does() {
     node(&root, "/outer").remove_subvolume("inner").unwrap();
     root.remove_subvolume("outer").unwrap();
     model.clear();
-    root.create("plain", Kind::Directory).unwrap();
+    root.create("plain", Kind::Directory, DIR).unwrap();
     model.insert("/plain".into(), Thing::Dir);
     assert_eq!(root.remove_subvolume("plain"), Err(Error::NotSupported));
     assert_eq!(root.remove_subvolume("missing"), Err(Error::NotFound));
@@ -287,7 +291,7 @@ fn random_snapshots_changes_and_removals_match_a_model() {
                     rewrite(&root, &path, noise(random.next(), random.below(40_000)), &mut model);
                 } else {
                     let (dir, name) = path.rsplit_once('/').unwrap();
-                    let file = node(&root, dir).create(name, Kind::File).unwrap();
+                    let file = node(&root, dir).create(name, Kind::File, FILE).unwrap();
                     let data = noise(random.next(), random.below(40_000));
                     put(&file, 0, &data);
                     model.insert(path, Thing::File(data));

@@ -716,7 +716,11 @@ list go before it sets the timer, the race above; a waiter reading
   opens only the devices with fixed Linux numbers (`null`, `zero`,
   `random`, `urandom`, `kmsg`, `tty`, `ptmx`, `fb0`); others fail with
   ENXIO. Symbolic links work on tmpfs, Btrfs and in the boot archive.
-- `chmod`, `chown` and `umask` change nothing until users (Phase 13).
+- Files have owners, groups and modes on tmpfs, Btrfs and ext4 (ADR
+  0213), which nothing checks until users come later in Phase 13; FAT
+  and exFAT keep none and show user 0's 0755: as Linux's, they take a
+  `chmod` of permission bits or a `chown` to user 0, which change
+  nothing, and refuse any other (EPERM).
 - `st_ctim` is the file's change time on tmpfs and Btrfs, and
   `st_mtim` on FAT and exFAT, which keep none (ADR 0135); reading a file
   never changes `st_atim` (ADR 0076).

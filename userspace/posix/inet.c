@@ -153,6 +153,19 @@ static void tcp(void) {
 	value = 1;
 	CHECK(setsockopt(client, SOL_SOCKET, SO_KEEPALIVE, &value, sizeof(value)) == 0);
 	CHECK(setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &value, sizeof(value)) == 0);
+	// Keep-alive's probes as on Linux: 7,200 s of quiet, then 9, 75 s apart.
+	CHECK(getsockopt(client, IPPROTO_TCP, TCP_KEEPIDLE, &value, &size) == 0 && value == 7200);
+	CHECK(getsockopt(client, IPPROTO_TCP, TCP_KEEPINTVL, &value, &size) == 0 && value == 75);
+	CHECK(getsockopt(client, IPPROTO_TCP, TCP_KEEPCNT, &value, &size) == 0 && value == 9);
+	value = 60;
+	CHECK(setsockopt(client, IPPROTO_TCP, TCP_KEEPIDLE, &value, sizeof(value)) == 0);
+	CHECK(getsockopt(client, IPPROTO_TCP, TCP_KEEPIDLE, &value, &size) == 0 && value == 60);
+	value = 0;
+	CHECK_ERROR(setsockopt(client, IPPROTO_TCP, TCP_KEEPINTVL, &value, sizeof(value)), EINVAL);
+	value = 128;
+	CHECK_ERROR(setsockopt(client, IPPROTO_TCP, TCP_KEEPCNT, &value, sizeof(value)), EINVAL);
+	value = 3;
+	CHECK(setsockopt(client, IPPROTO_TCP, TCP_KEEPCNT, &value, sizeof(value)) == 0);
 	value = 32;
 	CHECK(setsockopt(client, IPPROTO_IP, IP_TTL, &value, sizeof(value)) == 0);
 	CHECK(getsockopt(client, IPPROTO_IP, IP_TTL, &value, &size) == 0 && value == 32);

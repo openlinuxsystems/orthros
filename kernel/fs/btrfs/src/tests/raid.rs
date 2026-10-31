@@ -24,6 +24,7 @@ use radix_vfs::{Error, FileSystem, Kind};
 use super::files::noise;
 use super::rw::{Model, Thing, put, snapshot};
 use super::write::{image_of, writable, write_sparse};
+use super::{DIR, FILE};
 use super::{scratch, tool};
 use crate::BtrfsFs;
 use crate::chunk::kind;
@@ -136,7 +137,7 @@ pub(super) fn assert_reads(fs: &BtrfsFs, model: &Model, what: &str) {
 /// directory of `fs`, and notes it in `model`.
 pub(super) fn write_file(fs: &BtrfsFs, model: &mut Model, name: &str, seed: u64, len: usize) {
     let data = noise(seed, len);
-    let file = fs.root().create(name, Kind::File).unwrap();
+    let file = fs.root().create(name, Kind::File, FILE).unwrap();
     put(&file, 0, &data);
     model.insert(format!("/{name}"), Thing::File(data));
 }
@@ -159,7 +160,7 @@ fn each_profile_across_disks_is_read_written_and_passes_btrfs_check() {
         let mut model = Model::new();
         write_file(&fs, &mut model, "small", 1, 5000);
         write_file(&fs, &mut model, "big", 2, 3 << 20);
-        fs.root().create("dir", Kind::Directory).unwrap();
+        fs.root().create("dir", Kind::Directory, DIR).unwrap();
         model.insert("/dir".into(), Thing::Dir);
         fs.sync().unwrap();
         drop(fs);

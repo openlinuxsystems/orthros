@@ -30,12 +30,12 @@ A symbolic link named on the command line is changed through: its
 target gets the mode. One found while recursing is left alone, and
 *-v* says *neither symbolic link 'd/l' nor referent has been changed*.
 
-Until users come, in Phase 13 of the roadmap, Radix's files have no
-owners or permission bits of their own to change: the C library's
-*chmod*(2) checks that the file is there and changes nothing
-(*radix-posix*(7)), and _mode_ is not kept. chmod still reads its
-arguments as Linux's does and fails as it would, so that scripts that
-use it run.
+tmpfs, Btrfs and ext4 keep the mode (ADR 0213). FAT and exFAT keep
+none: as on Linux, a mode of permission bits alone is taken there and
+changes nothing, and one with set-user-ID, set-group-ID or sticky fails
+with *Operation not permitted*.
+Until users come, later in Phase 13 of the roadmap, the modes are kept
+but not yet checked (*radix-posix*(7)).
 
 # OPTIONS
 

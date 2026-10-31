@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Hard links and special files (ADR 0135), checked by `btrfs check` and
-//! by what Linux's `btrfs inspect-internal dump-tree` reads of them.
+//! Hard links and special files (ADR 0135), and owners and modes (ADR
+//! 0213), checked by `btrfs check` and by what Linux's `btrfs
+//! inspect-internal dump-tree` reads of them.
 
 use std::format;
 use std::os::unix::fs::MetadataExt;
@@ -12,10 +13,11 @@ use std::string::String;
 use radix_block::DeviceRef;
 use radix_block::ram::RamDisk;
 use radix_vfs::mem::{self, KArc};
-use radix_vfs::{Error, FileSystem, Kind, NodeRef, Slice, device_number};
+use radix_vfs::{Access, AccessChange, Error, FileSystem, Kind, NodeRef, Slice, device_number};
 
 use super::files::{contents, mount};
 use super::write::{SIZE, assert_checks, image_of, mkfs_empty, writable, write_sparse};
+use super::{DIR, FILE, LINK};
 use super::{mkfs, scratch, tool};
 use crate::fs::BtrfsFs;
 
@@ -73,9 +75,9 @@ fn hard_links_are_names_of_one_file_that_btrfs_check_counts() {
     let disk = writable(&mkfs_empty(&[]));
     let fs = mount_rw(&disk);
     let root = fs.root();
-    let file = root.create("a", Kind::File).unwrap();
+    let file = root.create("a", Kind::File, FILE).unwrap();
     put(&file, b"one inode");
-    let sub = root.create("sub", Kind::Directory).unwrap();
+    let sub = root.create("sub", Kind::Directory, DIR).unwrap();
     sub.link("b", &file).unwrap();
     root.link("c", &file).unwrap();
     assert_eq!(file.stat().links, 3);
@@ -129,8 +131,8 @@ fn names_past_a_full_reference_item_go_to_extended_references() {
     let disk = writable(&mkfs_empty(&[]));
     let fs = mount_rw(&disk);
     let root = fs.root();
-    let dir = root.create("dir", Kind::Directory).unwrap();
-    let file = dir.create(&long_name(0, 200), Kind::File).unwrap();
+    let dir = root.create("dir", Kind::Directory, DIR).unwrap();
+    let file = dir.create(&long_name(0, 200), Kind::File, FILE).unwrap();
     put(&file, b"many names");
     let ino = file.stat().id;
     // A 16 KiB block's item holds 77 names of 200 bytes.
@@ -177,7 +179,7 @@ fn without_extended_references_a_full_item_refuses_more_names() {
     let disk = writable(&mkfs_empty(&["-O", "^extref"]));
     let fs = mount_rw(&disk);
     let root = fs.root();
-    let file = root.create(&long_name(0, 200), Kind::File).unwrap();
+    let file = root.create(&long_name(0, 200), Kind::File, FILE).unwrap();
     let mut n = 1;
     let refused = loop {
         match root.link(&long_name(n, 200), &file) {
@@ -188,7 +190,7 @@ fn without_extended_references_a_full_item_refuses_more_names() {
     assert_eq!(refused, Error::TooManyNames);
     assert_eq!(n, 77);
     // The filesystem goes on.
-    root.create("after", Kind::File).unwrap();
+    root.create("after", Kind::File, FILE).unwrap();
     fs.sync().unwrap();
     let image = image_of(&disk, SIZE as usize);
     assert_checks(&image);
@@ -237,14 +239,17 @@ fn special_files_are_kept_as_linux_keeps_them() {
         ("file", Kind::File, 0),
     ];
     for (name, kind, device) in made {
-        let node = root.make_node(name, kind, device).unwrap();
+        let node = root.make_node(name, kind, device, Access::default_for(kind)).unwrap();
         assert_eq!((node.kind(), node.stat().device), (kind, device), "{name}");
     }
-    assert_eq!(root.make_node("fifo", Kind::Pipe, 0).err(), Some(Error::Exists));
-    assert_eq!(root.make_node("dir", Kind::Directory, 0).err(), Some(Error::NotSupported));
+    assert_eq!(
+        root.make_node("fifo", Kind::Pipe, 0, Access::default_for(Kind::Pipe)).err(),
+        Some(Error::Exists)
+    );
+    assert_eq!(root.make_node("dir", Kind::Directory, 0, DIR).err(), Some(Error::NotSupported));
     // A socket's name binds while the filesystem is mounted.
     let binding: radix_vfs::SocketBinding = mem::arc(7u32).unwrap();
-    let bound = root.make_socket("bound", binding).unwrap();
+    let bound = root.make_socket("bound", binding, Access::default_for(Kind::Socket)).unwrap();
     assert_eq!(bound.socket_binding().unwrap().downcast_ref::<u32>(), Some(&7));
     assert!(root.lookup("socket").unwrap().socket_binding().is_none());
     // Special files hold nothing to read.
@@ -262,7 +267,7 @@ fn special_files_are_kept_as_linux_keeps_them() {
     let mode = |name: &str| inode_field(&tree, root.lookup(name).unwrap().stat().id, "mode");
     assert_eq!(
         [mode("fifo"), mode("null"), mode("nvme"), mode("socket")],
-        [10644, 20644, 60644, 140755]
+        [10600, 20666, 60660, 140777]
     );
     let ro = mount(&image).unwrap();
     for (name, kind, device) in made {
@@ -273,11 +278,21 @@ fn special_files_are_kept_as_linux_keeps_them() {
             "{name}"
         );
     }
-    assert_eq!(ro.root().make_node("x", Kind::Pipe, 0).err(), Some(Error::ReadOnly));
+    assert_eq!(
+        ro.root().make_node("x", Kind::Pipe, 0, Access::default_for(Kind::Pipe)).err(),
+        Some(Error::ReadOnly)
+    );
     // What was bound is gone at the next mount; the name stays.
     assert!(ro.root().lookup("bound").unwrap().socket_binding().is_none());
     // The numbers beyond Linux's 32 bits are dropped, as Linux drops them.
-    let wide = root.make_node("wide", Kind::CharDevice, device_number(0x1001, 0x10_0001)).unwrap();
+    let wide = root
+        .make_node(
+            "wide",
+            Kind::CharDevice,
+            device_number(0x1001, 0x10_0001),
+            Access::default_for(Kind::CharDevice),
+        )
+        .unwrap();
     assert_eq!(wide.stat().device, device_number(1, 1));
     for name in ["fifo", "null", "nvme", "widest", "wide", "socket", "bound", "file"] {
         root.remove(name).unwrap();
@@ -303,4 +318,50 @@ fn special_files_linux_made_read_as_linux_made_them() {
     let meta = std::fs::metadata(dir.join("a")).unwrap();
     assert_eq!(u64::from(root.lookup("b").unwrap().stat().links), meta.nlink());
     assert_eq!(root.lookup("a").unwrap().stat().id, root.lookup("b").unwrap().stat().id);
+    // Owners and modes are Linux's.
+    for name in ["a", "fifo"] {
+        let meta = std::fs::metadata(dir.join(name)).unwrap();
+        let mode = (meta.mode() & 0o7777) as u16;
+        let access = Access { owner: meta.uid(), group: meta.gid(), mode };
+        assert_eq!(root.lookup(name).unwrap().access(), access, "{name}");
+    }
+}
+
+#[test]
+fn owners_and_modes_are_kept_as_linux_keeps_them() {
+    let disk = writable(&mkfs_empty(&[]));
+    let fs = mount_rw(&disk);
+    let root = fs.root();
+    let chmod = |mode| AccessChange { mode: Some(mode), ..AccessChange::default() };
+    let mine = Access { owner: 1000, group: 100, mode: 0o640 };
+    let file = root.create("file", Kind::File, mine).unwrap();
+    assert_eq!(file.access(), mine);
+    root.create("dir", Kind::Directory, Access { mode: 0o2775, ..mine }).unwrap();
+    let link = root.make_link("link", "file", LINK).unwrap();
+    // A chown past 16 bits takes the set-user-ID bit away.
+    file.set_access(&chmod(0o4755)).unwrap();
+    file.set_access(&AccessChange::chown(Kind::File, Some(70_000), None)).unwrap();
+    let chowned = Access { owner: 70_000, group: 100, mode: 0o755 };
+    assert_eq!(file.access(), chowned);
+    assert_eq!(link.set_access(&chmod(0o700)), Err(Error::NotSupported));
+    link.set_access(&AccessChange::chown(Kind::Symlink, None, Some(5))).unwrap();
+    // A file still open without a name changes, as on Linux.
+    let gone = root.create("gone", Kind::File, FILE).unwrap();
+    root.remove("gone").unwrap();
+    gone.set_access(&chmod(0o600)).unwrap();
+    assert_eq!(gone.access(), Access { mode: 0o600, ..FILE });
+    drop(gone);
+    fs.sync().unwrap();
+    let image = image_of(&disk, SIZE as usize);
+    assert_checks(&image);
+    let tree = dump(&image);
+    let field = |name: &str, field| inode_field(&tree, root.lookup(name).unwrap().stat().id, field);
+    let fields = |name| [field(name, "uid"), field(name, "gid"), field(name, "mode")];
+    assert_eq!(fields("file"), [70_000, 100, 100_755]);
+    assert_eq!(fields("dir"), [1000, 100, 42_775]);
+    assert_eq!(fields("link"), [0, 5, 120_777]);
+    let ro = mount(&image).unwrap();
+    let file = ro.root().lookup("file").unwrap();
+    assert_eq!(file.access(), chowned);
+    assert_eq!(file.set_access(&chmod(0o600)), Err(Error::ReadOnly));
 }

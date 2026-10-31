@@ -20,11 +20,18 @@ use crate::path::{self, Component};
 use crate::synthetic::{FixedDir, Generated, Link, Null, SyntheticFs, Zero};
 use crate::tmpfs::Tmpfs;
 use crate::{
-    APPEND, Error, FileSystem, FsKind, FsRef, Kind, Node, NodeRef, Result, Slice, SliceMut, mem,
+    APPEND, Access, AccessChange, Error, FileSystem, FsKind, FsRef, Kind, Node, NodeRef, Result,
+    Slice, SliceMut, mem,
 };
 
+/// The owner, group and mode of the directories, files and links the
+/// tests make: user 0's, with Linux's usual modes.
+const DIR: Access = Access::default_for(Kind::Directory);
+const FILE: Access = Access::default_for(Kind::File);
+const LINK: Access = Access::default_for(Kind::Symlink);
+
 fn tmpfs(max: u64) -> FsRef {
-    Tmpfs::new(max, u64::MAX).unwrap()
+    Tmpfs::new(max, u64::MAX, 0o755).unwrap()
 }
 
 fn vfs() -> Vfs {
@@ -32,7 +39,7 @@ fn vfs() -> Vfs {
 }
 
 fn create() -> OpenFlags {
-    OpenFlags { create: true, ..OpenFlags::default() }
+    OpenFlags { create: Some(FILE), ..OpenFlags::default() }
 }
 
 fn write(vfs: &Vfs, base: &Location, path: &str, data: &[u8]) -> Result<()> {
@@ -90,8 +97,8 @@ fn paths_are_checked() {
 fn tmpfs_files_and_directories() {
     let vfs = vfs();
     let root = vfs.root();
-    vfs.make_directory(&root, "etc").unwrap();
-    assert_eq!(vfs.make_directory(&root, "etc"), Err(Error::Exists));
+    vfs.make_directory(&root, "etc", DIR).unwrap();
+    assert_eq!(vfs.make_directory(&root, "etc", DIR), Err(Error::Exists));
     write(&vfs, &root, "etc/hostname", b"dukovo\n").unwrap();
     let file = vfs.open(&root, "etc/hostname", OpenFlags::default()).unwrap();
     assert_eq!(read_all(&file.node), b"dukovo\n");
@@ -105,7 +112,7 @@ fn tmpfs_files_and_directories() {
     assert_eq!(out, [0; 4]);
     file.node.set_size(3).unwrap();
     assert_eq!(read_all(&file.node), b"duk");
-    let excl = OpenFlags { create: true, exclusive: true, ..OpenFlags::default() };
+    let excl = OpenFlags { create: Some(FILE), exclusive: true, ..OpenFlags::default() };
     assert_eq!(vfs.open(&root, "etc/hostname", excl).err(), Some(Error::Exists));
     let trunc = OpenFlags { truncate: true, ..OpenFlags::default() };
     let file = vfs.open(&root, "etc/hostname", trunc).unwrap();
@@ -134,7 +141,7 @@ fn tmpfs_times_are_set() {
     let vfs = vfs();
     let root = vfs.root();
     write(&vfs, &root, "file", b"x").unwrap();
-    vfs.make_directory(&root, "dir").unwrap();
+    vfs.make_directory(&root, "dir", DIR).unwrap();
     let file = vfs.resolve(&root, "file").unwrap().node;
     let dir = vfs.resolve(&root, "dir").unwrap().node;
     let made = file.stat();
@@ -153,16 +160,68 @@ fn tmpfs_times_are_set() {
 }
 
 #[test]
+fn owners_and_modes_are_kept_and_changed_as_linux_has_them() {
+    let vfs = vfs();
+    let root = vfs.root();
+    assert_eq!(root.node.access(), DIR);
+    let mounted = Tmpfs::new(1 << 20, u64::MAX, 0o1777).unwrap();
+    assert_eq!(mounted.root().access().mode, 0o1777);
+    // What a node is made with is what it has.
+    let mine = Access { owner: 1000, group: 100, mode: 0o640 };
+    let flags = OpenFlags { create: Some(mine), ..OpenFlags::default() };
+    let file = vfs.open(&root, "file", flags).unwrap().node;
+    assert_eq!(file.access(), mine);
+    vfs.make_directory(&root, "dir", Access { mode: 0o700, ..mine }).unwrap();
+    let dir = vfs.resolve(&root, "dir").unwrap().node;
+    assert_eq!(dir.access(), Access { mode: 0o700, ..mine });
+    // chmod sets every bit given, and the change time.
+    let before = file.stat().changed;
+    let chmod = |mode| AccessChange { mode: Some(mode), ..AccessChange::default() };
+    file.set_access(&chmod(0o6755)).unwrap();
+    assert_eq!(file.access().mode, 0o6755);
+    assert!(file.stat().changed >= before);
+    // chown takes the set-ID bits away even when nothing else changes,
+    // the set-group-ID bit only if the group may run it.
+    file.set_access(&AccessChange::chown(Kind::File, None, None)).unwrap();
+    assert_eq!(file.access(), Access { mode: 0o755, ..mine });
+    file.set_access(&chmod(0o6745)).unwrap();
+    file.set_access(&AccessChange::chown(Kind::File, Some(0), None)).unwrap();
+    assert_eq!(file.access(), Access { owner: 0, group: 100, mode: 0o2745 });
+    // A directory keeps them.
+    dir.set_access(&chmod(0o2775)).unwrap();
+    dir.set_access(&AccessChange::chown(Kind::Directory, None, Some(50))).unwrap();
+    assert_eq!(dir.access(), Access { owner: 1000, group: 50, mode: 0o2775 });
+    // In a set-group-ID directory a new node takes its group, and a new
+    // directory its set-group-ID bit too.
+    write(&vfs, &root, "dir/shared", b"x").unwrap();
+    let shared = vfs.resolve(&root, "dir/shared").unwrap().node;
+    assert_eq!(shared.access(), Access { group: 50, ..FILE });
+    vfs.make_directory(&root, "dir/sub", DIR).unwrap();
+    let sub = vfs.resolve(&root, "dir/sub").unwrap().node;
+    assert_eq!(sub.access(), Access { group: 50, mode: 0o2755, ..DIR });
+    vfs.make_link(&root, "dir/link", "shared", Access { mode: 0o700, ..LINK }).unwrap();
+    let link = dir.lookup("link").unwrap();
+    assert_eq!(link.access(), Access { group: 50, ..LINK });
+    // A link's owner changes; its mode cannot.
+    assert_eq!(link.set_access(&chmod(0o700)), Err(Error::NotSupported));
+    link.set_access(&AccessChange::chown(Kind::Symlink, Some(7), None)).unwrap();
+    assert_eq!(link.access(), Access { owner: 7, group: 50, ..LINK });
+    // What a filesystem that keeps none shows, and its refusal.
+    assert_eq!(Null(9).access(), Access::default_for(Kind::CharDevice));
+    assert_eq!(Null(9).set_access(&chmod(0o600)), Err(Error::NotSupported));
+}
+
+#[test]
 fn tmpfs_has_a_file_limit() {
-    let vfs = Vfs::new(Tmpfs::new(1 << 20, 3).unwrap(), "tmpfs").unwrap();
+    let vfs = Vfs::new(Tmpfs::new(1 << 20, 3, 0o755).unwrap(), "tmpfs").unwrap();
     let root = vfs.root();
     let info = || root.mount.fs.info();
     assert_eq!((info().files, info().free_files), (3, 2));
     write(&vfs, &root, "a", b"x").unwrap();
-    vfs.make_directory(&root, "b").unwrap();
+    vfs.make_directory(&root, "b", DIR).unwrap();
     assert_eq!(info().free_files, 0);
     assert_eq!(write(&vfs, &root, "c", b"x"), Err(Error::NoSpace));
-    assert_eq!(vfs.make_directory(&root, "c"), Err(Error::NoSpace));
+    assert_eq!(vfs.make_directory(&root, "c", DIR), Err(Error::NoSpace));
     // A file counts until its last handle goes.
     let a = vfs.resolve(&root, "a").unwrap();
     vfs.remove(&root, "a").unwrap();
@@ -191,8 +250,8 @@ fn tmpfs_has_a_size_limit() {
 fn paths_stay_beneath_their_directory() {
     let vfs = vfs();
     let root = vfs.root();
-    vfs.make_directory(&root, "home").unwrap();
-    vfs.make_directory(&root, "home/user").unwrap();
+    vfs.make_directory(&root, "home", DIR).unwrap();
+    vfs.make_directory(&root, "home/user", DIR).unwrap();
     write(&vfs, &root, "secret", b"key").unwrap();
     let home = vfs.open(&root, "home/user", OpenFlags::default()).unwrap();
     write(&vfs, &home, "notes", b"hi").unwrap();
@@ -217,12 +276,12 @@ fn link_text(vfs: &Vfs, base: &Location, path: &str) -> Result<String> {
 fn symbolic_links_are_followed() {
     let vfs = vfs();
     let root = vfs.root();
-    vfs.make_directory(&root, "a").unwrap();
-    vfs.make_directory(&root, "a/b").unwrap();
+    vfs.make_directory(&root, "a", DIR).unwrap();
+    vfs.make_directory(&root, "a/b", DIR).unwrap();
     write(&vfs, &root, "a/b/file", b"data").unwrap();
     // Relative targets go on from the link's directory.
-    vfs.make_link(&root, "rel", "a/b").unwrap();
-    vfs.make_link(&root, "a/up", "../a/b/file").unwrap();
+    vfs.make_link(&root, "rel", "a/b", LINK).unwrap();
+    vfs.make_link(&root, "a/up", "../a/b/file", LINK).unwrap();
     assert_eq!(vfs.stat(&root, "rel/file").unwrap().size, 4);
     assert_eq!(vfs.stat(&root, "a/up").unwrap().size, 4);
     assert_eq!(vfs.stat(&root, "rel").unwrap().kind, Kind::Directory);
@@ -234,10 +293,10 @@ fn symbolic_links_are_followed() {
     // A `/` after the last name follows it.
     assert_eq!(vfs.resolve_link(&root, "rel/").unwrap().node.kind(), Kind::Directory);
     // Absolute targets start again from where the walk did.
-    vfs.make_link(&root, "abs", "/a/b/file").unwrap();
+    vfs.make_link(&root, "abs", "/a/b/file", LINK).unwrap();
     assert_eq!(read_all(&vfs.open(&root, "abs", OpenFlags::default()).unwrap().node), b"data");
     let a = vfs.resolve(&root, "a").unwrap();
-    vfs.make_link(&a, "inside", "/b/file").unwrap();
+    vfs.make_link(&a, "inside", "/b/file", LINK).unwrap();
     assert_eq!(vfs.stat(&a, "inside").unwrap().size, 4);
     assert_eq!(vfs.stat(&root, "a/inside").err(), Some(Error::NotFound));
     // `..` at the root is the root, as `/..` is `/`.
@@ -249,11 +308,11 @@ fn symbolic_links_are_followed() {
     assert_eq!(vfs.open(&root, "abs", no_follow).err(), Some(Error::Loop));
     assert!(vfs.open(&root, "rel/file", no_follow).is_ok());
     // Dangling links and loops.
-    vfs.make_link(&root, "dangling", "nowhere/x").unwrap();
+    vfs.make_link(&root, "dangling", "nowhere/x", LINK).unwrap();
     assert_eq!(vfs.stat(&root, "dangling").err(), Some(Error::NotFound));
     assert_eq!(vfs.stat_link(&root, "dangling").unwrap().kind, Kind::Symlink);
-    vfs.make_link(&root, "loop1", "loop2").unwrap();
-    vfs.make_link(&root, "loop2", "./loop1").unwrap();
+    vfs.make_link(&root, "loop1", "loop2", LINK).unwrap();
+    vfs.make_link(&root, "loop2", "./loop1", LINK).unwrap();
     assert_eq!(vfs.stat(&root, "loop1").err(), Some(Error::Loop));
     assert_eq!(vfs.stat_link(&root, "loop1").unwrap().kind, Kind::Symlink);
     // Where paths really lead.
@@ -275,9 +334,9 @@ fn symbolic_links_are_followed() {
     assert_eq!(vfs.real_path(&root, "rel/file", &mut SliceMut(&mut shorter[..])), Ok(8));
     assert_eq!(&shorter, b"a/");
     // Making links.
-    assert_eq!(vfs.make_link(&root, "rel", "x").err(), Some(Error::Exists));
-    assert_eq!(vfs.make_link(&root, "empty", "").err(), Some(Error::BadName));
-    assert_eq!(vfs.make_link(&root, "a/b/file/x", "y").err(), Some(Error::NotDirectory));
+    assert_eq!(vfs.make_link(&root, "rel", "x", LINK).err(), Some(Error::Exists));
+    assert_eq!(vfs.make_link(&root, "empty", "", LINK).err(), Some(Error::BadName));
+    assert_eq!(vfs.make_link(&root, "a/b/file/x", "y", LINK).err(), Some(Error::NotDirectory));
 }
 
 #[test]
@@ -288,7 +347,7 @@ fn at_most_forty_links_are_followed() {
     for i in 0..=crate::MAX_LINKS {
         let next =
             if i == crate::MAX_LINKS { String::from("file") } else { std::format!("l{}", i + 1) };
-        vfs.make_link(&root, &std::format!("l{i}"), &next).unwrap();
+        vfs.make_link(&root, &std::format!("l{i}"), &next, LINK).unwrap();
     }
     assert_eq!(vfs.stat(&root, "l1").unwrap().size, 1);
     assert_eq!(vfs.stat(&root, "l0").err(), Some(Error::Loop));
@@ -298,18 +357,18 @@ fn at_most_forty_links_are_followed() {
 fn files_are_made_and_names_changed_through_links() {
     let vfs = vfs();
     let root = vfs.root();
-    vfs.make_directory(&root, "dir").unwrap();
+    vfs.make_directory(&root, "dir", DIR).unwrap();
     // Creating through a link makes the file where it points.
-    vfs.make_link(&root, "new", "dir/made").unwrap();
+    vfs.make_link(&root, "new", "dir/made", LINK).unwrap();
     write(&vfs, &root, "new", b"xy").unwrap();
     assert_eq!(vfs.stat(&root, "dir/made").unwrap().size, 2);
     assert_eq!(vfs.stat_link(&root, "new").unwrap().kind, Kind::Symlink);
-    let exclusive = OpenFlags { create: true, exclusive: true, ..OpenFlags::default() };
+    let exclusive = OpenFlags { create: Some(FILE), exclusive: true, ..OpenFlags::default() };
     assert_eq!(vfs.open(&root, "new", exclusive).err(), Some(Error::Exists));
-    let no_follow = OpenFlags { create: true, no_follow: true, ..OpenFlags::default() };
+    let no_follow = OpenFlags { create: Some(FILE), no_follow: true, ..OpenFlags::default() };
     assert_eq!(vfs.open(&root, "new", no_follow).err(), Some(Error::Loop));
     // Renaming and removing take the link, not what it points to.
-    vfs.make_link(&root, "to_dir", "dir").unwrap();
+    vfs.make_link(&root, "to_dir", "dir", LINK).unwrap();
     vfs.rename(&root, "to_dir", &root, "dir2").unwrap();
     assert_eq!(vfs.stat(&root, "dir2/made").unwrap().size, 2);
     vfs.remove(&root, "dir2").unwrap();
@@ -318,34 +377,37 @@ fn files_are_made_and_names_changed_through_links() {
     // A link replaces a file, but not a directory.
     vfs.rename(&root, "new", &root, "dir/made").unwrap();
     assert_eq!(vfs.stat_link(&root, "dir/made").unwrap().kind, Kind::Symlink);
-    vfs.make_link(&root, "other", "x").unwrap();
+    vfs.make_link(&root, "other", "x", LINK).unwrap();
     assert_eq!(vfs.rename(&root, "other", &root, "dir").err(), Some(Error::IsDirectory));
 }
 
 #[test]
 fn links_count_against_the_limits() {
-    let fs = Tmpfs::new(8, 3).unwrap();
+    let fs = Tmpfs::new(8, 3, 0o755).unwrap();
     let vfs = Vfs::new(fs.clone(), "tmpfs").unwrap();
     let root = vfs.root();
-    assert_eq!(vfs.make_link(&root, "long", "123456789").err(), Some(Error::NoSpace));
-    vfs.make_link(&root, "a", "1234").unwrap();
-    vfs.make_link(&root, "b", "5678").unwrap();
+    assert_eq!(vfs.make_link(&root, "long", "123456789", LINK).err(), Some(Error::NoSpace));
+    vfs.make_link(&root, "a", "1234", LINK).unwrap();
+    vfs.make_link(&root, "b", "5678", LINK).unwrap();
     assert_eq!(fs.info().free_files, 0);
-    assert_eq!(vfs.make_link(&root, "c", "9").err(), Some(Error::NoSpace));
+    assert_eq!(vfs.make_link(&root, "c", "9", LINK).err(), Some(Error::NoSpace));
     vfs.remove(&root, "a").unwrap();
     vfs.remove(&root, "b").unwrap();
     assert_eq!(fs.info().free_files, 2);
-    vfs.make_link(&root, "c", "12345678").unwrap();
+    vfs.make_link(&root, "c", "12345678", LINK).unwrap();
 }
 
 #[test]
 fn sockets_have_names() {
-    let fs = Tmpfs::new(1 << 20, 3).unwrap();
+    let fs = Tmpfs::new(1 << 20, 3, 0o755).unwrap();
     let vfs = Vfs::new(fs.clone(), "tmpfs").unwrap();
     let root = vfs.root();
     let binding: crate::SocketBinding = mem::arc(7u32).unwrap();
-    vfs.make_socket(&root, "s", binding.clone()).unwrap();
-    assert_eq!(vfs.make_socket(&root, "s", binding).err(), Some(Error::Exists));
+    vfs.make_socket(&root, "s", binding.clone(), Access::default_for(Kind::Socket)).unwrap();
+    assert_eq!(
+        vfs.make_socket(&root, "s", binding, Access::default_for(Kind::Socket)).err(),
+        Some(Error::Exists)
+    );
     let named = vfs.resolve(&root, "s").unwrap();
     assert_eq!(named.node.kind(), Kind::Socket);
     assert_eq!(named.node.socket_binding().unwrap().downcast_ref::<u32>(), Some(&7));
@@ -359,7 +421,7 @@ fn sockets_have_names() {
     vfs.rename(&root, "s", &root, "f").unwrap();
     assert_eq!(vfs.stat(&root, "f").unwrap().kind, Kind::Socket);
     assert_eq!(fs.info().free_files, 1);
-    vfs.make_directory(&root, "d").unwrap();
+    vfs.make_directory(&root, "d", DIR).unwrap();
     assert_eq!(vfs.rename(&root, "f", &root, "d").err(), Some(Error::IsDirectory));
     vfs.remove(&root, "f").unwrap();
     drop(named);
@@ -370,18 +432,18 @@ fn sockets_have_names() {
 fn a_tree_of_mounts_goes_at_once() {
     let vfs = vfs();
     let root = vfs.root();
-    vfs.make_directory(&root, "fuzz").unwrap();
+    vfs.make_directory(&root, "fuzz", DIR).unwrap();
     vfs.mount(&root, "fuzz", tmpfs(1 << 20), "tmpfs", false).unwrap();
     for dir in ["fuzz/a", "fuzz/b", "fuzz/d"] {
-        vfs.make_directory(&root, dir).unwrap();
+        vfs.make_directory(&root, dir, DIR).unwrap();
     }
     vfs.mount(&root, "fuzz/a", tmpfs(1 << 20), "tmpfs", false).unwrap();
-    vfs.make_directory(&root, "fuzz/a/c").unwrap();
+    vfs.make_directory(&root, "fuzz/a/c", DIR).unwrap();
     vfs.mount(&root, "fuzz/a/c", tmpfs(1 << 20), "tmpfs", false).unwrap();
     vfs.mount(&root, "fuzz/b", tmpfs(1 << 20), "tmpfs", false).unwrap();
     // Stacked on the same directory, too.
     vfs.mount(&root, "fuzz/b", tmpfs(1 << 20), "tmpfs", false).unwrap();
-    vfs.make_directory(&root, "other").unwrap();
+    vfs.make_directory(&root, "other", DIR).unwrap();
     vfs.mount(&root, "other", tmpfs(1 << 20), "tmpfs", false).unwrap();
     let count = |vfs: &Vfs| {
         let mut n = 0;
@@ -427,7 +489,7 @@ impl FileSystem for Unsyncable {
 fn a_mount_whose_disk_is_gone_unmounts_though_its_sync_fails() {
     let vfs = vfs();
     let root = vfs.root();
-    vfs.make_directory(&root, "stick").unwrap();
+    vfs.make_directory(&root, "stick", DIR).unwrap();
     let stick: FsRef = mem::arc(Unsyncable(tmpfs(1 << 20))).unwrap();
     vfs.mount(&root, "stick", stick, "sdb1", false).unwrap();
     // While its disk is there, a failed sync keeps it mounted.
@@ -443,8 +505,8 @@ fn a_mount_whose_disk_is_gone_unmounts_though_its_sync_fails() {
 fn mounts_join_filesystems() {
     let vfs = vfs();
     let root = vfs.root();
-    vfs.make_directory(&root, "mnt").unwrap();
-    vfs.make_directory(&root, "mnt/disk").unwrap();
+    vfs.make_directory(&root, "mnt", DIR).unwrap();
+    vfs.make_directory(&root, "mnt/disk", DIR).unwrap();
     write(&vfs, &root, "mnt/disk/hidden", b"under").unwrap();
     let other = tmpfs(1 << 20);
     let mount = vfs.mount(&root, "mnt/disk", other.clone(), "test", false).unwrap();
@@ -489,7 +551,7 @@ fn mount_points_are_found_through_their_filter() {
     let dirs: Vec<String> = (0..200).map(|i| std::format!("d{i}")).collect();
     let mounted = |i: usize| i.is_multiple_of(3);
     for (i, dir) in dirs.iter().enumerate() {
-        vfs.make_directory(&root, dir).unwrap();
+        vfs.make_directory(&root, dir, DIR).unwrap();
         write(&vfs, &root, &std::format!("{dir}/under"), b"u").unwrap();
         if mounted(i) {
             vfs.mount(&root, dir, tmpfs(1 << 16), "tmpfs", false).unwrap();
@@ -525,7 +587,7 @@ fn renames() {
     let vfs = vfs();
     let root = vfs.root();
     for dir in ["a", "a/b", "c"] {
-        vfs.make_directory(&root, dir).unwrap();
+        vfs.make_directory(&root, dir, DIR).unwrap();
     }
     write(&vfs, &root, "a/f", b"one").unwrap();
     write(&vfs, &root, "c/g", b"two").unwrap();
@@ -593,7 +655,7 @@ fn listing_with_cursors() {
 fn removing_while_listing_skips_nothing() {
     let vfs = vfs();
     let root = vfs.root();
-    vfs.make_directory(&root, "dir").unwrap();
+    vfs.make_directory(&root, "dir", DIR).unwrap();
     let dir = vfs.resolve(&root, "dir").unwrap();
     let names: Vec<String> = (0..50).map(|i| format!("f{i:02}")).collect();
     for name in names.iter().rev() {
@@ -699,7 +761,7 @@ fn the_boot_archive_as_a_filesystem() {
     let link = vfs.stat_link(&root, "system/bin/sh").unwrap();
     assert_eq!((link.kind, link.size), (Kind::Symlink, 5));
     assert_eq!(link_text(&vfs, &root, "system/bin/sh").unwrap(), "spark");
-    assert_eq!(vfs.make_link(&root, "system/bin/ls", "x").err(), Some(Error::ReadOnly));
+    assert_eq!(vfs.make_link(&root, "system/bin/ls", "x", LINK).err(), Some(Error::ReadOnly));
     assert_eq!(vfs.open(&root, "system/new", create()).err(), Some(Error::ReadOnly));
     assert_eq!(spark.node.write(0, &Slice(b"x")), Err(Error::ReadOnly));
     // Each file is one node, so a tmpfs mounts over a directory of it.
@@ -1210,7 +1272,7 @@ proptest! {
                 TreeOp::MakeDir(d, n) => {
                     let p = path(d, n);
                     let expected = if parent_ok(&model, d) && !model.contains_key(&p) { Ok(()) } else { Err(()) };
-                    let got = vfs.make_directory(&root, &p).map_err(|_| ());
+                    let got = vfs.make_directory(&root, &p, DIR).map_err(|_| ());
                     prop_assert_eq!(got, expected);
                     if got.is_ok() {
                         model.insert(p, None);
@@ -1865,11 +1927,11 @@ proptest! {
 
 #[test]
 fn files_have_hard_links_that_count_against_the_limit() {
-    let fs = Tmpfs::new(1 << 20, 5).unwrap();
+    let fs = Tmpfs::new(1 << 20, 5, 0o755).unwrap();
     let vfs = Vfs::new(fs.clone(), "tmpfs").unwrap();
     let root = vfs.root();
     write(&vfs, &root, "a", b"one file").unwrap();
-    vfs.make_directory(&root, "sub").unwrap();
+    vfs.make_directory(&root, "sub", DIR).unwrap();
     let sub = vfs.resolve(&root, "sub").unwrap();
     vfs.link(&root, "a", &sub, "b", false).unwrap();
     assert_eq!(vfs.stat(&root, "a").unwrap().links, 2);
@@ -1899,14 +1961,14 @@ fn files_have_hard_links_that_count_against_the_limit() {
     drop(open);
     // A symbolic link is linked itself unless followed.
     write(&vfs, &root, "target", b"x").unwrap();
-    vfs.make_link(&root, "sym", "target").unwrap();
+    vfs.make_link(&root, "sym", "target", LINK).unwrap();
     vfs.link(&root, "sym", &root, "sym2", false).unwrap();
     assert_eq!(vfs.stat_link(&root, "sym2").unwrap().kind, Kind::Symlink);
     vfs.remove(&root, "sym2").unwrap();
     vfs.link(&root, "sym", &root, "sym2", true).unwrap();
     assert_eq!(vfs.stat_link(&root, "sym2").unwrap().kind, Kind::File);
     // Not from one filesystem to another.
-    let other = Tmpfs::new(1 << 20, 5).unwrap();
+    let other = Tmpfs::new(1 << 20, 5, 0o755).unwrap();
     vfs.mount(&root, "sub", other, "tmpfs", false).unwrap();
     let sub = vfs.resolve(&root, "sub").unwrap();
     assert_eq!(vfs.link(&root, "target", &sub, "x", false).err(), Some(Error::CrossMount));
@@ -1914,17 +1976,31 @@ fn files_have_hard_links_that_count_against_the_limit() {
 
 #[test]
 fn special_files_hold_their_kind_and_number() {
-    let fs = Tmpfs::new(1 << 20, 16).unwrap();
+    let fs = Tmpfs::new(1 << 20, 16, 0o755).unwrap();
     let vfs = Vfs::new(fs.clone(), "tmpfs").unwrap();
     let root = vfs.root();
     let null = crate::device_number(1, 3);
-    vfs.make_node(&root, "fifo", Kind::Pipe, 0).unwrap();
-    vfs.make_node(&root, "null", Kind::CharDevice, null).unwrap();
-    vfs.make_node(&root, "disk", Kind::BlockDevice, crate::device_number(259, 0)).unwrap();
-    vfs.make_node(&root, "socket", Kind::Socket, 0).unwrap();
-    vfs.make_node(&root, "file", Kind::File, 0).unwrap();
-    assert_eq!(vfs.make_node(&root, "fifo", Kind::Pipe, 0).err(), Some(Error::Exists));
-    assert_eq!(vfs.make_node(&root, "dir", Kind::Directory, 0).err(), Some(Error::NotSupported));
+    vfs.make_node(&root, "fifo", Kind::Pipe, 0, Access::default_for(Kind::Pipe)).unwrap();
+    vfs.make_node(&root, "null", Kind::CharDevice, null, Access::default_for(Kind::CharDevice))
+        .unwrap();
+    vfs.make_node(
+        &root,
+        "disk",
+        Kind::BlockDevice,
+        crate::device_number(259, 0),
+        Access::default_for(Kind::BlockDevice),
+    )
+    .unwrap();
+    vfs.make_node(&root, "socket", Kind::Socket, 0, Access::default_for(Kind::Socket)).unwrap();
+    vfs.make_node(&root, "file", Kind::File, 0, FILE).unwrap();
+    assert_eq!(
+        vfs.make_node(&root, "fifo", Kind::Pipe, 0, Access::default_for(Kind::Pipe)).err(),
+        Some(Error::Exists)
+    );
+    assert_eq!(
+        vfs.make_node(&root, "dir", Kind::Directory, 0, DIR).err(),
+        Some(Error::NotSupported)
+    );
     let stat = vfs.stat(&root, "null").unwrap();
     assert_eq!((stat.kind, stat.device, stat.links, stat.size), (Kind::CharDevice, null, 1, 0));
     assert_eq!(crate::device_parts(stat.device), (1, 3));
@@ -1950,7 +2026,7 @@ fn the_change_time_follows_names_and_times() {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
             as u64
     });
-    let fs = Tmpfs::new(1 << 20, 16).unwrap();
+    let fs = Tmpfs::new(1 << 20, 16, 0o755).unwrap();
     let vfs = Vfs::new(fs, "tmpfs").unwrap();
     let root = vfs.root();
     write(&vfs, &root, "a", b"x").unwrap();

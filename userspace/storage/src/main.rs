@@ -60,7 +60,7 @@ use libradix::abi::errors::{File as FileError, Kernel as KernelError};
 use libradix::abi::file::APPEND;
 use libradix::abi::process;
 use libradix::abi::startup::{SLOT_PROCESS, Startup};
-use radix_rt::fs::Dir;
+use radix_rt::fs::{Dir, Error};
 use radix_rt::{SYS, args, entry, println};
 
 entry!(main);
@@ -85,6 +85,10 @@ const WORDS: usize = 4 * 128 * 1024 + 70_001;
 const WORDS_LINE: &[u8; 56] = b" words of a file that compresses, alike on each of them\n";
 /// The files in `many/`: more than one directory cluster's entries.
 const MANY: usize = 40;
+/// The owner and group `write` gives some files, as a user's and a
+/// group's would be (ADR 0213).
+const OWNER: u32 = 1000;
+const GROUP: u32 = 100;
 /// The long name the test uses, which needs long-name entries.
 const LONG_NAME: &str = "A file with a long name, and spaces.txt";
 /// The file the boot test's host writes to each volume between the boots,
@@ -341,6 +345,19 @@ fn check_root(root: &Dir, after: bool) {
         }
         Err(err) => fail(&format!("a write to /system failed with {err}, not read_only")),
         Ok(()) => fail("/system took a write"),
+    }
+    // The system's files are root's, whoever made the image (ADR 0213),
+    // with the boot archive's modes.
+    for (path, mode) in [("system", 0o755), ("system/tests/storage", 0o755)] {
+        match root.stat(path) {
+            Ok(stat) => check((stat.mode, stat.owner, stat.group) == (mode, 0, 0), || {
+                format!(
+                    "/{path} has mode {:o}, owner {} and group {}, not {mode:o} and root's",
+                    stat.mode, stat.owner, stat.group
+                )
+            }),
+            Err(err) => fail(&format!("/{path}: {err}")),
+        }
     }
     for place in ROOT_PLACES {
         let text = format!("Written by Dukovo in /{place} before a reboot.\n");
@@ -754,7 +771,7 @@ fn write_volume(root: &Dir, name: &str) {
         Ok(dir) => dir,
         Err(err) => return fail(&format!("cannot open /volumes/{name}: {err}")),
     };
-    let btrfs = match dir.info() {
+    let kind = match dir.info() {
         Ok(info) => {
             println!(
                 "storage: /volumes/{name}: {}, {} KiB free of {} KiB in {}-byte clusters",
@@ -763,13 +780,14 @@ fn write_volume(root: &Dir, name: &str) {
                 info.blocks * u64::from(info.block_size) / 1024,
                 info.block_size
             );
-            info.kind == FilesystemKind::Btrfs
+            Some(info.kind)
         }
         Err(err) => {
             fail(&format!("/volumes/{name}: info: {err}"));
-            false
+            None
         }
     };
+    let btrfs = kind == Some(FilesystemKind::Btrfs);
     let mut written = 0usize;
     let mut files = 0usize;
     let mut step = |what: &str, result: radix_rt::fs::Result<usize>| match result {
@@ -879,8 +897,38 @@ fn write_volume(root: &Dir, name: &str) {
         }),
     );
 
+    // Owners and modes (ADR 0213), which Btrfs and ext4 keep: a file's,
+    // a set-user-ID bit that a chown takes away, and a set-group-ID
+    // directory whose files take its group. FAT and exFAT keep none: as
+    // Linux's, they take a chmod of permission bits and a chown to the
+    // owner they show, which change nothing, and refuse any other.
+    let keeps = keeps_access(kind);
+    let change = |path: &str, owner, group, mode| {
+        if let Err(err) = dir.set_access(path, owner, group, mode) {
+            fail(&format!("/volumes/{name}: set_access {path}: {err}"));
+        }
+    };
+    if keeps {
+        change("notes/final.txt", Some(OWNER), Some(GROUP), Some(0o640));
+        change("cut.txt", None, None, Some(0o4755));
+        change("cut.txt", Some(OWNER), None, None);
+    } else {
+        change("notes/final.txt", None, None, Some(0o640));
+        change("cut.txt", Some(0), Some(0), None);
+        for (owner, mode) in [(Some(OWNER), None), (None, Some(0o4755))] {
+            match dir.set_access("hello.txt", owner, None, mode) {
+                Err(Error::Status(status))
+                    if KernelError::from_status(status) == Some(KernelError::NotPermitted) => {}
+                done => fail(&format!("/volumes/{name}: hello.txt's access changed: {done:?}")),
+            }
+        }
+    }
+
     // A directory of more entries than a cluster holds.
     step("make many/", dir.make_dir("many").map(|()| 0));
+    if keeps {
+        change("many", None, Some(GROUP), Some(0o2755));
+    }
     for i in 0..MANY {
         let body = format!("file {i}\n");
         step(
@@ -959,6 +1007,7 @@ fn check_volume(root: &Dir, name: &str, host: bool) {
     if dir.info().is_ok_and(|info| info.kind == FilesystemKind::Btrfs) {
         checked += check_special(&dir, name);
     }
+    check_access(&dir, name);
     // What was renamed and removed has gone.
     for gone in ["draft.txt", "scratch.txt"] {
         match dir.stat(gone) {
@@ -976,6 +1025,41 @@ fn check_volume(root: &Dir, name: &str, host: bool) {
     println!(
         "storage: /volumes/{name}: {checked} files read back after the reboot, every byte as written"
     );
+}
+
+/// Whether a filesystem of `kind` keeps owners and modes (ADR 0213).
+fn keeps_access(kind: Option<FilesystemKind>) -> bool {
+    matches!(kind, Some(FilesystemKind::Btrfs | FilesystemKind::Ext4))
+}
+
+/// Checks the owners and modes `write_volume` gave on the volume `name`:
+/// as set where its filesystem keeps them, and user 0's 0755 where it
+/// keeps none.
+fn check_access(dir: &Dir, name: &str) {
+    let keeps = keeps_access(dir.info().ok().map(|info| info.kind));
+    let want = |path: &str, kept: (u16, u32, u32)| {
+        let want = if keeps { kept } else { (0o755, 0, 0) };
+        match dir.stat(path) {
+            Ok(stat) => check((stat.mode, stat.owner, stat.group) == want, || {
+                format!(
+                    "/volumes/{name}/{path} has mode {:o}, owner {} and group {}, not {:o}, {} \
+                     and {}",
+                    stat.mode, stat.owner, stat.group, want.0, want.1, want.2
+                )
+            }),
+            Err(err) => fail(&format!("/volumes/{name}/{path}: {err}")),
+        }
+    };
+    want("hello.txt", (0o644, 0, 0));
+    want("notes/final.txt", (0o640, OWNER, GROUP));
+    // The chown took the set-user-ID bit away.
+    want("cut.txt", (0o755, OWNER, 0));
+    // The set-group-ID directory's files have its group.
+    want("many", (0o2755, 0, GROUP));
+    want("many/file-07.txt", (0o644, 0, GROUP));
+    if keeps {
+        println!("storage: /volumes/{name}: owners and modes as set");
+    }
 }
 
 /// Checks the second name, the named pipe and the device node that

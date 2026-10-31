@@ -19,6 +19,7 @@ use super::files::noise;
 use super::log::{list, log_root as image_log_root, replayed_list, unsparse};
 use super::rw::{Model, Thing, put, snapshot};
 use super::write::{CrashDisk, Op, btrfs_check, image_of, mkfs_empty, mkfs_sized, writable};
+use super::{DIR, FILE};
 use crate::fs::BtrfsFs;
 
 /// How many writes through `disk` had: one a superblock.
@@ -123,7 +124,7 @@ fn a_power_cut_anywhere_keeps_each_fsync() {
         let root = fs.root();
         let mut model = Model::new();
         let file = |dir: &NodeRef, name: &str, model: &mut Model, path: &str, len: usize| {
-            let node = dir.create(name, Kind::File).unwrap();
+            let node = dir.create(name, Kind::File, FILE).unwrap();
             let data = noise(path.len() as u64, len);
             put(&node, 0, &data);
             model.insert(path.into(), Thing::File(data));
@@ -131,7 +132,7 @@ fn a_power_cut_anywhere_keeps_each_fsync() {
         };
         let a = file(&root, "a", &mut model, "/a", 300_000);
         let b = file(&root, "b", &mut model, "/b", 50_000);
-        let d = root.create("d", Kind::Directory).unwrap();
+        let d = root.create("d", Kind::Directory, DIR).unwrap();
         model.insert("/d".into(), Thing::Dir);
         let c = file(&d, "c", &mut model, "/d/c", 20_000);
         fs.sync().unwrap();
@@ -224,7 +225,7 @@ fn an_fsync_writes_about_what_linuxs_log_does() {
     let image = mkfs_sized(192 << 20, &[]);
     let disk = mem::arc(CrashDisk::new(&image)).unwrap();
     let fs = mount_crash(&disk);
-    let file = fs.root().create("f", Kind::File).unwrap();
+    let file = fs.root().create("f", Kind::File, FILE).unwrap();
     put(&file, 0, &noise(1, 64 << 10));
     fs.sync().unwrap();
     for round in 0..4 {
@@ -260,7 +261,7 @@ fn a_log_for_linux_to_replay() {
     let fs = mount_crash(&disk);
     let root = fs.root();
     let made = |dir: &NodeRef, name: &str, len: usize| {
-        let node = dir.create(name, Kind::File).unwrap();
+        let node = dir.create(name, Kind::File, FILE).unwrap();
         put(&node, 0, &noise(name.len() as u64 * 7 + len as u64, len));
         node
     };
@@ -269,7 +270,7 @@ fn a_log_for_linux_to_replay() {
     let holes = made(&root, "holes", 300_000);
     let unsynced = made(&root, "unsynced", 5000);
     let times = made(&root, "times", 3000);
-    let d = root.create("d", Kind::Directory).unwrap();
+    let d = root.create("d", Kind::Directory, DIR).unwrap();
     let inner = made(&d, "inner", 50_000);
     fs.sync().unwrap();
     let mut random = XorShift(0x11b);

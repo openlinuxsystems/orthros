@@ -644,7 +644,8 @@ _target/userspace/_).
 		one with an MBR partition table holding a FAT32 partition. Spark
 		builds the directory hierarchy and mounts each volume at
 		_/volumes/<name>_; _/system/tests/storage write_ writes files of
-		many sizes, a long-named one and directories to each, checks
+		many sizes, a long-named one and directories to each, sees a
+		chown to another user refused, as FAT keeps no owners, checks
 		_/tmp_, _/devices_, _/kernel_ and _/processes_, and syncs. On the host,
 		*fsck.fat -n* checks every volume and mtools reads every file
 		back; the host then writes a file to one. A second boot from the
@@ -722,7 +723,8 @@ _target/userspace/_).
 		*fsck.exfat -n* must find nothing wrong; between the boots, The
 		Sleuth Kit (*fls* and *icat*), an exFAT reader of its own, must
 		read every file back as written, and none of those renamed or
-		removed. The host writes no file of its own to them: no tool on
+		removed. A chown to another user is refused, as exFAT keeps
+		no owners. The host writes no file of its own to them: no tool on
 		Linux writes to exFAT without mounting it. exfatprogs and The
 		Sleuth Kit must be installed (*ob doctor* says how).
 
@@ -868,10 +870,14 @@ _target/userspace/_).
 		test's kinds, uncompressed, which *mkfs.btrfs* made holding only
 		the file the host writes to FAT disks between the boots. Spark
 		must mount both to write; on Btrfs the program also writes
-		_grow.bin_, 12 MiB, past the first data chunk. After each boot,
-		Linux's *btrfs check --check-data-csum* must find nothing wrong;
-		between the boots, *btrfs restore* must copy out every file as
-		written, and none of those renamed or removed.
+		_grow.bin_, 12 MiB, past the first data chunk, and gives files
+		owners, groups and modes, a chown taking a set-user-ID bit away
+		and a set-group-ID directory's files taking its group. After
+		each boot, Linux's *btrfs check --check-data-csum* must find
+		nothing wrong; between the boots, *btrfs restore* must copy out
+		every file as written, and none of those renamed or removed,
+		and *btrfs inspect-internal dump-tree* must show the owners,
+		groups and modes given.
 
 	*btrfs-stress*
 		The long filesystem stress run of Phase 10. Boot 4 CPUs under
@@ -961,8 +967,9 @@ _target/userspace/_).
 		write. After each boot, e2fsprogs' *e2fsck -fn* must find nothing
 		wrong, both on the disk as Radix left it and on a copy whose
 		journal *e2fsck* replayed; between the boots, *debugfs* must copy
-		out every file as written, and none of those renamed or removed.
-		e2fsprogs must be installed (*ob doctor* says how).
+		out every file as written, and none of those renamed or removed,
+		and show the owners, groups and modes the program gave, as on
+		*btrfs-write*. e2fsprogs must be installed (*ob doctor* says how).
 
 	*ext4-power-cut*
 		The *btrfs-power-cut* test on a 64 MiB ext4 disk as *mkfs.ext4*
@@ -985,7 +992,7 @@ _target/userspace/_).
 		default settings in. _/system/tests/storage root_ checks in
 		_/processes/mounts_ that _/system_ is _@system.a_, read-only,
 		and the others are on the same disk, that _/system_ refuses a
-		file, and writes and syncs a file in _/system/settings_,
+		file and is root's, whoever made the image, and writes and syncs a file in _/system/settings_,
 		_/system/state_, _/applications_, _/users_ and _/shared_.
 		Booted again, Spark must add no default settings, and
 		_/system/tests/storage rooted_ must read each file back. After

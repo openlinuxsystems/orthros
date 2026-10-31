@@ -1030,7 +1030,9 @@ pub fn install(at: SlotRef, kind: ObjectKind, object: Object) -> Result<()> {
     install_charged(at, kind, object, None)
 }
 
-/// The process interface, on the process `found` in slot `slot`.
+/// The process interface, on the process `found` in slot `slot`, kept
+/// out of line, as [`super::methods::call`] says.
+#[inline(never)]
 pub fn method(
     user: &UserRef,
     slot: u32,

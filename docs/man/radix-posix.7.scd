@@ -170,7 +170,7 @@ Real-time signals queue with their values, up to 1,024 per process
 (what *RLIMIT_SIGPENDING* says), and are taken lowest number first and
 in order within a number. *kill* may signal the caller, its descendants and the
 processes of its session; *kill(-1, ...)* signals all of those but the
-caller and process 1. Users come with Phase 13, and with them POSIX's rules.
+caller and process 1. Users come later in Phase 13, and with them POSIX's rules.
 
 Spark, process 1, takes only the signals it has a handler for, as Linux's
 init does: the others, SIGKILL and SIGSTOP included, are dropped, and a
@@ -205,9 +205,14 @@ last read (*st_atim*). Reading a file does not change *st_atim*, as with
 Linux's *noatime*: it is when the file was made, or what a program set.
 *st_ctim* is when the file's names, times or contents last changed on
 tmpfs and Btrfs, and *st_mtim* on FAT and exFAT. *st_nlink* is its number
-of names (1 for a directory), and *st_rdev* a device node's number. Until users come in Phase 13, everything
-belongs to user 0, regular files and directories have mode 0755,
-devices 0660 or 0666, pipes 0600 and sockets 0777.
+of names (1 for a directory), and *st_rdev* a device node's number.
+*st_mode*'s permission bits, *st_uid* and *st_gid* are what tmpfs, Btrfs
+and ext4 keep (ADR 0213). FAT and exFAT keep none, so their files and
+directories are user 0's with mode 0755, as Linux's vfat shows them with
+its default umask; the boot archive's are user 0's with the modes *ob*
+gave them; and the kernel's own trees (*/devices*, */processes*,
+*/kernel*) show Linux's usual modes: 0755 for a directory, 0644 for a
+file, 0660 or 0666 for a device, 0600 for a pipe and 0777 for a socket.
 
 *utimensat*, *futimens* and the older *utime* and *utimes* set a file's
 times on tmpfs and FAT, which keeps them in two-second steps and the
@@ -324,8 +329,11 @@ sender, and no address for a stream.
 
 *getsockopt* and *setsockopt* take *SO_REUSEADDR* (kept, changing
 nothing), *SO_KEEPALIVE*, *SO_BROADCAST*, *SO_RCVBUF* and *SO_SNDBUF*
-(fixed sizes), *SO_RCVTIMEO*, *SO_SNDTIMEO*, *TCP_NODELAY* and *IP_TTL*;
-*getsockopt* also answers *SO_TYPE*, *SO_DOMAIN*, *SO_PROTOCOL*,
+(fixed sizes), *SO_RCVTIMEO*, *SO_SNDTIMEO*, *TCP_NODELAY*,
+*TCP_KEEPIDLE*, *TCP_KEEPINTVL*, *TCP_KEEPCNT* and *IP_TTL*. Keep-alive
+probes go as on Linux: after 7,200 seconds of quiet, then 75 seconds
+apart, and 9 unanswered reset the connection. TCP's congestion control
+is CUBIC. *getsockopt* also answers *SO_TYPE*, *SO_DOMAIN*, *SO_PROTOCOL*,
 *SO_ERROR* and *SO_ACCEPTCONN*. *SOCK_RAW* fails with EPERM, and control
 messages with EOPNOTSUPP.
 
@@ -494,10 +502,27 @@ define and declare with the same parameters and result.
 
 # USERS
 
-Users come with Phase 13. Until then every process is user 0 and group
-0, *setuid* and its kin succeed only for 0, files have no permissions to
-check, and *chmod*, *chown* and *umask* change nothing. There are no
-login records, so *getlogin* fails and *logname* finds no login name.
+Files have owners, groups and permission bits (ADR 0213). *open*,
+*mkdir*, *mknod*, *mkfifo* and *bind* give what they make the mode asked
+for less the *umask*, which the kernel keeps for each process and applies
+itself; it belongs to the caller's user and group, or to the directory's
+group if the directory has the set-group-ID bit, which a new directory
+takes too. *chmod*, *fchmod*, *fchmodat*, *chown*, *fchown*, *lchown* and
+*fchownat* change them, and a *chown* takes a file's set-user-ID bit away,
+and its set-group-ID bit if its group may run it, as Linux does.
+*fchmodat* with *AT_SYMLINK_NOFOLLOW* on a symbolic link fails with
+EOPNOTSUPP. On FAT and exFAT, which keep none, a change of permission
+bits alone, or to user 0 and group 0, is taken and changes nothing, as
+on Linux, so that *cp -p* and *tar* can copy to them; any other fails
+with EPERM.
+*fchmod* and *fchown* need a descriptor open for writing (EACCES
+otherwise), as *futimens* does.
+
+Users come with the rest of Phase 13. Until then every process is user 0
+and group 0, *setuid* and its kin succeed only for 0, and the modes are
+kept but not checked: *access* says a file that is there may be read,
+written and run. There are no login records, so *getlogin* fails and
+*logname* finds no login name.
 
 # TESTS
 

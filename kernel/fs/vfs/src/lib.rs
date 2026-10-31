@@ -233,6 +233,110 @@ pub struct Stat {
     pub device: u64,
 }
 
+/// Who a node belongs to and what its permission bits are: POSIX's
+/// `st_uid`, `st_gid` and `st_mode & 0o7777` (ADR 0213). They only ever
+/// narrow what a capability reaches; until users come every process is
+/// user 0, so nothing checks them yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Access {
+    /// The number of the user it belongs to.
+    pub owner: u32,
+    /// The number of its group.
+    pub group: u32,
+    /// Its permission bits, [`mode::ALL`] at most: read, write and
+    /// execute for its owner, its group and the others, with
+    /// set-user-ID, set-group-ID and sticky.
+    pub mode: u16,
+}
+
+/// The bits of [`Access::mode`] past the nine permissions.
+pub mod mode {
+    /// Run as the file's owner (kept and shown, but Radix runs no program
+    /// as anyone else: ADR 0213).
+    pub const SET_USER: u16 = 0o4000;
+    /// Run as the file's group; on a directory, files made in it take its
+    /// group.
+    pub const SET_GROUP: u16 = 0o2000;
+    /// On a directory: only a file's owner may remove or rename it.
+    pub const STICKY: u16 = 0o1000;
+    /// Execute (search, for a directory) for the group.
+    pub const GROUP_EXECUTE: u16 = 0o010;
+    /// Every bit a mode may have.
+    pub const ALL: u16 = 0o7777;
+}
+
+impl Access {
+    /// What a node of `kind` shows when its filesystem keeps no owners or
+    /// modes, as procfs, sysfs and devfs keep none: user 0's, with
+    /// Linux's usual modes.
+    pub const fn default_for(kind: Kind) -> Access {
+        let mode = match kind {
+            Kind::Directory => 0o755,
+            Kind::File => 0o644,
+            Kind::BlockDevice => 0o660,
+            Kind::CharDevice => 0o666,
+            Kind::Pipe => 0o600,
+            Kind::Socket | Kind::Symlink => 0o777,
+        };
+        Access { owner: 0, group: 0, mode }
+    }
+}
+
+/// A change of a node's owner, group or mode ([`Node::set_access`]): each
+/// that is `None` stays as it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AccessChange {
+    /// The new owner's number.
+    pub owner: Option<u32>,
+    /// The new group's number.
+    pub group: Option<u32>,
+    /// The new permission bits, [`mode::ALL`] at most.
+    pub mode: Option<u16>,
+    /// Take the set-user-ID bit away, and the set-group-ID bit if the
+    /// group may execute it, before `mode` is set: what chown(2) does to
+    /// a node that is not a directory, so that a program never keeps them
+    /// for a new owner.
+    pub drop_set_ids: bool,
+}
+
+impl AccessChange {
+    /// What chown(2) changes on a node of `kind`: `owner` and `group`, and
+    /// as Linux has it, for one that is not a directory, its set-ID bits
+    /// ([`AccessChange::drop_set_ids`]), even when both stay.
+    pub fn chown(kind: Kind, owner: Option<u32>, group: Option<u32>) -> Self {
+        AccessChange { owner, group, mode: None, drop_set_ids: kind != Kind::Directory }
+    }
+
+    /// Whether a filesystem that keeps no owners or modes, of a node that
+    /// shows `shown`, takes the change, as Linux's vfat and exfat do: one
+    /// that names the owner and group shown, if any, and permission bits
+    /// alone is taken and changes nothing, so that `cp -p` and `tar` can
+    /// copy to a USB stick; any other is refused.
+    pub fn fits_none_kept(&self, shown: Access) -> bool {
+        self.owner.is_none_or(|owner| owner == shown.owner)
+            && self.group.is_none_or(|group| group == shown.group)
+            && self.mode.is_none_or(|mode| mode & !0o777 == 0)
+    }
+
+    /// `access` with the change made. Filesystems call it under the lock
+    /// that keeps the node's access, so that no other change slips in
+    /// between.
+    pub fn apply(&self, access: Access) -> Access {
+        let mut kept = access.mode;
+        if self.drop_set_ids {
+            kept &= !mode::SET_USER;
+            if kept & mode::GROUP_EXECUTE != 0 {
+                kept &= !mode::SET_GROUP;
+            }
+        }
+        Access {
+            owner: self.owner.unwrap_or(access.owner),
+            group: self.group.unwrap_or(access.group),
+            mode: self.mode.map_or(kept, |mode| mode & mode::ALL),
+        }
+    }
+}
+
 /// The device number of `major` and `minor`, as [`Stat::device`] holds
 /// it: the major number in its high half.
 pub const fn device_number(major: u32, minor: u32) -> u64 {
@@ -414,15 +518,32 @@ pub trait Node: Send + Sync + Any {
         Err(Error::NotDirectory)
     }
 
-    /// Makes an empty file or directory `name` in a directory.
-    fn create(&self, _name: &str, _kind: Kind) -> Result<NodeRef> {
+    /// Who it belongs to and its permission bits. A filesystem that keeps
+    /// none makes them up: [`Access::default_for`] its kind, unless it
+    /// says otherwise.
+    fn access(&self) -> Access {
+        Access::default_for(self.kind())
+    }
+
+    /// Changes its owner, group or mode as `change` says, and its change
+    /// time. A symbolic link's mode cannot change. Nodes whose filesystem
+    /// keeps no owners or modes fail with [`Error::NotSupported`], or take
+    /// a change that [`AccessChange::fits_none_kept`] and change nothing.
+    fn set_access(&self, _change: &AccessChange) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    /// Makes an empty file or directory `name` in a directory, which
+    /// belongs to `access`'s owner and group and has its mode, if its
+    /// filesystem keeps them.
+    fn create(&self, _name: &str, _kind: Kind, _access: Access) -> Result<NodeRef> {
         Err(Error::NotDirectory)
     }
 
-    /// Makes a symbolic link `name` to `target` in a directory: a
-    /// directory of a filesystem that has none fails with
-    /// [`Error::NotSupported`].
-    fn make_link(&self, _name: &str, _target: &str) -> Result<NodeRef> {
+    /// Makes a symbolic link `name` to `target` in a directory, which
+    /// belongs to `access`'s owner and group: a directory of a filesystem
+    /// that has none fails with [`Error::NotSupported`].
+    fn make_link(&self, _name: &str, _target: &str, _access: Access) -> Result<NodeRef> {
         if self.kind() == Kind::Directory {
             Err(Error::NotSupported)
         } else {
@@ -447,7 +568,14 @@ pub trait Node: Send + Sync + Any {
     /// [`Kind::BlockDevice`]) that stands for device number `device`, an
     /// empty file, or a socket's name that holds no socket. A directory
     /// of a filesystem that has none fails with [`Error::NotSupported`].
-    fn make_node(&self, _name: &str, _kind: Kind, _device: u64) -> Result<NodeRef> {
+    /// It belongs to `access`'s owner and group and has its mode.
+    fn make_node(
+        &self,
+        _name: &str,
+        _kind: Kind,
+        _device: u64,
+        _access: Access,
+    ) -> Result<NodeRef> {
         if self.kind() == Kind::Directory {
             Err(Error::NotSupported)
         } else {
@@ -457,10 +585,15 @@ pub trait Node: Send + Sync + Any {
 
     /// Makes a socket's name `name` in a directory: a file of kind
     /// [`Kind::Socket`] that holds `binding`, which
-    /// [`Node::socket_binding`] gives back, and which cannot be opened. A
-    /// directory of a filesystem that has none fails with
-    /// [`Error::NotSupported`].
-    fn make_socket(&self, _name: &str, _binding: SocketBinding) -> Result<NodeRef> {
+    /// [`Node::socket_binding`] gives back, and which cannot be opened,
+    /// with `access`. A directory of a filesystem that has none fails
+    /// with [`Error::NotSupported`].
+    fn make_socket(
+        &self,
+        _name: &str,
+        _binding: SocketBinding,
+        _access: Access,
+    ) -> Result<NodeRef> {
         if self.kind() == Kind::Directory {
             Err(Error::NotSupported)
         } else {

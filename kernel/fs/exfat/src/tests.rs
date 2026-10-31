@@ -23,11 +23,16 @@ use proptest::prelude::*;
 use radix_block::ram::RamDisk;
 use radix_block::{BlockDevice, DeviceRef};
 use radix_vfs::mem::{self, KArc};
-use radix_vfs::{Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
+use radix_vfs::{Access, AccessChange, Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
 
 use crate::ExfatFs;
 use crate::boot::{self, REGION_SECTORS};
 use crate::entry::{self, ENTRY, File, Stream, kind};
+
+/// The owner, group and mode of the directories and files the tests
+/// make: user 0's, with Linux's usual modes.
+const DIR: Access = Access::default_for(Kind::Directory);
+const FILE: Access = Access::default_for(Kind::File);
 
 /// 2026-10-22 00:42:22 UTC, for files' times.
 fn clock() -> u64 {
@@ -211,7 +216,7 @@ fn read_all(node: &NodeRef) -> Vec<u8> {
 
 /// A file `name` in `dir` holding `data`.
 fn make_file(dir: &NodeRef, name: &str, data: &[u8]) -> NodeRef {
-    let node = dir.create(name, Kind::File).unwrap();
+    let node = dir.create(name, Kind::File, FILE).unwrap();
     if !data.is_empty() {
         write_all(&node, 0, data);
     }
@@ -275,8 +280,8 @@ fn files_written_are_read_back_and_fsck_passes() {
     for (mib, cluster) in VOLUMES {
         let volume = Volume::new(&mkfs(mib, cluster));
         let root = volume.root();
-        let dir = root.create("Documents and Settings", Kind::Directory).unwrap();
-        let sub = dir.create("sub", Kind::Directory).unwrap();
+        let dir = root.create("Documents and Settings", Kind::Directory, DIR).unwrap();
+        let sub = dir.create("sub", Kind::Directory, DIR).unwrap();
         let mut expected = Vec::new();
         for (i, name) in NAMES.iter().enumerate() {
             let data = pattern(i as u32, SIZES[i % SIZES.len()]);
@@ -419,8 +424,8 @@ fn remove_rename_and_replace() {
     for (mib, cluster) in [VOLUMES[0], VOLUMES[2]] {
         let volume = Volume::new(&mkfs(mib, cluster));
         let root = volume.root();
-        let a = root.create("dir a", Kind::Directory).unwrap();
-        let b = root.create("dir b", Kind::Directory).unwrap();
+        let a = root.create("dir a", Kind::Directory, DIR).unwrap();
+        let b = root.create("dir b", Kind::Directory, DIR).unwrap();
         make_file(&a, "one.txt", b"one");
         make_file(&a, "two.txt", &pattern(2, 9000));
         make_file(&b, "three.txt", b"three");
@@ -438,7 +443,7 @@ fn remove_rename_and_replace() {
         assert_eq!(root.rename("dir b", &*moved, "inside"), Err(Error::BadName));
         // A non-empty directory is not removed, nor replaced.
         assert_eq!(root.remove("dir b"), Err(Error::NotEmpty));
-        let c = root.create("c", Kind::Directory).unwrap();
+        let c = root.create("c", Kind::Directory, DIR).unwrap();
         assert_eq!(root.rename("c", &*b, "moved"), Err(Error::NotEmpty));
         assert_eq!(root.rename("c", &*b, "three.txt"), Err(Error::NotDirectory));
         b.remove("moved/the first file, renamed to a much longer name.txt").unwrap_err();
@@ -546,8 +551,8 @@ fn files_in_pieces_get_the_table() {
         let root = volume.root();
         // Two files growing in turn take each other's next clusters, so
         // each is in pieces: the first piece moves to the table.
-        let a = root.create("a.bin", Kind::File).unwrap();
-        let b = root.create("b.bin", Kind::File).unwrap();
+        let a = root.create("a.bin", Kind::File, FILE).unwrap();
+        let b = root.create("b.bin", Kind::File, FILE).unwrap();
         let (mut want_a, mut want_b) = (Vec::new(), Vec::new());
         for round in 0..12u32 {
             let piece_a = pattern(round, cluster as usize * 2 + 7);
@@ -563,7 +568,7 @@ fn files_in_pieces_get_the_table() {
             }
         }
         // A directory in pieces too.
-        let dir = root.create("many", Kind::Directory).unwrap();
+        let dir = root.create("many", Kind::Directory, DIR).unwrap();
         for i in 0..(cluster as usize / 32 * 3) / 3 + 5 {
             make_file(&dir, &format!("file number {i}"), b"x");
             if i % 7 == 0 {
@@ -593,7 +598,7 @@ fn files_in_pieces_get_the_table() {
 fn full_volumes_and_directories() {
     let volume = Volume::new(&mkfs(8, 512));
     let root = volume.root();
-    let file = root.create("filler", Kind::File).unwrap();
+    let file = root.create("filler", Kind::File, FILE).unwrap();
     let mut written = 0u64;
     // Big writes until one does not fit, then a cluster at a time.
     let mut chunk = Vec::new();
@@ -613,7 +618,7 @@ fn full_volumes_and_directories() {
     assert!(written > 5 << 20, "{written}");
     assert_eq!(volume.fs.info().free, 0);
     // No cluster for a new directory either.
-    assert_eq!(root.create("dir", Kind::Directory).err(), Some(Error::NoSpace));
+    assert_eq!(root.create("dir", Kind::Directory, DIR).err(), Some(Error::NoSpace));
     // Data written so far is kept.
     drop(file);
     let image = volume.image();
@@ -639,7 +644,7 @@ fn read_only_volumes_refuse_changes() {
     let image = volume.image();
     volume = Volume::mount_in(512, &image, true).unwrap();
     let root = volume.root();
-    assert_eq!(root.create("new", Kind::File).err(), Some(Error::ReadOnly));
+    assert_eq!(root.create("new", Kind::File, FILE).err(), Some(Error::ReadOnly));
     assert_eq!(root.remove("kept.txt"), Err(Error::ReadOnly));
     let kept = walk(&root, "kept.txt").unwrap();
     assert_eq!(kept.write(0, &Slice(b"x")), Err(Error::ReadOnly));
@@ -650,7 +655,7 @@ fn read_only_volumes_refuse_changes() {
 }
 
 #[test]
-fn times_are_kept_as_exfat_keeps_them() {
+fn times_are_kept_as_exfat_keeps_them_and_owners_none() {
     let volume = Volume::new(&mkfs(16, 4096));
     let root = volume.root();
     let file = make_file(&root, "timed.txt", b"t");
@@ -662,6 +667,18 @@ fn times_are_kept_as_exfat_keeps_them() {
     assert_eq!(stat.modified, 1_709_210_096_780_000_000);
     assert_eq!(stat.accessed, 1_709_210_096_000_000_000);
     assert_eq!(stat.created, clock());
+    // exFAT keeps no owners or modes: everything is user 0's, 0755, as
+    // Linux's exfat shows it. As there, a chmod of permission bits and a
+    // chown to user 0 are taken and change nothing; others are refused.
+    let shown = Access { owner: 0, group: 0, mode: 0o755 };
+    assert_eq!((file.access(), root.access()), (shown, shown));
+    file.set_access(&AccessChange { mode: Some(0o644), ..AccessChange::default() }).unwrap();
+    file.set_access(&AccessChange::chown(Kind::File, Some(0), None)).unwrap();
+    assert_eq!(file.access(), shown);
+    let chown = AccessChange::chown(Kind::File, Some(1000), None);
+    assert_eq!(file.set_access(&chown), Err(Error::NotSupported));
+    let sticky = AccessChange { mode: Some(0o1755), ..AccessChange::default() };
+    assert_eq!(root.set_access(&sticky), Err(Error::NotSupported));
     drop((root, file));
     let volume = volume.remount();
     let stat = walk(&volume.root(), "timed.txt").unwrap().stat();
@@ -677,16 +694,16 @@ fn names_exfat_forbids_are_refused() {
     let volume = Volume::new(&mkfs(16, 4096));
     let root = volume.root();
     for name in ["a:b", "q?", "star*", "trailing.", "trailing ", "pipe|", "back\\slash"] {
-        assert_eq!(root.create(name, Kind::File).err(), Some(Error::BadName), "{name}");
+        assert_eq!(root.create(name, Kind::File, FILE).err(), Some(Error::BadName), "{name}");
     }
-    assert_eq!(root.create(&"n".repeat(256), Kind::File).err(), Some(Error::NameTooLong));
+    assert_eq!(root.create(&"n".repeat(256), Kind::File, FILE).err(), Some(Error::NameTooLong));
     make_file(&root, &"n".repeat(255), b"longest");
     make_file(&root, "Straße", b"1");
     // The same but for case, by the volume's table.
-    assert_eq!(root.create("STRASSE", Kind::File).map(|_| ()), Ok(()));
-    assert_eq!(root.create("straße", Kind::File).err(), Some(Error::Exists));
-    assert_eq!(root.create("ÜBER", Kind::File).map(|_| ()), Ok(()));
-    assert_eq!(root.create("über", Kind::File).err(), Some(Error::Exists));
+    assert_eq!(root.create("STRASSE", Kind::File, FILE).map(|_| ()), Ok(()));
+    assert_eq!(root.create("straße", Kind::File, FILE).err(), Some(Error::Exists));
+    assert_eq!(root.create("ÜBER", Kind::File, FILE).map(|_| ()), Ok(()));
+    assert_eq!(root.create("über", Kind::File, FILE).err(), Some(Error::Exists));
     drop(root);
     fsck(&volume.image());
 }
@@ -893,7 +910,7 @@ fn volumes_of_4k_sectors_on_disks_of_4k_sectors() {
         volume.fs.label(&mut label).unwrap();
         assert_eq!(label, "FOUR");
         let root = volume.root();
-        let dir = root.create("Sub directory", Kind::Directory).unwrap();
+        let dir = root.create("Sub directory", Kind::Directory, DIR).unwrap();
         let mut expected = Vec::new();
         for (i, &size) in SIZES.iter().enumerate() {
             let name = format!("file {i}.bin");
@@ -981,7 +998,7 @@ proptest! {
                     let path = join(dir, name);
                     let parent_ok = dir.is_empty() || model.get(dir) == Some(&Model::Dir);
                     let kind = if kind { Kind::Directory } else { Kind::File };
-                    let got = walk(&root, dir).and_then(|d| d.create(name, kind).map(|_| ()));
+                    let got = walk(&root, dir).and_then(|d| d.create(name, kind, Access::default_for(kind)).map(|_| ()));
                     if !parent_ok {
                         prop_assert!(got.is_err());
                     } else {
@@ -1123,8 +1140,8 @@ fn populated() -> &'static [Vec<u8>] {
             .map(|(mib, cluster)| {
                 let volume = Volume::new(&mkfs(mib, cluster));
                 let root = volume.root();
-                let dir = root.create("A long directory name", Kind::Directory).unwrap();
-                let inner = dir.create("inner", Kind::Directory).unwrap();
+                let dir = root.create("A long directory name", Kind::Directory, DIR).unwrap();
+                let inner = dir.create("inner", Kind::Directory, DIR).unwrap();
                 for (i, (name, size)) in NAMES.iter().zip(SIZES).enumerate() {
                     let parent = [&root, &dir, &inner][i % 3];
                     make_file(parent, name, &pattern(u32::try_from(i).unwrap(), size));
@@ -1211,7 +1228,7 @@ proptest! {
         if let Ok(fs) = ExfatFs::mount(device, false) {
             let root = fs.root();
             read_everything(&root, 0, &mut 200);
-            if let Ok(file) = root.create("new file.txt", Kind::File) {
+            if let Ok(file) = root.create("new file.txt", Kind::File, FILE) {
                 let _ = file.write(0, &Slice(&pattern(99, 5000)));
                 let _ = file.set_size(100_000);
             }

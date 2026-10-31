@@ -594,9 +594,14 @@ bool inet_option(int layer, int number, enum radix_socket_option *option, bool *
 		default: return false;
 		}
 	}
-	if(layer == IPPROTO_TCP && number == TCP_NODELAY) {
-		*option = RADIX_SOCKET_OPTION_NO_DELAY;
-		return true;
+	if(layer == IPPROTO_TCP) {
+		switch(number) {
+		case TCP_NODELAY: *option = RADIX_SOCKET_OPTION_NO_DELAY; return true;
+		case TCP_KEEPIDLE: *option = RADIX_SOCKET_OPTION_KEEP_IDLE; return true;
+		case TCP_KEEPINTVL: *option = RADIX_SOCKET_OPTION_KEEP_INTERVAL; return true;
+		case TCP_KEEPCNT: *option = RADIX_SOCKET_OPTION_KEEP_COUNT; return true;
+		default: return false;
+		}
 	}
 	if(layer == IPPROTO_IP && number == IP_TTL) {
 		*option = RADIX_SOCKET_OPTION_TIME_TO_LIVE;
