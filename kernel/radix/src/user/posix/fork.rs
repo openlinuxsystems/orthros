@@ -86,6 +86,8 @@ pub fn fork(user: &UserRef, label: u32) -> Result<u64> {
         }
         let (class, level) = parent.io_priority();
         child.set_io_priority(class, level);
+        // It has not started: it acts for its parent's name from the first.
+        child.name_before_start(parent.identity());
         with_tree(|tree| -> Result<()> {
             join(tree, parent)?;
             tree.insert_child(child.number(), parent.number(), child.clone()).map_err(tree_error)

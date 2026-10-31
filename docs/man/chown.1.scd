@@ -32,7 +32,10 @@ retained as root:root*.
 tmpfs, Btrfs and ext4 keep owners and groups (ADR 0213); FAT and exFAT
 keep none, and as on Linux, a chown there to root, the owner they show,
 changes nothing and any other fails with *Operation not permitted*. A change of owner or group takes a file's set-user-ID bit away,
-and its set-group-ID bit if its group may run it. Until users come,
+and its set-group-ID bit if its group may run it. Giving a file to
+another user needs the bypass right on the capability it is reached
+through; its owner may give it only a group of their own, as on Linux
+(*radix-posix*(7), ADR 0214). Until users come,
 later in Phase 13 of the roadmap, every user and group but root's is
 unknown by name, so naming another fails as it would on Linux for a user
 who does not exist; a number names anyone.

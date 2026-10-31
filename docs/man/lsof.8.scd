@@ -35,7 +35,7 @@ object (*ENDP* an endpoint, *NTFY* a notification, *MEM* a memory
 object, *PROC*, *THRD*, *SPACE*, *DOMN*, *RING*, *KLOG*...), and its
 NAME its rights, such as *send+grant*.
 
-Until users come, in Phase 13 of the roadmap, every process is root's.
+The USER column is the user each process acts for (*radix-names*(2)).
 Radix has no network files until Phase 12: *-i* lists nothing and
 exits 1.
 

@@ -76,6 +76,8 @@ pub enum Object {
     Power,
     /// The machine's platform controls (radix-platform(2)).
     Platform,
+    /// The authority to give names (radix-names(2)).
+    Names,
 }
 
 impl Object {
@@ -95,6 +97,7 @@ impl Object {
             Object::Directory(_) => ObjectKind::Directory,
             Object::Power => ObjectKind::Power,
             Object::Platform => ObjectKind::Platform,
+            Object::Names => ObjectKind::Names,
         }
     }
 }
@@ -254,6 +257,7 @@ enum Kept {
     Directory(Weak<FileObject, Kmalloc>),
     Power,
     Platform,
+    Names,
 }
 
 impl Kept {
@@ -272,6 +276,7 @@ impl Kept {
             Object::Directory(dir) => Kept::Directory(Arc::downgrade(dir)),
             Object::Power => Kept::Power,
             Object::Platform => Kept::Platform,
+            Object::Names => Kept::Names,
         }
     }
 
@@ -291,6 +296,7 @@ impl Kept {
             Kept::Directory(dir) => Object::Directory(dir.upgrade()?),
             Kept::Power => Object::Power,
             Kept::Platform => Object::Platform,
+            Kept::Names => Object::Names,
         })
     }
 }
@@ -587,7 +593,8 @@ pub fn released(registry: &mut Registry, released: &Released) {
         | Object::Random
         | Object::KernelLog
         | Object::Power
-        | Object::Platform => {}
+        | Object::Platform
+        | Object::Names => {}
     }
     // What it was charged is given back once it has closed.
     drop(charge);

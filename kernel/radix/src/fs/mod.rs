@@ -63,9 +63,10 @@ use radix_klog::{error, info, warn};
 use radix_mm::{FRAMES, Kmalloc, PAGE_SIZE};
 use radix_sync::{Mutex, Once, SpinLock};
 use radix_vfs::mount::{Location, OpenFlags, Vfs};
-use radix_vfs::{Error, FileSystem, FsInfo, FsKind, FsRef, Kind, NodeRef, mem};
+use radix_vfs::{Error, FileSystem, FsInfo, FsKind, FsRef, Kind, NodeRef, Who, mem};
 
 use crate::Arch;
+use crate::user::names::Identity;
 
 /// A file or directory object, shared.
 pub type FileRef = alloc::sync::Arc<FileObject, Kmalloc>;
@@ -259,27 +260,41 @@ pub struct FileObject {
     next: SpinLock<Option<FileRef>>,
     /// Where it was opened.
     pub opened: Opened,
+    /// The name it acts for (ADR 0214): what the second gate checks on
+    /// the files opened or made through it, which take it too.
+    pub name: Identity,
 }
 
 impl FileObject {
-    /// An object for `at`.
-    pub fn new(at: Location) -> Option<FileRef> {
-        FileObject::with(at, Description::default())
+    /// An object for `at`, acting for `name`.
+    pub fn new(at: Location, name: Identity) -> Option<FileRef> {
+        FileObject::with(at, Description::default(), name)
     }
 
-    /// An object for `at`, with `description`'s flags.
-    pub fn with(at: Location, description: Description) -> Option<FileRef> {
-        FileObject::opened(at, description, None)
+    /// An object for `at`, with `description`'s flags, acting for `name`.
+    pub fn with(at: Location, description: Description, name: Identity) -> Option<FileRef> {
+        FileObject::opened(at, description, None, name)
+    }
+
+    /// An object for the place `of` is, with its flags and where it was
+    /// opened, acting for `name` (radix-names(2)'s `stamp`).
+    pub fn stamped(of: &FileObject, name: Identity) -> Option<FileRef> {
+        let mut made = FileObject::opened(of.at.clone(), of.description(), None, name)?;
+        // Nothing else refers to it yet.
+        alloc::sync::Arc::get_mut(&mut made)?.opened = of.opened;
+        Some(made)
     }
 
     /// An object for `at`, with `description`'s flags, opened by a path
-    /// from a directory: `from` holds where the directory was opened and
-    /// the path. A mount's root has its own path, which the tree keeps.
+    /// from a directory and acting for `name`: `from` holds where the
+    /// directory was opened and the path. A mount's root has its own path,
+    /// which the tree keeps.
     #[allow(unsafe_code)]
     pub fn opened(
         at: Location,
         description: Description,
         from: Option<(&Opened, &[u8])>,
+        name: Identity,
     ) -> Option<FileRef> {
         // Only a node of a pipe's, a socket's or a character device's kind
         // can be one.
@@ -312,6 +327,7 @@ impl FileObject {
             special,
             next: SpinLock::new(None),
             opened: Opened::NONE,
+            name,
         });
         made.opened.set(&made.at, from);
         // SAFETY: written just above.
@@ -494,15 +510,16 @@ pub fn init() {
 pub fn scratch_tree(name: &str, max: u64) -> radix_vfs::Result<Location> {
     let tree = vfs().ok_or(Error::NotFound)?;
     let root = tree.root();
-    tree.make_directory(&root, name, radix_vfs::Access::default_for(Kind::Directory))?;
+    let k = &Who::KERNEL;
+    tree.make_directory(k, &root, name, radix_vfs::Access::default_for(Kind::Directory))?;
     let mounted = tmpfs(max, TMPFS_MODE)
         .and_then(fs_ref)
-        .and_then(|fs| tree.mount(&root, name, fs, "tmpfs", false));
+        .and_then(|fs| tree.mount(k, &root, name, fs, "tmpfs", false));
     if let Err(err) = mounted {
-        let _ = tree.remove(&root, name);
+        let _ = tree.remove(k, &root, name);
         return Err(err);
     }
-    tree.open(&root, name, OpenFlags { directory: true, ..OpenFlags::default() })
+    tree.open(k, &root, name, OpenFlags { directory: true, ..OpenFlags::default() })
 }
 
 /// Takes a tree [`scratch_tree`] made away, with whatever was mounted in
@@ -510,8 +527,8 @@ pub fn scratch_tree(name: &str, max: u64) -> radix_vfs::Result<Location> {
 pub fn remove_scratch_tree(name: &str) -> radix_vfs::Result<()> {
     let tree = vfs().ok_or(Error::NotFound)?;
     let root = tree.root();
-    tree.unmount_tree(&root, name)?;
-    tree.remove(&root, name)
+    tree.unmount_tree(&Who::KERNEL, &root, name)?;
+    tree.remove(&Who::KERNEL, &root, name)
 }
 
 /// The mode of a mounted tmpfs's root, as Linux has it: all may make
@@ -889,6 +906,8 @@ pub fn status(err: Error) -> Status {
         Error::NotLink => FileError::NotLink,
         Error::TooManyNames => FileError::TooManyNames,
         Error::QuotaExceeded => FileError::QuotaExceeded,
+        Error::Denied => FileError::Denied,
+        Error::NotPermitted => return Kernel::NotPermitted.status(0),
         // What a node does not do is an argument it does not take.
         Error::NotSupported => return Kernel::InvalidArgument.status(0),
         Error::NoMemory => return Kernel::NoMemory.status(0),

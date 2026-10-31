@@ -133,19 +133,21 @@ fn start_spark(
     // The kernel's own capability space for Spark: its process's original
     // capability, the memory for the programs it starts, the domain its
     // services' domains go below, the machine's power, the network, its
-    // platform controls, and the boot archive's memory and frames. It is
-    // never destroyed.
-    let slots = loader::archive_slots(archive.len()).saturating_add(6);
+    // platform controls, the names (ADR 0214), and the boot archive's
+    // memory and frames. It is never destroyed.
+    let slots = loader::archive_slots(archive.len()).saturating_add(7);
     let kept =
         caps::with(|store| store.create_space(slots)).and_then(|made| made).map_err(cap_error)?;
     let slot = |n| SlotRef::new(kept, n);
     let (at, pool, services, power, network, platform) =
         (slot(0), slot(1), slot(2), slot(3), slot(4), slot(5));
+    let names = slot(6);
     caps::create_memory(pool, MEMORY_ORDER).map_err(cap_error)?;
     let settings = Settings::new(OomClass::Service);
     caps::create_domain(services, &domains::root(), SERVICES, settings).map_err(cap_error)?;
     process::install(power, ObjectKind::Power, Object::Power)?;
     process::install(platform, ObjectKind::Platform, Object::Platform)?;
+    process::install(names, ObjectKind::Names, Object::Names)?;
     caps::with(|store| store.grant_range(network, ObjectKind::Network, 0, 1 << 16))
         .and_then(|done| done)
         .map_err(cap_error)?;
@@ -163,8 +165,9 @@ fn start_spark(
             (power, ObjectKind::Power.rights(), 0),
             (network, ObjectKind::Network.rights(), 0),
             (platform, ObjectKind::Platform.rights(), 0),
+            (names, ObjectKind::Names.rights(), 0),
         ],
-        archive: Some((archive, slot(6))),
+        archive: Some((archive, slot(7))),
         root: true,
         domain: domains::root(),
         on_exit: Some(spark_exited),

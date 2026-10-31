@@ -34,8 +34,10 @@ tmpfs, Btrfs and ext4 keep the mode (ADR 0213). FAT and exFAT keep
 none: as on Linux, a mode of permission bits alone is taken there and
 changes nothing, and one with set-user-ID, set-group-ID or sticky fails
 with *Operation not permitted*.
-Until users come, later in Phase 13 of the roadmap, the modes are kept
-but not yet checked (*radix-posix*(7)).
+Only a file's owner changes its mode, unless the capability it is
+reached through has the bypass right, and a mode with the set-group-ID
+bit loses it when the file's group is not one of the caller's, as on
+Linux (*radix-posix*(7), ADR 0214).
 
 # OPTIONS
 

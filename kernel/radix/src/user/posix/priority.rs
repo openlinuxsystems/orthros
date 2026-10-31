@@ -239,7 +239,7 @@ fn processes_named(
                 continue;
             }
             processes.try_reserve(1).map_err(|_| error(Kernel::NoMemory))?;
-            let permitted = tree.may_signal(me.number(), member.pid);
+            let permitted = tree.may_signal(me.number(), member.pid, super::same_user);
             let _ = processes.push_within_capacity((member.handle.clone(), permitted));
         }
         Ok(())
@@ -262,7 +262,8 @@ fn thread_named(user: &UserRef, number: u64) -> Result<Named> {
     }
     let process = with_tree(|tree| -> Result<Option<(ProcessRef, bool)>> {
         join(tree, me)?;
-        Ok(find(tree, number).map(|process| (process, tree.may_signal(me.number(), number))))
+        let permitted = tree.may_signal(me.number(), number, super::same_user);
+        Ok(find(tree, number).map(|process| (process, permitted)))
     })?;
     if let Some((process, permitted)) = process {
         let (thread, target) = find_thread(&process, number).ok_or(error(Kernel::NoSuchProcess))?;

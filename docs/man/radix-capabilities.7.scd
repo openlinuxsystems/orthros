@@ -89,11 +89,12 @@ rights listed, plus *copy* and *transfer*, which every kind has.
 
 *file*
 	An open file description: a file, a pipe's end, a socket or a
-	device (see *radix-file*(2)). Rights: *read*, *write*.
+	device (see *radix-file*(2)). Rights: *read*, *write*, *bypass*.
 
 *directory*
 	A place in the file tree, beneath which paths are resolved (see
-	*radix-directory*(2)). Rights: *read*, *write*, *control*.
+	*radix-directory*(2)). Rights: *read*, *write*, *control*,
+	*bypass*.
 
 *power*
 	The machine's power, which Spark turns off or restarts (see
@@ -110,13 +111,21 @@ rights listed, plus *copy* and *transfer*, which every kind has.
 	keeps: its fans' duties and curves, its LEDs and its ARGB header
 	(see *radix-platform*(2)). Rights: *read*, to ask what they are;
 	*control*, to change them.
+*names*
+	The authority to give processes and capabilities the names they act
+	for, which only Spark holds (see *radix-names*(2)). Rights:
+	*control*.
 
 # RIGHTS
 
-The twelve rights are *read*, *write*, *execute*, *send*, *receive*,
-*grant*, *signal*, *control*, *seal*, *unseal*, *copy* and *transfer*.
-What the first ten allow depends on the kind and is described with the
-operations that need them. Two concern capabilities themselves:
+The thirteen rights are *read*, *write*, *execute*, *send*, *receive*,
+*grant*, *signal*, *control*, *seal*, *unseal*, *copy*, *transfer* and
+*bypass*. What the first ten allow depends on the kind and is described
+with the operations that need them. *bypass*, on a directory or a file,
+passes the owners, groups and modes of the files reached through it, as
+Linux's CAP_DAC_OVERRIDE does but only beneath that directory, and is
+carried to what is opened through it (*radix-names*(2), ADR 0214). Two
+concern capabilities themselves:
 
 *copy*
 	Needed to derive, seal or retype: to make anything from this
@@ -250,7 +259,7 @@ Operations on capabilities fail with one of these, and change nothing:
 At boot the kernel reports its store:
 
 ```
-Capabilities: ready; 20 object kinds, 12 rights, spaces of up to 65536 slots, derivations up to 64 deep
+Capabilities: ready; 21 object kinds, 13 rights, spaces of up to 65536 slots, derivations up to 64 deep
 ```
 
 The *kdb* command *caps* counts the spaces, capabilities and objects by
@@ -259,5 +268,5 @@ are described in *radix-debug*(7).
 
 # SEE ALSO
 
-*radix-ipc*(7), *radix-capability*(2), *radix-errors*(2), *radix-debug*(7),
+*radix-ipc*(7), *radix-capability*(2), *radix-names*(2), *radix-errors*(2), *radix-debug*(7),
 *dukovo-boot*(7), *ob*(1)

@@ -310,6 +310,12 @@ fn with_user<T>(uid: u32, read: impl FnOnce(&libc::passwd) -> T) -> Option<T> {
     (e == 0 && !found.is_null()).then(|| read(&pw))
 }
 
+/// The user this program runs as.
+pub fn own_user() -> u32 {
+    // SAFETY: geteuid has no preconditions.
+    unsafe { libc::geteuid() }
+}
+
 /// The name of user `uid`, or its number if it has none.
 pub fn user_name(uid: u32) -> String {
     with_user(uid, |pw| {

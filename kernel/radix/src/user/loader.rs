@@ -168,7 +168,8 @@ fn build(at: SlotRef, process: &ProcessRef, program: &Program<'_>) -> Result<()>
     process::install(mine(startup::SLOT_LOG), ObjectKind::KernelLog, Object::KernelLog)?;
     if program.root {
         let root = crate::fs::vfs().ok_or(error(Kernel::Gone))?.root();
-        let root = crate::fs::FileObject::new(root).ok_or(error(Kernel::NoMemory))?;
+        let root = crate::fs::FileObject::new(root, super::names::Identity::ROOT)
+            .ok_or(error(Kernel::NoMemory))?;
         process::install(mine(startup::SLOT_ROOT), ObjectKind::Directory, Object::Directory(root))
             .map_err(|err| failed(name, "giving it the root directory", err))?;
     }

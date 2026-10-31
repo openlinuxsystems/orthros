@@ -54,14 +54,15 @@ struct Settings {
     hide_idle: bool,
     width: Option<usize>,
     help: bool,
-    /// `-u` named a user other than root, who has no processes.
-    other_user: bool,
+    /// `-u`: only this user's processes.
+    user: Option<u32>,
 }
 
 /// One row: a process or a thread of one.
 #[derive(Default)]
 struct Row {
     pid: u64,
+    user: u32,
     name: String,
     args: Vec<OsString>,
     state: char,
@@ -177,7 +178,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         hide_idle: false,
         width: None,
         help: false,
-        other_user: false,
+        user: None,
     };
     while let Some(arg) = args.next()? {
         match arg {
@@ -203,8 +204,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
                 let name = args.text()?;
                 let uid =
                     util::user_id(&name).ok_or_else(|| usage(format!("invalid user '{name}'")))?;
-                // Every process is root's.
-                s.other_user = uid != 0;
+                s.user = Some(uid);
             }
             Arg::Short('H') => s.threads = true,
             Arg::Short('o') => {
@@ -307,7 +307,10 @@ fn sample(s: &Settings, before: &mut Before) -> Result<Vec<Row>, Fail> {
     let span = now.saturating_sub(before.at_ns).max(1) as f64;
     let mut rows = Vec::new();
     let mut cpu = HashMap::new();
-    let wanted = |p: &&Process| !s.other_user && (s.pids.is_empty() || s.pids.contains(&p.number));
+    let wanted = |p: &&Process| {
+        s.user.is_none_or(|user| p.user == user)
+            && (s.pids.is_empty() || s.pids.contains(&p.number))
+    };
     for p in processes.iter().filter(wanted) {
         let args = if s.command_line { proc::cmdline(p.number) } else { Vec::new() };
         if s.threads && !p.zombie() {
@@ -335,6 +338,7 @@ fn percent(id: u64, cpu_ns: u64, before: &Before, span: f64) -> f64 {
 fn process_row(p: &Process, args: Vec<OsString>, before: &Before, span: f64) -> Row {
     Row {
         pid: p.number,
+        user: p.user,
         name: p.name.clone(),
         args,
         state: p.state_letter(),
@@ -351,6 +355,7 @@ fn thread_row(p: &Process, t: &Thread, args: &[OsString], before: &Before, span:
     let cpu_ns = t.user_ns + t.system_ns;
     Row {
         pid: t.number,
+        user: p.user,
         name: t.name.clone(),
         args: args.to_vec(),
         state: if p.run == "stopped" { 'T' } else { proc::run_letter(&t.run) },
@@ -473,7 +478,7 @@ fn render(s: &Settings, before: &Before, rows: &[Row]) -> String {
     let mut shown: Vec<&Row> =
         rows.iter().filter(|r| !s.hide_idle || r.percent > 0.0 || r.state == 'R').collect();
     shown.sort_by(|a, b| order(s.sort, s.reverse, a, b));
-    let user = util::user_name(0);
+    let mut names = HashMap::new();
     let room = height.saturating_sub(lines.len());
     for r in shown.into_iter().take(room) {
         let centis = r.cpu_ns / 10_000_000;
@@ -491,7 +496,12 @@ fn render(s: &Settings, before: &Before, rows: &[Row]) -> String {
         lines.push(format!(
             "{:>7} {:<8} {:>3} {:>3} {:>7} {:>6} {:>6} {} {:>5.1} {:>5.1} {:>9} {}",
             r.pid,
-            user.chars().take(8).collect::<String>(),
+            names
+                .entry(r.user)
+                .or_insert_with(|| util::user_name(r.user))
+                .chars()
+                .take(8)
+                .collect::<String>(),
             pr,
             r.nice,
             r.virtual_kib,

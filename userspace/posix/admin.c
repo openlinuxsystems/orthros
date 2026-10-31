@@ -397,21 +397,32 @@ static void tracing(void) {
 	CHECK(strstr(text, "--- child ") != NULL && strstr(text, "[pid ") != NULL);
 
 	// A process already running: it goes on while traced, and its end
-	// ends the trace.
-	pid_t busy = fork();
-	if(!busy) {
-		for(int i = 0; i < 40; i++) {
-			getppid();
-			check_sleep_ms(25);
+	// ends the trace. Only a descendant may be traced, as Linux's Yama has
+	// it (ADR 0214): a child forks the busy one, then becomes rtrace.
+	pid_t attacher = check_fork();
+	if(!attacher) {
+		pid_t busy = fork();
+		if(!busy) {
+			for(int i = 0; i < 40; i++) {
+				getppid();
+				check_sleep_ms(25);
+			}
+			_exit(0);
 		}
-		_exit(0);
+		char number[24];
+		execl("/bin/rtrace", "rtrace", "-o", DIR "/attached", "-p", text_of(busy, number),
+				(char *)NULL);
+		_exit(127);
 	}
-	char number[24];
-	STATUS(0, "/bin/rtrace", "-o", DIR "/attached", "-p", text_of(busy, number));
 	int status;
-	CHECK(waitpid(busy, &status, 0) == busy && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	CHECK(waitpid(attacher, &status, 0) == attacher && WIFEXITED(status) &&
+			WEXITSTATUS(status) == 0);
 	CHECK(strstr(read_file(DIR "/attached", text, sizeof(text)), "+++ exited with 0 +++") !=
 			NULL);
+	// Not one it did not start: its parent, here.
+	char parent[24];
+	STATUS(1, "/bin/sh", "-c",
+			strcat(strcpy(text, "/bin/rtrace -o /devices/null -p "), text_of(getpid(), parent)));
 
 	// As strace: a command is found before anything starts, results line
 	// up at column 40, -r's times are six wide, and a command a signal

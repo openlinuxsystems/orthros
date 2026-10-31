@@ -34,7 +34,8 @@ use radix_sync::Mutex;
 use crate::mem::{self, KArc, KVec};
 use crate::path::{self, Component};
 use crate::{
-    Access, Error, FsRef, Kind, ListFn, MAX_LINKS, NodeRef, PATH_MAX, Result, Stat, address, mode,
+    Access, Error, FsRef, Kind, ListFn, MAX_LINKS, NodeRef, PATH_MAX, Result, Stat, Who, address,
+    mode, want,
 };
 
 /// A filesystem mounted on a directory.
@@ -164,6 +165,38 @@ pub fn made_with(dir: &Location, access: Access, kind: Kind) -> Access {
     Access { group: parent.group, mode: access.mode | extra, ..access }
 }
 
+/// Whether `who` may look names up in `node`: search it, if it is a
+/// directory. In anything else the lookup fails with not-a-directory, as
+/// on Linux, whatever its mode.
+#[inline]
+fn may_search(who: &Who, node: &dyn crate::Node) -> Result<()> {
+    if who.bypass || node.kind() != Kind::Directory {
+        return Ok(());
+    }
+    who.check(node, want::EXECUTE)
+}
+
+/// Whether `who` may change the entries of the directory at `dir`: write
+/// and search it.
+fn may_change(who: &Who, dir: &Location) -> Result<()> {
+    who.check(&*dir.node, want::WRITE | want::EXECUTE)
+}
+
+/// Whether `who` may remove `node` from the directory at `dir`: change
+/// the directory, and in a sticky one, own the node or the directory, as
+/// POSIX has it (ADR 0214).
+fn may_remove(who: &Who, dir: &Location, node: &dyn crate::Node) -> Result<()> {
+    may_change(who, dir)?;
+    if who.bypass {
+        return Ok(());
+    }
+    let parent = dir.node.access();
+    if parent.mode & mode::STICKY != 0 && !who.owns(parent) && !who.owns(node.access()) {
+        return Err(Error::NotPermitted);
+    }
+    Ok(())
+}
+
 /// How `open` opens.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct OpenFlags {
@@ -181,6 +214,9 @@ pub struct OpenFlags {
     /// Fail with [`Error::Loop`] if the last name is a symbolic link,
     /// rather than follow it.
     pub no_follow: bool,
+    /// What the opener will do with a file that is there, as [`want`]'s
+    /// bits, which the second gate checks (ADR 0214).
+    pub want: u16,
 }
 
 /// The tree of mounted filesystems.
@@ -260,9 +296,11 @@ impl Vfs {
     /// target that starts with `/`, from `base`, as if `base` were the
     /// root. At most [`MAX_LINKS`] are followed. `..` steps back along the
     /// chain; at `base` it stays there when `base` is the tree's root, as
-    /// `/..` is `/`, and is refused anywhere else.
+    /// `/..` is `/`, and is refused anywhere else. Each directory it looks
+    /// in must let `who` search it (ADR 0214).
     fn walk<T>(
         &self,
+        who: &Who,
         base: &Location,
         path: &str,
         follow: bool,
@@ -283,7 +321,11 @@ impl Vfs {
             };
             let mut components = path::components(text);
             while let Some(component) = components.next() {
-                match component? {
+                let component = component?;
+                if let Some((here, _)) = chain.last() {
+                    may_search(who, &*here.node)?;
+                }
+                match component {
                     Component::Current => {}
                     Component::Parent if chain.len() == 1 && at_root => {}
                     Component::Parent if chain.len() == 1 => return Err(Error::Outside),
@@ -329,38 +371,47 @@ impl Vfs {
         }
     }
 
-    /// Where `path` leads from `base`, following symbolic links ([`walk`]).
+    /// Where `path` leads from `base`, following symbolic links ([`walk`]),
+    /// for `who`.
     ///
     /// [`walk`]: Vfs::walk
-    pub fn resolve(&self, base: &Location, path: &str) -> Result<Location> {
-        self.resolve_as(base, path, true)
+    pub fn resolve(&self, who: &Who, base: &Location, path: &str) -> Result<Location> {
+        self.resolve_as(who, base, path, true)
     }
 
     /// Where `path` leads from `base`, following symbolic links but for
     /// one that is its last name (unless a `/` follows it): what `lstat`
     /// and `readlink` look at.
-    pub fn resolve_link(&self, base: &Location, path: &str) -> Result<Location> {
-        self.resolve_as(base, path, false)
+    pub fn resolve_link(&self, who: &Who, base: &Location, path: &str) -> Result<Location> {
+        self.resolve_as(who, base, path, false)
     }
 
-    fn resolve_as(&self, base: &Location, path: &str, follow: bool) -> Result<Location> {
+    fn resolve_as(&self, who: &Who, base: &Location, path: &str, follow: bool) -> Result<Location> {
+        // `.` alone is `base` itself, as a descriptor's own directory is
+        // to fstat(2): it needs no search of it.
+        if path == "." {
+            return Ok(base.clone());
+        }
         // Where the walk is, when it has left `base`: a name moves the
         // node on, and a mount there the mount too.
         let mut mount: Option<MountRef> = None;
         let mut node: Option<NodeRef> = None;
         let mut components = path::components(path);
         while let Some(component) = components.next() {
-            match component? {
+            let component = component?;
+            let here = node.as_ref().unwrap_or(&base.node);
+            may_search(who, &**here)?;
+            match component {
                 Component::Current => {}
                 // Only `..` and symbolic links need the chain: `..` to
                 // step back along, and a link to start again from.
-                Component::Parent => return self.walk_to_end(base, path, follow),
+                Component::Parent => return self.walk_to_end(who, base, path, follow),
                 Component::Name(name) => {
-                    let found = node.as_ref().unwrap_or(&base.node).lookup(name)?;
+                    let found = here.lookup(name)?;
                     if found.kind() == Kind::Symlink
                         && (!components.at_end() || follow || components.trailing_slash())
                     {
-                        return self.walk_to_end(base, path, follow);
+                        return self.walk_to_end(who, base, path, follow);
                     }
                     match self.mounted_root(mount.as_ref().unwrap_or(&base.mount), &found) {
                         Some(top) => {
@@ -379,8 +430,14 @@ impl Vfs {
     }
 
     /// Where the walk of `path` from `base` ends.
-    fn walk_to_end(&self, base: &Location, path: &str, follow: bool) -> Result<Location> {
-        self.walk(base, path, follow, |chain, _| {
+    fn walk_to_end(
+        &self,
+        who: &Who,
+        base: &Location,
+        path: &str,
+        follow: bool,
+    ) -> Result<Location> {
+        self.walk(who, base, path, follow, |chain, _| {
             chain.last().map(|(at, _)| at.clone()).ok_or(Error::Outside)
         })
     }
@@ -388,22 +445,33 @@ impl Vfs {
     /// The directory `path`'s last name is in, and that name.
     pub fn resolve_parent<'p>(
         &self,
+        who: &Who,
         base: &Location,
         path: &'p str,
     ) -> Result<(Location, &'p str)> {
         let (dir, name) = path::split_last(path)?;
-        let at = self.resolve(base, dir)?;
+        let at = self.resolve(who, base, dir)?;
         if at.node.kind() != Kind::Directory {
             return Err(Error::NotDirectory);
         }
         Ok((at, name))
     }
 
-    /// Opens `path` beneath `base`, following symbolic links unless
-    /// `flags.no_follow` says not to follow one that is the last name. A
-    /// file made through a symbolic link is made where the link points,
-    /// as POSIX has it.
-    pub fn open(&self, base: &Location, path: &str, flags: OpenFlags) -> Result<Location> {
+    /// Opens `path` beneath `base` for `who`, following symbolic links
+    /// unless `flags.no_follow` says not to follow one that is the last
+    /// name. A file made through a symbolic link is made where the link
+    /// points, as POSIX has it. One that is there must let `who` do what
+    /// `flags.want` asks, and write it to truncate it; one the open makes
+    /// is `who`'s whatever its mode, and its directory must let `who`
+    /// change it.
+    pub fn open(
+        &self,
+        who: &Who,
+        base: &Location,
+        path: &str,
+        flags: OpenFlags,
+    ) -> Result<Location> {
+        let mut made = false;
         let at = if let Some(access) = flags.create {
             // The path again with the link's target for its last name,
             // once a link stood there.
@@ -414,7 +482,7 @@ impl Vfs {
                     Some(bytes) => core::str::from_utf8(bytes).map_err(|_| Error::BadName)?,
                     None => path,
                 };
-                let (dir, name) = self.resolve_parent(base, text)?;
+                let (dir, name) = self.resolve_parent(who, base, text)?;
                 match dir.node.lookup(name) {
                     Ok(_) if flags.exclusive => return Err(Error::Exists),
                     Ok(node) if node.kind() == Kind::Symlink => {
@@ -428,15 +496,17 @@ impl Vfs {
                     Ok(node) => break self.cross(Location { mount: dir.mount.clone(), node }),
                     Err(Error::NotFound) => {
                         dir.writable()?;
+                        who.check(&*dir.node, want::WRITE | want::EXECUTE)?;
                         let access = made_with(&dir, access, Kind::File);
                         let node = dir.node.create(name, Kind::File, access)?;
+                        made = true;
                         break Location { mount: dir.mount.clone(), node };
                     }
                     Err(err) => return Err(err),
                 }
             }
         } else {
-            self.resolve_as(base, path, !flags.no_follow)?
+            self.resolve_as(who, base, path, !flags.no_follow)?
         };
         let kind = at.node.kind();
         if kind == Kind::Symlink {
@@ -448,6 +518,13 @@ impl Vfs {
         }
         if flags.directory && kind != Kind::Directory {
             return Err(Error::NotDirectory);
+        }
+        // A directory is listed and changed through, each checked then.
+        if !made && kind != Kind::Directory {
+            let asked = flags.want | if flags.truncate { want::WRITE } else { 0 };
+            if asked != 0 {
+                who.check(&*at.node, asked)?;
+            }
         }
         if flags.truncate && kind == Kind::File {
             at.writable()?;
@@ -463,6 +540,7 @@ impl Vfs {
     /// `access`'s owner and group, and its mode is 0777.
     pub fn make_link(
         &self,
+        who: &Who,
         base: &Location,
         path: &str,
         target: &str,
@@ -474,28 +552,36 @@ impl Vfs {
         if target.len() > PATH_MAX {
             return Err(Error::NameTooLong);
         }
-        let (dir, name) = self.resolve_parent(base, path)?;
+        let (dir, name) = self.resolve_parent(who, base, path)?;
         dir.writable()?;
         if dir.node.lookup(name).is_ok() {
             return Err(Error::Exists);
         }
+        may_change(who, &dir)?;
         let access = made_with(&dir, Access { mode: 0o777, ..access }, Kind::Symlink);
         dir.node.make_link(name, target, access).map(drop)
     }
 
     /// Makes `to` beneath `to_base` another name of the file `path`
     /// beneath `base` ([`crate::Node::link`]): of the link itself when it
-    /// is a symbolic link, unless `follow`, as `linkat` has it.
+    /// is a symbolic link, unless `follow`, as `linkat` has it. Each side
+    /// is resolved for its own name, `who` and `to_who`, as each directory
+    /// capability acts for its own; `who` must own the file or may read
+    /// and write it, as Linux's `fs.protected_hardlinks` has it, and
+    /// `to_who` change the directory the new name goes in.
+    #[allow(clippy::too_many_arguments)]
     pub fn link(
         &self,
+        who: &Who,
         base: &Location,
         path: &str,
+        to_who: &Who,
         to_base: &Location,
         to: &str,
         follow: bool,
     ) -> Result<()> {
-        let from = self.resolve_as(base, path, follow)?;
-        let (dir, name) = self.resolve_parent(to_base, to)?;
+        let from = self.resolve_as(who, base, path, follow)?;
+        let (dir, name) = self.resolve_parent(to_who, to_base, to)?;
         // In Linux's order of errors.
         if dir.node.lookup(name).is_ok() {
             return Err(Error::Exists);
@@ -504,8 +590,17 @@ impl Vfs {
         if !KArc::ptr_eq(&from.mount, &dir.mount) {
             return Err(Error::CrossMount);
         }
+        may_change(to_who, &dir)?;
         if from.node.kind() == Kind::Directory {
             return Err(Error::IsDirectory);
+        }
+        if !who.bypass {
+            let access = from.node.access();
+            let kind = from.node.kind();
+            let usable = kind == Kind::File && who.may(access, kind, want::READ | want::WRITE);
+            if !who.owns(access) && !usable {
+                return Err(Error::NotPermitted);
+            }
         }
         dir.node.link(name, &from.node)
     }
@@ -514,17 +609,19 @@ impl Vfs {
     /// device number `device` ([`crate::Node::make_node`]), with `access`.
     pub fn make_node(
         &self,
+        who: &Who,
         base: &Location,
         path: &str,
         kind: Kind,
         device: u64,
         access: Access,
     ) -> Result<()> {
-        let (dir, name) = self.resolve_parent(base, path)?;
+        let (dir, name) = self.resolve_parent(who, base, path)?;
         dir.writable()?;
         if dir.node.lookup(name).is_ok() {
             return Err(Error::Exists);
         }
+        may_change(who, &dir)?;
         let access = made_with(&dir, access, kind);
         dir.node.make_node(name, kind, device, access).map(drop)
     }
@@ -533,16 +630,18 @@ impl Vfs {
     /// ([`crate::Node::make_socket`]), with `access`.
     pub fn make_socket(
         &self,
+        who: &Who,
         base: &Location,
         path: &str,
         binding: crate::SocketBinding,
         access: Access,
     ) -> Result<()> {
-        let (dir, name) = self.resolve_parent(base, path)?;
+        let (dir, name) = self.resolve_parent(who, base, path)?;
         dir.writable()?;
         if dir.node.lookup(name).is_ok() {
             return Err(Error::Exists);
         }
+        may_change(who, &dir)?;
         let access = made_with(&dir, access, Kind::Socket);
         dir.node.make_socket(name, binding, access).map(drop)
     }
@@ -552,11 +651,12 @@ impl Vfs {
     /// was cut short.
     pub fn read_link(
         &self,
+        who: &Who,
         base: &Location,
         path: &str,
         out: &mut dyn crate::Out,
     ) -> Result<usize> {
-        self.resolve_link(base, path)?.node.read_link(out)
+        self.resolve_link(who, base, path)?.node.read_link(out)
     }
 
     /// Writes where `path` beneath `base` leads into `out`: the names
@@ -566,11 +666,12 @@ impl Vfs {
     /// holds if it was cut short.
     pub fn real_path(
         &self,
+        who: &Who,
         base: &Location,
         path: &str,
         out: &mut dyn crate::Out,
     ) -> Result<usize> {
-        self.walk(base, path, true, |chain, names| {
+        self.walk(who, base, path, true, |chain, names| {
             let steps = &chain[1..];
             if steps.is_empty() {
                 put_within(out, 0, b".")?;
@@ -590,18 +691,29 @@ impl Vfs {
     }
 
     /// Makes the directory `path` beneath `base`, with `access`.
-    pub fn make_directory(&self, base: &Location, path: &str, access: Access) -> Result<()> {
-        let (dir, name) = self.resolve_parent(base, path)?;
+    pub fn make_directory(
+        &self,
+        who: &Who,
+        base: &Location,
+        path: &str,
+        access: Access,
+    ) -> Result<()> {
+        let (dir, name) = self.resolve_parent(who, base, path)?;
         dir.writable()?;
+        if dir.node.lookup(name).is_ok() {
+            return Err(Error::Exists);
+        }
+        may_change(who, &dir)?;
         let access = made_with(&dir, access, Kind::Directory);
         dir.node.create(name, Kind::Directory, access).map(drop)
     }
 
     /// Removes the file or empty directory `path` beneath `base`.
-    pub fn remove(&self, base: &Location, path: &str) -> Result<()> {
-        let (dir, name) = self.resolve_parent(base, path)?;
+    pub fn remove(&self, who: &Who, base: &Location, path: &str) -> Result<()> {
+        let (dir, name) = self.resolve_parent(who, base, path)?;
         dir.writable()?;
         let node = dir.node.lookup(name)?;
+        may_remove(who, &dir, &*node)?;
         let mounted = self.mounted_on(&dir.mount, &node).is_some();
         // Let go of it first: held here, a file no one has open would look
         // open to its filesystem, which keeps an open file past its last
@@ -615,43 +727,56 @@ impl Vfs {
 
     /// Makes `path` beneath `base` a new, empty subvolume
     /// ([`crate::Node::make_subvolume`]).
-    pub fn make_subvolume(&self, base: &Location, path: &str) -> Result<()> {
-        let (dir, name) = self.resolve_parent(base, path)?;
+    pub fn make_subvolume(&self, who: &Who, base: &Location, path: &str) -> Result<()> {
+        let (dir, name) = self.resolve_parent(who, base, path)?;
         dir.writable()?;
         if dir.node.lookup(name).is_ok() {
             return Err(Error::Exists);
         }
+        may_change(who, &dir)?;
         dir.node.make_subvolume(name)
     }
 
     /// Makes `to` beneath `to_base` a snapshot of the subvolume that holds
     /// `source` beneath `base`, read-only if `read_only`
-    /// ([`crate::Node::snapshot`]).
+    /// ([`crate::Node::snapshot`]). `who` must own `source`, as on Linux,
+    /// and `to_who` change the directory the snapshot goes in.
+    #[allow(clippy::too_many_arguments)]
     pub fn snapshot(
         &self,
+        who: &Who,
         base: &Location,
         source: &str,
+        to_who: &Who,
         to_base: &Location,
         to: &str,
         read_only: bool,
     ) -> Result<()> {
-        let from = self.resolve(base, source)?;
-        let (dir, name) = self.resolve_parent(to_base, to)?;
+        let from = self.resolve(who, base, source)?;
+        let (dir, name) = self.resolve_parent(to_who, to_base, to)?;
         if dir.node.lookup(name).is_ok() {
             return Err(Error::Exists);
         }
         dir.writable()?;
+        may_change(to_who, &dir)?;
+        if !who.owns(from.node.access()) {
+            return Err(Error::NotPermitted);
+        }
         // On one filesystem, through whichever mounts of it, as Linux has
         // it: the filesystem checks.
         dir.node.snapshot(name, &from.node, read_only)
     }
 
     /// Removes the subvolume `path` beneath `base`, with everything in it
-    /// ([`crate::Node::remove_subvolume`]).
-    pub fn remove_subvolume(&self, base: &Location, path: &str) -> Result<()> {
-        let (dir, name) = self.resolve_parent(base, path)?;
+    /// ([`crate::Node::remove_subvolume`]). `who` must be able to remove
+    /// it from its directory, and to write and search it, as Linux's
+    /// `user_subvol_rm_allowed` has it.
+    pub fn remove_subvolume(&self, who: &Who, base: &Location, path: &str) -> Result<()> {
+        let (dir, name) = self.resolve_parent(who, base, path)?;
         dir.writable()?;
         let node = dir.node.lookup(name)?;
+        may_remove(who, &dir, &*node)?;
+        who.check(&*node, want::WRITE | want::EXECUTE)?;
         let mounted = self.mounted_on(&dir.mount, &node).is_some();
         // Let go of it first: held here, the subvolume would be in use.
         drop(node);
@@ -662,10 +787,21 @@ impl Vfs {
     }
 
     /// Moves `from` beneath `base` to `to` beneath `to_base`, on one
-    /// filesystem.
-    pub fn rename(&self, base: &Location, from: &str, to_base: &Location, to: &str) -> Result<()> {
-        let (source, from_name) = self.resolve_parent(base, from)?;
-        let (target, to_name) = self.resolve_parent(to_base, to)?;
+    /// filesystem, each side resolved for its own name. `who` must be able
+    /// to remove it from its directory, and to write a directory it moves
+    /// to another, for its `..`, and `to_who` to remove what it replaces
+    /// from the other, or to change it, as on Linux.
+    pub fn rename(
+        &self,
+        who: &Who,
+        base: &Location,
+        from: &str,
+        to_who: &Who,
+        to_base: &Location,
+        to: &str,
+    ) -> Result<()> {
+        let (source, from_name) = self.resolve_parent(who, base, from)?;
+        let (target, to_name) = self.resolve_parent(to_who, to_base, to)?;
         if !KArc::ptr_eq(&source.mount, &target.mount) {
             return Err(Error::CrossMount);
         }
@@ -674,33 +810,48 @@ impl Vfs {
         if self.mounted_on(&source.mount, &moving).is_some() {
             return Err(Error::InUse);
         }
-        if let Ok(replaced) = target.node.lookup(to_name)
-            && self.mounted_on(&target.mount, &replaced).is_some()
+        let replaced = target.node.lookup(to_name).ok();
+        if let Some(replaced) = &replaced
+            && self.mounted_on(&target.mount, replaced).is_some()
         {
             return Err(Error::InUse);
         }
+        if !(who.bypass && to_who.bypass) {
+            may_remove(who, &source, &*moving)?;
+            match &replaced {
+                Some(replaced) => may_remove(to_who, &target, &**replaced)?,
+                None => may_change(to_who, &target)?,
+            }
+            if moving.kind() == Kind::Directory && address(&source.node) != address(&target.node) {
+                who.check(&*moving, want::WRITE)?;
+            }
+        }
+        drop((moving, replaced));
         source.node.rename(from_name, &*target.node, to_name)
     }
 
     /// What `path` beneath `base` is.
-    pub fn stat(&self, base: &Location, path: &str) -> Result<Stat> {
-        Ok(self.resolve(base, path)?.node.stat())
+    pub fn stat(&self, who: &Who, base: &Location, path: &str) -> Result<Stat> {
+        Ok(self.resolve(who, base, path)?.node.stat())
     }
 
     /// What `path` beneath `base` is, the link itself if it is a symbolic
     /// link.
-    pub fn stat_link(&self, base: &Location, path: &str) -> Result<Stat> {
-        Ok(self.resolve_link(base, path)?.node.stat())
+    pub fn stat_link(&self, who: &Who, base: &Location, path: &str) -> Result<Stat> {
+        Ok(self.resolve_link(who, base, path)?.node.stat())
     }
 
-    /// Lists the directory at `at` from `cursor`.
-    pub fn list(&self, at: &Location, cursor: u64, f: ListFn<'_>) -> Result<()> {
+    /// Lists the directory at `at` from `cursor`, which `who` must be able
+    /// to read.
+    pub fn list(&self, who: &Who, at: &Location, cursor: u64, f: ListFn<'_>) -> Result<()> {
+        who.check(&*at.node, want::READ)?;
         at.node.list(cursor, f)
     }
 
     /// Mounts `fs` on the directory `path` beneath `base`.
     pub fn mount(
         &self,
+        who: &Who,
         base: &Location,
         path: &str,
         fs: FsRef,
@@ -708,7 +859,7 @@ impl Vfs {
         read_only: bool,
     ) -> Result<MountRef> {
         let root = fs.root();
-        self.mount_at(base, path, fs, root, source, read_only)
+        self.mount_at(who, base, path, fs, root, source, read_only)
     }
 
     /// Mounts the directory `from` on the directory `path` beneath `base`,
@@ -716,6 +867,7 @@ impl Vfs {
     /// mount is read-only if `read_only`, or if `from`'s is.
     pub fn bind(
         &self,
+        who: &Who,
         base: &Location,
         path: &str,
         from: &Location,
@@ -726,7 +878,7 @@ impl Vfs {
         }
         let read_only = read_only || from.mount.read_only();
         let (fs, root) = (from.mount.fs.clone(), from.node.clone());
-        let mount = self.mount_at(base, path, fs, root, from.mount.source(), read_only)?;
+        let mount = self.mount_at(who, base, path, fs, root, from.mount.source(), read_only)?;
         if from.mount.lost.load(Ordering::Acquire) {
             mount.lost.store(true, Ordering::Release);
         }
@@ -735,8 +887,10 @@ impl Vfs {
 
     /// Mounts `fs`, its directory `root` at the top, on the directory
     /// `path` beneath `base`.
+    #[allow(clippy::too_many_arguments)]
     fn mount_at(
         &self,
+        who: &Who,
         base: &Location,
         path: &str,
         fs: FsRef,
@@ -744,7 +898,7 @@ impl Vfs {
         source: &str,
         read_only: bool,
     ) -> Result<MountRef> {
-        let (at, where_) = self.walk(base, path, true, |chain, names| {
+        let (at, where_) = self.walk(who, base, path, true, |chain, names| {
             let at = chain.last().map(|(at, _)| at.clone()).ok_or(Error::Outside)?;
             let mut where_ = mem::vec();
             prefix_of(base, &mut where_)?;
@@ -820,8 +974,8 @@ impl Vfs {
     /// syncing it. Fails with [`Error::InUse`] while anything is mounted
     /// on it or any handle holds a place on it, and with the sync's error
     /// if it fails, unless the mount's disk is gone.
-    pub fn unmount(&self, base: &Location, path: &str) -> Result<()> {
-        let at = self.resolve(base, path)?;
+    pub fn unmount(&self, who: &Who, base: &Location, path: &str) -> Result<()> {
+        let at = self.resolve(who, base, path)?;
         if at.mount.on.is_none() || address(&at.node) != address(&at.mount.root) {
             return Err(Error::NotFound);
         }
@@ -848,8 +1002,8 @@ impl Vfs {
     /// kernel's fuzz test does with the tree it let programs mount things
     /// in, once they have gone. Fails with [`Error::InUse`], unmounting
     /// none, while any handle holds a place on one of them.
-    pub fn unmount_tree(&self, base: &Location, path: &str) -> Result<()> {
-        let at = self.resolve(base, path)?;
+    pub fn unmount_tree(&self, who: &Who, base: &Location, path: &str) -> Result<()> {
+        let at = self.resolve(who, base, path)?;
         if at.mount.on.is_none() || address(&at.node) != address(&at.mount.root) {
             return Err(Error::NotFound);
         }

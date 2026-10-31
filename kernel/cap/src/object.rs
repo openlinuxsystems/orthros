@@ -9,8 +9,9 @@
 //! (Phase 4: a CPU weight and a memory limit that threads and their memory
 //! are charged to, after Linux's cgroups), and from Phase 5 the kernel's
 //! random number generator, rings and the kernel log, files and
-//! directories, from Phase 9 the machine's power, and from Phase 11 its
-//! platform controls (ADR 0208). Four kinds are
+//! directories, from Phase 9 the machine's power, from Phase 11 its
+//! platform controls (ADR 0208), and from Phase 13 the authority to give
+//! names (ADR 0214). Four kinds are
 //! ranges, named by the range itself: three of hardware resources,
 //! interrupt lines, I/O ports and device registers (MMIO), and from
 //! Phase 12 the network's ports, which programs connect and listen
@@ -69,10 +70,12 @@ pub enum ObjectKind {
     /// The machine's platform controls, which its embedded controller
     /// keeps: its fans, their curves, its LEDs and its ARGB header.
     Platform = 19,
+    /// The authority to give processes and directories names (ADR 0214).
+    Names = 20,
 }
 
 /// How many kinds there are.
-pub const KINDS: usize = 20;
+pub const KINDS: usize = 21;
 
 impl ObjectKind {
     /// Every kind, in the order of their numbers.
@@ -97,6 +100,7 @@ impl ObjectKind {
         ObjectKind::Power,
         ObjectKind::Network,
         ObjectKind::Platform,
+        ObjectKind::Names,
     ];
 
     /// The kind numbered `n`.
@@ -135,9 +139,11 @@ impl ObjectKind {
             ObjectKind::Random => Rights::READ,
             ObjectKind::Ring => Rights::CONTROL.union(Rights::SEND),
             ObjectKind::KernelLog => Rights::WRITE,
-            ObjectKind::File => Rights::READ.union(Rights::WRITE),
-            ObjectKind::Directory => Rights::READ.union(Rights::WRITE).union(Rights::CONTROL),
-            ObjectKind::Power => Rights::CONTROL,
+            ObjectKind::File => Rights::READ.union(Rights::WRITE).union(Rights::BYPASS),
+            ObjectKind::Directory => {
+                Rights::READ.union(Rights::WRITE).union(Rights::CONTROL).union(Rights::BYPASS)
+            }
+            ObjectKind::Power | ObjectKind::Names => Rights::CONTROL,
             // Sending is connecting out, to any port; receiving is taking
             // what comes to the ports in the range.
             ObjectKind::Network => Rights::SEND.union(Rights::RECEIVE),
@@ -204,6 +210,7 @@ impl ObjectKind {
             ObjectKind::Power => "power",
             ObjectKind::Network => "network",
             ObjectKind::Platform => "platform",
+            ObjectKind::Names => "names",
         }
     }
 }

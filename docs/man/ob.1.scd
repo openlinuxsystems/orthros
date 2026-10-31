@@ -476,6 +476,24 @@ _target/userspace/_).
 		does, whatever name it claims, refusing a flood and keeping
 		nothing of a notification in the log.
 
+	*principals*
+		Boot 2 CPUs with _/system/tests/posix/principals_ as a program
+		that holds the names capability (Spark's *--names*), which makes
+		a tree in _/tmp_ for two users and starts itself as bob and as
+		alice, each with a root that acts for them and has no bypass
+		right (*radix-names*(2)). Alice checks her name and that it
+		cannot change; that she cannot read bob's 0700 home or list it,
+		give her files to another or a group not hers, change bob's
+		files' modes, remove or rename them in a sticky directory, link
+		to his files she may not write, set his files' times, or run a
+		file without an execute bit; that what she makes in a
+		set-group-ID directory takes its group; and that she can
+		neither signal nor trace bob's processes or root's, and reads
+		only their *status* in _/processes_. Root, whose root has the
+		bypass right, then reads both homes, and a capability stamped
+		for bob makes files that are his and reaches alice's only with
+		the bypass right (ADR 0214).
+
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test
 		services that run _/system/tests/posix/netgrant_: _granted_ asks

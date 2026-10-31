@@ -1,0 +1,42 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+readdir and readdir_r end the program when the system cannot read the
+directory. POSIX has readdir return NULL with errno set, and readdir_r
+return the error, as glibc and musl do: a directory a user may open but
+not read, since ADR 0214 checks owners and modes, fails that way.
+Upstreamable.
+
+diff -ruN a/options/posix/generic/dirent.cpp b/options/posix/generic/dirent.cpp
+--- a/options/posix/generic/dirent.cpp
++++ b/options/posix/generic/dirent.cpp
+@@ -75,8 +75,12 @@
+ struct dirent *readdir(DIR *dir) {
+ 	__ensure(dir->__ent_next <= dir->__ent_limit);
+ 	if(dir->__ent_next == dir->__ent_limit) {
+-		if(int e = mlibc::sysdep_or_enosys<ReadEntries>(dir->__handle, dir->__ent_buffer, 2048, &dir->__ent_limit); e)
+-			__ensure(!"mlibc::sys_read_entries() failed");
++		if(int e = mlibc::sysdep_or_enosys<ReadEntries>(dir->__handle, dir->__ent_buffer, 2048, &dir->__ent_limit); e) {
++			dir->__ent_next = 0;
++			dir->__ent_limit = 0;
++			errno = e;
++			return nullptr;
++		}
+ 		dir->__ent_next = 0;
+ 		if(!dir->__ent_limit)
+ 			return nullptr;
+@@ -116,8 +120,12 @@
+ 
+ 	__ensure(dir->__ent_next <= dir->__ent_limit);
+ 	if(dir->__ent_next == dir->__ent_limit) {
+-		if(int e = mlibc::sysdep_or_panic<ReadEntries>(dir->__handle, dir->__ent_buffer, 2048, &dir->__ent_limit); e)
+-			__ensure(!"mlibc::sys_read_entries() failed");
++		if(int e = mlibc::sysdep_or_panic<ReadEntries>(dir->__handle, dir->__ent_buffer, 2048, &dir->__ent_limit); e) {
++			dir->__ent_next = 0;
++			dir->__ent_limit = 0;
++			*result = nullptr;
++			return e;
++		}
+ 		dir->__ent_next = 0;
+ 		if(!dir->__ent_limit) {
+ 			*result = nullptr;
