@@ -310,7 +310,7 @@ impl State {
         let mut socket = tcp_socket(tcp_memory);
         self.options.apply(&mut socket, false);
         let mut stack = interface.stack.lock();
-        let handle = match stack.add_socket(socket) {
+        let handle = match interface.add_socket(&mut stack, socket) {
             Ok(handle) => handle,
             Err(socket) => {
                 drop(stack);
@@ -1101,7 +1101,7 @@ fn release_parts(parts: &mut Vec<Part, Kmalloc>, connected: bool, mut port: Opti
                 if open {
                     let orphan = Orphan {
                         handle,
-                        leases,
+                        leases: Some(leases),
                         port: port.take(),
                         deadline_ns: sched::now_ns().saturating_add(net::ORPHAN_NS),
                     };
@@ -1137,7 +1137,7 @@ fn udp_part(
         return Err(status(Kernel::InvalidArgument));
     }
     let mut stack = interface.stack.lock();
-    match stack.add_socket(socket) {
+    match interface.add_socket(&mut stack, socket) {
         Ok(handle) => {
             Ok(Part { interface, handle, leases: Leases::Udp(leases), other: OtherEnd::default() })
         }
@@ -1165,7 +1165,7 @@ fn listening_part(
         return Err(status(Kernel::InvalidArgument));
     }
     let mut stack = interface.stack.lock();
-    match stack.add_socket(socket) {
+    match interface.add_socket(&mut stack, socket) {
         Ok(handle) => {
             Ok(Part { interface, handle, leases: Leases::Tcp(leases), other: OtherEnd::default() })
         }

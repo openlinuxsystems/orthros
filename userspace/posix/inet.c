@@ -5,9 +5,10 @@
 // loopback interface. TCP: bind, listen, connect and accept, their
 // addresses, data both ways, shutdown and the end of the stream, the
 // options, a connection refused, non-blocking connect and accept with
-// poll, a listener shared with a child, and a socket that listens
-// unbound. UDP: sendto and recvfrom, datagrams kept whole, sendmsg and
-// recvmsg over several buffers, connect, and MSG_DONTWAIT. The errors of
+// poll, a listener shared with a child, a socket that listens unbound,
+// and more connections at once than an interface's first socket slots.
+// UDP: sendto and recvfrom, datagrams kept whole, sendmsg and recvmsg
+// over several buffers, connect, and MSG_DONTWAIT. The errors of
 // addresses in use or not on the machine and of families not there. And
 // the network capabilities: a child with none cannot make a socket
 // (EACCES), one that may only connect out cannot bind a port or listen,
@@ -102,6 +103,31 @@ static void short_connections(void) {
 		CHECK(accepted >= 0);
 		CHECK(close(client) == 0);
 		CHECK(close(accepted) == 0);
+	}
+	CHECK(close(server) == 0);
+}
+
+// More sockets at once than the loopback interface has slots for at
+// first (128), two for each connection and the listener: the interface
+// makes more slots (ADR 0188), and the connections made first still
+// carry bytes.
+static void many_connections(void) {
+	enum { COUNT = 70 };
+	int server = listener();
+	unsigned short port = port_of(server);
+	int clients[COUNT], accepted[COUNT];
+	for(int i = 0; i < COUNT; i++) {
+		clients[i] = connected(port);
+		accepted[i] = accept(server, NULL, NULL);
+		CHECK(accepted[i] >= 0);
+	}
+	for(int i = 0; i < COUNT; i++) {
+		unsigned char byte = (unsigned char)i;
+		CHECK(write(clients[i], &byte, 1) == 1);
+		unsigned char got = 0;
+		CHECK(read(accepted[i], &got, 1) == 1 && got == byte);
+		CHECK(close(clients[i]) == 0);
+		CHECK(close(accepted[i]) == 0);
 	}
 	CHECK(close(server) == 0);
 }
@@ -455,6 +481,7 @@ int main(void) {
 	check_start("inet");
 	RUN(bench_order);
 	RUN(short_connections);
+	RUN(many_connections);
 	RUN(tcp);
 	RUN(non_blocking);
 	RUN(unbound);
