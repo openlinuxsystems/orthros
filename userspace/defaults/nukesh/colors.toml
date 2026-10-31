@@ -32,7 +32,7 @@ host = "green"
 path = "bold blue"
 symbol = "magenta"
 error = "bold bright-white on red"
-admin = "bold black on yellow"
+admin = "bold bright-white on yellow"
 
 # The command line as you type it. An unknown command is underlined as
 # well as red, so that it shows without colour too.
