@@ -19,7 +19,9 @@
 //! card's slot to the stack's receive buffer, and once on the way out,
 //! from the transmit buffer to a slot. The loopback link's packets are
 //! not copied at all: the stack writes and reads them in place, in the
-//! link's ring (ADR 0185).
+//! link's ring (ADR 0185). And a TCP connection with both its ends on the
+//! loopback link passes its bytes straight across, in no packet at all,
+//! when it can ([`Stack::send_across`], ADR 0186).
 //!
 //! [`Pinger`] sends ICMP echo requests and matches their replies, for
 //! the kernel's own checks of a link (`selftest=net`). The stack itself
@@ -37,11 +39,13 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+mod across;
 mod loopback;
 mod sockets;
 #[cfg(test)]
 mod tests;
 
+pub use across::{Across, OtherEnd};
 pub use loopback::Loopback;
 pub use smoltcp;
 pub use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};

@@ -44,7 +44,7 @@ use radix_net::smoltcp::iface::SocketHandle;
 use radix_net::smoltcp::socket::{tcp, udp};
 use radix_net::smoltcp::time::Duration;
 use radix_net::smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
-use radix_net::{ConnectError, Ipv4Address};
+use radix_net::{Across, ConnectError, Ipv4Address, OtherEnd};
 use radix_sync::Mutex;
 use radix_vfs::mount::Location;
 use radix_vfs::{In, Kind as NodeKind, Node, NodeRef, Out, Stat, mem, next_id};
@@ -159,6 +159,9 @@ struct Part {
     interface: &'static Interface,
     handle: SocketHandle,
     leases: Leases,
+    /// Where a connection's other end was last found on its interface,
+    /// when it is a socket of the same one (ADR 0186).
+    other: OtherEnd,
 }
 
 /// Where a socket is in its life.
@@ -313,6 +316,7 @@ impl State {
             interface,
             handle,
             leases: Leases::Tcp(leases),
+            other: OtherEnd::default(),
         });
         if held.is_some() {
             self.held = held;
@@ -697,8 +701,9 @@ impl InetSocket {
                     return Err(status(Kernel::Gone));
                 }
                 let Some(index) = state.connection()? else { return Ok(None) };
-                let part = &state.parts[index];
-                let mut stack = part.interface.stack.lock();
+                let part = &mut state.parts[index];
+                let interface = part.interface;
+                let mut stack = interface.stack.lock();
                 let Some(socket) = stack.socket_mut::<tcp::Socket<'static>>(part.handle) else {
                     return Err(status(Kernel::Gone));
                 };
@@ -706,16 +711,30 @@ impl InetSocket {
                     return Err(status(Kernel::Gone));
                 }
                 let (mut copied, mut tried) = (Ok(true), 0);
-                let wrote = socket
-                    .send(|room| {
-                        tried = room.len().min(data.len() - sent);
-                        copied = data.get_now(sent, &mut room[..tried]);
-                        if matches!(copied, Ok(true)) { (tried, tried) } else { (0, 0) }
-                    })
-                    .unwrap_or(0);
+                let mut write = |room: &mut [u8]| {
+                    tried = room.len().min(data.len() - sent);
+                    copied = data.get_now(sent, &mut room[..tried]);
+                    if matches!(copied, Ok(true)) { (tried, tried) } else { (0, 0) }
+                };
+                // Straight into the other end's buffer, when it is a socket
+                // on the same interface, which reads them as soon as its
+                // program does (ADR 0186); else into the connection's own,
+                // for the stack to send.
+                let now = sched::now_ns();
+                let (wrote, across) =
+                    match stack.send_across(part.handle, &mut part.other, now, &mut write) {
+                        Across::Passed(wrote, _) => (wrote, true),
+                        Across::Full => (0, true),
+                        Across::Packets => {
+                            let socket = stack.socket_mut::<tcp::Socket<'static>>(part.handle);
+                            (socket.map_or(0, |socket| socket.send(&mut write).unwrap_or(0)), false)
+                        }
+                    };
                 drop(stack);
                 if wrote > 0 {
-                    part.interface.kick();
+                    // The other end hears of bytes that came across as it
+                    // hears of a poll's.
+                    if across { net::changed() } else { interface.kick() }
                 }
                 sent += wrote;
                 // A page that was not there is made without the stack's lock,
@@ -994,14 +1013,14 @@ impl InetSocket {
                 if waiting { poll::READABLE } else { 0 }
             }
             Phase::Connecting => match state.settle() {
-                Ok(true) => connection_events(&state),
+                Ok(true) => connection_events(&mut state),
                 Ok(false) => 0,
                 Err(err) => {
                     state.error = err.0;
                     poll::WRITABLE | poll::ERROR | poll::HANG_UP
                 }
             },
-            Phase::Connected => connection_events(&state),
+            Phase::Connected => connection_events(&mut state),
         }
     }
 }
@@ -1010,7 +1029,7 @@ impl InetSocket {
 /// not ended is closed if the socket is `connected` through it, and left
 /// to its interface to finish, holding `port`; else it is reset.
 fn release_parts(parts: &mut Vec<Part, Kmalloc>, connected: bool, mut port: Option<Held>) {
-    while let Some(Part { interface, handle, leases }) = parts.pop() {
+    while let Some(Part { interface, handle, leases, .. }) = parts.pop() {
         let mut stack = interface.stack.lock();
         match leases {
             Leases::Udp(leases) => {
@@ -1072,7 +1091,9 @@ fn udp_part(
     }
     let mut stack = interface.stack.lock();
     match stack.add_socket(socket) {
-        Ok(handle) => Ok(Part { interface, handle, leases: Leases::Udp(leases) }),
+        Ok(handle) => {
+            Ok(Part { interface, handle, leases: Leases::Udp(leases), other: OtherEnd::default() })
+        }
         Err(socket) => {
             drop(stack);
             memory::give_back_udp(leases, socket);
@@ -1098,7 +1119,9 @@ fn listening_part(
     }
     let mut stack = interface.stack.lock();
     match stack.add_socket(socket) {
-        Ok(handle) => Ok(Part { interface, handle, leases: Leases::Tcp(leases) }),
+        Ok(handle) => {
+            Ok(Part { interface, handle, leases: Leases::Tcp(leases), other: OtherEnd::default() })
+        }
         Err(socket) => {
             drop(stack);
             memory::give_back_tcp(leases, socket);
@@ -1108,17 +1131,21 @@ fn listening_part(
 }
 
 /// What a stream socket's connection is ready for.
-fn connection_events(state: &State) -> u16 {
-    let Some(part) = state.parts.first() else { return poll::HANG_UP };
+fn connection_events(state: &mut State) -> u16 {
+    let shut_read = state.shut_read;
+    let Some(part) = state.parts.first_mut() else { return poll::HANG_UP };
     let mut stack = part.interface.stack.lock();
+    // A connection whose bytes go straight across can send as many as the
+    // other end has room for (ADR 0186).
+    let across = stack.room_across(part.handle, &mut part.other);
     let Some(socket) = stack.socket_mut::<tcp::Socket<'static>>(part.handle) else {
         return poll::HANG_UP;
     };
     let mut events = 0;
-    if socket.can_recv() || !socket.may_recv() || state.shut_read {
+    if socket.can_recv() || !socket.may_recv() || shut_read {
         events |= poll::READABLE;
     }
-    if socket.can_send() || !socket.may_send() {
+    if across.map_or_else(|| socket.can_send(), |room| room > 0) || !socket.may_send() {
         events |= poll::WRITABLE;
     }
     if !socket.is_open() || (!socket.may_recv() && !socket.may_send()) {
@@ -1132,8 +1159,9 @@ fn receive_stream(state: &mut State, out: &mut dyn Out) -> Result<Option<Receive
     loop {
         let Some(index) = state.connection()? else { return Ok(None) };
         let peer = state.peer;
-        let part = &state.parts[index];
-        let mut stack = part.interface.stack.lock();
+        let part = &mut state.parts[index];
+        let interface = part.interface;
+        let mut stack = interface.stack.lock();
         let Some(connection) = stack.socket_mut::<tcp::Socket<'static>>(part.handle) else {
             return Err(status(Kernel::Reset));
         };
@@ -1148,6 +1176,13 @@ fn receive_stream(state: &mut State, out: &mut dyn Out) -> Result<Option<Receive
             copied = out.put_now(0, &bytes[..tried]);
             if matches!(copied, Ok(true)) { (tried, tried) } else { (0, 0) }
         });
+        // The window the read opened goes straight to the other end when
+        // it is a socket on the same interface (ADR 0186), in no packet:
+        // whether it has bytes to send, which a poll sends.
+        let told = match read {
+            Ok(n) if n > 0 => stack.window_across(part.handle, &mut part.other, sched::now_ns()),
+            _ => None,
+        };
         drop(stack);
         match copied {
             Ok(true) => {}
@@ -1165,9 +1200,20 @@ fn receive_stream(state: &mut State, out: &mut dyn Out) -> Result<Option<Receive
                 // once only if it had shut to half the buffer or less, as on
                 // Linux, which sends a window by itself only when it opens
                 // that much: until then the other end has half the buffer
-                // to send into, and the next ACK carries the window.
-                if narrow {
-                    part.interface.kick();
+                // to send into, and the next ACK carries the window. One
+                // told straight has gone already; the other end's program
+                // may be waiting for it.
+                match told {
+                    Some(waiting) => {
+                        if narrow {
+                            net::changed();
+                        }
+                        if waiting {
+                            interface.kick();
+                        }
+                    }
+                    None if narrow => interface.kick(),
+                    None => {}
                 }
                 Ok(Some((n, peer)))
             }

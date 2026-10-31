@@ -30,6 +30,18 @@ FIN at once (tcp_fin), and so does this; the kernel takes a loopback
 connection in TIME-WAIT apart at once (ADR 0185), which must not lose
 that ACK.
 
+A TCP connection whose two ends are sockets of the same interface, as
+on the loopback interface, can pass its octets straight into the other
+end's receive buffer, with no segment between them, as Solaris's TCP
+fusion does (ADR 0186): the kernel copies them there from the sending
+program, as it would have copied them into the transmit buffer. This
+adds the calls each end makes for it, which count what passes as a
+segment sent, received and acknowledged at once, and a window that a
+read opens as told by an ACK: `next_across`, `room_across`,
+`receive_across`, `sent_across`, `window_across`, `told_window_across`
+and `heard_window_across`. The kernel pairs the sockets, and passes
+octets only when no segment between them is on its way.
+
 To be offered upstream.
 
 --- a/src/iface/socket_set.rs
@@ -218,7 +230,7 @@ To be offered upstream.
      /// The waker is woken on state changes that might affect the return value
 --- a/src/socket/tcp.rs
 +++ b/src/socket/tcp.rs
-@@ -632,6 +632,12 @@
+@@ -632,6 +632,143 @@
          }
      }
  
@@ -228,10 +240,141 @@ To be offered upstream.
 +        (self.rx_buffer, self.tx_buffer)
 +    }
 +
++    // Passing octets across. A connection whose other end is a socket of
++    // the same interface can pass its octets straight into that socket's
++    // receive buffer, with no segment between them, as Solaris's TCP
++    // fusion does. Each end counts them as a segment sent, received and
++    // acknowledged at once, so that its sequence numbers, windows and
++    // timers are as they would have been, and segments can go between the
++    // two again at any time. Whoever owns both sockets pairs them, and
++    // passes octets across only when no segment between them is on its
++    // way.
++
++    /// The sequence number of the next octet this socket sends, if it can
++    /// pass octets straight across to the other end: its transmit half is
++    /// open, and no octet waits to be sent or acknowledged.
++    pub fn next_across(&self) -> Option<TcpSeqNumber> {
++        let idle = self.tx_buffer.is_empty()
++            && self.remote_last_seq == self.local_seq_no
++            && !self.pending_fast_retransmit;
++        (self.may_send() && idle).then_some(self.local_seq_no)
++    }
++
++    /// How many octets this socket can take straight from the other end,
++    /// which sends from `seq`: `None` unless its receive half is open,
++    /// `seq` is the next octet it expects, and it has acknowledged every
++    /// octet it received, none out of order.
++    pub fn room_across(&self, seq: TcpSeqNumber) -> Option<usize> {
++        let open = matches!(
++            self.state,
++            State::Established | State::FinWait1 | State::FinWait2
++        ) && !self.rx_fin_received;
++        let next = self.remote_seq_no + self.rx_buffer.len();
++        let in_step =
++            next == seq && self.remote_last_ack == Some(next) && self.assembler.is_empty();
++        (open && in_step).then(|| self.rx_buffer.window())
++    }
++
++    /// Takes octets straight from the other end at `now`, once
++    /// `room_across` has said it can: `write` writes them into the room at
++    /// the end of the receive buffer, and returns how many it wrote and
++    /// what to return. They are acknowledged at once. Returns what `write`
++    /// returned, how many octets came, and the window this socket offers
++    /// now, as a segment's window field, for the other end's
++    /// `sent_across`.
++    pub fn receive_across<F, R>(&mut self, now: Instant, write: F) -> (R, usize, u16)
++    where
++        F: FnOnce(&mut [u8]) -> (usize, R),
++    {
++        let (size, result) = self.rx_buffer.enqueue_many_with(write);
++        if size > 0 {
++            self.remote_last_ack = Some(self.remote_seq_no + self.rx_buffer.len());
++            self.remote_last_win = self.scaled_window();
++            self.ack_delay_timer = AckDelayTimer::Idle;
++            self.heard_across(now);
++        }
++        (result, size, self.scaled_window())
++    }
++
++    /// Counts `size` octets as passed straight across to the other end at
++    /// `now` and acknowledged by it, which offers `window` now (a
++    /// segment's window field): what its `receive_across` returned.
++    pub fn sent_across(&mut self, size: usize, window: u16, now: Instant) {
++        self.local_seq_no += size;
++        self.remote_last_seq = self.local_seq_no;
++        self.local_rx_last_ack = Some(self.local_seq_no);
++        self.local_rx_dup_acks = 0;
++        self.take_window_across(window, now);
++    }
++
++    /// The window this socket offers, as a segment's window field, and the
++    /// acknowledgement number it goes with, if the other end can be told of
++    /// it straight: its receive half is open, and it has acknowledged every
++    /// octet it received, none out of order.
++    pub fn window_across(&self) -> Option<(TcpSeqNumber, u16)> {
++        let open = matches!(
++            self.state,
++            State::Established | State::FinWait1 | State::FinWait2
++        );
++        let next = self.remote_seq_no + self.rx_buffer.len();
++        let acked = self.remote_last_ack == Some(next) && self.assembler.is_empty();
++        (open && acked).then(|| (next, self.scaled_window()))
++    }
++
++    /// Counts `window`, which `window_across` gave, as told to the other
++    /// end.
++    pub fn told_window_across(&mut self, window: u16) {
++        self.remote_last_win = window;
++    }
++
++    /// Takes `window`, a segment's window field, as the window the other
++    /// end offers, told straight at `now` with the acknowledgement number
++    /// `ack`: false, and nothing changes, unless the connection is
++    /// synchronized and `ack` is the first octet of this socket's not yet
++    /// acknowledged.
++    pub fn heard_window_across(&mut self, ack: TcpSeqNumber, window: u16, now: Instant) -> bool {
++        let synchronized = !matches!(
++            self.state,
++            State::Closed | State::Listen | State::SynSent | State::SynReceived | State::TimeWait
++        );
++        if !synchronized || ack != self.local_seq_no {
++            return false;
++        }
++        self.take_window_across(window, now);
++        true
++    }
++
++    /// Takes `window` as the window the other end offers now, as an
++    /// acknowledgement from it at `now` would.
++    fn take_window_across(&mut self, window: u16, now: Instant) {
++        let window = (window as usize) << self.remote_win_scale.unwrap_or(0);
++        self.remote_win_len = window;
++        self.congestion_controller
++            .inner_mut()
++            .set_remote_window(window);
++        if window == 0 && !self.tx_buffer.is_empty() && self.timer.is_idle() {
++            let delay = self.rtte.retransmission_timeout();
++            self.timer.set_for_zero_window_probe(now, delay);
++        }
++        if window != 0 && self.timer.is_zero_window_probe() {
++            self.timer.set_for_idle(now, self.keep_alive);
++        }
++        self.heard_across(now);
++    }
++
++    /// Counts the other end as heard from at `now`, as a segment from it
++    /// would.
++    fn heard_across(&mut self, now: Instant) {
++        self.remote_last_ts = Some(now);
++        if self.timer.is_idle() {
++            self.timer.set_for_idle(now, self.keep_alive);
++        }
++    }
++
      /// Enable or disable TCP Timestamp.
      pub fn set_tsval_generator(&mut self, generator: Option<TcpTimestampGenerator>) {
          self.tsval_generator = generator;
-@@ -2008,6 +2014,10 @@
+@@ -2008,6 +2145,10 @@
              (State::FinWait1, TcpControl::Fin) => {
                  self.remote_seq_no += 1;
                  self.rx_fin_received = true;
@@ -242,7 +385,7 @@ To be offered upstream.
                  if ack_of_fin {
                      self.set_state(State::TimeWait);
                      self.timer.set_for_close(cx.now());
-@@ -2022,6 +2032,8 @@
+@@ -2022,6 +2163,8 @@
              (State::FinWait2, TcpControl::Fin) => {
                  self.remote_seq_no += 1;
                  self.rx_fin_received = true;
