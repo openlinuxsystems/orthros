@@ -4,3 +4,4 @@
 //! The drivers against simulated controllers.
 
 mod ehci;
+mod intel;

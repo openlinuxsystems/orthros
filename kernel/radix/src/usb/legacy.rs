@@ -172,6 +172,7 @@ pub fn run(index: usize) {
 }
 
 /// Starts the driver of the controller `start` names.
+#[inline(never)]
 fn start_driver(
     start: &Start,
     waiter: &mut KernelWaiter,
@@ -181,11 +182,15 @@ fn start_driver(
     let mut about = TextBuf::<96>::new();
     let (driver, handoff): (Box<dyn Hcd + Send, Kmalloc>, Handoff) = match start.kind {
         Kind::Ehci => {
+            // Built on the heap from the constant, not on this stack.
+            let tables = Box::try_new_in(radix_usbhc::ehci::Tables::EMPTY, heap)
+                .map_err(|_| radix_usbhc::Error::NoMemory)?;
             let ehci = radix_usbhc::ehci::Ehci::new(
                 &start.function,
                 start.regs.clone(),
                 waiter,
                 &mut alloc,
+                tables,
             )?;
             let info = ehci.info();
             let _ = core::fmt::Write::write_fmt(

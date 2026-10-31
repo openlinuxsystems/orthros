@@ -38,6 +38,8 @@
 //! Series on have none, and a hub inside, on each port, which talks to
 //! the slower devices.
 
+use core::ops::DerefMut;
+
 use radix_hw::pci::Function;
 use radix_hw::{Dma, Mmio, PAGE_SIZE, device_barrier};
 use radix_usb::host::{Data, Endpoint, Error, Hcd, PipeId, Port, Target, Waiter};
@@ -261,8 +263,23 @@ struct DefaultPipe {
     qh: Slot,
 }
 
-/// An EHCI controller, taken from the firmware and started.
-pub struct Ehci {
+/// The driver's records of its pipes: kept apart from it, so that the
+/// kernel holds them on its heap rather than on a thread's stack while
+/// the driver starts (ADR 0058). [`Tables::EMPTY`] starts them.
+pub struct Tables {
+    pipes: [Option<Pipe>; MAX_PIPES],
+    defaults: [Option<DefaultPipe>; MAX_DEFAULT_PIPES],
+}
+
+impl Tables {
+    /// No pipes yet.
+    pub const EMPTY: Tables =
+        Tables { pipes: [const { None }; MAX_PIPES], defaults: [None; MAX_DEFAULT_PIPES] };
+}
+
+/// An EHCI controller, taken from the firmware and started, with its
+/// pipes' records in `T`.
+pub struct Ehci<T: DerefMut<Target = Tables>> {
     op: Mmio,
     info: Info,
     port_power: bool,
@@ -280,8 +297,7 @@ pub struct Ehci {
     control: Dma,
     buffers: Dma,
     chunks_used: u64,
-    pipes: [Option<Pipe>; MAX_PIPES],
-    defaults: [Option<DefaultPipe>; MAX_DEFAULT_PIPES],
+    tables: T,
     failed: bool,
 }
 
@@ -291,17 +307,18 @@ fn node(level: usize, phase: usize) -> usize {
     (1 << level) - 1 + phase
 }
 
-impl Ehci {
+impl<T: DerefMut<Target = Tables>> Ehci<T> {
     /// Takes the controller of `function`, whose registers are `regs`,
     /// from the firmware, resets it, and starts it with both schedules on
     /// and every port routed to it. Memory comes from `alloc` (pages,
-    /// below 4 GiB).
+    /// below 4 GiB); `tables`, empty, keeps the pipes.
     pub fn new(
         function: &Function,
         regs: Mmio,
         waiter: &mut dyn Waiter,
         alloc: &mut dyn FnMut(usize, bool) -> Option<Dma>,
-    ) -> Result<Ehci, crate::Error> {
+        tables: T,
+    ) -> Result<Ehci<T>, crate::Error> {
         if regs.len() < 0x20 {
             return Err(crate::Error::Unsupported("its registers are too few"));
         }
@@ -358,8 +375,7 @@ impl Ehci {
             control,
             buffers,
             chunks_used: 0,
-            pipes: [const { None }; MAX_PIPES],
-            defaults: [None; MAX_DEFAULT_PIPES],
+            tables,
             failed: false,
         };
         ehci.build_schedules();
@@ -552,14 +568,14 @@ impl Ehci {
         max_packet: u16,
         waiter: &mut dyn Waiter,
     ) -> Result<Slot, Error> {
-        if let Some(found) = self.defaults.iter().flatten().find(|d| d.target.address == target.address)
+        if let Some(found) = self.tables.defaults.iter().flatten().find(|d| d.target.address == target.address)
         {
             if found.target == target && found.max_packet == max_packet {
                 return Ok(found.qh);
             }
             self.forget(target.address, waiter);
         }
-        let free = self.defaults.iter().position(Option::is_none).ok_or(Error::NoMemory)?;
+        let free = self.tables.defaults.iter().position(Option::is_none).ok_or(Error::NoMemory)?;
         let slot = self.pool.take().ok_or(Error::NoMemory)?;
         let (chars, caps) = Self::words(target, 0, max_packet, true);
         self.pool.write32(slot, qh::CHARS, chars);
@@ -567,7 +583,7 @@ impl Ehci {
         self.pool.write32(slot, qh::NEXT, link::TERMINATE);
         self.pool.write32(slot, qh::ALT_NEXT, link::TERMINATE);
         self.link_async(slot);
-        self.defaults[free] = Some(DefaultPipe { target, max_packet, qh: slot });
+        self.tables.defaults[free] = Some(DefaultPipe { target, max_packet, qh: slot });
         Ok(slot)
     }
 
@@ -623,7 +639,7 @@ impl Ehci {
 
     /// Hangs pipe `index`'s queue head in the periodic tree.
     fn hang(&mut self, index: usize) {
-        let Some(pipe) = &self.pipes[index] else { return };
+        let Some(pipe) = &self.tables.pipes[index] else { return };
         let (qh, at) = (pipe.qh, self.tree[pipe.node]);
         self.pool.write32(qh, qh::LINK, self.pool.read32(at, qh::LINK));
         device_barrier();
@@ -633,7 +649,7 @@ impl Ehci {
     /// Takes pipe `index`'s queue head out of the periodic tree, and waits
     /// until the controller has left it.
     fn unhang(&mut self, index: usize, waiter: &mut dyn Waiter) {
-        let Some(pipe) = &self.pipes[index] else { return };
+        let Some(pipe) = &self.tables.pipes[index] else { return };
         let target = self.pool.phys(pipe.qh);
         let mut at = self.tree[pipe.node];
         for _ in 0..MAX_PIPES + 1 {
@@ -658,7 +674,7 @@ impl Ehci {
 
     /// The pipe `pipe` names, if it is open.
     fn pipe(&self, pipe: PipeId) -> Result<&Pipe, Error> {
-        self.pipes.get(usize::from(pipe)).and_then(Option::as_ref).ok_or(Error::BadRequest)
+        self.tables.pipes.get(usize::from(pipe)).and_then(Option::as_ref).ok_or(Error::BadRequest)
     }
 }
 
@@ -696,7 +712,7 @@ fn take_from_firmware(function: &Function, eecp: usize, waiter: &mut dyn Waiter)
     Handoff::None
 }
 
-impl Hcd for Ehci {
+impl<T: DerefMut<Target = Tables>> Hcd for Ehci<T> {
     fn kind(&self) -> &'static str {
         "EHCI"
     }
@@ -828,7 +844,7 @@ impl Hcd for Ehci {
         if endpoint.kind != TransferType::Interrupt || buffer > CHUNK {
             return Err(Error::BadRequest);
         }
-        let index = self.pipes.iter().position(Option::is_none).ok_or(Error::NoMemory)?;
+        let index = self.tables.pipes.iter().position(Option::is_none).ok_or(Error::NoMemory)?;
         let chunk = self.take_chunk().ok_or(Error::NoMemory)?;
         let (Some(qh), Some(qtd)) = (self.pool.take(), self.pool.take()) else {
             self.chunks_used &= !(1 << chunk);
@@ -865,7 +881,7 @@ impl Hcd for Ehci {
         self.pool.write32(qh, qh::CAPS, caps);
         self.pool.write32(qh, qh::NEXT, link::TERMINATE);
         self.pool.write32(qh, qh::ALT_NEXT, link::TERMINATE);
-        self.pipes[index] = Some(Pipe { endpoint, qh, qtd, chunk, node, asked: None });
+        self.tables.pipes[index] = Some(Pipe { endpoint, qh, qtd, chunk, node, asked: None });
         self.hang(index);
         Ok(index as PipeId)
     }
@@ -895,21 +911,21 @@ impl Hcd for Ehci {
         self.fill_qtd(slot, link::TERMINATE, token, phys, length);
         device_barrier();
         self.pool.write32(qh, qh::NEXT, self.pool.phys(slot));
-        if let Some(Some(p)) = self.pipes.get_mut(usize::from(pipe)) {
+        if let Some(Some(p)) = self.tables.pipes.get_mut(usize::from(pipe)) {
             p.asked = Some(length);
         }
         Ok(())
     }
 
     fn poll(&mut self, pipe: PipeId) -> Option<Result<usize, Error>> {
-        let p = self.pipes.get(usize::from(pipe))?.as_ref()?;
+        let p = self.tables.pipes.get(usize::from(pipe))?.as_ref()?;
         let asked = p.asked?;
         let token = self.pool.read32(p.qtd, qtd::TOKEN);
         if token & qtd::ACTIVE != 0 && !self.failed {
             return None;
         }
         device_barrier();
-        if let Some(Some(p)) = self.pipes.get_mut(usize::from(pipe)) {
+        if let Some(Some(p)) = self.tables.pipes.get_mut(usize::from(pipe)) {
             p.asked = None;
         }
         if self.failed {
@@ -938,7 +954,7 @@ impl Hcd for Ehci {
         let toggle = self.pool.read32(qh, qh::TOKEN) & qtd::TOGGLE;
         self.pool.write32(qh, qh::NEXT, link::TERMINATE);
         self.pool.write32(qh, qh::TOKEN, toggle);
-        if let Some(Some(p)) = self.pipes.get_mut(index) {
+        if let Some(Some(p)) = self.tables.pipes.get_mut(index) {
             self.pool.write32(p.qtd, qtd::TOKEN, 0);
             p.asked = None;
         }
@@ -960,7 +976,7 @@ impl Hcd for Ehci {
             return;
         }
         self.unhang(index, waiter);
-        if let Some(p) = self.pipes[index].take() {
+        if let Some(p) = self.tables.pipes[index].take() {
             self.load[p.node] = self.load[p.node].saturating_sub(1);
             self.chunks_used &= !(1 << p.chunk);
             self.pool.give(p.qh);
@@ -970,11 +986,11 @@ impl Hcd for Ehci {
 
     fn forget(&mut self, address: u8, waiter: &mut dyn Waiter) {
         let Some(at) =
-            self.defaults.iter().position(|d| d.is_some_and(|d| d.target.address == address))
+            self.tables.defaults.iter().position(|d| d.is_some_and(|d| d.target.address == address))
         else {
             return;
         };
-        let Some(pipe) = self.defaults[at].take() else { return };
+        let Some(pipe) = self.tables.defaults[at].take() else { return };
         self.unlink_async(pipe.qh, waiter);
         self.pool.give(pipe.qh);
     }

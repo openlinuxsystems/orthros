@@ -18,7 +18,7 @@ use radix_usb::host::{Data, Endpoint, Error, Hcd, Target, Tt, Waiter};
 use radix_usb::{Setup, Speed, TransferType, descriptor};
 
 use crate::Handoff;
-use crate::ehci::Ehci;
+use crate::ehci::{Ehci, Tables};
 
 const CAPLENGTH: usize = 0x20;
 const PORTS: usize = 4;
@@ -457,7 +457,7 @@ fn keyboard(speed: Speed) -> SimDevice {
 struct Rig {
     sim: Arc<Sim>,
     clock: Clock,
-    ehci: Ehci,
+    ehci: Ehci<Box<Tables>>,
 }
 
 fn rig(devices: [Option<SimDevice>; PORTS], companions: u32) -> Rig {
@@ -466,7 +466,7 @@ fn rig(devices: [Option<SimDevice>; PORTS], companions: u32) -> Rig {
     let regs = Mmio::fake(sim.clone(), 0x100);
     let (function, _) = function(false, false);
     let mut clock = Clock { sim: sim.clone(), now: 0 };
-    let ehci = Ehci::new(&function, regs, &mut clock, &mut alloc).unwrap();
+    let ehci = Ehci::new(&function, regs, &mut clock, &mut alloc, Box::new(Tables::EMPTY)).unwrap();
     Rig { sim, clock, ehci }
 }
 
@@ -510,7 +510,7 @@ fn takes_the_controller_from_the_firmware() {
         let regs = Mmio::fake(sim.clone(), 0x100);
         let (function, config) = function(owns, stubborn);
         let mut clock = Clock { sim: sim.clone(), now: 0 };
-        let ehci = Ehci::new(&function, regs, &mut clock, &mut alloc).unwrap();
+        let ehci = Ehci::new(&function, regs, &mut clock, &mut alloc, Box::new(Tables::EMPTY)).unwrap();
         assert_eq!(ehci.info().handoff, expected);
         let b = config.bytes.lock().unwrap();
         assert_eq!(b[EECP + 3], 1, "the system's semaphore is set");
