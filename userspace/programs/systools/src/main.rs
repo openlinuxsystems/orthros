@@ -41,6 +41,7 @@ mod lscpu;
 mod lsmem;
 mod lsof;
 mod lspci;
+mod lsusb;
 mod memory;
 mod modes;
 mod notifyd;
@@ -56,6 +57,7 @@ mod replace;
 mod rtrace;
 mod script;
 mod scrub;
+mod sensors;
 mod sessions;
 mod signals;
 mod subvolume;
@@ -114,6 +116,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("lsmem", lsmem::main),
     ("lsof", lsof::main),
     ("lspci", lspci::main),
+    ("lsusb", lsusb::main),
     ("mkswap", swap::mkswap),
     ("notifications", notifyd::notifications),
     ("notify-send", notifyd::notify_send),
@@ -131,6 +134,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("rtrace", rtrace::main),
     ("script", script::main),
     ("scrub", scrub::main),
+    ("sensors", sensors::main),
     ("service", power::service),
     ("shutdown", power::shutdown),
     ("subvolume", subvolume::main),

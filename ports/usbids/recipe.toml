@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# The USB ID database (ADR 0230): the names of USB vendors, products and
+# classes, which lsusb(8) shows, from the Linux USB ID Repository, in
+# /system/resources/hwdata/usb.ids, where hwdata puts it on Linux
+# (/usr/share/hwdata).
+#
+# Only data is taken, no code. The repository's page
+# (http://www.linux-usb.org/usb-ids.html) says the database may be
+# distributed under the GPL, version 2 or later, or the 3-clause BSD
+# license, as Debian's usb.ids package has it. The git repository the
+# source is pinned from, the maintainer's copy on GitHub, holds the GPL's
+# version 3, one of those "or later", as its LICENSE, which the license
+# manifest takes as the notice; usb.ids's own header names its maintainer.
+# The file is installed as it is, which either license allows.
+name = "usbids"
+version = "2026.06.26"
+summary = "the USB ID database, which names USB devices"
+license = "GPL-2.0-or-later OR BSD-3-Clause"
+homepage = "http://www.linux-usb.org/usb-ids.html"
+image = ["system/resources/hwdata/usb.ids"]
+
+# The history of usb.ids, one commit for each snapshot.
+[source]
+git = "https://github.com/usbids/usbids.git"
+commit = "5eb613762db1e34b9218da63a88f22dd26f743c5"

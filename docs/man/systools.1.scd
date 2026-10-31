@@ -102,6 +102,8 @@ error that starts with the tool's name.
 :  what each process holds open
 |  *lspci*(8)
 :  the PCI functions
+|  *lsusb*(8)
+:  the USB devices, or the tree of their buses and ports
 |  *mkswap*(8)
 :  make a swap area on a disk or partition
 |  *notifications*(1)
@@ -128,6 +130,8 @@ error that starts with the tool's name.
 :  trace a process's system calls
 |  *script*(1)
 :  record a terminal session
+|  *sensors*(1)
+:  the machine's temperatures and fan speeds
 |  *service*(8)
 :  start, stop and look at the services
 |  *shutdown*(8)

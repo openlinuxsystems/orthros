@@ -21,6 +21,9 @@
 //! - `/kernel/bus/pci/devices/<address>/vendor`, `device`, `class`,
 //!   `revision`, `subsystem_vendor` and `subsystem_device`, in
 //!   hexadecimal, for every PCI function the scan found;
+//! - `/kernel/bus/usb/devices`: each controller's root hub (`usb1`),
+//!   each USB device (`1-3.2`) and each of its interfaces (`1-3.2:1.0`),
+//!   with Linux's files (ADR 0230, [`usb`]);
 //! - `/kernel/bus/i2c/devices/i2c-0/name`, when the kernel drives the
 //!   chipset's SMBus host controller (ADR 0206), as Linux names its
 //!   adapter (`SMBus I801 adapter at <port>`, or `SMBus PIIX4 adapter
@@ -94,6 +97,8 @@ use radix_uacpi::thermal::STEPS;
 
 use super::disk;
 use crate::acpi::{devices, thermal};
+
+mod usb;
 use crate::{Arch, hwmon, i2c, pstate};
 
 static COMMAND_LINE: Once<&'static str> = Once::new();
@@ -120,6 +125,7 @@ pub fn make() -> Result<FsRef> {
     let pci = bus.add_dir("pci", next_id())?;
     let devices: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(PciDevices)?;
     pci.add("devices", ListedDir::make(next_id(), devices)?)?;
+    usb::add(&bus)?;
     if i2c::found() {
         let i2c = bus.add_dir("i2c", next_id())?.add_dir("devices", next_id())?;
         let adapter = i2c.add_dir("i2c-0", next_id())?;
