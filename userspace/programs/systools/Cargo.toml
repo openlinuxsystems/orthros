@@ -20,6 +20,7 @@ radix-abi = { path = "../../../kernel/abi" }
 # The firmware's SMBIOS tables, as the kernel reads them, for hwinfo(8)
 # (ADR 0231).
 radix-smbios = { path = "../../../kernel/lib/smbios" }
+radix-spd = { path = "../../../kernel/lib/spd" }
 # logd(8)'s records and requests, as lines of JSON (ADR 0210).
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.140"

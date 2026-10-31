@@ -281,6 +281,15 @@ We implement these from their published descriptions. No code is copied.
   `/sys/class/dmi/id`, whose files and boot line Radix takes
   ([ADR 0231](docs/adr/0231-the-firmwares-smbios-tables-and-hwinfo.md)).
   We use no code of Linux's `dmi_scan` or of dmidecode.
+- JEDEC's SPD layouts (JESD21-C Annex K for DDR3 and Annex L for DDR4,
+  JESD400-5 for DDR5), its EE1004-v and JESD300-5 (SPD5118) for the
+  EEPROMs that hold them, and JEP106's makers' codes, from which
+  `radix-spd` reads and decodes the memory modules' SPD data; and
+  Linux's `i2c_register_spd`, whose way of finding the EEPROMs by the
+  SMBIOS memory kind, and whose `/sys/bus/i2c/devices` files, Radix
+  takes ([ADR 0232](docs/adr/0232-memory-modules-spd-eeproms-over-the-smbus.md)).
+  We use no code of Linux's `ee1004`, `at24` or `spd5118` drivers, or of
+  i2c-tools' `decode-dimms`.
 - The block device `ioctl` requests of Linux's user API (`<linux/fs.h>`),
   BLKGETSIZE64 to BLKDISCARD, whose numbers and meanings Radix's block
   devices take ([ADR 0111](docs/adr/0111-one-queue-for-every-disk.md)).

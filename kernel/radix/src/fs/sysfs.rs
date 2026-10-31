@@ -28,6 +28,10 @@
 //!   chipset's SMBus host controller (ADR 0206), as Linux names its
 //!   adapter (`SMBus I801 adapter at <port>`, or `SMBus PIIX4 adapter
 //!   port 0 at <port>` for AMD's FCH);
+//! - `/kernel/bus/i2c/devices/0-00<address>/name` and `eeprom`, for each
+//!   memory module's SPD EEPROM on it (ADR 0232): its kind, as Linux
+//!   names its driver (`spd`, `ee1004` or `spd5118`), and its bytes,
+//!   read the first time the file is opened ([`crate::i2c`]);
 //! - `/kernel/firmware/memmap/<n>/start`, `end` (its last byte, in
 //!   hexadecimal) and `type` (Linux's names: `System RAM`, `Reserved`,
 //!   `ACPI Tables`...), for each range of the firmware's memory map
@@ -136,15 +140,7 @@ pub fn make() -> Result<FsRef> {
     pci.add("devices", ListedDir::make(next_id(), devices)?)?;
     usb::add(&bus)?;
     if i2c::found() {
-        let i2c = bus.add_dir("i2c", next_id())?.add_dir("devices", next_id())?;
-        let adapter = i2c.add_dir("i2c-0", next_id())?;
-        adapter.add(
-            "name",
-            value(|text| {
-                Arch::smbus_name(text)?;
-                writeln!(text)
-            })?,
-        )?;
+        i2c_bus(&bus)?;
     }
     let firmware = root.add_dir("firmware", next_id())?;
     let memmap: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(MemoryMap)?;
@@ -204,6 +200,35 @@ pub fn make() -> Result<FsRef> {
     };
     let root: NodeRef = root;
     SyntheticFs::make(FsKind::Sys, root)
+}
+
+/// `/kernel/bus/i2c/devices`: the SMBus adapter, and the memory modules'
+/// SPD EEPROMs on it.
+fn i2c_bus(bus: &FixedDir) -> Result<()> {
+    let devices = bus.add_dir("i2c", next_id())?.add_dir("devices", next_id())?;
+    let adapter = devices.add_dir("i2c-0", next_id())?;
+    adapter.add(
+        "name",
+        value(|text| {
+            Arch::smbus_name(text)?;
+            writeln!(text)
+        })?,
+    )?;
+    let mut result = Ok(());
+    i2c::spds(&mut |index, address, eeprom| {
+        let mut name = TextBuf::<16>::new();
+        let _ = write!(name, "0-{address:04x}");
+        result = result.and_then(|()| {
+            let dir = devices.add_dir(name.as_str(), next_id())?;
+            let kind = eeprom.name();
+            dir.add("name", value(move |text| writeln!(text, "{kind}"))?)?;
+            dir.add(
+                "eeprom",
+                value(move |text| i2c::read_spd(index, |bytes| text.write_bytes(bytes)))?,
+            )
+        });
+    });
+    result
 }
 
 fn version(text: &mut Text) -> fmt::Result {

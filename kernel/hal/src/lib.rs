@@ -398,6 +398,46 @@ pub struct Smbios {
     pub table: &'static [u8],
 }
 
+/// One transaction on the SMBus (Phase 11e, ADR 0232), by the names of
+/// the SMBus specification's protocols.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmbusTransfer {
+    /// Send Byte: one byte, with no command code.
+    SendByte(u8),
+    /// Receive Byte: one byte, with no command code.
+    ReceiveByte,
+    /// Read Byte: the byte at a command code.
+    ReadByte(u8),
+    /// Read Word: the word at a command code, low byte first.
+    ReadWord(u8),
+    /// Write Byte: a byte, at a command code.
+    WriteByte(u8, u8),
+}
+
+/// Why an SMBus transaction failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmbusError {
+    /// There is no controller, or the firmware's AML has taken it.
+    NoController,
+    /// No device acknowledged the address.
+    NoDevice,
+    /// The controller was busy, or another master took the bus.
+    Busy,
+    /// The controller said it failed, or it did not finish in time.
+    Failed,
+}
+
+impl core::fmt::Display for SmbusError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            SmbusError::NoController => "the controller is not the kernel's",
+            SmbusError::NoDevice => "no device answered",
+            SmbusError::Busy => "the bus is busy",
+            SmbusError::Failed => "the transaction failed",
+        })
+    }
+}
+
 /// Devices: what drivers need from the machine (Phase 7).
 ///
 /// Drivers never see raw pointers: device registers come as
@@ -515,8 +555,15 @@ pub trait Devices {
     /// Finds the chipset's SMBus host controller, Intel's or that of AMD's
     /// FCH (Phase 11e, ADR 0206), and logs it and the memory modules'
     /// EEPROMs that answer on it. Called once, after the PCI scan; whether
-    /// there is one.
-    fn find_smbus() -> bool;
+    /// there is one. `wait` waits so many microseconds between polls of
+    /// the controller, asleep where the caller may sleep (ADR 0232).
+    fn find_smbus(wait: fn(u64)) -> bool;
+
+    /// Runs one transaction on the controller [`Devices::find_smbus`]
+    /// found, with the device at 7-bit `address`: what it read (a byte in
+    /// the low 8 bits), 0 for a write. Callers may sleep: one transaction
+    /// waits for another.
+    fn smbus_transfer(address: u8, transfer: SmbusTransfer) -> Result<u16, SmbusError>;
 
     /// Writes the name of the controller [`Devices::find_smbus`] found, as
     /// Linux names its adapter; fails if there is none.

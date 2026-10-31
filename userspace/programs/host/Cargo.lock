@@ -456,6 +456,10 @@ name = "radix-smbios"
 version = "0.10.4"
 
 [[package]]
+name = "radix-spd"
+version = "0.10.4"
+
+[[package]]
 name = "radix-sync"
 version = "0.10.4"
 
@@ -688,6 +692,7 @@ dependencies = [
  "libc",
  "radix-abi",
  "radix-smbios",
+ "radix-spd",
  "serde",
  "serde_json",
 ]

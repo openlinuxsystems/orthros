@@ -242,7 +242,7 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   mm-stress        tens of millions of heap objects on 4 CPUs and 2 NUMA nodes
   tlb              TLB shootdowns and address-space switches
   framework-ec     a Framework EC's ACPI device with no EC behind it, and ectool
-  smbus            q35's SMBus controller and its memory modules' EEPROMs
+  smbus            q35's SMBus controller, its memory modules' EEPROMs and DDR4 SPD data
   smbios           QEMU's SMBIOS tables under UEFI, /sys/class/dmi/id and hwinfo
   msr              a read of an MSR the CPU lacks faults and goes on
   caps             no capability forged or widened; revokes against 3 CPUs
