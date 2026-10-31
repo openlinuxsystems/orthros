@@ -328,6 +328,40 @@ fn a_connection_to_a_port_no_one_listens_on_is_reset() {
 }
 
 #[test]
+fn a_quiet_connection_stays_open_past_its_timeout() {
+    // The kernel gives every connection a timeout for answers (900 s,
+    // ADR 0183); a connection with nothing to answer is not waiting for
+    // one, however long it is quiet, as on Linux.
+    let (mut a, mut b) = pair();
+    let server = b.add_socket(tcp_memory().socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(7).unwrap();
+    let client = a.add_socket(tcp_memory().socket()).ok().unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 10);
+    for (stack, handle) in [(&mut a, client), (&mut b, server)] {
+        let socket = stack.socket_mut::<tcp::Socket<'static>>(handle).unwrap();
+        socket.set_timeout(Some(smoltcp::time::Duration::from_secs(900)));
+    }
+    a.socket_mut::<tcp::Socket<'static>>(client).unwrap().send_slice(b"hi").unwrap();
+    run(&mut a, &mut b, &mut now, 20);
+    let mut got = [0; 4];
+    let len = b.socket_mut::<tcp::Socket<'static>>(server).unwrap().recv_slice(&mut got).unwrap();
+    assert_eq!(&got[..len], b"hi");
+    // An hour of quiet, the stacks polled every ten seconds as a card's
+    // thread polls them for other sockets' work.
+    for _ in 0..360 {
+        now += 10_000_000_000;
+        a.poll(now);
+        b.poll(now);
+    }
+    for (stack, handle) in [(&mut a, client), (&mut b, server)] {
+        let state = stack.socket_mut::<tcp::Socket<'static>>(handle).unwrap().state();
+        assert_eq!(state, tcp::State::Established);
+    }
+}
+
+#[test]
 fn sends_udp_datagrams_and_gives_their_memory_back() {
     let (mut a, mut b) = pair();
     let receiver = b.add_socket(udp_memory().socket()).ok().unwrap();

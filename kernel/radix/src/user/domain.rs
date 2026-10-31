@@ -40,7 +40,9 @@ fn domain(user: &UserRef, slot: u32, needs: Rights) -> Result<DomainRef> {
     caps::domain_at(SlotRef::new(user.cspace, slot), needs).map_err(cap_error)
 }
 
-/// A method of the resource domain in `slot`, called by `user`'s thread.
+/// A method of the resource domain in `slot`, called by `user`'s thread,
+/// kept out of line, as [`super::methods::call`] says.
+#[inline(never)]
 pub fn method(user: &UserRef, slot: u32, label: u32, args: &[u64; 8]) -> Result<Answer> {
     match label {
         abi::CREATE => {

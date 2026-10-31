@@ -44,7 +44,7 @@ use radix_net::smoltcp::iface::SocketHandle;
 use radix_net::smoltcp::socket::{tcp, udp};
 use radix_net::smoltcp::time::Duration;
 use radix_net::smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
-use radix_net::{Across, ConnectError, Ipv4Address, OtherEnd};
+use radix_net::{Across, ConnectError, Ipv4Address, OtherEnd, TcpMemory};
 use radix_sync::Mutex;
 use radix_vfs::mount::Location;
 use radix_vfs::{In, Kind as NodeKind, Node, NodeRef, Out, Stat, mem, next_id};
@@ -65,8 +65,17 @@ const CONNECT_NS: u64 = 60_000_000_000;
 /// How long a connection waits for an answer to what it sent before it
 /// is reset, as Linux's tcp_retries2 gives about.
 const ANSWER_SECS: u64 = 900;
-/// How long a connection with keep_alive is quiet before it is probed.
-const KEEP_ALIVE_SECS: u64 = 7200;
+/// How long a connection with keep_alive is quiet before it is probed,
+/// how long apart the probes go when unanswered, and how many before it
+/// is reset, to begin with: Linux's defaults (TCP_KEEPIDLE,
+/// TCP_KEEPINTVL and TCP_KEEPCNT).
+const KEEP_IDLE_SECS: u16 = 7200;
+const KEEP_INTERVAL_SECS: u16 = 75;
+const KEEP_COUNT: u8 = 9;
+/// The most seconds TCP_KEEPIDLE and TCP_KEEPINTVL take, and probes
+/// TCP_KEEPCNT takes, as on Linux.
+const KEEP_SECS_MAX: u64 = 32_767;
+const KEEP_COUNT_MAX: u64 = 127;
 /// The bytes of an IPv4 header and a UDP header, which a datagram's
 /// interface's MTU holds with it.
 const UDP_HEADERS: usize = 28;
@@ -182,6 +191,9 @@ enum Phase {
 struct Options {
     reuse_address: bool,
     keep_alive: bool,
+    keep_idle_secs: u16,
+    keep_interval_secs: u16,
+    keep_count: u8,
     no_delay: bool,
     broadcast: bool,
     time_to_live: u8,
@@ -193,6 +205,9 @@ impl Options {
     const DEFAULT: Options = Options {
         reuse_address: false,
         keep_alive: false,
+        keep_idle_secs: KEEP_IDLE_SECS,
+        keep_interval_secs: KEEP_INTERVAL_SECS,
+        keep_count: KEEP_COUNT,
         no_delay: false,
         broadcast: false,
         time_to_live: 64,
@@ -204,16 +219,17 @@ impl Options {
     fn apply(&self, socket: &mut tcp::Socket<'static>, connected: bool) {
         socket.set_nagle_enabled(!self.no_delay);
         socket.set_hop_limit(Some(self.time_to_live));
-        // Keep-alive's probes are answers too, so the wait for one is
-        // longer than the quiet before them.
+        // Probes that go unanswered reset the connection after their count,
+        // as on Linux; the wait for an answer to data is the timeout's.
         if self.keep_alive {
-            socket.set_keep_alive(Some(Duration::from_secs(KEEP_ALIVE_SECS)));
+            socket.set_keep_alive(Some(Duration::from_secs(self.keep_idle_secs.into())));
+            let interval = Duration::from_secs(self.keep_interval_secs.into());
+            socket.set_keep_alive_probes(Some((interval, self.keep_count)));
         } else {
             socket.set_keep_alive(None);
         }
         let answer = if connected {
-            let quiet = if self.keep_alive { KEEP_ALIVE_SECS } else { 0 };
-            Duration::from_secs(quiet + ANSWER_SECS)
+            Duration::from_secs(ANSWER_SECS)
         } else {
             Duration::from_micros(CONNECT_NS / 1_000)
         };
@@ -291,7 +307,7 @@ impl State {
         };
         self.parts.try_reserve_exact(1).map_err(|_| status(Kernel::NoMemory))?;
         let (leases, tcp_memory) = memory::lend_tcp().ok_or(status(Kernel::NoMemory))?;
-        let mut socket = tcp_memory.socket();
+        let mut socket = tcp_socket(tcp_memory);
         self.options.apply(&mut socket, false);
         let mut stack = interface.stack.lock();
         let handle = match stack.add_socket(socket) {
@@ -401,6 +417,29 @@ fn kmalloc() -> Kmalloc {
 
 fn status(kind: Kernel) -> Status {
     kind.status(0)
+}
+
+/// A TCP socket made with `memory`, which sends timestamps (RFC 7323), as
+/// Linux's do: in milliseconds, from a random start of its own.
+fn tcp_socket(memory: TcpMemory) -> tcp::Socket<'static> {
+    let mut socket = memory.socket();
+    socket.set_tsval_generator(Some(tsval));
+    socket.set_tsval_offset(crate::user::random::u64() as u32);
+    socket
+}
+
+/// The clock of TCP's timestamps, in milliseconds since boot, wrapping.
+fn tsval() -> u32 {
+    (sched::now_ns() / 1_000_000) as u32
+}
+
+/// A keep-alive setting of `value`, 1 to `max`, as its field holds it.
+fn keep<T: TryFrom<u64>>(value: u64, max: u64) -> Result<T, Status> {
+    (1..=max)
+        .contains(&value)
+        .then(|| T::try_from(value).ok())
+        .flatten()
+        .ok_or(status(Kernel::InvalidArgument))
 }
 
 /// The interfaces a socket bound to `address` is on: every one for any
@@ -892,6 +931,9 @@ impl InetSocket {
         let old = match option {
             SocketOption::ReuseAddress => flag(options.reuse_address),
             SocketOption::KeepAlive => flag(options.keep_alive),
+            SocketOption::KeepIdle => u64::from(options.keep_idle_secs),
+            SocketOption::KeepInterval => u64::from(options.keep_interval_secs),
+            SocketOption::KeepCount => u64::from(options.keep_count),
             SocketOption::NoDelay => flag(options.no_delay),
             SocketOption::Broadcast => flag(options.broadcast),
             SocketOption::TimeToLive => u64::from(options.time_to_live),
@@ -921,6 +963,11 @@ impl InetSocket {
         match option {
             SocketOption::ReuseAddress => options.reuse_address = value != 0,
             SocketOption::KeepAlive => options.keep_alive = value != 0,
+            SocketOption::KeepIdle => options.keep_idle_secs = keep(value, KEEP_SECS_MAX)?,
+            SocketOption::KeepInterval => {
+                options.keep_interval_secs = keep(value, KEEP_SECS_MAX)?;
+            }
+            SocketOption::KeepCount => options.keep_count = keep(value, KEEP_COUNT_MAX)?,
             SocketOption::NoDelay => options.no_delay = value != 0,
             SocketOption::Broadcast => options.broadcast = value != 0,
             SocketOption::TimeToLive => {
@@ -1110,7 +1157,7 @@ fn listening_part(
     options: &Options,
 ) -> Result<Part, Status> {
     let (leases, tcp_memory) = memory::lend_tcp().ok_or(status(Kernel::NoMemory))?;
-    let mut socket = tcp_memory.socket();
+    let mut socket = tcp_socket(tcp_memory);
     options.apply(&mut socket, true);
     let endpoint = IpListenEndpoint { addr: address.map(IpAddress::Ipv4), port };
     if socket.listen(endpoint).is_err() {

@@ -106,7 +106,9 @@ fn read(user: u32, group: u32, groups: UserBuffer) -> Result<Identity> {
     Identity::new(user, group, &list[..len / 4]).ok_or(error(Kernel::NoMemory))
 }
 
-/// A method of the names capability `cap`, called by `user`'s thread.
+/// A method of the names capability `cap`, called by `user`'s thread,
+/// kept out of line, as [`super::methods::call`] says.
+#[inline(never)]
 pub fn method(user: &UserRef, cap: &Capability, label: u32, args: &[u64; 8]) -> Result<Answer> {
     cap.check(ObjectKind::Names, Rights::CONTROL).map_err(cap_error)?;
     match label {
