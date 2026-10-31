@@ -455,6 +455,19 @@ _target/userspace/_).
 		process in its domain, which Spark stops; _driver_ makes the
 		requests and powers the machine off (*spark*(8)).
 
+	*logging*
+		Boot 2 CPUs with the default services (Spark's *--services*) and
+		_/system/tests/posix/logtest_, which writes lines to the kernel
+		log as a program and checks what *log*(1), *journalctl*(1) and
+		*dmesg*(1) show of them and of the services: levels, names and
+		process numbers, a program's line with a service's name in front
+		of it kept as the program's, the kernel's records alone, a line
+		*log -f* shows as it comes, the boots and the day files; then
+		*service logd restart*, after which no record is kept twice
+		(*logd*(8)); the audit log's events from Spark and the kernel
+		and none from a program; and *logtrim*(8) and journalctl's
+		*--vacuum-time* removing old day files, each removal an event.
+
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test
 		services that run _/system/tests/posix/netgrant_: _granted_ asks

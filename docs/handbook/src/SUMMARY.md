@@ -26,7 +26,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 - [Running services: web, databases and certificates]()
 - [Cloud and virtual machines]()
 - [Server hardening]()
-- [Logs, monitoring and troubleshooting]()
+- [Logs, monitoring and troubleshooting](logs.md)
 - [SSH and remote access]()
 - [Power, laptops and desktops]()
 - [Privacy and security reporting]()

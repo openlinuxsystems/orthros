@@ -139,18 +139,21 @@ found and ends like this:
 [    1.945004] cpu1: spark[1]: spark: built the hierarchy of 9 directories and mounted 8 filesystems
 [    1.994464] cpu1: spark[1]: spark: added 7 default settings to /system/settings
 [    2.025364] cpu1: spark[1]: spark: listening at /system/live/spark/control
-[    2.059082] cpu1: spark[1]: spark: 3 services in /system/settings/spark/services, 3 enabled
-[    2.162156] cpu1: spark[1]: spark: started consoled (/system/commands/consoled) as process 12
-[    2.166020] cpu1: spark[1]: spark: started volumed (/system/commands/volumed) as process 13
-[    2.171904] cpu1: spark[1]: spark: started diskhealth (/system/commands/diskhealth) as process 14
+[    2.059082] cpu1: spark[1]: spark: 4 services in /system/settings/spark/services, 4 enabled
+[    2.124318] cpu1: spark[1]: spark: started logd (/system/commands/logd) as process 12
+[    2.162156] cpu1: spark[1]: spark: started consoled (/system/commands/consoled) as process 13
+[    2.166020] cpu1: spark[1]: spark: started volumed (/system/commands/volumed) as process 14
+[    2.171904] cpu1: spark[1]: spark: started diskhealth (/system/commands/diskhealth) as process 15
 [    2.207236] Framebuffer: a program took the screen; the log stays off it
 ```
 
 After `Boot complete.` the kernel starts Spark, the first program, which
 builds the directory hierarchy, mounts any FAT disks QEMU has at
 `/volumes` (see [Files, the directory hierarchy and /volumes](files.md))
-and starts the services. The first is `consoled`, which takes the
-screen from the kernel's log and shows a shell on it: the
+and starts the services. The first is `logd`, which keeps the system's
+log (see [Logs, monitoring and troubleshooting](logs.md)); then
+`consoled` takes the screen from the kernel's log and shows a shell on
+it: the
 [Nukesh guide](nukesh.md) goes on from there. `dukovo-boot(7)` and
 `spark(8)` explain each step. Press **Ctrl-A** then **X** to quit QEMU,
 or type `poweroff` in the shell. Useful variations:

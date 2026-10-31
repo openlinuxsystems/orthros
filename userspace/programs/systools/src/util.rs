@@ -59,6 +59,34 @@ pub fn strip_os_error(error: &io::Error) -> String {
     }
 }
 
+/// A size as util-linux's fstrim and journalctl read it: bytes, or with
+/// a suffix of K, M, G, T, P (KiB...) or KB, MB, GB, TB, PB (powers of
+/// 1000).
+pub fn parse_size(text: &str) -> Option<u64> {
+    let digits = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
+    let (number, suffix) = text.split_at(digits);
+    let number: u64 = number.parse().ok()?;
+    let suffix = suffix.to_ascii_uppercase();
+    let power = |base: u64, n: u32| number.checked_mul(base.checked_pow(n)?);
+    // Not a size if a letter of it is not ASCII: logd reads one from its
+    // settings, and must not end over it.
+    let (letter, rest) = suffix.split_at_checked(suffix.len().min(1))?;
+    let n = match letter {
+        "" => return Some(number),
+        "K" => 1,
+        "M" => 2,
+        "G" => 3,
+        "T" => 4,
+        "P" => 5,
+        _ => return None,
+    };
+    match rest {
+        "" | "IB" => power(1024, n),
+        "B" => power(1000, n),
+        _ => None,
+    }
+}
+
 /// `bytes` with a unit, in powers of 1024 (`si`: of 1000), as `ls -h`
 /// and `df -h` print them: rounded up, with one decimal below 10 and
 /// none above, and carried into the next unit when it rounds up to one
@@ -103,11 +131,24 @@ pub fn monotonic_ns() -> u64 {
 
 /// Seconds since the epoch, formatted with strftime(3) in local time.
 pub fn local_time(seconds: i64, format: &str) -> String {
+    time_text(seconds, format, false)
+}
+
+/// Seconds since the epoch, formatted with strftime(3) in UTC, or in
+/// local time.
+pub fn time_text(seconds: i64, format: &str, utc: bool) -> String {
     let time = seconds as libc::time_t;
-    // SAFETY: an all-zero tm is valid; localtime_r fills it.
+    // SAFETY: an all-zero tm is valid; gmtime_r and localtime_r fill it.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     // SAFETY: both pointers are valid for the call.
-    if unsafe { libc::localtime_r(&raw const time, &raw mut tm) }.is_null() {
+    let filled = unsafe {
+        if utc {
+            libc::gmtime_r(&raw const time, &raw mut tm)
+        } else {
+            libc::localtime_r(&raw const time, &raw mut tm)
+        }
+    };
+    if filled.is_null() {
         return seconds.to_string();
     }
     let Ok(format) = CString::new(format) else { return String::new() };

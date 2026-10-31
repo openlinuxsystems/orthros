@@ -20,6 +20,10 @@ static const char *const ELSEWHERE[][2] = {
 		{"keymap", "the consoles boot test's: the layout it sets is the one consoled types in"},
 		{"volumed", "the volumes boot test's service: it mounts a stick plugged in after boot"},
 		{"eject", "the volumes boot test's: it unmounts the stick volumed mounted"},
+		{"logd", "the logging boot test's service: it keeps the log the services write"},
+		{"log", "the logging boot test's: it reads the log through logd"},
+		{"journalctl", "the logging boot test's: it reads the log through logd"},
+		{"logtrim", "the logging boot test's: it asks logd to trim the log"},
 };
 
 enum { ELSEWHERE_COUNT = sizeof(ELSEWHERE) / sizeof(ELSEWHERE[0]) };

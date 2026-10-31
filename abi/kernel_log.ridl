@@ -8,20 +8,29 @@
 //! to it, prefixed with the thread's name.
 //!
 //! Programs read the log through _/devices/kmsg_ (radix-files(7)), as
-//! Linux's read _/dev/kmsg_: each read of it returns one record, the oldest the reader has
-//! not read, as a line of text `priority,sequence,microseconds,-;text`.
-//! The priority is the record's syslog(3) level (3 for errors, 4 for
-//! warnings, 6 for information, 7 for debugging), of the kernel's
-//! facility, 0, for every record; the lines programs wrote start with
-//! their names. The sequence numbers every record since boot, and the
-//! microseconds are the time since boot. A read waits for a record unless
-//! the file is non-blocking, and fails with invalid_argument if the
-//! buffer cannot hold the line; one that finds its next record gone from
-//! the kernel's ring fails with gone (EPIPE) once, then goes on from the
-//! oldest still kept. Seeking to the start goes back to the oldest record
-//! kept since the log was last cleared, and to the end skips all of them;
-//! no other offset is taken. Writing a line logs it, as `debug_log` does,
-//! at the level a `<N>` before it gives, or information.
+//! Linux's read _/dev/kmsg_: each read of it returns one record, the
+//! oldest the reader has not read, as a line of text
+//! `priority,sequence,microseconds,-;text`. The priority is the record's
+//! syslog(3) level (3 for errors, 4 for warnings, 6 for information, 7
+//! for debugging) plus its facility times eight: the kernel's, 0, for the
+//! kernel's own records, and for the lines programs wrote the facility
+//! their `<N>` gave, or the user facility, 1, as Linux marks the lines
+//! written to its _/dev/kmsg_; authpriv, 10, marks a security event,
+//! which logd(8) keeps in the audit log if the kernel or Spark wrote it.
+//! A program's line names the process that wrote it after the flags, as
+//! Linux's `caller=` field does:
+//! `priority,sequence,microseconds,-,process=N;text`, its text starting
+//! with the writing thread's name. The kernel sets the process, so
+//! logd(8) can tell Spark's lines from the rest. The sequence numbers
+//! every record since boot, and the microseconds are the time since boot.
+//! A read waits for a record unless the file is non-blocking, and fails
+//! with invalid_argument if the buffer cannot hold the line; one that
+//! finds its next record gone from the kernel's ring fails with gone
+//! (EPIPE) once, then goes on from the oldest still kept. Seeking to the
+//! start goes back to the oldest record kept since the log was last
+//! cleared, and to the end skips all of them; no other offset is taken.
+//! Writing a line logs it, as `debug_log` does, at the level and facility
+//! a `<N>` before it gives, or information of the user facility.
 
 module kernel_log;
 
@@ -30,7 +39,8 @@ const WRITE_MAX: u64 = 256;
 
 /// radix-file(2)'s `control` request on _/devices/kmsg_ that clears the log
 /// (as `dmesg -C` does): readers that open it or seek to its start
-/// later skip the records it holds. Needs the write right.
+/// later skip the records it holds; a security event of the kernel's
+/// then says which process cleared it. Needs the write right.
 const CLEAR: u32 = 0x4b4d0001;
 
 /// The kernel log. Writing needs the write right.

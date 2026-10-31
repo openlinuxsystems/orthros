@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# How much of the system's log logd(8) keeps (log(5), ADR 0211). 0 lifts
+# a limit. `service logd reload` reads this file again.
+
+# Days the log keeps records.
+keep-days = 90
+# The most space the log and the audit log take together: a size, and a
+# share of their file system in percent; the smaller one counts.
+max-size = 4G
+max-percent = 10
+# Days the audit log keeps security events.
+audit-keep-days = 365

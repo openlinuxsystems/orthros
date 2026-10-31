@@ -196,3 +196,5 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0206](0206-the-chipsets-smbus-controller.md) | The chipset's SMBus controller | Accepted |
 | [0207](0207-framework-embedded-controller.md) | Framework's embedded controller | Accepted |
 | [0208](0208-programs-set-the-fans-leds-and-argb-header-through-the-platform-capability.md) | Programs set the fans, LEDs and ARGB header through the platform capability | Accepted |
+| [0210](0210-logd-keeps-the-kernel-log-as-the-system-log.md) | logd keeps the kernel log as the system's log, and the kernel says which process wrote each record | Accepted |
+| [0211](0211-the-audit-log-and-trimming-the-log.md) | Security events of the kernel and Spark go to an audit log, and logd trims the log by age and size | Accepted |
