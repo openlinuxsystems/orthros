@@ -62,6 +62,7 @@ fn version(kind: ObjectKind) -> u32 {
         ObjectKind::ResourceDomain => radix_abi::resource_domain::VERSION,
         ObjectKind::Power => radix_abi::power::VERSION,
         ObjectKind::Network => radix_abi::network::VERSION,
+        ObjectKind::Platform => radix_abi::platform::VERSION,
         _ => 0,
     }
 }
@@ -154,6 +155,7 @@ pub fn call(
         (ObjectKind::ResourceDomain, _) => super::domain::method(user, slot, info.label, &args),
         (ObjectKind::Power, _) => super::power::method(user, cap, info.label, &args),
         (ObjectKind::Network, _) => super::network::method(user, slot, cap, info.label, &args),
+        (ObjectKind::Platform, _) => super::platform::method(user, cap, info.label, &args),
         (ObjectKind::Directory, _) => {
             super::files::directory_method(user, found, info.label, &args)
         }

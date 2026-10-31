@@ -88,6 +88,7 @@ const HEADER: usize = 8;
 /// Commands.
 const CMD_HELLO: u16 = 0x0001;
 const CMD_GET_VERSION: u16 = 0x0002;
+const CMD_GET_CMD_VERSIONS: u16 = 0x0008;
 const CMD_PWM_SET_FAN_DUTY: u16 = 0x0024;
 const CMD_LED_CONTROL: u16 = 0x0029;
 const CMD_THERMAL_AUTO_FAN_CTRL: u16 = 0x0052;
@@ -127,13 +128,18 @@ impl fmt::Display for Absent {
     }
 }
 
+/// The EC's result for a command it does not have.
+pub const STATUS_INVALID_COMMAND: u16 = 1;
+/// The EC's result for parameters it does not take.
+pub const STATUS_INVALID_PARAM: u16 = 3;
+
 /// Why a command failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The EC stayed busy.
     Timeout,
-    /// The EC's result, not success: 1 for a command it does not have, 3
-    /// for parameters it does not take, and so on.
+    /// The EC's result, not success: [`STATUS_INVALID_COMMAND`],
+    /// [`STATUS_INVALID_PARAM`], and so on.
     Status(u16),
     /// The response's header or checksum is wrong, or it is too long.
     BadResponse,
@@ -287,6 +293,42 @@ impl Led {
 
 /// An LED's colors, in the EC's order.
 pub const LED_COLORS: [&str; 6] = ["red", "green", "blue", "yellow", "white", "amber"];
+
+impl Led {
+    /// The LED the EC numbers `id`, if it is one of these.
+    pub fn from_id(id: u8) -> Option<Led> {
+        Led::ALL.into_iter().find(|&led| led as u8 == id)
+    }
+}
+
+/// What the host can change through the EC, by the commands it takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Control {
+    /// Fixed fan duties, and giving fans back to the EC.
+    FanDuty,
+    /// Framework's fan curves.
+    FanCurve,
+    /// The LEDs.
+    Leds,
+    /// The addressable LEDs of an ARGB header or an RGB keyboard.
+    Rgb,
+}
+
+impl Control {
+    /// Every control.
+    pub const ALL: [Control; 4] =
+        [Control::FanDuty, Control::FanCurve, Control::Leds, Control::Rgb];
+
+    /// The commands it takes, and the version of each.
+    fn commands(self) -> &'static [(u16, u8)] {
+        match self {
+            Control::FanDuty => &[(CMD_PWM_SET_FAN_DUTY, 1), (CMD_THERMAL_AUTO_FAN_CTRL, 1)],
+            Control::FanCurve => &[(CMD_FAN_CONFIGURATION, 0)],
+            Control::Leds => &[(CMD_LED_CONTROL, 1)],
+            Control::Rgb => &[(CMD_RGBKBD_SET_COLOR, 0)],
+        }
+    }
+}
 
 /// `EC_CMD_LED_CONTROL`'s flags: only ask, or give the LED back to the EC.
 const LED_QUERY: u8 = 1 << 0;
@@ -454,6 +496,29 @@ impl<P: Platform> Ec<P> {
         let string = if image == Image::ReadOnly { &response[..32] } else { &response[32..64] };
         let _ = out.write_str(text(string));
         Ok(image)
+    }
+
+    /// `EC_CMD_GET_CMD_VERSIONS` (version 1): whether the EC takes version
+    /// `version` of `command`. It answers that it does not know one it
+    /// lacks.
+    pub fn takes(&mut self, command: u16, version: u8) -> Result<bool, Error> {
+        let mut mask = [0; 4];
+        match self.command(CMD_GET_CMD_VERSIONS, 1, &command.to_le_bytes(), &mut mask) {
+            Ok(4) => Ok(u32::from_le_bytes(mask) & 1 << version != 0),
+            Ok(_) => Err(Error::BadResponse),
+            Err(Error::Status(STATUS_INVALID_PARAM)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether the EC takes every command `control` needs.
+    pub fn has(&mut self, control: Control) -> Result<bool, Error> {
+        for &(command, version) in control.commands() {
+            if !self.takes(command, version)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// `EC_CMD_TEMP_SENSOR_GET_INFO`: writes temperature sensor `sensor`'s

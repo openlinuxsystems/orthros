@@ -494,7 +494,10 @@ _target/userspace/_).
 	*framework-ec*
 		Boot with an SSDT of the test's that names a Framework EC
 		(*FRMWC004*): the kernel must find the device, and, with no EC
-		behind it in QEMU, say so and leave it alone.
+		behind it in QEMU, say so and leave it alone; then *ectool*(8),
+		typed at the console, whose shell holds the platform
+		capability, must say that the kernel drives no embedded
+		controller.
 
 	*smbus*
 		Boot to the console under BIOS: the kernel must find the SMBus

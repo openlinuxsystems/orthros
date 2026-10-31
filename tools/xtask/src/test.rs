@@ -1299,10 +1299,10 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "framework-ec",
-        about: "QEMU with an ACPI table of the test's that names a Framework EC: the kernel finds the device, sees no EC's memory map behind it and leaves it alone",
+        about: "QEMU with an ACPI table of the test's that names a Framework EC: the kernel finds the device, sees no EC's memory map behind it and leaves it alone; ectool at the console, whose shell holds the platform capability, says there is no EC",
         firmware: Firmware::Bios,
         media: Media::Usb,
-        cmdline: "qemu-exit",
+        cmdline: "",
         cpus: 1,
         memory: "1G",
         reboot: false,
@@ -3667,7 +3667,7 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     } else {
         vm.expect("Lock checker: ")?;
     }
-    vm.expect("Capabilities: ready; 19 object kinds, 12 rights")?;
+    vm.expect("Capabilities: ready; 20 object kinds, 12 rights")?;
     vm.expect("User mode: SYSCALL/SYSRET entry, user half ")?;
     vm.expect("Files: the root is a tmpfs; Spark mounts the rest")?;
     // Every test image carries the user test programs.
@@ -4441,7 +4441,18 @@ fn framework_ec(vm: &mut Vm, case: &Case) -> Result<(), String> {
          it is not used",
     )?;
     vm.expect("Boot complete.")?;
-    vm.expect_exit(QEMU_EXIT_SUCCESS)
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // consoled's file asks for admin.hardware, so root's shell holds the
+    // platform capability: the kernel itself answers that there is no EC,
+    // where a shell without it would be told it needs admin.hardware.
+    vm.type_text("ectool fanduty 50\n")?;
+    vm.expect_screen(&["ectool: the kernel drives no embedded controller"])?;
+    vm.type_text("ectool pwmgetnumfans\n")?;
+    vm.expect_screen(&["Number of fans = 0"])?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: asked to power off the machine")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 
 fn smbus(vm: &mut Vm, case: &Case) -> Result<(), String> {

@@ -1,0 +1,123 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! The platform capability (Phase 11, ADR 0208): the controls of the
+//! machine that no device of its own has, which its embedded controller
+//! keeps: its fans' duties and curves, its LEDs, and the addressable LEDs
+//! of its ARGB header. On the Framework Desktop these are Framework's
+//! embedded controller's (ADR 0207).
+//!
+//! The kernel gives Spark the one capability to them when it starts.
+//! Spark gives a service a copy in SLOT_PLATFORM, with the read and
+//! control rights, when its file asks for admin.hardware (spark(8)), and
+//! ectool(8) uses the one in its slot. Asking needs the read right, and
+//! changing anything the control right.
+//!
+//! A method fails with not_supported where the kernel drives no embedded
+//! controller, or where the controller lacks the commands the method
+//! takes (`describe` says which it has); with out_of_range for a fan,
+//! sensor or LED it does not have; with timed_out where it does not
+//! answer within a second, and with io where it refuses a command.
+
+module platform;
+
+/// The most addressable LEDs `set_rgb` reaches.
+const RGB_LEDS: u32 = 128;
+
+/// The controls an embedded controller has, by the commands it takes.
+flags Controls: u32 {
+    /// Fixed fan duties, and giving fans back (`set_fan_duty`,
+    /// `auto_fan`).
+    fan_duty = 0;
+    /// Fan curves (`fan_curve`, `set_fan_curve`): Framework's, on the
+    /// Framework Desktop.
+    fan_curve = 1;
+    /// LEDs (`led`, `set_led`, `auto_led`).
+    leds = 2;
+    /// The addressable LEDs of an ARGB header, or of an RGB keyboard
+    /// (`set_rgb`).
+    rgb = 3;
+}
+
+/// An LED, by the Chromium EC's number for it.
+enum Led: u32 {
+    /// The battery's charge.
+    battery = 0;
+    /// The machine's power state, on its power button or case.
+    power = 1;
+    /// On the power adapter.
+    adapter = 2;
+    /// On the left side.
+    left = 3;
+    /// On the right side.
+    right = 4;
+    /// The Framework Desktop's second power LED, on its mainboard.
+    second_power = 7;
+}
+
+/// The machine's platform controls. Each method needs the read right to
+/// ask, or the control right to change something.
+interface platform = 0x0010 version 1 {
+    kind = platform;
+    /// What the embedded controller has: its controls, its fans and its
+    /// temperature sensors (a bit for each, by its number from 0 in the
+    /// controller's memory map, as /kernel/class/hwmon numbers them from
+    /// 1), and its LEDs (a bit for each Led). Needs the read right.
+    method describe = 1 () -> (controls: Controls, fans: u32, sensors: u32, leds: u32)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, not_supported];
+    /// Runs fan `fan` at `percent` of its duty, from 0 to 100, which takes
+    /// it from the controller's own control until `auto_fan`. Restarting
+    /// the machine gives it back too. Needs the control right.
+    method set_fan_duty = 2 (fan: u32, percent: u32) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                out_of_range, not_supported, timed_out, io];
+    /// Gives fan `fan` back to the controller, which runs it as its
+    /// curve and the temperatures say. Needs the control right.
+    method auto_fan = 3 (fan: u32) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, out_of_range,
+                not_supported, timed_out, io];
+    /// Fan `fan`'s curve: below `min_temperature` of temperature sensor
+    /// `sensor`, in degrees Celsius, the fan stops, or runs at `min_duty`
+    /// if `always_on`; from there its duty rises in a straight line to
+    /// `max_duty` at `max_temperature` and above. `duty` is the duty the
+    /// controller gives it now, in percent. Needs the read right.
+    method fan_curve = 4 (fan: u32) -> (min_temperature: u32, max_temperature: u32,
+                                         min_duty: u32, max_duty: u32, always_on: bool,
+                                         sensor: u32, duty: u32)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, out_of_range,
+                not_supported, timed_out, io];
+    /// Gives fan `fan` a curve, as `fan_curve` describes one. The
+    /// temperatures must rise (`min_temperature` below `max_temperature`)
+    /// and the duties must not fall (`min_duty` at most `max_duty`, at most
+    /// 100), and the sensor must be one the controller has. The curve
+    /// stays until the controller itself restarts. Needs the control
+    /// right.
+    method set_fan_curve = 5 (fan: u32, min_temperature: u32, max_temperature: u32,
+                              min_duty: u32, max_duty: u32, always_on: bool, sensor: u32) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                out_of_range, not_supported, timed_out, io];
+    /// The brightest LED `led` goes in each of its colors, 0 for a color
+    /// it lacks. Needs the read right.
+    method led = 6 (led: Led) -> (red: u32, green: u32, blue: u32, yellow: u32, white: u32,
+                                  amber: u32)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                out_of_range, not_supported, timed_out, io];
+    /// Lights LED `led` at a brightness in each of its colors, at most
+    /// 255 each (0 for off), which takes it from the controller until
+    /// `auto_led`. Needs the control right.
+    method set_led = 7 (led: Led, red: u32, green: u32, blue: u32, yellow: u32, white: u32,
+                        amber: u32) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                out_of_range, not_supported, timed_out, io];
+    /// Gives LED `led` back to the controller, which lights it for the
+    /// machine's state. Needs the control right.
+    method auto_led = 8 (led: Led) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                out_of_range, not_supported, timed_out, io];
+    /// Gives the addressable LEDs from `first` on the colors in `colors`,
+    /// three bytes for each (red, green and blue), up to the RGB_LEDS'th
+    /// LED. Needs the control right.
+    method set_rgb = 9 (first: u32, colors: in bytes) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                bad_address, out_of_range, not_supported, timed_out, io];
+}

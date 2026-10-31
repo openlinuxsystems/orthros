@@ -29,7 +29,9 @@ time.
 
 Spark starts consoled at boot as the *consoled* service
 (_/system/settings/spark/services/consoled.service_, *spark*(8)), first and
-stopped last, and starts it again if it fails. Without a screen, as on
+stopped last, and starts it again if it fails. Its file asks for
+*admin.hardware*, so that root's shells may set the fans, the LEDs and
+the ARGB header with *ectool*(8). Without a screen, as on
 a machine with only a serial console, consoled logs *no screen for
 consoles* and exits with 0, and stays stopped.
 

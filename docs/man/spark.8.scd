@@ -245,6 +245,10 @@ that start with *#* are left out. The keys:
 	between, such as *22, 8000-8009*; none by default. Ranges may not
 	overlap, and with *network.outbound* there are at most eight.
 
+*admin.hardware* = *yes* | *no*
+	Whether it may set the machine's fans, LEDs and ARGB header, with
+	the platform capability; *no* by default (see *THE PLATFORM*).
+
 A file Spark cannot read, or with a key it does not know, is logged and
 left out. For example, _consoled.service_:
 
@@ -255,6 +259,7 @@ order = 10
 restart = on-failure
 weight = 200
 memory = none
+admin.hardware = yes
 ```
 
 Spark starts each service as a POSIX program (*radix-posix*(7)) in a
@@ -428,6 +433,19 @@ them through *fork* and *exec*. A service that asks for neither cannot
 use the network at all; the C library's calls fail with EACCES
 (*radix-posix*(7)).
 
+# THE PLATFORM
+
+The kernel gives Spark the platform capability, with the rights to ask
+and to change: the fans' duties and curves, the LEDs and the ARGB
+header that the machine's embedded controller keeps
+(*radix-platform*(2), ADR 0208). A service whose file says
+*admin.hardware = yes* gets a copy in _SLOT_PLATFORM_
+(*radix-startup*(2)), with the copy and transfer rights, so that its
+children get it through *fork* and *exec*: *consoled*(8)'s does, so that
+root's shells may run *ectool*(8). A service that does not ask cannot
+change them; the hardware monitor's files under _/kernel/class/hwmon_
+still show the fans and sensors to everyone (*radix-sysfs*(5)).
+
 # EXAMPLES
 
 Boot the default image in QEMU, where Spark starts the services and
@@ -589,5 +607,5 @@ _name_ *(process* _n_*) was ended by signal 9 (stopped by the out-of-memory poli
 *service*(8), *shutdown*(8), *reboot*(8), *consoled*(8), *dukovo-boot*(7),
 *radix-files*(7), *radix-processes*(7), *radix-posix*(7), *radix-proc*(5),
 *radix-sysfs*(5), *radix-directory*(2), *radix-process*(2),
-*radix-resource-domain*(2), *radix-power*(2), *radix-startup*(2), *ob*(1),
-*watchdog*(8)
+*radix-resource-domain*(2), *radix-power*(2), *radix-platform*(2),
+*radix-startup*(2), *ob*(1), *watchdog*(8), *ectool*(8)

@@ -22,6 +22,7 @@ mod device;
 mod df;
 mod diskhealth;
 mod dmesg;
+mod ectool;
 mod eject;
 mod findmnt;
 mod fstrim;
@@ -84,6 +85,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("device", device::main),
     ("diskhealth", diskhealth::main),
     ("dmesg", dmesg::main),
+    ("ectool", ectool::main),
     ("eject", eject::main),
     ("findmnt", findmnt::main),
     ("fstrim", fstrim::main),

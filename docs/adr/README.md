@@ -195,3 +195,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0205](0205-the-cpus-temperature-sensors.md) | The CPUs' temperature sensors | Accepted |
 | [0206](0206-the-chipsets-smbus-controller.md) | The chipset's SMBus controller | Accepted |
 | [0207](0207-framework-embedded-controller.md) | Framework's embedded controller | Accepted |
+| [0208](0208-programs-set-the-fans-leds-and-argb-header-through-the-platform-capability.md) | Programs set the fans, LEDs and ARGB header through the platform capability | Accepted |

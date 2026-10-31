@@ -24,6 +24,9 @@ struct State {
     hung: bool,
     /// Whether it gets its responses' checksums wrong.
     bad_checksums: bool,
+    /// Whether it is a Chromebook's, without Framework's fan curves and
+    /// with no ARGB header.
+    chromebook: bool,
     waited_us: u64,
     commands: Vec<(u16, u8, Vec<u8>)>,
     duty: BTreeMap<u8, u8>,
@@ -55,6 +58,7 @@ impl Simulated {
             busy_after: 3,
             hung: false,
             bad_checksums: false,
+            chromebook: false,
             waited_us: 0,
             commands: Vec::new(),
             duty: BTreeMap::new(),
@@ -112,6 +116,16 @@ impl State {
                 data[32..46].copy_from_slice(b"dogwood-0.0.11");
                 data[96] = 2;
                 (0, data)
+            }
+            (CMD_GET_CMD_VERSIONS, 1) if params.len() == 2 => {
+                let mask: u32 = match u16::from_le_bytes([params[0], params[1]]) {
+                    CMD_HELLO | CMD_GET_VERSION | CMD_TEMP_SENSOR_GET_INFO => 1,
+                    CMD_GET_CMD_VERSIONS | CMD_PWM_SET_FAN_DUTY | CMD_THERMAL_AUTO_FAN_CTRL => 3,
+                    CMD_LED_CONTROL => 2,
+                    CMD_RGBKBD_SET_COLOR | CMD_FAN_CONFIGURATION if !self.chromebook => 1,
+                    _ => return (3, Vec::new()),
+                };
+                (0, mask.to_le_bytes().to_vec())
             }
             (CMD_TEMP_SENSOR_GET_INFO, 0) => {
                 let names = ["power-f75303", "memory-f75303", "ambient-f75303", "amd-apu"];
@@ -360,4 +374,22 @@ fn rgb_colors_go_in_as_many_requests_as_they_take() {
     }
     assert_eq!(ec.set_rgb(100, &colors), Err(Error::TooBig));
     assert_eq!(simulated.state().commands.len(), 2, "nothing is sent past the last LED");
+}
+
+#[test]
+fn the_ec_says_which_commands_it_takes() {
+    let (mut ec, simulated) = desktop();
+    assert_eq!(ec.takes(CMD_PWM_SET_FAN_DUTY, 1), Ok(true));
+    assert_eq!(ec.takes(CMD_LED_CONTROL, 0), Ok(false), "only version 1");
+    assert_eq!(ec.takes(0x7fff, 0), Ok(false), "a command it does not know");
+    for control in Control::ALL {
+        assert_eq!(ec.has(control), Ok(true), "{control:?}");
+    }
+    simulated.state().chromebook = true;
+    let has: Vec<bool> = Control::ALL.iter().map(|&control| ec.has(control).unwrap()).collect();
+    assert_eq!(has, [true, false, true, false]);
+    simulated.state().hung = true;
+    assert_eq!(ec.has(Control::Leds), Err(Error::Timeout));
+    assert_eq!(Led::from_id(7), Some(Led::SecondPower));
+    assert_eq!(Led::from_id(5), None);
 }

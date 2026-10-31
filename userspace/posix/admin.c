@@ -615,7 +615,9 @@ static void power(void) {
 }
 
 // lspci, lscpu and lsmem (ADR 0144): what they say of QEMU's q35 with 4
-// CPUs and 1 GiB, from /kernel and the PCI ID database.
+// CPUs and 1 GiB, from /kernel and the PCI ID database; and ectool
+// (ADR 0208), with no embedded controller to ask and no platform
+// capability to ask with, which the framework-ec boot test gives it.
 static void hardware(void) {
 	CONTAINS("00:00.0 Host bridge: Intel Corporation 82G33/G31/P35/P31 Express DRAM Controller\n",
 	         "/bin/lspci");
@@ -634,6 +636,10 @@ static void hardware(void) {
 	           "Total offline memory:      0B\n",
 	       "/bin/lsmem", "--summary");
 	STATUS(1, "/bin/lsmem", "--summary=sometimes");
+	OUTPUT("", "Number of fans = 0\n", "/bin/ectool", "pwmgetnumfans");
+	STATUS(1, "/bin/ectool", "fanduty", "50");
+	STATUS(1, "/bin/ectool", "led", "power", "query");
+	RUN_WITH(1, "", "\n  fancurve <idx> [<key>=<value>...]\n", 1, "/bin/ectool", "help");
 }
 
 // The storage tools on a disk and a mount that are not there, and on
