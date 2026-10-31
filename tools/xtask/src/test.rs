@@ -8168,7 +8168,7 @@ fn elevate(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_screen(&["Enter: sign in"])?;
     vm.press(&["ret"])?;
     vm.expect_anywhere("consoled: Ctrl+Alt+Delete menu: sign-in on tty3")?;
-    vm.expect_screen(&["(tty3)", "Name:"])?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION}"), "Name:"])?;
     // Disabling bob's account ends his session on tty2 at once, and he
     // cannot sign in again until it is enabled (ADR 0220); alice's own is
     // another administrator's to disable.

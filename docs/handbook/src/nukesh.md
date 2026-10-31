@@ -64,7 +64,7 @@ command not found. Did you mean service?`. A command from your history
 that starts with what you typed shows faded after the cursor; → or End
 takes it.
 
-The prompt is `name@host folder ›`. After a command fails it shows a
+The prompt is `name@host folder $`. After a command fails it shows a
 `✗ 127` badge with the exit status, and while you are root it shows an
 `admin` badge and `#`. `ls`, `grep`, `diff` and `ip` are in colour too,
 but only on the terminal: piped into another command or a file, their

@@ -42,11 +42,12 @@ fish and zsh's syntax highlighting do this; bash does not.
   word, a path that exists, or a program on `PATH`; the answers are
   cached until `PATH` changes or a command runs.
 - **The prompt.** While `PS1` is its default (`$ ` or `# `), the line
-  editor draws `name@host folder ›`, then `✗ status` after a failure
+  editor draws `name@host folder $`, then `✗ status` after a failure
   and `admin` and `#` while the shell is root's. `PS1` itself is
   unchanged, so scripts that test it and the plain reader see what they
-  did; setting `PS1` turns the drawn prompt off. `›` and `✗` are in
-  the Spleen fonts the consoles use; `❯`, the mock's, is not.
+  did; setting `PS1` turns the drawn prompt off. It ends in `$`, as
+  before: the mock's `❯` is not in the Spleen fonts the consoles use,
+  and `$` is what people and the boot tests look for. `✗` is in them.
 
 ## Consequences
 

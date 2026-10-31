@@ -21,7 +21,7 @@
 # terminal, and everywhere with:
 enabled = true
 
-# The prompt: name@host folder ›, with a ✗ badge and the code after a
+# The prompt: name@host folder $, with a ✗ badge and the code after a
 # failed command, and an admin badge while you are root. The prompt is
 # drawn this way while PS1 is left at its default.
 [prompt]

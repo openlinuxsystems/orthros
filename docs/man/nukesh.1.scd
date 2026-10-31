@@ -167,7 +167,7 @@ nothing is red and underlined before Enter. A command from the history
 that starts with what was typed shows faded after the cursor, and → or
 End takes it. After "command not found" at the prompt, the shell names
 the closest command it knows: "Did you mean service?". While *PS1* is
-left at its default, the prompt is _name_*@*_host_ _folder_ *›*, with a
+left at its default, the prompt is _name_*@*_host_ _folder_ *$*, with a
 *✗* _status_ badge after a command that failed and an *admin* badge,
 and *#*, while the shell is root's. An interactive shell also gives
 *ls*, *grep*, *diff* and *ip* colours on a terminal, through aliases

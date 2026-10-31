@@ -240,7 +240,7 @@ const SECTIONS: &[Section] = &[
             key("at", "bright-black", "the @ between name and host"),
             key("host", "green", "the computer's name"),
             key("path", "bold blue", "the working folder"),
-            key("symbol", "magenta", "the › at the end"),
+            key("symbol", "magenta", "the $ at the end"),
             key("error", "bold bright-white on red", "the ✗ badge after a failed command"),
             key("admin", "bold black on yellow", "the admin badge while you are root"),
         ],

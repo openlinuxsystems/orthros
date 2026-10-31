@@ -52,7 +52,7 @@ example *"bold blue"*, *"red underline"*, *"bold bright-white on red"*.
 
 *[prompt]* *user*, *at*, *host*, *path*, *symbol*, *error*, *admin*
 	While *PS1* is left at its default, the prompt is
-	_name_*@*_host_ _folder_ *›*, with a *✗* _status_ badge after a
+	_name_*@*_host_ _folder_ *$*, with a *✗* _status_ badge after a
 	command that failed and an *admin* badge, and *#*, while the shell
 	is root's. *error* and *admin* are the badges' styles.
 

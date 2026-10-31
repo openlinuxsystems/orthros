@@ -15,7 +15,7 @@
 //! With colours (colors.toml(5), ADR 0258), the line is coloured as it is
 //! typed (`highlight`), a command from the history that starts with what
 //! was typed shows faded after the cursor (ADR 0259), and while `PS1` is
-//! left at its default the prompt is `name@host folder ›`, with a badge
+//! left at its default the prompt is `name@host folder $`, with a badge
 //! for a failed command's status and one while the shell is root's.
 
 use std::borrow::Cow;
@@ -336,7 +336,7 @@ fn colors(shell: &Shell) -> bool {
 }
 
 /// The prompt drawn while `PS1` is its default, `$ ` or `# ` (ADR 0258):
-/// `name@host folder › `, with `✗ status` after a failed command and
+/// `name@host folder $ `, with `✗ status` after a failed command and
 /// `admin` while the shell is root's, then `#`. Colours are added when
 /// they may be used.
 fn rich_prompt(shell: &mut Shell) -> Option<String> {
@@ -369,7 +369,7 @@ fn rich_prompt(shell: &mut Shell) -> Option<String> {
         out.push_str(&style("admin", " admin "));
     }
     out.push(' ');
-    out.push_str(&style("symbol", if root { "#" } else { "›" }));
+    out.push_str(&style("symbol", if root { "#" } else { "$" }));
     out.push(' ');
     Some(out)
 }
