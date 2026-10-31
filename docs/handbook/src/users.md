@@ -146,6 +146,29 @@ scripts.
 wait of two seconds, and a longer one after each wrong one in a row, up
 to a minute, so a password cannot be guessed quickly.
 
+## A lost administrator's password
+
+If you lose the password of the only administrator, choose **Dukovo
+Server: startup trouble** in the boot menu, which shows for three
+seconds when the computer starts. The sign-in then first shows the
+startup-trouble menu:
+
+```
+  1  Reset an administrator's password
+  2  Sign in
+  3  Restart
+  4  Power off
+```
+
+Choose 1, name the administrator, and type the new password twice; then
+choose 2 and sign in with it. Nobody resets a password unseen: the audit
+log keeps each reset, and every administrator is told at their next
+sign-in, before their shell starts. The menu gives nothing that the boot
+menu did not give already, since anyone at it can start root's shell; a
+server is reached through its own console or its cloud provider's.
+Once disks are encrypted, in release 1.4, a reset will need the
+recovery key.
+
 ## Where accounts are kept
 
 | File | What it holds |
@@ -153,6 +176,7 @@ to a minute, so a password cannot be guessed quickly.
 | `/system/settings/passwd` | The users, in Linux's format, without passwords |
 | `/system/settings/group` | The groups, in Linux's format |
 | `/system/state/authd/passwords` | The passwords' Argon2id hashes, which only the authd service reads |
+| `/system/state/authd/notices` | What each person is told at their next sign-in, such as a password reset |
 
 `/etc/passwd` and `/etc/group` lead to the first two, so programs from
 Linux find them where they look. Only authd changes these files, and it

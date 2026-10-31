@@ -219,3 +219,4 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0250](0250-sign-in-at-the-consoles-and-sessions-started-by-authd.md) | Sign-in at the consoles, and sessions started by authd | Accepted |
 | [0251](0251-the-consoles-ask-for-elevate-s-password-and-ctrl-alt-delete-is-the-secure-attention-key.md) | The consoles ask for elevate's password, and Ctrl+Alt+Delete is the secure attention key | Accepted |
 | [0252](0252-the-logs-are-for-administrators-and-everyone-reads-their-own-programs-records.md) | The logs are for administrators, and everyone reads their own programs' records | Accepted |
+| [0253](0253-the-startup-trouble-menu-resets-an-administrator-s-password.md) | The startup-trouble menu resets an administrator's password | Accepted |

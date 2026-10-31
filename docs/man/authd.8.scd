@@ -84,6 +84,17 @@ closes the connection, but for a session (below):
 	Makes the owner's account, an administrator's, at a machine's first
 	sign-in. Only root may, and only while *needs-owner* says *yes*.
 
+*reset* _name_ _password_
+	Sets administrator _name_'s password to _password_, which may be
+	empty, from the startup-trouble menu of *login*(1) (ADR 0253). Only
+	root may, and only while the kernel was started with
+	*startup-trouble* (*dukovo-boot*(7)); an account that is not an
+	administrator's is refused, as an administrator changes its
+	password with *elevate passwd*. The wrong passwords given for
+	_name_ are forgotten, so the new one opens the account at once. It
+	is a security event, and each administrator is told at their next
+	sign-in (see SESSIONS).
+
 *session* _name_ _password_ _term_
 	Starts _name_'s session, if _password_ is theirs, on the terminal
 	sent with the request as a descriptor (*SCM_RIGHTS*), with *TERM*
@@ -183,6 +194,20 @@ of authd ends the sessions it started.
 
 Without the names capability authd logs *no names capability: sign-in
 cannot start sessions* when it starts, and refuses *session*.
+
+Before a session's programs start, authd writes on its terminal what
+the person is to be told since they last signed in, and forgets it once
+the session starts: today, that a password was reset from the
+startup-trouble menu, which every administrator is told:
+
+```
+authd: the password of alice was reset from the startup-trouble menu, by process 61 (user 0)
+```
+
+```
+Your password was reset from the startup-trouble menu on Sat Oct 31 12:40 2026.
+The password of alice was reset from the startup-trouble menu on Sat Oct 31 12:40 2026.
+```
 
 # ELEVATE
 
@@ -300,6 +325,10 @@ _/system/settings/group_
 
 _/system/state/authd/passwords_
 	The passwords' hashes.
+
+_/system/state/authd/notices_
+	What each person is told at their next sign-in: a line
+	_name_<tab>_text_ each.
 
 _/system/live/authd/socket_
 	The socket authd answers at.

@@ -562,7 +562,8 @@ _target/userspace/_).
 		*log*(1) shows him that line alone, with its hint, while
 		*dmesg*(1) and *log --audit* are refused him (ADR 0252);
 		signintest checks that each session's
-		leader acts for its user on a terminal of its own. Bob signs out
+		leader acts for its user on a terminal of its own, and that
+		*authd*(8) resets no password outside the startup-trouble menu. Bob signs out
 		and the sign-in comes back; a wrong password is refused after a
 		wait and the right one signs him in again; alice, still signed
 		in on tty1, cannot list bob's home. The power button ends it
@@ -588,6 +589,16 @@ _target/userspace/_).
 		input. Ctrl+Alt+Delete with no prompt shows consoled's menu; Esc
 		closes it, and Enter shows the sign-in on tty3, where nobody is
 		signed in. The power button ends it (ADRs 0219, 0251 and 0252).
+
+	*startup-trouble*
+		Boot 2 CPUs under UEFI from USB with *startup-trouble*, as the
+		boot menu's second entry does (ADR 0253). tty1's sign-in shows
+		the startup-trouble menu first, which has no password to reset
+		while there is no account; signing in makes alice's, the
+		owner's. She signs out, and the menu resets her password: the
+		old one is refused, the new one signs her in, *authd*(8)'s audit
+		line says so, and she is told before her shell starts, once and
+		not again. The menu powers the computer off.
 
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test

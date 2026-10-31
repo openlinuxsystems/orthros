@@ -133,6 +133,8 @@ fn requests_go_and_come_back() {
         },
         Request::NeedsOwner,
         Request::Owner { name: "chase".into(), full_name: String::new(), password: Vec::new() },
+        Request::Reset { name: "alice".into(), password: b"queen of hearts".to_vec() },
+        Request::Reset { name: "alice".into(), password: Vec::new() },
         Request::Session {
             name: "alice".into(),
             password: b"s3cret".to_vec(),
@@ -183,6 +185,10 @@ fn requests_go_and_come_back() {
         b"check\0a\0b\0"
     );
     assert_eq!(Request::NeedsOwner.encode(), b"needs-owner\0");
+    assert_eq!(
+        Request::Reset { name: "alice".into(), password: b"pw".to_vec() }.encode(),
+        b"reset\0alice\0pw\0"
+    );
     let elevate = Request::Elevate {
         mode: Mode::Shell,
         password: Some(b"pw".to_vec()),
@@ -260,6 +266,8 @@ fn debug_leaves_out_passwords() {
     );
     let prompted = Request::Prompted { id: 3, typed: Prompted::Password(b"hunter2".to_vec()) };
     assert!(!format!("{prompted:?}").contains("hunter2"));
+    let reset = Request::Reset { name: "alice".into(), password: b"hunter2".to_vec() };
+    assert_eq!(format!("{reset:?}"), r#"Reset { name: "alice" }"#);
 }
 
 #[test]

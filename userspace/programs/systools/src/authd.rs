@@ -38,6 +38,7 @@
 //! `prompted` answer, or for at most [`PROMPT_TIME`].
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -531,6 +532,9 @@ impl Authd {
                         (add(files, name, full_name, true, password, peer), now)
                     }
                 }
+                Request::Reset { name, password } => {
+                    (self.reset(&files, name, password, peer), now)
+                }
                 Request::Session { name, password, term } => {
                     let (answer, at) = self.session(i, &files, name, password, term, peer, now);
                     // A wrong password is in the audit log already; any
@@ -761,6 +765,16 @@ impl Authd {
         let groups =
             accounts::other_groups(user, &files.groups, radix_abi::names::GROUPS_MAX as usize);
         let tty = signin::terminal_name(&terminal);
+        // What happened while they were away comes first, on the
+        // terminal, before the session's programs write to it.
+        let notices = Notices::read();
+        let theirs = notices.of(name);
+        if !theirs.is_empty()
+            && let Ok(copy) = terminal.try_clone()
+        {
+            let text = format!("\n{}\n\n", theirs.join("\n"));
+            let _ = File::from(copy).write_all(text.as_bytes());
+        }
         match signin::start(names, user, &groups, &terminal, term) {
             Ok(process) => {
                 audit!(
@@ -768,6 +782,11 @@ impl Authd {
                     peer.process,
                     peer.user
                 );
+                if !theirs.is_empty()
+                    && let Err(why) = notices.without(name).write()
+                {
+                    eprintln!("authd: {why}");
+                }
                 let process = process as i32;
                 let session = Session { name: name.into(), terminal: tty, elevated: false };
                 self.sessions.insert(process, session);
@@ -1058,6 +1077,65 @@ impl Authd {
         }
     }
 
+    /// Sets administrator `name`'s password to `password` from the
+    /// startup-trouble menu (ADR 0253): root's to ask, only while the
+    /// kernel was started for startup trouble. It is a security event, and
+    /// every administrator, and `name`, is told at their next sign-in.
+    fn reset(&mut self, files: &Files, name: &str, password: &[u8], peer: Peer) -> Answer {
+        if !peer.is_root() {
+            let why = "only the startup-trouble menu, which runs as root, resets a password";
+            return Answer::Refused(why.into());
+        }
+        if !util::kernel_flag(STARTUP_TROUBLE) {
+            let why = "a password is reset only from the startup-trouble menu: start the \
+                       computer from its menu's startup-trouble entry";
+            return Answer::Refused(why.into());
+        }
+        let Some(user) = files.user(name) else {
+            return Answer::Refused(format!("there is no account {}", shown(name)));
+        };
+        // No built-in account has a password, root included, nor gets one.
+        if !user.is_person() {
+            return Answer::Refused(format!(
+                "{name} is not a person's account and has no password"
+            ));
+        }
+        if !accounts::is_admin(user, &files.groups) {
+            return Answer::Refused(format!(
+                "{name} is not an administrator: an administrator resets that password with \
+                 elevate passwd {name}"
+            ));
+        }
+        if let Err(why) = set_password(files, name, password) {
+            return Answer::Refused(why);
+        }
+        // The new password opens the account at once.
+        self.wrong.retain(|(account, _), _| account != name);
+        let empty = if password.is_empty() { ", to an empty one" } else { "" };
+        audit!(
+            "the password of {name} was reset{empty} from the startup-trouble menu, by process {} \
+             (user {})",
+            peer.process,
+            peer.user
+        );
+        let when = util::local_time(util::now_ns() as i64 / 1_000_000_000, "%a %b %e %H:%M %Y");
+        let mut notices = Notices::read();
+        let admins =
+            files.users.entries().filter(|u| u.is_person() && accounts::is_admin(u, &files.groups));
+        for admin in admins {
+            let notice = if admin.name == name {
+                format!("Your password was reset from the startup-trouble menu on {when}.")
+            } else {
+                format!("The password of {name} was reset from the startup-trouble menu on {when}.")
+            };
+            notices.add(&admin.name, &notice);
+        }
+        if let Err(why) = notices.write() {
+            eprintln!("authd: {why}");
+        }
+        Answer::Done(String::new())
+    }
+
     /// Changes `name`'s password to `new`: a user's own, given the one it
     /// has now, or anyone's, for root.
     fn passwd(
@@ -1081,16 +1159,7 @@ impl Authd {
                 return refused;
             }
         }
-        let changed = hash_of(new).and_then(|hash| {
-            let mut passwords = files.passwords.clone();
-            if let Some(line) = passwords.entries_mut().find(|p| p.name == name) {
-                line.hash = hash;
-            } else {
-                passwords.push(Password { name: name.into(), hash });
-            }
-            replace(accounts::PASSWORDS, &passwords.text(), 0o600)
-        });
-        if let Err(why) = changed {
+        if let Err(why) = set_password(files, name, new) {
             return (Answer::Refused(why), now);
         }
         let empty = if new.is_empty() { ", to an empty one" } else { "" };
@@ -1100,6 +1169,73 @@ impl Authd {
             peer.user
         );
         (Answer::Done(String::new()), now)
+    }
+}
+
+/// Puts the hash of `password` in `name`'s line of the passwords file.
+fn set_password(files: &Files, name: &str, password: &[u8]) -> Result<(), String> {
+    let hash = hash_of(password)?;
+    let mut passwords = files.passwords.clone();
+    if let Some(line) = passwords.entries_mut().find(|p| p.name == name) {
+        line.hash = hash;
+    } else {
+        passwords.push(Password { name: name.into(), hash });
+    }
+    replace(accounts::PASSWORDS, &passwords.text(), 0o600)
+}
+
+/// The kernel flag of the startup-trouble menu's boot entry
+/// (dukovo-boot(7)).
+pub const STARTUP_TROUBLE: &str = "startup-trouble";
+
+/// Where the notices for people's next sign-in are kept.
+const NOTICES: &str = "/system/state/authd/notices";
+
+/// What each person is told at their next sign-in: a line `NAME<tab>TEXT`
+/// each, in authd's own directory.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Notices(Vec<(String, String)>);
+
+impl Notices {
+    /// Those kept; none if there is no file, or it cannot be read.
+    fn read() -> Notices {
+        Notices::parse(&read_text(NOTICES).unwrap_or_default())
+    }
+
+    fn parse(text: &str) -> Notices {
+        Notices(
+            text.lines()
+                .filter_map(|line| line.split_once('\t'))
+                .map(|(name, text)| (name.to_string(), text.to_string()))
+                .collect(),
+        )
+    }
+
+    fn text(&self) -> String {
+        self.0.iter().fold(String::new(), |mut all, (name, text)| {
+            let _ = writeln!(all, "{name}\t{text}");
+            all
+        })
+    }
+
+    /// Adds one for `name`, kept to one line.
+    fn add(&mut self, name: &str, text: &str) {
+        let text = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        self.0.push((name.to_string(), text));
+    }
+
+    /// `name`'s, oldest first.
+    fn of(&self, name: &str) -> Vec<String> {
+        self.0.iter().filter(|(n, _)| n == name).map(|(_, text)| text.clone()).collect()
+    }
+
+    /// All but `name`'s.
+    fn without(&self, name: &str) -> Notices {
+        Notices(self.0.iter().filter(|(n, _)| n != name).cloned().collect())
+    }
+
+    fn write(&self) -> Result<(), String> {
+        replace(NOTICES, &self.text(), 0o600)
     }
 }
 
@@ -1453,6 +1589,20 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notices_wait_for_each_person() {
+        let mut notices = Notices::parse("alice\tYour password was reset.\nbad line\n");
+        assert_eq!(notices.of("alice"), ["Your password was reset."]);
+        notices.add("bob", "The password of alice\nwas reset.");
+        notices.add("alice", "Another.");
+        assert_eq!(notices.of("bob"), ["The password of alice was reset."]);
+        assert_eq!(notices.of("alice").len(), 2);
+        let left = notices.without("alice");
+        assert_eq!(left.text(), "bob\tThe password of alice was reset.\n");
+        assert_eq!(Notices::parse(&left.text()), left);
+        assert!(notices.of("carol").is_empty());
+    }
 
     #[test]
     fn the_decoy_costs_what_a_password_does() {

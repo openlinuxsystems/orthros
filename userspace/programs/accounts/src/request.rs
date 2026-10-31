@@ -15,6 +15,7 @@
 //! needs-owner\0
 //! owner\0chase\0Chase\0her secret\0
 //! session\0alice\0secret\0linux\0
+//! reset\0alice\0new secret\0
 //! elevate\0command\0ask\0\0linux\0/users/alice\0LANG=C.UTF-8\0--\0dmesg\0-w\0
 //! unlock\0password\0secret\0
 //! forget\0
@@ -109,6 +110,16 @@ pub enum Request {
         password: Vec<u8>,
         /// The terminal's type, for `TERM`.
         term: String,
+    },
+    /// Set administrator `name`'s password to `password`, from the
+    /// startup-trouble menu (ADR 0253): root's to ask, and only while the
+    /// kernel was started with `startup-trouble`. Every administrator is
+    /// told at their next sign-in.
+    Reset {
+        /// The administrator.
+        name: String,
+        /// Their new password, which may be empty.
+        password: Vec<u8>,
     },
     /// Run a command as an administrator, with the admin set (ADR 0219):
     /// an administrator's to ask, and after their password unless their
@@ -250,6 +261,7 @@ impl Request {
             Request::Session { name, password, term } => {
                 vec![b"session", name.as_bytes(), password, term.as_bytes()]
             }
+            Request::Reset { name, password } => vec![b"reset", name.as_bytes(), password],
             Request::Elevate { mode, password, ask, term, directory, language, command } => {
                 let mut fields: Vec<&[u8]> = vec![b"elevate", mode.word()];
                 fields.extend(password_fields(password, *ask));
@@ -308,6 +320,9 @@ impl Request {
                 password: password.to_vec(),
             }),
             [b"needs-owner"] => Ok(Request::NeedsOwner),
+            [b"reset", name, password] => {
+                Ok(Request::Reset { name: text(name)?, password: password.to_vec() })
+            }
             [b"owner", name, full_name, password] => Ok(Request::Owner {
                 name: text(name)?,
                 full_name: text(full_name)?,
@@ -368,7 +383,8 @@ impl Request {
             Request::Check { password, .. }
             | Request::Add { password, .. }
             | Request::Owner { password, .. }
-            | Request::Session { password, .. } => wipe(password),
+            | Request::Session { password, .. }
+            | Request::Reset { password, .. } => wipe(password),
             Request::Passwd { current, new, .. } => {
                 wipe(current);
                 wipe(new);
@@ -400,6 +416,7 @@ impl std::fmt::Debug for Request {
                 write!(f, "Add {{ name: {name:?}, full_name: {full_name:?}, admin: {admin} }}")
             }
             Request::NeedsOwner => write!(f, "NeedsOwner"),
+            Request::Reset { name, .. } => write!(f, "Reset {{ name: {name:?} }}"),
             Request::Owner { name, full_name, .. } => {
                 write!(f, "Owner {{ name: {name:?}, full_name: {full_name:?} }}")
             }

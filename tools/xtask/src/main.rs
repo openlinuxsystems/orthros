@@ -260,6 +260,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    boot, two people side by side, neither in the other's home
   elevate          elevate and sudo: alice runs commands as root after her
                    password, once a pane for 15 minutes; bob may not
+  startup-trouble  the boot menu's startup-trouble entry resets an
+                   administrator's password, and she is told at sign-in
   spark-network    Spark gives each service the network its file asks for
   page-fault       a page fault's panic report, on serial and on screen
   crash-log-uefi   the panic report survives a restart (UEFI)
