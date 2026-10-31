@@ -89,6 +89,12 @@ For losses, old segments and many connections (ADR 0188):
   it and closes (RFC 6191) when its sequence number is past the last
   received or its timestamp is newer.
 
+Found by fuzzing the stack with frames changed at random (ADR 0189):
+
+- An ICMPv4 error (destination unreachable, time exceeded) left its four
+  unused bytes as its buffer had them, from a frame sent before; they
+  are zero (RFC 792).
+
 To be offered upstream.
 
 --- a/src/iface/interface/tcp.rs
@@ -2436,3 +2442,68 @@ To be offered upstream.
 +        assert_eq!(&ring.into_storage()[..], b"abc.");
 +    }
  }
+--- a/src/wire/icmpv4.rs
++++ b/src/wire/icmpv4.rs
+@@ -523,6 +523,9 @@
+             } => {
+                 packet.set_msg_type(Message::DstUnreachable);
+                 packet.set_msg_code(reason.into());
++                // The four bytes after the checksum are unused, and zero
++                // (RFC 792), not what the buffer held before.
++                packet.buffer.as_mut()[field::UNUSED].fill(0);
+ 
+                 let mut ip_packet = Ipv4Packet::new_unchecked(packet.data_mut());
+                 header.emit(&mut ip_packet, checksum_caps);
+@@ -537,6 +540,9 @@
+             } => {
+                 packet.set_msg_type(Message::TimeExceeded);
+                 packet.set_msg_code(reason.into());
++                // The four bytes after the checksum are unused, and zero
++                // (RFC 792), not what the buffer held before.
++                packet.buffer.as_mut()[field::UNUSED].fill(0);
+ 
+                 let mut ip_packet = Ipv4Packet::new_unchecked(packet.data_mut());
+                 header.emit(&mut ip_packet, checksum_caps);
+@@ -695,6 +701,42 @@
+     }
+ 
+     #[test]
++    fn test_error_emit_zeroes_unused() {
++        let header = Ipv4Repr {
++            src_addr: crate::wire::Ipv4Address::new(10, 0, 0, 1),
++            dst_addr: crate::wire::Ipv4Address::new(10, 0, 0, 2),
++            next_header: crate::wire::IpProtocol::Udp,
++            payload_len: 8,
++            hop_limit: 64,
++        };
++        let data = [0x5a; 8];
++        for repr in [
++            Repr::DstUnreachable {
++                reason: DstUnreachable::PortUnreachable,
++                header,
++                data: &data,
++            },
++            Repr::TimeExceeded {
++                reason: TimeExceeded::TtlExpired,
++                header,
++                data: &data,
++            },
++        ] {
++            let mut bytes = vec![0xa5; repr.buffer_len()];
++            repr.emit(
++                &mut Packet::new_unchecked(&mut bytes[..]),
++                &ChecksumCapabilities::default(),
++            );
++            assert_eq!(&bytes[4..8], &[0; 4]);
++            let packet = Packet::new_checked(&bytes[..]).unwrap();
++            assert_eq!(
++                Repr::parse(&packet, &ChecksumCapabilities::default()),
++                Ok(repr)
++            );
++        }
++    }
++
++    #[test]
+     fn test_check_len() {
+         let bytes = [0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+         assert_eq!(Packet::new_checked(&[]), Err(Error));
