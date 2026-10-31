@@ -84,6 +84,7 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/commands/bash", "nukesh"),
     ("system/commands/sh", "nukesh"),
     ("system/commands/rnukesh", "nukesh"),
+    ("system/commands/authd", "systools"),
     ("system/commands/balance", "systools"),
     ("system/commands/blkid", "systools"),
     ("system/commands/chgrp", "systools"),
@@ -111,6 +112,7 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/commands/kill", "systools"),
     ("system/commands/log", "systools"),
     ("system/commands/logd", "systools"),
+    ("system/commands/login", "systools"),
     ("system/commands/logtrim", "systools"),
     ("system/commands/lsblk", "systools"),
     ("system/commands/lscpu", "systools"),
@@ -123,6 +125,7 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/commands/notify-send", "systools"),
     ("system/commands/notifyd", "systools"),
     ("system/commands/nvme", "systools"),
+    ("system/commands/passwd", "systools"),
     ("system/commands/pgrep", "systools"),
     ("system/commands/pidstat", "systools"),
     ("system/commands/pkill", "systools"),
@@ -146,6 +149,7 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/commands/top", "systools"),
     ("system/commands/tree", "systools"),
     ("system/commands/uptime", "systools"),
+    ("system/commands/user", "systools"),
     ("system/commands/users", "systools"),
     ("system/commands/vmstat", "systools"),
     ("system/commands/volumed", "systools"),
@@ -229,7 +233,8 @@ pub const STD_MANIFEST: &str = "userspace/programs/Cargo.toml";
 
 /// The programs on Rust's standard library whose unit tests run on the
 /// host: what they test does not need Radix.
-pub const HOST_TESTED: &[&str] = &["consoled", "keymap", "manifest", "nukesh", "systools"];
+pub const HOST_TESTED: &[&str] =
+    &["accounts", "consoled", "keymap", "manifest", "nukesh", "systools"];
 
 /// The Cargo.lock of the host builds of the programs on Rust's standard
 /// library. They take the crates the ports patch for Radix from

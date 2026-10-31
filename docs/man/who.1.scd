@@ -21,8 +21,9 @@ sessions on one line.
 
 Radix keeps no utmp file. A session is a session leader with a
 controlling terminal, as _/processes_ shows it (*radix-proc*(5)), which began
-when its leader started: a login shell on a terminal. Every session is
-root's until users come.
+when its leader started: a login shell on a terminal. Its user is the
+one its leader acts for, who signed in on that terminal (*login*(1)).
+users lists them sorted, once per session.
 
 # OPTIONS
 

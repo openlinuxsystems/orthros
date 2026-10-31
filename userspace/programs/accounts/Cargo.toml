@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "accounts"
+description = "Dukovo's accounts (ADR 0218): the passwd, group and password files, the rules for names, Argon2id hashes, and what authd(8) is asked"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Argon2id hashes, for authd(8), and for `ob image --user`, which makes
+# an account in an image.
+hash = ["dep:argon2", "dep:base64ct"]
+
+[dependencies]
+# RustCrypto's Argon2 (MIT OR Apache-2.0), without its PHC string types:
+# the hashes are written and read here (RFC 9106, the PHC string format).
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc"], optional = true }
+base64ct = { version = "1.8", features = ["alloc"], optional = true }
+
+[lints]
+workspace = true

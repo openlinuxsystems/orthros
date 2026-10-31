@@ -16,8 +16,8 @@ consoled - the virtual consoles on the screen and keyboard
 consoled draws Dukovo's virtual consoles, *tty1* to *tty6*, on the
 screen, one at a time, and types what is pressed on the keyboard into
 the one shown. Each console is a terminal for *TERM=linux*, a VT100 with
-the Linux console's colours, keys and escape sequences, running a login
-shell on a pseudo-terminal of its own (*radix-posix*(7)).
+the Linux console's colours, keys and escape sequences, running the
+sign-in, *login*(1), on a pseudo-terminal of its own (*radix-posix*(7)).
 
 The Radix kernel shows its log on the screen while the machine starts.
 When consoled takes the screen (_/devices/fb0_, *radix-framebuffer*(2)) the
@@ -39,11 +39,10 @@ consoles* and exits with 0, and stays stopped.
 
 # SESSIONS
 
-tty1's session starts with consoled; each other console's starts the
-first time it is shown. A session is root's login shell, from
-_/system/settings/passwd_ (*nukesh*(1) by default), started as *-nukesh*
-with *HOME*, *SHELL*, *USER*, *LOGNAME* and *TERM=linux* set and the
-screen's size on its terminal. Before it, the console shows
+tty1's sign-in starts with consoled; each other console's starts the
+first time it is shown. consoled runs _/system/commands/login_ as root
+on the console's terminal, in a session of its own, with *TERM=linux*
+and the screen's size on the terminal. Before it, the console shows
 _/system/settings/issue_, in which *\\s* is the system's name, *\\r* its
 release, *\\l* the console's name, *\\n* the host's name, *\\v* the
 kernel's version and *\\m* the machine:
@@ -51,13 +50,28 @@ kernel's version and *\\m* the machine:
 ```
 Dukovo Server 0.10.4 (tty1)
 
-#
+Name:
 ```
 
-When a session ends, as with *exit*, the console clears and a new one
-starts. A session that ends within 2 seconds five times in a row waits
-10 seconds before the next. Users and login(1) come in Phase 13 of the
-roadmap; until then each session is root's, with no password asked.
+login asks for a name and a password, and *authd*(8) starts the
+person's session on that terminal, acting for them; on a machine with
+no account yet it first makes the owner's (*login*(1), ADR 0250). Each
+console signs in on its own, so two people, or one person twice, can be
+signed in on two consoles at once.
+
+When the sign-in ends, because the session it started ended, as with
+*exit*, or because its input did, the console clears and the sign-in
+starts again. One that ends within 2 seconds five times in a row waits
+10 seconds before the next.
+
+With *--shell*, or with *console-sign-in=off* on the kernel's command
+line (*dukovo-boot*(7)), there is no sign-in: each console runs root's
+login shell from _/system/settings/passwd_ (*nukesh*(1) by default), as
+*-nukesh*, with *HOME*, *SHELL*, *USER*, *LOGNAME* and *TERM=linux* set,
+and with no password asked, and consoled logs *console-sign-in=off:
+root's shell on each console, no sign-in*. Only someone who can already
+change the kernel's command line, at the boot menu or in the boot
+volume, can turn it off; the boot tests do, to type at root's shell.
 
 # NOTIFICATIONS
 
@@ -124,7 +138,8 @@ vte crate's, from the Alacritty project.
 	Have _n_ consoles, 1 to 12, rather than 6.
 
 *--shell* _path_
-	Start _path_ in each session rather than root's shell.
+	Start _path_ as root's login shell in each session, with no
+	sign-in.
 
 *--help*, *--version*
 	Show how to call it, or its version.
@@ -155,6 +170,6 @@ _/system/live/notify/socket_
 
 # SEE ALSO
 
-*spark*(8), *reboot*(8), *keymap*(1), *keymap*(5), *nukesh*(1), *dmesg*(1),
-*notifyd*(8), *notify-send*(1),
+*login*(1), *authd*(8), *spark*(8), *reboot*(8), *keymap*(1), *keymap*(5), *nukesh*(1), *dmesg*(1),
+*notifyd*(8), *notify-send*(1), *dukovo-boot*(7),
 *radix-framebuffer*(2), *radix-input*(2), *radix-files*(7)

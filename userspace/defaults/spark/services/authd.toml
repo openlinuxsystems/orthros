@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Accounts: authd(8) alone changes the account files: the names in
+# /system/settings/passwd and group, and the passwords' Argon2id hashes
+# in /system/state/authd, which no other program reads. user(8) and
+# passwd(1) ask it (ADR 0218), and login(1) signs people in through it
+# (ADR 0250).
+#
+# service.toml(5) explains each setting. `service check authd` checks
+# this file, and `service edit authd` checks it as you save.
+
+service_version = 1
+description = "Accounts"
+program = "/system/commands/authd"
+# Lower starts first: before the consoles, which will sign people in
+# through it.
+order = 8
+# Started again whenever it ends: always, on-failure or never.
+restart = "always"
+
+[limits]
+# The sessions it starts, and all they run, share its domain, as the
+# shells shared consoled's before sign-in, so it has no memory limit and
+# twice the default CPU weight. A password's hash takes 64 MiB while it
+# is made, one at a time.
+cpu_weight = 200
+memory = "none"
+
+# What it holds: the whole tree, as Spark does, past the owners and modes
+# of files: it writes the account files, and makes each new home its
+# owner's.
+[permissions]
+runs-with-your-access = true
+# The names capability: it starts each session as the person who signs
+# in (ADR 0250). No other service holds it.
+names = true

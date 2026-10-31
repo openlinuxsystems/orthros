@@ -1154,11 +1154,12 @@ int Sysdeps<GetSockopt>::operator()(int fd, int layer, int number, void *__restr
 	if(layer != SOL_SOCKET)
 		return ENOPROTOOPT;
 	if(number == SO_PEERCRED) {
-		// Every process runs as root until Phase 13 brings users.
+		// The process at the other end, and the user and group it acted
+		// for, as they were when the connection was made (ADR 0218).
 		struct ucred cred;
 		cred.pid = state.connected ? static_cast<pid_t>(state.peer) : 0;
-		cred.uid = state.connected ? 0 : static_cast<uid_t>(-1);
-		cred.gid = state.connected ? 0 : static_cast<gid_t>(-1);
+		cred.uid = state.connected ? static_cast<uid_t>(state.user) : static_cast<uid_t>(-1);
+		cred.gid = state.connected ? static_cast<gid_t>(state.group) : static_cast<gid_t>(-1);
 		socklen_t len = *size < sizeof(cred) ? *size : sizeof(cred);
 		memcpy(buffer, &cred, len);
 		*size = len;

@@ -15,6 +15,7 @@ use std::io::{Read, Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::account::{self, Account};
 use crate::config::{self, Profile};
 use crate::process::{self, step};
 use crate::{Context, Ctx, Error, Result, VERSION, btrfs, kernel, licenses, userspace};
@@ -62,6 +63,8 @@ pub struct Overrides {
     pub microcode: Option<String>,
     /// The serial number of a disk to add the disk check of (ADR 0122).
     pub disk_check: Option<String>,
+    /// An account to make in the root (ADR 0218).
+    pub account: Option<Account>,
 }
 
 /// Builds the kernel and the release image described by dukovo.toml.
@@ -82,7 +85,8 @@ pub fn build_release(
     // Optical media are read-only, so an ISO has no root to write.
     let root = ctx.out.join("root.btrfs");
     if !iso {
-        make_root(ctx, &programs.bootfs, &ctx.out.join("root-staging"), &root)?;
+        let staging = ctx.out.join("root-staging");
+        make_root(ctx, &programs.bootfs, &staging, &root, overrides.account.as_ref())?;
     }
     let built = build(
         ctx,
@@ -384,9 +388,15 @@ const SUBVOLUMES: [&str; 7] =
 /// Makes the Dukovo root's Btrfs in the file `output`, of [`ROOT_BYTES`],
 /// with the pinned `mkfs.btrfs` ([`btrfs::mkfs`]): `@system.a` holds what
 /// the boot archive at `bootfs` has in its `system` directory, unpacked
-/// into `staging` first, and the other [`SUBVOLUMES`] are empty. Data is
-/// compressed with zstd.
-pub fn make_root(ctx: &Ctx, bootfs: &Path, staging: &Path, output: &Path) -> Result<()> {
+/// into `staging` first, and the other [`SUBVOLUMES`] are empty but for
+/// the files of `account`, if there is one. Data is compressed with zstd.
+pub fn make_root(
+    ctx: &Ctx,
+    bootfs: &Path,
+    staging: &Path,
+    output: &Path,
+    account: Option<&Account>,
+) -> Result<()> {
     step(&format!("Making the Dukovo root's Btrfs {}", ctx.display(output)));
     if staging.exists() {
         std::fs::remove_dir_all(staging).context(|| format!("removing {}", staging.display()))?;
@@ -438,6 +448,10 @@ pub fn make_root(ctx: &Ctx, bootfs: &Path, staging: &Path, output: &Path) -> Res
                 )
             })
             .context(|| format!("writing {}", path.display()))?;
+    }
+    if let Some(account) = account {
+        let subvolume = |name: &str| staging.join(name);
+        account::add(&system, &subvolume(SUBVOLUMES[1]), &subvolume(SUBVOLUMES[2]), account)?;
     }
     let _ = std::fs::remove_file(output);
     std::fs::File::create(output)

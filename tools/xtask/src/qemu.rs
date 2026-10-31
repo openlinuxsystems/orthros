@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::account;
 use crate::config::{Firmware, Media};
 use crate::image::{self, Overrides};
 use crate::process::{self, step};
@@ -263,7 +264,9 @@ pub fn run_command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         cmdline: args.value("--cmdline")?,
         microcode: args.value("--microcode")?,
         disk_check: None,
+        account: None,
     };
+    let account = account::Options::from_args(args)?;
     if gdb {
         // GDB's symbols are at the link address, so the kernel must stay
         // there.
@@ -273,6 +276,7 @@ pub fn run_command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     let profile = args.profile(&ctx.config)?;
     let extra = args.take_passthrough();
     args.finish()?;
+    overrides.account = account.account(ctx)?;
 
     require_qemu()?;
     let image_path = image::build_release(ctx, profile, false, &overrides)?;
