@@ -494,6 +494,25 @@ _target/userspace/_).
 		for bob makes files that are his and reaches alice's only with
 		the bypass right (ADR 0214).
 
+	*views*
+		Boot 2 CPUs with _/system/tests/posix/views_ as a program that
+		holds the names capability, which builds a view for alice as
+		authd will build a session's (*radix-directory*(2)'s
+		*make_view* and *attach*): the system's files, the devices, her
+		home, a message of the day attached read-only, a link with
+		Unix's name, and a _/tmp_ of the session's own; then starts
+		itself as alice with the view as her root, without the right to
+		add to it. Alice checks that she sees the view's names and
+		nothing past them, not the system's _/tmp_; that _.._, getcwd,
+		realpath and links work across its entries; that what was
+		attached read-only and the view's own directories take nothing;
+		that she can neither mount nor attach in it; and that she can
+		make a view of her own from what she holds. Root then finds what
+		she made where the view put it, and checks that a view refuses
+		another name's capabilities, one without the bypass right when
+		it has it, a view's own, a pipe, a taken name and a path through
+		what it attached, and mounts beneath it (ADR 0215).
+
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test
 		services that run _/system/tests/posix/netgrant_: _granted_ asks

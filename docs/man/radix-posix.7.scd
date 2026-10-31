@@ -547,6 +547,17 @@ Linux's root does. *opendir* and *chdir* need the directory's read and
 execute bits, as on Linux; a directory opened with *O_PATH* needs
 neither.
 
+A process's root may be a view (*radix-directory*(2), ADR 0215): a
+directory the kernel makes, with directories, files and device nodes
+attached at its names, as a mount namespace of bind mounts is on Linux.
+Each is at its real path, and nothing past them is there. *..*, *getcwd*,
+*realpath* and symbolic links work across its entries as in any tree, and
+*..* at its root stays there. What was attached without the write right,
+and the view's own directories, fail writes with EROFS, and *statvfs*
+says *ST_RDONLY* there; *mount* beneath a view fails with EOPNOTSUPP, and
+*sync* syncs each attached place's filesystem. A session's view will give
+it a */tmp* of its own (Phase 13b.5).
+
 There are no login records yet, so *getlogin* fails and *logname* finds
 no login name.
 

@@ -94,7 +94,8 @@ rights listed, plus *copy* and *transfer*, which every kind has.
 *directory*
 	A place in the file tree, beneath which paths are resolved (see
 	*radix-directory*(2)). Rights: *read*, *write*, *control*,
-	*bypass*.
+	*bypass*. On a view, a directory made of attached capabilities
+	(ADR 0215), *control* is the right to attach to it.
 
 *power*
 	The machine's power, which Spark turns off or restarts (see

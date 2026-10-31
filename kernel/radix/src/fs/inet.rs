@@ -1369,7 +1369,7 @@ pub fn file(
     let node: NodeRef = mem::arc(socket).map_err(|_| status(Kernel::NoMemory))?;
     let description =
         Description { non_blocking: flags.contains(PipeFlags::NON_BLOCKING), append: false };
-    FileObject::with(Location { mount, node }, description, user.process.identity())
+    FileObject::with(Location::new(mount, node), description, user.process.identity())
         .ok_or(status(Kernel::NoMemory))
 }
 

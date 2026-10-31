@@ -204,5 +204,6 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0212](0212-notifications-and-the-privacy-promise.md) | notifyd passes notifications to the console's bottom line, naming the sender as the kernel does, and the privacy promise | Accepted |
 | [0213](0213-files-have-owners-groups-and-modes.md) | Files have owners, groups and modes, which Btrfs, ext4 and tmpfs keep | Accepted |
 | [0214](0214-names-and-the-second-gate.md) | Processes and capabilities act for names, which the names capability gives, and owners and modes narrow what a capability reaches | Accepted |
+| [0215](0215-views-directories-made-of-attached-capabilities.md) | Views: directories made of attached capabilities, which a walk crosses onto as onto mounts | Accepted |
 | [0230](0230-sensors-and-lsusb-with-the-usb-id-database.md) | sensors and lsusb are systools, with the USB ID database as a port | Accepted |
 | [0231](0231-the-firmwares-smbios-tables-and-hwinfo.md) | The firmware's SMBIOS tables show what the machine is, and hwinfo shows them | Accepted |

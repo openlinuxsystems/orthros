@@ -236,6 +236,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    the audit log, and logtrim
   principals       alice and bob, each with a root of their own name, and the
                    second gate between them: owners, modes, signals, tracing
+  views            alice in a view made of attached capabilities, as a
+                   session's: real paths, .., links, a /tmp of its own
   spark-network    Spark gives each service the network its file asks for
   page-fault       a page fault's panic report, on serial and on screen
   crash-log-uefi   the panic report survives a restart (UEFI)

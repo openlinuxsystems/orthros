@@ -1217,6 +1217,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "views",
+        about: "a view made of attached capabilities, as a session's will be: alice, whose root is one, sees its names at their real paths and nothing past them, with .., getcwd, realpath and links working across them, a /tmp of the session's own, read-only entries and directories of the view's that take nothing, no mount or attach in it, and a view of her own; and what a view refuses to take",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "lockdep -- --posix --names /system/tests/posix/views",
+        cpus: 2,
+        memory: "512M",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: views,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "spark-network",
         about: "Spark gives each service the network its file asks for, and none to one that asks for nothing",
         firmware: Firmware::Uefi,
@@ -7102,6 +7118,28 @@ fn principals(vm: &mut Vm, case: &Case) -> Result<(), String> {
     }
     if code != "0x0" || !log.contains("principals: every check passed") {
         return Err(format!("principals exited with code {code}"));
+    }
+    vm.expect("spark: nothing more to do; waiting")
+}
+
+/// The `views` test: Spark starts views (userspace/posix/views.c) as
+/// root with the names capability, which builds a view for alice as
+/// authd will build a session's and starts itself as alice in it
+/// (ADR 0215).
+fn views(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_ahead("spark: started /system/tests/posix/views as process ")?;
+    let code = program_line(vm, "(/system/tests/posix/views) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> =
+        log.lines().filter(|line| line.contains("views: FAILED")).map(str::trim).collect();
+    if !failed.is_empty() {
+        return Err(format!("views failed: {}", failed.join("; ")));
+    }
+    // Alice's run and root's each say so.
+    if code != "0x0" || log.matches("views: every check passed").count() != 2 {
+        return Err(format!("views exited with code {code}"));
     }
     vm.expect("spark: nothing more to do; waiting")
 }

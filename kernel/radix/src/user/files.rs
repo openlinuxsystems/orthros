@@ -284,6 +284,24 @@ fn filesystem_kind(kind: FsKind) -> FilesystemKind {
 /// transfer.
 const OPEN_RIGHTS: Rights = Rights::READ.union(Rights::WRITE).union(Rights::CONTROL);
 
+/// The rights `make_view` gives the view's root, besides the bypass right
+/// (ADR 0215).
+const VIEW_RIGHTS: Rights = Rights::READ
+    .union(Rights::WRITE)
+    .union(Rights::CONTROL)
+    .union(Rights::COPY)
+    .union(Rights::TRANSFER);
+
+/// The status a view's error becomes: as a file's, but what cannot be
+/// attached, or is no view, is not_supported rather than an argument the
+/// call does not take.
+fn view_status(err: radix_vfs::Error) -> radix_abi::Status {
+    match err {
+        radix_vfs::Error::NotSupported => Kernel::NotSupported.status(0),
+        err => fs::status(err),
+    }
+}
+
 /// The directory `found` designates, if its capability has the rights
 /// `needs`: `found` is what the system call found in the slot the caller
 /// named, so the slot is not looked at again.
@@ -357,7 +375,7 @@ pub fn directory_method(
             if a.flags.contains(OpenFlags::CREATE) && a.flags.contains(OpenFlags::DIRECTORY) {
                 return Err(error(Kernel::InvalidArgument));
             }
-            let asked = cap_rights(a.rights).intersection(OPEN_RIGHTS);
+            let mut asked = cap_rights(a.rights).intersection(OPEN_RIGHTS);
             let changes =
                 a.flags.contains(OpenFlags::CREATE) || a.flags.contains(OpenFlags::TRUNCATE);
             let mut needs =
@@ -366,6 +384,11 @@ pub fn directory_method(
                 needs = needs.union(Rights::WRITE);
             }
             let dir = directory_of(found, needs)?;
+            // Beneath a view, control would mount on, and attach in, the
+            // places it attaches (ADR 0215).
+            if dir.at.in_view() {
+                asked = asked.difference(Rights::CONTROL);
+            }
             let to = SlotRef::new(cspace, a.to);
             // The slot first when the open changes something, so that a
             // file is not made or cut for nothing; otherwise putting the
@@ -777,6 +800,9 @@ pub fn directory_method(
         directory::UNMOUNT => {
             let a = directory::UnmountArgs::decode(args)?;
             let dir = directory_of(found, Rights::CONTROL)?;
+            if dir.at.in_view() {
+                return Err(Kernel::NotSupported.status(0));
+            }
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
             let who = who(found.cap.rights(), dir);
@@ -786,7 +812,12 @@ pub fn directory_method(
         directory::SYNC => {
             directory::SyncArgs::decode(args)?;
             let dir = directory_of(found, Rights::NONE)?;
-            dir.at.mount.fs.sync().map_err(fs::status)?;
+            // A view's are the filesystems of what it attaches.
+            if dir.at.in_view() {
+                vfs()?.sync_view(&dir.at).map_err(fs::status)?;
+            } else {
+                dir.at.mount.fs.sync().map_err(fs::status)?;
+            }
             answer(label, 0, [0; 8])
         }
         directory::INFO => {
@@ -796,7 +827,8 @@ pub fn directory_method(
             let info = mount.fs.info();
             let results = directory::InfoResults {
                 filesystem: filesystem_kind(mount.fs.kind()),
-                flags: if mount.read_only() { MountFlags::READ_ONLY } else { MountFlags::NONE },
+                // Read-only too beneath a view's read-only entry.
+                flags: if dir.at.read_only() { MountFlags::READ_ONLY } else { MountFlags::NONE },
                 block_size: info.block_size,
                 blocks: info.blocks,
                 free: info.free,
@@ -866,6 +898,9 @@ pub fn directory_method(
             }
             answer(label, 0, [0; 8])
         }
+        directory::MAKE_VIEW | directory::ATTACH | directory::ATTACH_LINK => {
+            view_method(user, found, label, args)
+        }
         file::LOCK | file::LOCK_HOLDER => {
             lock_method(user, found, ObjectKind::Directory, label, args)
         }
@@ -881,6 +916,9 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
     let cspace = user.cspace;
     let a = directory::MountArgs::decode(args)?;
     let dir = directory_of(found, Rights::CONTROL)?;
+    if dir.at.in_view() {
+        return Err(Kernel::NotSupported.status(0));
+    }
     let read_only = a.flags.contains(MountFlags::READ_ONLY);
     let compress = a.flags.contains(MountFlags::COMPRESS);
     let mut path = Path::Empty;
@@ -940,6 +978,64 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
         labelled.as_str()
     );
     answer(label, 0, [0; 8])
+}
+
+/// The methods that make and add to views (ADR 0215), out of
+/// [`directory_method`], so as not to grow the frame every directory
+/// method shares.
+#[inline(never)]
+fn view_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> Result<Answer> {
+    let cspace = user.cspace;
+    match label {
+        directory::MAKE_VIEW => {
+            let a = directory::MakeViewArgs::decode(args)?;
+            let dir = directory_of(found, Rights::NONE)?;
+            let at = vfs()?.make_view(&who(found.cap.rights(), dir)).map_err(fs::status)?;
+            let object = FileObject::new(at, dir.name.clone()).ok_or(error(Kernel::NoMemory))?;
+            let rights = VIEW_RIGHTS.union(found.cap.rights().intersection(Rights::BYPASS));
+            install_file(
+                user,
+                SlotRef::new(cspace, a.to),
+                ObjectKind::Directory,
+                rights,
+                object,
+                false,
+            )?;
+            answer(label, 0, [0; 8])
+        }
+        directory::ATTACH => {
+            let a = directory::AttachArgs::decode(args)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
+            let (what_cap, what) = match objects::find_object(cspace, a.what) {
+                Some(Object::File(_)) => objects::file(cspace, a.what, Rights::READ)?,
+                _ => objects::directory(cspace, a.what, Rights::READ)?,
+            };
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
+            let read_only = !what_cap.rights().contains(Rights::WRITE);
+            vfs()?
+                .attach(
+                    &dir.at,
+                    path.as_str()?,
+                    &what.at,
+                    &who(what_cap.rights(), &what),
+                    read_only,
+                )
+                .map_err(view_status)?;
+            answer(label, 0, [0; 8])
+        }
+        directory::ATTACH_LINK => {
+            let a = directory::AttachLinkArgs::decode(args)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
+            let (mut path, mut target) = (Path::Empty, Path::Empty);
+            let (path, target) = (path.copy(a.path)?, target.copy(a.target)?);
+            vfs()?
+                .attach_link(&dir.at, path.as_str()?, target.as_target()?)
+                .map_err(view_status)?;
+            answer(label, 0, [0; 8])
+        }
+        _ => Err(error(Kernel::NoSuchMethod)),
+    }
 }
 
 /// Puts a capability with `rights` to `object`, a file or directory

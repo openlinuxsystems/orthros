@@ -48,6 +48,22 @@
 //! says otherwise. A capability with the bypass right passes the second
 //! gate, but for running a file that no execute bit lets anyone run
 //! (radix-process(2)'s `exec`), as Linux's root does.
+//!
+//! Views (Phase 13, ADR 0215). A view is a directory the kernel makes,
+//! with directories and files that capabilities hold attached at its
+//! names, as a mount namespace of bind mounts: a program whose root is a
+//! view finds each at its real path and nothing past them. `make_view`
+//! makes one and `attach` and `attach_link` fill it, which needs the
+//! control right on it. A path resolved beneath a view goes onto what is
+//! attached as onto a mount; `..` at the view's root stays there, a
+//! link's target that starts with `/` starts again from it, and
+//! `real_path` gives the view's names. A view acts for the name of the
+//! capability it was made from, and takes only capabilities acting for
+//! that name, with the bypass right if it has it; one attached without
+//! the write right is read-only beneath the view (read_only). The view's
+//! own directories take no files, nothing is mounted beneath a view
+//! (not_supported), and a capability `open` makes beneath one never has
+//! the control right.
 
 module directory;
 
@@ -299,7 +315,7 @@ struct ScrubProgress {
 }
 
 /// A directory.
-interface directory = 0x000b version 7 {
+interface directory = 0x000b version 8 {
     kind = directory;
     /// Opens the file or directory at `path` (`.` for this one) and puts
     /// a capability to it with `rights` in slot `to`. Returns what it is.
@@ -308,7 +324,8 @@ interface directory = 0x000b version 7 {
     /// (radix-process(2)'s `file_mask`), and belongs to the caller's user
     /// and group, or to the directory's group if it has the set-group-ID
     /// bit; `mode` is not looked at otherwise. Needs the read right, and
-    /// the write right to create or truncate or to ask for it.
+    /// the write right to create or truncate or to ask for it. Beneath a
+    /// view, the capability it makes never has the control right.
     method open = 1 (path: in bytes, flags: OpenFlags, rights: Rights, to: slot, mode: u32)
         -> (kind: FileKind)
         raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument, no_memory,
@@ -363,18 +380,21 @@ interface directory = 0x000b version 7 {
     /// `flags` has read_only). A Btrfs that Radix cannot write yet, or an
     /// ext4 with features Radix only reads, fails with invalid_argument
     /// unless `flags` has read_only, as on Linux, and so does compress for
-    /// a filesystem other than `btrfs`.
+    /// a filesystem other than `btrfs`. Beneath a view it fails with
+    /// not_supported.
     method mount = 7 (path: in bytes, filesystem: in bytes, source: u32, flags: MountFlags) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, in_use, io,
-                corrupt, unknown_filesystem, not_block_device, too_many_links, denied];
+                corrupt, unknown_filesystem, not_block_device, too_many_links, denied,
+                not_supported];
     /// Unmounts the filesystem whose root is at `path`, after writing what
     /// it holds in memory to its disk. Fails with in_use while anything
-    /// is mounted on it or open on it. Needs the control right.
+    /// is mounted on it or open on it, and with not_supported beneath a
+    /// view. Needs the control right.
     method unmount = 8 (path: in bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, in_use,
-                io, corrupt, too_many_links, denied];
+                io, corrupt, too_many_links, denied, not_supported];
     /// Writes everything the directory's filesystem holds in memory to its
     /// disk.
     method sync = 9 () -> ()
@@ -663,4 +683,35 @@ interface directory = 0x000b version 7 {
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside,
                 read_only, io, corrupt, too_many_links, denied];
+    /// Makes an empty view (ADR 0215) acting for this capability's name,
+    /// and puts a capability to its root in slot `to` with the read,
+    /// write, control, copy and transfer rights, and this capability's
+    /// bypass right if it has it, which the view then has too. Deriving a
+    /// copy without the control right gives a program a view it cannot
+    /// add to.
+    method make_view = 33 (to: slot) -> ()
+        raises [no_such_slot, empty_slot, occupied, no_memory];
+    /// Attaches the directory, file or device node the capability in slot
+    /// `what` holds at `path` in this view, making the view's directories
+    /// on the way: beneath the view, `path` leads to it as `what` does,
+    /// read-only unless `what` has the write right. Needs the control
+    /// right on a view's directory (not_supported on any other), and the
+    /// read right on `what`, which must act for the view's name and have
+    /// the bypass right if the view has it (not_permitted). Fails with
+    /// exists if `path` is taken, in_use if it goes through what is
+    /// attached already, bad_name if it has a `..`, and not_supported for
+    /// a capability to a view's own directory or to anything but a
+    /// directory, a file or a device node of the tree.
+    method attach = 34 (path: in bytes, what: slot) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                no_memory, bad_address, exists, not_directory, no_space, name_too_long, bad_name,
+                in_use, not_permitted, not_supported];
+    /// Makes a symbolic link at `path` in this view that points to
+    /// `target`, as `make_link` does, making the view's directories on
+    /// the way as `attach` does. Needs the control right on a view's
+    /// directory.
+    method attach_link = 35 (path: in bytes, target: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, exists, not_directory, no_space, name_too_long, bad_name, in_use,
+                not_supported];
 }

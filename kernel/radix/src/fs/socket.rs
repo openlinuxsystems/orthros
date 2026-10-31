@@ -490,7 +490,7 @@ fn file(user: &crate::user::UserRef, socket: Socket, flags: PipeFlags) -> Result
     let node: NodeRef = mem::arc(socket).map_err(|_| Kernel::NoMemory.status(0))?;
     let description =
         Description { non_blocking: flags.contains(PipeFlags::NON_BLOCKING), append: false };
-    FileObject::with(Location { mount, node }, description, user.process.identity())
+    FileObject::with(Location::new(mount, node), description, user.process.identity())
         .ok_or(Kernel::NoMemory.status(0))
 }
 
