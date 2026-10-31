@@ -58,6 +58,7 @@ members = [
     "lib/relocs",
     "lib/sensors",
     "lib/smbios",
+    "lib/spd",
     "lib/sync",
     "lib/tty",
     "lib/uacpi",

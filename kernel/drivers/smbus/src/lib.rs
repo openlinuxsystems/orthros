@@ -38,7 +38,8 @@
 //!   reference for the port and the semaphore.)
 //!
 //! Only byte and word transfers are done: what reading an SPD EEPROM or
-//! a sensor chip needs. The crate has no `unsafe` code; the kernel gives
+//! a sensor chip needs, with Send Byte and Receive Byte, by which a DDR4
+//! module's EE1004 picks its page (ADR 0232). The crate has no `unsafe` code; the kernel gives
 //! it bus 0's configuration space and reaches I/O ports and device memory
 //! for it ([`Platform`]). Its tests run it against simulated controllers.
 
@@ -91,6 +92,7 @@ const BYTE_DONE: u8 = 1 << 7;
 const DONE_FLAGS: u8 = BYTE_DONE | FAILED | BUS_ERR | DEV_ERR | INTR;
 
 /// The host control register: the protocols, and START.
+const BYTE: u8 = 0x04;
 const BYTE_DATA: u8 = 0x08;
 const WORD_DATA: u8 = 0x0c;
 const START: u8 = 1 << 6;
@@ -340,6 +342,18 @@ impl<P: Platform> Smbus<P> {
     /// Writes `value` at `command` of the device at `address`.
     pub fn write_byte_data(&mut self, address: u8, command: u8, value: u8) -> Result<(), Error> {
         self.transfer(address, command, BYTE_DATA, Some(value)).map(|_| ())
+    }
+
+    /// Sends `value` alone to the device at `address` (the SMBus's Send
+    /// Byte), which the controller takes from its command register.
+    pub fn send_byte(&mut self, address: u8, value: u8) -> Result<(), Error> {
+        self.transfer(address, value, BYTE, Some(value)).map(|_| ())
+    }
+
+    /// Reads a byte from the device at `address`, with no command code
+    /// (Receive Byte).
+    pub fn receive_byte(&mut self, address: u8) -> Result<u8, Error> {
+        self.transfer(address, 0, BYTE, None).map(|(low, _)| low)
     }
 
     fn reg(&self, offset: u16) -> u16 {

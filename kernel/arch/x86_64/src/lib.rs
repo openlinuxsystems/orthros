@@ -483,8 +483,15 @@ impl Devices for Arch {
         watchdog::stop();
     }
 
-    fn find_smbus() -> bool {
-        smbus::find()
+    fn find_smbus(wait: fn(u64)) -> bool {
+        smbus::find(wait)
+    }
+
+    fn smbus_transfer(
+        address: u8,
+        transfer: radix_hal::SmbusTransfer,
+    ) -> Result<u16, radix_hal::SmbusError> {
+        smbus::run(address, transfer)
     }
 
     fn smbus_name(out: &mut dyn core::fmt::Write) -> core::fmt::Result {

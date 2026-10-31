@@ -302,8 +302,15 @@ impl Devices for Arch {
 
     fn watchdog_stop() {}
 
-    fn find_smbus() -> bool {
+    fn find_smbus(_wait: fn(u64)) -> bool {
         false
+    }
+
+    fn smbus_transfer(
+        _address: u8,
+        _transfer: radix_hal::SmbusTransfer,
+    ) -> Result<u16, radix_hal::SmbusError> {
+        Err(radix_hal::SmbusError::NoController)
     }
 
     fn smbus_name(_out: &mut dyn core::fmt::Write) -> core::fmt::Result {

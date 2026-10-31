@@ -47,6 +47,9 @@ const THERMAL_TABLE: &str = "file=thermal.aml";
 /// The SSDT of the `framework-ec` case: a Framework EC's ACPI device.
 const CROSEC_AML: &[u8] = include_bytes!("acpi/crosec.aml");
 const CROSEC_TABLE: &str = "file=crosec.aml";
+/// The SMBIOS memory device of the `smbus` case, which QEMU gives in place
+/// of its own ([`ddr4_device`]).
+const DDR4_DEVICE: &str = "file=ddr4.smbios";
 /// The release's name, which the kernel's banner gives after its version
 /// (`BANNER` in kernel/radix/src/main.rs) and the console's greeting
 /// begins with (userspace/defaults/issue).
@@ -96,6 +99,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-sensors",
     "radix-smbios",
     "radix-smbus",
+    "radix-spd",
     "radix-sync",
     "radix-tty",
     "radix-uacpi",
@@ -1380,7 +1384,7 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "smbus",
-        about: "the kernel drives the SMBus controller of q35's ICH9 and finds the eight memory modules' EEPROMs QEMU puts on it; Linux's /sys/bus/i2c names its adapter at the console; SeaBIOS's SMBIOS tables are found in its area",
+        about: "the kernel drives the SMBus controller of q35's ICH9 and finds the eight memory modules' EEPROMs QEMU puts on it; SeaBIOS's SMBIOS tables are found in its area, and say the memory is DDR4, so the first module's EEPROM is read as an EE1004 at the console, with Linux's /sys/bus/i2c files, and hwinfo decodes it",
         firmware: Firmware::Bios,
         media: Media::Usb,
         cmdline: "",
@@ -1389,14 +1393,22 @@ pub const CASES: &[Case] = &[
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
-        qemu: &[],
+        // QEMU has no EE1004: two DDC devices take its page selects.
+        qemu: &[
+            "-smbios",
+            DDR4_DEVICE,
+            "-device",
+            "i2c-ddc,address=0x36",
+            "-device",
+            "i2c-ddc,address=0x37",
+        ],
         script: smbus,
         disks: &[],
         second: None,
     },
     Case {
         name: "smbios",
-        about: "the kernel finds QEMU's SMBIOS tables through the UEFI system table, logs the machine as Linux does and shows its names in Linux's /sys/class/dmi/id, without the serial numbers; hwinfo shows them all at the console",
+        about: "the kernel finds QEMU's SMBIOS tables through the UEFI system table, logs the machine as Linux does and shows its names in Linux's /sys/class/dmi/id, without the serial numbers, and says QEMU's kind of memory has no SPD EEPROM it reads; hwinfo shows them all at the console",
         firmware: Firmware::Uefi,
         media: Media::Usb,
         cmdline: "",
@@ -2527,14 +2539,15 @@ fn run_case(
     let disks = make_disks(ctx, dir, case, base, root)?;
     let mut extra: Vec<String> = case.qemu.iter().map(ToString::to_string).collect();
     for arg in &mut extra {
-        let (name, aml) = match arg.as_str() {
-            POWER_TABLE => ("power.aml", POWER_AML),
-            THERMAL_TABLE => ("thermal.aml", THERMAL_AML),
-            CROSEC_TABLE => ("crosec.aml", CROSEC_AML),
+        let (name, bytes) = match arg.as_str() {
+            POWER_TABLE => ("power.aml", POWER_AML.to_vec()),
+            THERMAL_TABLE => ("thermal.aml", THERMAL_AML.to_vec()),
+            CROSEC_TABLE => ("crosec.aml", CROSEC_AML.to_vec()),
+            DDR4_DEVICE => ("ddr4.smbios", ddr4_device()),
             _ => continue,
         };
         let path = dir.join(name);
-        std::fs::write(&path, aml).map_err(|e| format!("{}: {e}", path.display()))?;
+        std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
         *arg = format!("file={}", qemu::option_value(&path));
     }
     if case.disks.iter().any(|disk| disk.bus == Bus::Sata) {
@@ -4611,17 +4624,56 @@ fn smbus(vm: &mut Vm, case: &Case) -> Result<(), String> {
     )?;
     // SeaBIOS keeps the SMBIOS entry point in its area (ADR 0231).
     vm.expect_anywhere("DMI: QEMU Standard PC (Q35 + ICH9, 2009), BIOS ")?;
+    // The tables' memory device says DDR4, so its module's EEPROM is an
+    // EE1004 (ADR 0232).
+    vm.expect_anywhere("SMBus: the DDR4 memory modules' SPD EEPROMs (ee1004) at 0x50")?;
     vm.expect("Boot complete.")?;
     vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
     vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
     // `is` between name and value, so that no needle is in a typed line.
     vm.type_text("echo \"name is $(cat /sys/bus/i2c/devices/i2c-0/name)\"\n")?;
     vm.expect_screen(&["name is SMBus I801 adapter at 0700"])?;
+    // Read for the first time: both pages of QEMU's 256-byte EEPROM.
+    vm.type_text(
+        "d=/sys/bus/i2c/devices/0-0050; echo \"spd is $(cat $d/name), $(wc -c < $d/eeprom) \
+         bytes\"\n",
+    )?;
+    vm.expect_screen(&["spd is ee1004, 512 bytes"])?;
+    vm.type_text("clear; hwinfo memory\n")?;
+    vm.expect_screen(&[
+        "Memory",
+        "  DIMM 0:           1 GiB DDR4 SODIMM, 2666 MT/s, Dukovo DK-DDR4-1",
+        "  SPD at 0x50:      blank",
+    ])?;
     vm.type_text("poweroff\n")?;
     vm.expect("spark: asked to power off the machine")?;
     vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
     // QEMU ends when the guest enters ACPI's S5.
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// An SMBIOS memory device (type 17, of SMBIOS 2.8's 40 bytes): a 1 GiB
+/// DDR4-2666 SO-DIMM in slot `DIMM 0`, made by `Dukovo`, part
+/// `DK-DDR4-1`, of QEMU's memory array (handle 1000h).
+fn ddr4_device() -> Vec<u8> {
+    let mut bytes = vec![17, 0x28, 0x00, 0x11, 0x00, 0x10, 0xfe, 0xff];
+    // Widths, the size in MiB, the form (SO-DIMM), the set, the locators,
+    // the kind (DDR4) and its details (synchronous).
+    bytes.extend_from_slice(&[64, 0, 64, 0, 0x00, 0x04, 0x0d, 0, 1, 0, 0x1a, 0x80, 0]);
+    // The speed, the maker, serial number, asset tag and part number, the
+    // rank, the extended size, the speed set, and the voltages (1.2 V).
+    bytes.extend_from_slice(&2666u16.to_le_bytes());
+    bytes.extend_from_slice(&[2, 0, 0, 3, 1, 0, 0, 0, 0]);
+    bytes.extend_from_slice(&2666u16.to_le_bytes());
+    for _ in 0..3 {
+        bytes.extend_from_slice(&1200u16.to_le_bytes());
+    }
+    for string in ["DIMM 0", "Dukovo", "DK-DDR4-1"] {
+        bytes.extend_from_slice(string.as_bytes());
+        bytes.push(0);
+    }
+    bytes.push(0);
+    bytes
 }
 
 fn smbios(vm: &mut Vm, case: &Case) -> Result<(), String> {
@@ -4631,6 +4683,8 @@ fn smbios(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_anywhere("SMBIOS 3.0.0 present.")?;
     vm.expect_anywhere("DMI: Dukovo Test Machine/Test Board, BIOS ")?;
     vm.expect_anywhere("DMI: Memory slots populated: 1/1")?;
+    // QEMU's own memory device is of kind "RAM" (ADR 0232).
+    vm.expect_anywhere("SMBus: RAM memory (kind 0x07) has no SPD EEPROM the kernel reads")?;
     vm.expect("Boot complete.")?;
     vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
     vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;

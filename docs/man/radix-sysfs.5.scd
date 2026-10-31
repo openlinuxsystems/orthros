@@ -174,6 +174,16 @@ _/kernel/bus/i2c/devices/i2c-0/name_
 	for Intel's, with its I/O port in hexadecimal, or *SMBus PIIX4
 	adapter port 0 at 0b00* for that of AMD's FCH.
 
+_/kernel/bus/i2c/devices/0-00_*nn*_/name_, _eeprom_
+	A memory module's SPD EEPROM on the SMBus, at address *nn*
+	(*50* to *57*), found as Linux finds them, by the memory's kind in
+	the SMBIOS tables (ADR 0232): _name_ is the kind of EEPROM, as Linux
+	names its driver, *spd* (DDR3 and older), *ee1004* (DDR4) or
+	*spd5118* (DDR5); _eeprom_ is its bytes, 256, 512 or 1024 of them,
+	read from the module the first time the file is opened, which takes
+	up to a second, and kept. A read that fails is an I/O error.
+	*hwinfo*(8) decodes them.
+
 _/kernel/firmware/memmap/_*n*_/start_, _end_, _type_
 	The firmware's memory map, as the boot loader gave it to the kernel,
 	a directory a range numbered from *0* in its order, as Linux's

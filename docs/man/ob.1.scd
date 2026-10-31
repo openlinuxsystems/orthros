@@ -582,13 +582,20 @@ _target/userspace/_).
 		controller of q35's ICH9 at port 0x700 and the eight memory
 		modules' EEPROMs QEMU puts on it,
 		_/sys/bus/i2c/devices/i2c-0/name_ must name its adapter, and
-		SeaBIOS's SMBIOS tables must be found in its area.
+		SeaBIOS's SMBIOS tables must be found in its area. The tables'
+		memory device, which the test gives QEMU, says DDR4, so the
+		kernel must take the first module's EEPROM for an EE1004,
+		whose page selects two of QEMU's DDC devices take: its _name_
+		must say *ee1004*, its _eeprom_ must read 512 bytes, and
+		*hwinfo* must show the module's SPD data as blank, as QEMU's
+		EEPROM is.
 
 	*smbios*
 		Boot to the console under UEFI with QEMU's SMBIOS tables given a
 		machine's, a board's and a memory device's strings: the kernel
 		must find them through the UEFI system table and log the machine
-		and its memory slots as Linux does; _/sys/class/dmi/id_ must name
+		and its memory slots as Linux does, and say that QEMU's kind
+		of memory has no SPD EEPROM it reads; _/sys/class/dmi/id_ must name
 		the product and leave out its serial number; and *hwinfo* must
 		show the system, the board with their serial numbers, and the
 		memory device.

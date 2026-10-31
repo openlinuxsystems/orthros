@@ -5,7 +5,8 @@
 //! its INUSE semaphore, and the FCH's with its four ports, its power
 //! management registers in memory or behind the index and data ports, and
 //! a microcontroller that may hold the bus. Devices are EEPROMs of 256
-//! bytes; a transaction runs when START is written, as QEMU's does.
+//! bytes, whose Send Byte sets where Receive Byte reads; a transaction
+//! runs when START is written, as QEMU's does.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -42,8 +43,10 @@ struct State {
     owned: bool,
     held_for: u32,
     given_back: u32,
-    /// The devices, by port and address.
+    /// The devices, by port and address, and where each one's next
+    /// Receive Byte reads.
     devices: HashMap<(u8, u8), [u8; 256]>,
+    pointers: HashMap<(u8, u8), u8>,
 }
 
 impl State {
@@ -65,12 +68,20 @@ impl State {
     fn run(&mut self) {
         let target = self.address >> 1;
         let read = self.address & 1 != 0;
-        let Some(memory) = self.devices.get_mut(&(self.port(), target)) else {
+        let device = (self.port(), target);
+        let Some(memory) = self.devices.get_mut(&device) else {
             self.status |= DEV_ERR;
             return;
         };
         let at = usize::from(self.command);
+        let pointer = self.pointers.entry(device).or_insert(0);
         match (self.control & 0x1c, read) {
+            // An EEPROM's Send Byte sets where it reads next.
+            (BYTE, false) => *pointer = self.command,
+            (BYTE, true) => {
+                self.data[0] = memory[usize::from(*pointer)];
+                *pointer = pointer.wrapping_add(1);
+            }
             (BYTE_DATA, true) => self.data[0] = memory[at],
             (WORD_DATA, true) => self.data = [memory[at], memory[(at + 1) % 256]],
             (BYTE_DATA, false) => memory[at] = self.data[0],
@@ -262,6 +273,7 @@ fn simulated(chip: Chip) -> (Mmio, Chipset) {
         held_for: 0,
         given_back: 0,
         devices: HashMap::from([((0, 0x50), eeprom(0)), ((0, 0x52), eeprom(0x80))]),
+        pointers: HashMap::new(),
     };
     let state = Arc::new(Mutex::new(state));
     (Mmio::fake(Arc::new(Config(state.clone())), BUS_SIZE), Chipset(state))
@@ -292,6 +304,11 @@ fn intels_controller_reads_and_writes_its_devices() {
     assert_eq!(smbus.write_byte_data(0x50, 0x20, 0x5a), Ok(()));
     assert_eq!(smbus.read_byte_data(0x50, 0x20), Ok(0x5a));
     assert_eq!(smbus.read_byte_data(0x51, 0), Err(Error::NoDevice));
+    assert_eq!(smbus.send_byte(0x52, 0x10), Ok(()));
+    assert_eq!(smbus.receive_byte(0x52), Ok(0x90));
+    assert_eq!(smbus.receive_byte(0x52), Ok(0x91));
+    assert_eq!(smbus.send_byte(0x36, 0), Err(Error::NoDevice));
+    assert_eq!(smbus.receive_byte(0x36), Err(Error::NoDevice));
     // Each transaction gives firmware back the semaphore and clears its
     // status, the failed one too.
     assert_eq!(chipset.0.lock().unwrap().status, 0);
@@ -316,10 +333,12 @@ fn the_fchs_controller_takes_the_bus_and_port_0() {
         assert_eq!(smbus.ports(), 0xb00..0xb10);
         assert_eq!(smbus.read_byte_data(0x50, 3), Ok(3), "port 0's device answers");
         assert_eq!(smbus.read_byte_data(0x51, 0), Err(Error::NoDevice));
+        assert_eq!(smbus.send_byte(0x50, 0x7f), Ok(()));
+        assert_eq!(smbus.receive_byte(0x50), Ok(0x7f));
         let state = chipset.0.lock().unwrap();
         assert_eq!(state.pm[2], 2 << 3 | 0b111, "the port and the other bits are put back");
         assert!(!state.owned);
-        assert_eq!(state.given_back, 2);
+        assert_eq!(state.given_back, 4);
     }
 }
 

@@ -13,6 +13,11 @@
 //! firmware, without the processors and memory. Serial numbers and the
 //! UUID are left out unless asked for (`-s`), so that the output can be
 //! shared as it is.
+//!
+//! The memory section adds what each memory module's SPD EEPROM says of
+//! it, which the kernel reads over the SMBus and shows in
+//! `/kernel/bus/i2c/devices/0-00<address>/eeprom` (ADR 0232), decoded by
+//! `radix-spd`.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -26,6 +31,7 @@ use radix_abi::startup::SLOT_PLATFORM;
 use radix_smbios::memory::{self, MemoryArray, MemoryDevice};
 use radix_smbios::processor::Processor;
 use radix_smbios::{Entry, Ids, Table, chassis_name, kind};
+use radix_spd::Spd;
 
 use crate::args::{Arg, Args};
 use crate::sys::SYS;
@@ -33,6 +39,9 @@ use crate::util::{Fail, fail, usage};
 
 /// Where the kernel shows what anyone may read of the tables.
 const DMI: &str = "/kernel/class/dmi/id";
+
+/// Where it shows the memory modules' SPD EEPROMs.
+const I2C: &str = "/kernel/bus/i2c/devices";
 
 /// The sections, in the order they are shown.
 const SECTIONS: [&str; 6] = ["system", "board", "chassis", "firmware", "processor", "memory"];
@@ -112,6 +121,66 @@ fn read_fields(dir: &Path) -> Fields {
             Some((name, text))
         })
         .collect()
+}
+
+/// What reading a memory module's SPD EEPROM gave, by its address.
+type Spds = Vec<(u16, io::Result<Vec<u8>>)>;
+
+/// The SPD EEPROMs in `dir`, in the order of their addresses.
+fn read_spds(dir: &Path) -> Spds {
+    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    let mut spds: Spds = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let address = u16::from_str_radix(name.to_str()?.strip_prefix("0-")?, 16).ok()?;
+            let eeprom = entry.path().join("eeprom");
+            eeprom.exists().then(|| (address, fs::read(eeprom)))
+        })
+        .collect();
+    spds.sort_by_key(|(address, _)| *address);
+    spds
+}
+
+/// An SPD EEPROM's line: what its bytes say of its module.
+fn spd_line(read: &io::Result<Vec<u8>>, serials: bool) -> String {
+    let bytes = match read {
+        Ok(bytes) => bytes,
+        Err(error) => return format!("unreadable: {error}"),
+    };
+    let spd = Spd::new(bytes);
+    if spd.is_blank() {
+        return "blank".to_string();
+    }
+    let mut parts = Vec::new();
+    let what: Vec<&str> = [spd.kind(), spd.form()].into_iter().flatten().collect();
+    let what =
+        if what.is_empty() { "memory of a kind not known".to_string() } else { what.join(" ") };
+    parts.push(match spd.size() {
+        Some(bytes) => format!("{} {what}", size(bytes)),
+        None => what,
+    });
+    if let Some(speed) = spd.speed() {
+        parts.push(format!("{speed} MT/s"));
+    }
+    let maker: Vec<String> =
+        [spd.maker().map(|maker| maker.to_string()), spd.part_number().map(str::to_string)]
+            .into_iter()
+            .flatten()
+            .collect();
+    if !maker.is_empty() {
+        parts.push(maker.join(" "));
+    }
+    if let Some(date) = spd.date() {
+        parts.push(format!("made in week {} of {}", date.week, date.year));
+    }
+    if serials && let Some(serial) = spd.serial() {
+        parts.push(format!("serial number {serial}"));
+    }
+    if spd.checksums_match() == Some(false) {
+        parts.push("its checksum is wrong".to_string());
+    }
+    parts.join(", ")
 }
 
 /// A line of a section: its label and value.
@@ -211,8 +280,14 @@ fn memory_device(d: &MemoryDevice<'_>, serials: bool) -> (String, String) {
     (label, parts.join(", "))
 }
 
-/// The sections `fields` and, if they were read, the tables give.
-fn sections(fields: &Fields, tables: Option<(&Entry, &Table<'_>)>, serials: bool) -> Vec<Section> {
+/// The sections `fields` and, if they were read, the tables and the SPD
+/// EEPROMs give.
+fn sections(
+    fields: &Fields,
+    tables: Option<(&Entry, &Table<'_>)>,
+    spds: &Spds,
+    serials: bool,
+) -> Vec<Section> {
     let mut system = Section::new("System");
     system.field("Manufacturer", fields, "sys_vendor");
     system.field("Product", fields, "product_name");
@@ -275,15 +350,20 @@ fn sections(fields: &Fields, tables: Option<(&Entry, &Table<'_>)>, serials: bool
             let (label, line) = memory_device(device, serials);
             memory.add(label, line);
         }
+        for (address, read) in spds {
+            memory.add(format!("SPD at {address:#04x}"), spd_line(read, serials));
+        }
     }
     vec![system, board, chassis, firmware, processors, memory]
 }
 
 /// Prints the sections `wanted` (all if none) that have lines, from
-/// `tables` if the kernel gave them, else from the fields in `dmi`.
+/// `tables` if the kernel gave them, with the SPD EEPROMs in `i2c`, else
+/// from the fields in `dmi`.
 pub fn run(
     tables: &Result<Tables, Status>,
     dmi: &Path,
+    i2c: &Path,
     wanted: &[&str],
     serials: bool,
     out: &mut dyn Write,
@@ -320,8 +400,14 @@ pub fn run(
     if fields.is_empty() && parsed.is_none() {
         return Err(fail(NO_TABLES.to_string()));
     }
+    // Each EEPROM is read whole the first time, which takes a while.
+    let spds = if parsed.is_some() && (wanted.is_empty() || wanted.contains(&"memory")) {
+        read_spds(i2c)
+    } else {
+        Vec::new()
+    };
     let mut first = true;
-    for section in sections(&fields, parsed.as_ref().map(|(e, t)| (e, t)), serials) {
+    for section in sections(&fields, parsed.as_ref().map(|(e, t)| (e, t)), &spds, serials) {
         let name = section.title.to_ascii_lowercase();
         if section.lines.is_empty() || !(wanted.is_empty() || wanted.contains(&name.as_str())) {
             continue;
@@ -372,7 +458,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         }
     }
     let mut out = io::stdout().lock();
-    run(&read_tables(), Path::new(DMI), &wanted, serials, &mut out)
+    run(&read_tables(), Path::new(DMI), Path::new(I2C), &wanted, serials, &mut out)
 }
 
 #[cfg(test)]
@@ -463,9 +549,75 @@ mod tests {
         wanted: &[&str],
         serials: bool,
     ) -> (i32, String) {
+        output_with(tables, dmi, Path::new("/nonexistent"), wanted, serials)
+    }
+
+    fn output_with(
+        tables: &Result<Tables, Status>,
+        dmi: &Path,
+        i2c: &Path,
+        wanted: &[&str],
+        serials: bool,
+    ) -> (i32, String) {
         let mut out = Vec::new();
-        let status = run(tables, dmi, wanted, serials, &mut out).unwrap_or(1);
+        let status = run(tables, dmi, i2c, wanted, serials, &mut out).unwrap_or(1);
         (status, String::from_utf8(out).unwrap())
+    }
+
+    /// A Samsung 8 GiB DDR4-2666 SO-DIMM's SPD data, laid out by JEDEC's
+    /// Annex L.
+    fn ddr4_spd() -> Vec<u8> {
+        let mut b = vec![0; 512];
+        b[..5].copy_from_slice(&[0x23, 0x11, 0x0c, 0x03, 0x45]);
+        b[12] = 0x01;
+        b[13] = 0x03;
+        b[18] = 0x06;
+        b[320..327].copy_from_slice(&[0x80, 0xce, 0, 0x19, 0x12, 0x12, 0x34]);
+        b[327..329].copy_from_slice(&[0x56, 0x78]);
+        b[329..349].copy_from_slice(b"M471A1K43CB1-CTD    ");
+        for (covered, at) in [(0..126, 126), (128..254, 254)] {
+            let crc = radix_spd::crc16(&b[covered]);
+            b[at..at + 2].copy_from_slice(&crc.to_le_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn memory_modules_spd_data() {
+        let dir = std::env::temp_dir().join(format!("hwinfo-spd-{}", std::process::id()));
+        for name in ["i2c-0", "0-0050", "0-0052", "0-0053"] {
+            fs::create_dir_all(dir.join(name)).unwrap();
+        }
+        fs::write(dir.join("0-0050/eeprom"), ddr4_spd()).unwrap();
+        fs::write(dir.join("0-0052/eeprom"), [0; 512]).unwrap();
+        let mut wrong = ddr4_spd();
+        wrong[18] = 0x05;
+        fs::write(dir.join("0-0053/eeprom"), wrong).unwrap();
+        let tables = Ok(laptop());
+        let (status, text) =
+            output_with(&tables, Path::new("/nonexistent"), &dir, &["memory"], false);
+        assert_eq!(status, 0);
+        assert!(
+            text.ends_with(
+                "  DIMM B (BANK 2):  empty\n  SPD at 0x50:      8 GiB DDR4 SO-DIMM, 2666 MT/s, \
+                 Samsung M471A1K43CB1-CTD, made in week 12 of 2019\n  SPD at 0x52:      blank\n  \
+                 SPD at 0x53:      8 GiB DDR4 SO-DIMM, 3200 MT/s, Samsung M471A1K43CB1-CTD, made \
+                 in week 12 of 2019, its checksum is wrong\n"
+            ),
+            "{text}"
+        );
+        let (_, text) = output_with(&tables, Path::new("/nonexistent"), &dir, &["memory"], true);
+        assert!(
+            text.contains(
+                "made in week 12 of 2019, serial number 12345678
+"
+            ),
+            "{text}"
+        );
+        // Not read for other sections.
+        let (_, text) = output_with(&tables, Path::new("/nonexistent"), &dir, &["system"], false);
+        assert!(!text.contains("SPD"));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
