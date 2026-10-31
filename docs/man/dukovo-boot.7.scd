@@ -147,8 +147,13 @@ _/system/resources/licenses/_
   and partitions. The functions are listed in
   _/kernel/bus/pci/devices_ (*radix-sysfs*(5)).
 . Unless *aml=off*, uACPI then runs the firmware's AML, and the kernel
-  hears the power button through it; see *ACPI*.
+  hears the power button through it; see *ACPI*. The kernel then drives
+  the chipset's SMBus controller, if it has one, and Framework's embedded
+  controller; see *SMBUS* and *EMBEDDED CONTROLLER*.
 . Each CPU then picks its own speed where it can; see *CPU FREQUENCY*.
+  The firmware's thermal zones are watched from then on; see *ACPI*.
+  The kernel then looks for the CPUs' temperature sensors; see
+  *SENSORS*.
 . It checks that every CPU takes timer
   interrupts and answers an inter-processor interrupt, runs the self-test
   named by *selftest* if any, and prints *Boot complete.*
@@ -512,7 +517,7 @@ them to *init*, and the kernel does not read them.
 *selftest*=_name_
 	Run a self-test at the end of boot: *page-fault*, *crash-reboot*,
 	*breakpoint*, *mm-stress*, *stack-overflow*, *smep*, *smap*, *tlb*,
-	*caps*, *fpu*, *sched-fair*, *sched-rt*, *sched-pi*, *sched-balance*,
+	*msr*, *caps*, *fpu*, *sched-fair*, *sched-rt*, *sched-pi*, *sched-balance*,
 	*lockdep*, *rcu*, *oom*, *user*, *ipc*, *fuzz*, *iommu*, *net* or
 	*bench*.
 	See *radix-debug*(7). *ob test* uses these. The first program does
@@ -580,6 +585,19 @@ it was last read, such as *; 12 of them since the bank was read*. More than
 them, and reads the banks every second until 30 seconds go by without a
 corrected error, then unmasks them.
 
+AMD's Zen has banks of a scalable kind, which the log's line about the
+banks names (ADR 0204): each belongs to one block of the chip, which its
+errors name, with the block's extended code, its MCA_IPID and its
+MCA_SYND:
+
+	Machine check: CPU 0 bank 15: corrected error without an error code in
+	the unified memory controller on channel 1, a DRAM ECC error, address
+	0x12340 (status 0x8420000000000000, ipid 0x9600150f00, synd 0x5a00000000000001)
+
+An error that Zen could not correct but that nothing has used yet is
+logged as *deferred*. A memory controller's address is its own, not a
+physical one, so its errors retire no page.
+
 An uncorrected error raises a machine check. On a CPU that recovers from
 them (Intel's Xeons, with software error recovery, and AMD's Zen, with
 SUCCOR), bad memory that a program reads ends only that program, with
@@ -597,7 +615,8 @@ it no longer maps it. The log says so:
 and _/processes/meminfo_ counts it (*radix-proc*(5)).
 
 The memory controllers' errors are counted by the bank and channel they
-were on, in Linux's EDAC files under _/kernel/devices/system/edac_
+were on (on Zen, the channel a memory controller's bank serves), in
+Linux's EDAC files under _/kernel/devices/system/edac_
 (*radix-sysfs*(5)). Counts by DIMM, which need each chipset's map of
 addresses to DIMMs, come later (ADR 0169).
 
@@ -652,10 +671,31 @@ closed*). The batteries and adapters are in _/kernel/class/power_supply_
 and the lids in _/processes/acpi/button/lid_, as on Linux
 (*radix-sysfs*(5), *radix-proc*(5)); nothing yet acts on a closed lid.
 
+It then finds the thermal zones (ADR 0203), up to eight, and says what
+each is: its temperature, its trip points, and how often it is looked at
+(_\_TZP_), or that it is looked at when the firmware notifies a change:
+
+	Thermal: TZ00 is at 45 °C; critical at 80 °C; hot at 70 °C; passive at 60 °C; looked at every 1.0 s
+
+Once the CPUs' speed is set, the _thermal_ thread watches them, as
+Linux's step-wise governor does. At or past the passive trip point and
+warming, each look caps every CPU's highest level a fifth lower, up to
+three steps; below it and cooling, a step is undone at each look, which
+comes every _\_TSP_ meanwhile. Where the firmware picks the CPUs' speed,
+which the kernel cannot lower, the log says so. At the hot trip point
+the kernel warns, having no hibernation. At the critical one Spark is
+asked to power the machine off, as for a press of the power button, and
+the kernel powers it off itself if it is still on 30 seconds later:
+
+	Thermal: TZ00 is at 80 °C, at or past its critical trip point, 80 °C: powering off
+	Power: TZ00 is too hot; asking Spark to power the machine off
+
+The zones are in _/kernel/class/thermal_, as on Linux (*radix-sysfs*(5)).
+
 With *aml=off*, or if uACPI cannot start, which the kernel logs, no AML
 runs; the kernel hears a fixed power button by itself and powers off
 with the sleep types of the DSDT's _\_S5_ (ADR 0142), and no battery,
-adapter or lid is found.
+adapter, lid or thermal zone is found.
 
 # CPU FREQUENCY
 
@@ -675,6 +715,66 @@ Each CPU's policy is in _/kernel/devices/system/cpu/cpufreq_, as on Linux
 keep the firmware's setting:
 
 	CPU frequency: left to the firmware: the CPUs have neither Intel's HWP nor AMD's CPPC
+
+# SENSORS
+
+The CPUs' own temperature sensors are read as Linux's _k10temp_ and
+_coretemp_ drivers read them (ADR 0205). AMD's Zen processors keep their
+control temperature, Tctl, and on most desktop and server models each
+core complex die's, in their System Management Unit, which the kernel
+reaches through the root complex; Intel's count each core's and each
+package's in registers every CPU reads for itself. The log says which:
+
+```
+Sensors: AMD's processor sensors (k10temp) read Tctl, Tccd1 and Tccd2
+Sensors: Intel's digital thermal sensors (coretemp) read 1 package and 4 cores, up to 100 °C
+```
+
+QEMU's CPUs have neither, even under KVM:
+
+	Sensors: the CPUs have no temperature sensor the kernel reads
+
+The sensors, and the thermal zones of *ACPI*, are in
+_/kernel/class/hwmon_, as on Linux (*radix-sysfs*(5)).
+
+# EMBEDDED CONTROLLER
+
+Framework's machines have a Chromium embedded controller, which runs
+their fans and power LEDs (ADR 0207). Once uACPI has started, the kernel
+looks for the ACPI device that names it (*FRMWC004*, or Chromebooks'
+*GOOG0004*), checks that the EC answers, and logs its firmware, fans and
+sensors:
+
+```
+EC: Framework's embedded controller (FRMWC004), firmware dogwood-0.0.11 (read-write image), with 3 fans and 5 temperature sensors
+```
+
+A device with no EC behind it is a warning:
+
+	EC: the firmware names FRMWC004, but its memory map does not say EC at port 0xe00; it is not used
+
+The fans and sensors are in _/kernel/class/hwmon_ as *cros_ec*
+(*radix-sysfs*(5)).
+
+# SMBUS
+
+The SMBus is the chipset's slow bus to the memory modules' SPD EEPROMs
+and sensor chips. The kernel drives Intel's controller and that of AMD's
+FCH (ADR 0206), and the log says where it is and which EEPROMs answer:
+
+```
+SMBus: Intel's controller (8086:2930) at port 0x700 (SMBus I801 adapter at 0700); memory modules' EEPROMs answer at 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57
+SMBus: the FCH's controller (revision 0x61) at port 0xb00 (SMBus PIIX4 adapter port 0 at 0b00); no memory module's EEPROM answers
+```
+
+A controller the kernel leaves alone is a warning: Intel's without an
+I/O base, or the FCH's switched off. Otherwise:
+
+	SMBus: none the kernel drives
+
+Once the firmware's AML reads or writes the controller's ports, the
+kernel leaves it to the firmware, as Linux does. The adapter is named in
+_/kernel/bus/i2c/devices/i2c-0/name_ (*radix-sysfs*(5)).
 
 # IOMMU
 

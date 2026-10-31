@@ -355,6 +355,18 @@ _target/userspace/_).
 		and the fixed power button must still power the machine off
 		(*radix-sysfs*(5), *radix-proc*(5), *dukovo-boot*(7)'s *ACPI*).
 
+	*acpi-thermal*
+		Boot normally under BIOS with an SSDT of the test's
+		(_tools/xtask/src/acpi/thermal.asl_), as QEMU has no thermal
+		zone: the kernel must say what its zone is, and at the console
+		the zone's files in _/sys/class/thermal_, and hwmon's _acpitz_
+		in _/sys/class/hwmon_, must read as the table says. Once the
+		console has read its temperature three times, the zone warms
+		5 °C a read: the kernel must say it cannot slow QEMU's
+		CPUs at each step past the passive trip point, warn at the hot
+		one, and at the critical one Spark must power the machine off
+		(*radix-sysfs*(5), *dukovo-boot*(7)'s *ACPI*).
+
 	*usb-devices*
 		Boot normally under UEFI with the lock checker on and the *dbc*
 		flag, with QEMU's USB keyboard on the xHCI controller's second
@@ -443,6 +455,17 @@ _target/userspace/_).
 		process in its domain, which Spark stops; _driver_ makes the
 		requests and powers the machine off (*spark*(8)).
 
+	*logging*
+		Boot 2 CPUs with the default services (Spark's *--services*) and
+		_/system/tests/posix/logtest_, which writes lines to the kernel
+		log as a program and checks what *log*(1), *journalctl*(1) and
+		*dmesg*(1) show of them and of the services: levels, names and
+		process numbers, a program's line with a service's name in front
+		of it kept as the program's, the kernel's records alone, a line
+		*log -f* shows as it comes, the boots and the day files; then
+		*service logd restart*, after which no record is kept twice
+		(*logd*(8)).
+
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test
 		services that run _/system/tests/posix/netgrant_: _granted_ asks
@@ -478,6 +501,23 @@ _target/userspace/_).
 		Boot 4 CPUs with *selftest=tlb*, which checks that every CPU
 		sees a changed kernel mapping after a TLB shootdown and that
 		address spaces switched on several CPUs keep their own mappings.
+
+	*framework-ec*
+		Boot with an SSDT of the test's that names a Framework EC
+		(*FRMWC004*): the kernel must find the device, and, with no EC
+		behind it in QEMU, say so and leave it alone.
+
+	*smbus*
+		Boot to the console under BIOS: the kernel must find the SMBus
+		controller of q35's ICH9 at port 0x700 and the eight memory
+		modules' EEPROMs QEMU puts on it, and
+		_/sys/bus/i2c/devices/i2c-0/name_ must name its adapter.
+
+	*msr*
+		Boot with *selftest=msr*: EFER must read, and with KVM a read
+		of an MSR no processor has must fault and go on, as the
+		temperature sensors' reads do. Without KVM, QEMU reads it as 0,
+		and the test must say it skipped.
 
 	*caps*
 		Boot 4 CPUs with *selftest=caps*, the capability store's test

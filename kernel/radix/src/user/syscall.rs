@@ -19,8 +19,6 @@
 //! way, which writes each one's record as it returns (`fs::trace`); the
 //! others pay one look at a flag of the process.
 
-use core::fmt;
-
 use radix_abi::endpoint::{MessageFlags, NO_SLOT};
 use radix_abi::errors::Kernel;
 use radix_abi::kernel_log::WRITE_MAX;
@@ -38,6 +36,7 @@ use super::objects::{self, Object};
 use super::process::Ending;
 use super::{EXIT_STOPPED, Result, UserRef, cap_error, error, exit_current};
 use crate::Arch;
+use crate::fs::kmsg::Shown;
 use crate::sched::{self, ThreadRef};
 
 /// What a system call did.
@@ -365,24 +364,14 @@ fn debug_log(me: &ThreadRef, cspace: SpaceId, a: sys::DebugLogArgs) -> Result<()
     while let [rest @ .., b'\n' | b'\r'] = text {
         text = rest;
     }
-    info!("{}[{}]: {}", me.name(), me.id(), Shown(text));
+    let (level, text) = crate::fs::kmsg::level_of(text);
+    let process = me.user().map_or(0, |user| user.process.number());
+    let name = me.name();
+    // Saturating, as `/devices/kmsg`'s writes (ADR 0210).
+    radix_klog::log_from(
+        level,
+        u32::try_from(process).unwrap_or(u32::MAX),
+        format_args!("{}[{}]: {}", Shown(name.as_str().as_bytes()), me.id(), Shown(text)),
+    );
     Ok(())
-}
-
-/// Text from a program as the log shows it: UTF-8 kept, control
-/// characters and bytes that are not UTF-8 shown as `?`.
-struct Shown<'a>(&'a [u8]);
-
-impl fmt::Display for Shown<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for chunk in self.0.utf8_chunks() {
-            for c in chunk.valid().chars() {
-                f.write_fmt(format_args!("{}", if c.is_control() { '?' } else { c }))?;
-            }
-            if !chunk.invalid().is_empty() {
-                f.write_str("?")?;
-            }
-        }
-        Ok(())
-    }
 }

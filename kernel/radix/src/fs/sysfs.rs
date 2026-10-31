@@ -21,6 +21,10 @@
 //! - `/kernel/bus/pci/devices/<address>/vendor`, `device`, `class`,
 //!   `revision`, `subsystem_vendor` and `subsystem_device`, in
 //!   hexadecimal, for every PCI function the scan found;
+//! - `/kernel/bus/i2c/devices/i2c-0/name`, when the kernel drives the
+//!   chipset's SMBus host controller (ADR 0206), as Linux names its
+//!   adapter (`SMBus I801 adapter at <port>`, or `SMBus PIIX4 adapter
+//!   port 0 at <port>` for AMD's FCH);
 //! - `/kernel/firmware/memmap/<n>/start`, `end` (its last byte, in
 //!   hexadecimal) and `type` (Linux's names: `System RAM`, `Reserved`,
 //!   `ACPI Tables`...), for each range of the firmware's memory map
@@ -41,6 +45,28 @@
 //!   `model_name`, `manufacturer` and `serial_number`. A value the
 //!   battery does not know, as the rest while its bay is empty, fails to
 //!   read (EIO), as Linux's do (ENODEV);
+//! - `/kernel/class/thermal/thermal_zone<n>`, for each of the firmware's
+//!   thermal zones (ADR 0203), as Linux's ACPI thermal driver shows them:
+//!   its `type` (`acpitz`), `temp` (thousandths of a degree Celsius, read
+//!   from the zone when opened), `mode` (`enabled`), `policy` and
+//!   `available_policies` (`step_wise`), and each trip point's
+//!   `trip_point_<k>_type`, `_temp` and `_hyst` (0), critical, hot and
+//!   passive in that order; and where the CPUs pick their own speed, a
+//!   `cooling_device<n>` for each (`type` `Processor`, `max_state` 3 and
+//!   `cur_state`, the steps passive cooling slows them by);
+//! - `/kernel/class/hwmon/hwmon<n>`, for the temperature sensors
+//!   (ADR 0205), as Linux's hwmon class shows them: an `acpitz` for the
+//!   thermal zones, a `temp<k>_input` (and `temp<k>_crit`) each; AMD's
+//!   processor sensors, `k10temp`, with `temp<k>_input` and
+//!   `temp<k>_label` (`Tctl`, `Tccd1`...); and a `coretemp` for each of
+//!   Intel's packages, with each sensor's `temp<k>_label` (`Package id
+//!   0`, `Core 0`...), `temp<k>_input`, `temp<k>_crit` (TjMax),
+//!   `temp<k>_max` where the processor gives it and `temp<k>_crit_alarm`;
+//!   and `cros_ec`, Framework's embedded controller's (ADR 0207), with
+//!   each fan's `fan<k>_input` and `fan<k>_fault` and each sensor's
+//!   `temp<k>_input`, `temp<k>_fault` and `temp<k>_label`.
+//!   Each `name` says which, and a sensor that gives no reading fails to
+//!   read (EIO);
 //! - `/kernel/devices/system/cpu`: `possible`, `present` and `online`, the
 //!   CPUs as Linux's lists (`0-7`), and where the CPUs pick their own
 //!   speed (ADR 0202), each CPU's `cpufreq/policy<n>`, as Linux's
@@ -58,15 +84,17 @@
 use core::fmt::{self, Write};
 
 use radix_block::DeviceRef;
-use radix_hal::{MemoryKind, MemoryRegion, Smp, Watchdog};
+use radix_hal::{Devices, MemoryKind, MemoryRegion, Smp, Watchdog};
 use radix_klog::TextBuf;
 use radix_sync::Once;
 use radix_vfs::synthetic::{FixedDir, Generated, Generator, Link, ListedDir, Listing, SyntheticFs};
 use radix_vfs::{Error, FsKind, FsRef, KArc, Kind, NodeRef, Result, Text, mem, next_id};
 
+use radix_uacpi::thermal::STEPS;
+
 use super::disk;
-use crate::acpi::devices;
-use crate::{Arch, pstate};
+use crate::acpi::{devices, thermal};
+use crate::{Arch, hwmon, i2c, pstate};
 
 static COMMAND_LINE: Once<&'static str> = Once::new();
 static ROOT: Once<KArc<FixedDir>> = Once::new();
@@ -92,11 +120,25 @@ pub fn make() -> Result<FsRef> {
     let pci = bus.add_dir("pci", next_id())?;
     let devices: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(PciDevices)?;
     pci.add("devices", ListedDir::make(next_id(), devices)?)?;
+    if i2c::found() {
+        let i2c = bus.add_dir("i2c", next_id())?.add_dir("devices", next_id())?;
+        let adapter = i2c.add_dir("i2c-0", next_id())?;
+        adapter.add(
+            "name",
+            value(|text| {
+                Arch::smbus_name(text)?;
+                writeln!(text)
+            })?,
+        )?;
+    }
     let firmware = root.add_dir("firmware", next_id())?;
     let memmap: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(MemoryMap)?;
     firmware.add("memmap", ListedDir::make(next_id(), memmap)?)?;
     let power = devices::batteries().next().is_some() || devices::adapters().next().is_some();
-    let class = if crate::watchdog::found().is_some() || power {
+    let thermal = thermal::zones().next().is_some();
+    let mut monitors = false;
+    hwmon::devices(&mut |_| monitors = true);
+    let class = if crate::watchdog::found().is_some() || power || thermal || monitors {
         Some(root.add_dir("class", next_id())?)
     } else {
         None
@@ -122,6 +164,12 @@ pub fn make() -> Result<FsRef> {
     }
     if power && let Some(class) = &class {
         power_supply(class)?;
+    }
+    if thermal && let Some(class) = &class {
+        thermal_class(class)?;
+    }
+    if monitors && let Some(class) = &class {
+        hwmon_class(class)?;
     }
     let system = root.add_dir("devices", next_id())?.add_dir("system", next_id())?;
     cpu(&system)?;
@@ -169,6 +217,92 @@ fn power_supply(class: &FixedDir) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// `/kernel/class/thermal`: the firmware's thermal zones, and the CPUs
+/// their passive cooling slows.
+fn thermal_class(class: &FixedDir) -> Result<()> {
+    let dir = class.add_dir("thermal", next_id())?;
+    if pstate::driver().is_some() {
+        for (index, _) in pstate::cpus().enumerate() {
+            let mut name = TextBuf::<24>::new();
+            let _ = write!(name, "cooling_device{index}");
+            let device = dir.add_dir(name.as_str(), next_id())?;
+            device.add("type", value(|text| writeln!(text, "Processor"))?)?;
+            device.add("max_state", value(|text| writeln!(text, "{STEPS}"))?)?;
+            device.add("cur_state", value(|text| writeln!(text, "{}", pstate::step()))?)?;
+        }
+    }
+    for (index, zone) in thermal::zones().enumerate() {
+        let mut name = TextBuf::<24>::new();
+        let _ = write!(name, "thermal_zone{index}");
+        let zone_dir = dir.add_dir(name.as_str(), next_id())?;
+        zone_dir.add("type", value(|text| writeln!(text, "acpitz"))?)?;
+        zone_dir.add(
+            "temp",
+            value(move |text| {
+                let now = zone.temperature().ok_or(fmt::Error)?;
+                writeln!(text, "{}", now.millicelsius())
+            })?,
+        )?;
+        zone_dir.add("mode", value(|text| writeln!(text, "enabled"))?)?;
+        zone_dir.add("policy", value(|text| writeln!(text, "step_wise"))?)?;
+        zone_dir.add("available_policies", value(|text| writeln!(text, "step_wise"))?)?;
+        for (trip, (kind, _)) in zone.trips().listed().enumerate() {
+            let mut name = TextBuf::<32>::new();
+            let _ = write!(name, "trip_point_{trip}_type");
+            zone_dir.add(name.as_str(), value(move |text| writeln!(text, "{kind}"))?)?;
+            name.clear();
+            let _ = write!(name, "trip_point_{trip}_temp");
+            // As the firmware last said, which it may change (0x81).
+            let temp = move |text: &mut Text| {
+                let (_, at) =
+                    zone.trips().listed().find(|&(now, _)| now == kind).ok_or(fmt::Error)?;
+                writeln!(text, "{}", at.millicelsius())
+            };
+            zone_dir.add(name.as_str(), value(temp)?)?;
+            name.clear();
+            let _ = write!(name, "trip_point_{trip}_hyst");
+            zone_dir.add(name.as_str(), value(|text| writeln!(text, "0"))?)?;
+        }
+    }
+    Ok(())
+}
+
+/// `/kernel/class/hwmon`: the temperature sensors.
+fn hwmon_class(class: &FixedDir) -> Result<()> {
+    let dir = class.add_dir("hwmon", next_id())?;
+    let mut index = 0;
+    let mut result = Ok(());
+    hwmon::devices(&mut |device| {
+        if result.is_ok() {
+            result = hwmon_device(&dir, index, device);
+            index += 1;
+        }
+    });
+    result
+}
+
+/// `hwmon<index>`, for `device`.
+fn hwmon_device(dir: &FixedDir, index: usize, device: hwmon::Device) -> Result<()> {
+    let mut name = TextBuf::<16>::new();
+    let _ = write!(name, "hwmon{index}");
+    let device_dir = dir.add_dir(name.as_str(), next_id())?;
+    let device_name = device.name();
+    device_dir.add("name", value(move |text| writeln!(text, "{device_name}"))?)?;
+    let mut result = Ok(());
+    hwmon::channels(device, &mut |channel| {
+        for &file in channel.files() {
+            if result.is_err() {
+                return;
+            }
+            let mut name = TextBuf::<32>::new();
+            let _ = write!(name, "{}{}_{}", channel.kind(), channel.number(), file.suffix());
+            result = value(move |text| hwmon::write_file(channel, file, text))
+                .and_then(|generated| device_dir.add(name.as_str(), generated));
+        }
+    });
+    result
 }
 
 /// `/kernel/devices/system/cpu`: the CPUs' lists, and each CPU's

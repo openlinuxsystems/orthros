@@ -41,6 +41,12 @@ const QEMU_EXIT_POWER_OFF: i32 = 0;
 /// argument `run_case` replaces with the file it writes it to.
 const POWER_AML: &[u8] = include_bytes!("acpi/power.aml");
 const POWER_TABLE: &str = "file=power.aml";
+/// The SSDT `acpi-thermal` gives QEMU (`src/acpi/thermal.asl`), likewise.
+const THERMAL_AML: &[u8] = include_bytes!("acpi/thermal.aml");
+const THERMAL_TABLE: &str = "file=thermal.aml";
+/// The SSDT of the `framework-ec` case: a Framework EC's ACPI device.
+const CROSEC_AML: &[u8] = include_bytes!("acpi/crosec.aml");
+const CROSEC_TABLE: &str = "file=crosec.aml";
 /// The release's name, which the kernel's banner gives after its version
 /// (`BANNER` in kernel/radix/src/main.rs) and the console's greeting
 /// begins with (userspace/defaults/issue).
@@ -60,6 +66,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-bootinfo",
     "radix-btrfs",
     "radix-cap",
+    "radix-crosec",
     "radix-elf",
     "radix-exfat",
     "radix-ext4",
@@ -86,6 +93,8 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-relocs",
     "radix-sched",
     "radix-scsi",
+    "radix-sensors",
+    "radix-smbus",
     "radix-sync",
     "radix-tty",
     "radix-uacpi",
@@ -985,6 +994,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "acpi-thermal",
+        about: "QEMU with an ACPI table of the test's: uACPI finds its thermal zone, Linux's /sys/class/thermal shows it at the console, and as it warms past its passive, hot and critical trip points the kernel says so and Spark powers the machine off",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-acpitable", THERMAL_TABLE],
+        script: acpi_thermal,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "usb-devices",
         about: "the xHCI controller under UEFI names the boot stick, a keyboard, two hubs and the devices behind them, follows devices plugged in and pulled out, and has no Debug Capability for dbc",
         firmware: Firmware::Uefi,
@@ -1159,6 +1184,22 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "logging",
+        about: "logd keeps the kernel log, the services' lines among them, as lines of JSON; log, journalctl and dmesg read it by service, level, time and pattern; a program cannot pass its lines off as a service's; logd started again keeps no record twice",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "lockdep -- --services --posix /system/tests/posix/logtest",
+        cpus: 2,
+        memory: "512M",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: logging,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "spark-network",
         about: "Spark gives each service the network its file asks for, and none to one that asks for nothing",
         firmware: Firmware::Uefi,
@@ -1269,6 +1310,54 @@ pub const CASES: &[Case] = &[
         cpu_model: None,
         qemu: &[],
         script: tlb,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "framework-ec",
+        about: "QEMU with an ACPI table of the test's that names a Framework EC: the kernel finds the device, sees no EC's memory map behind it and leaves it alone",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit",
+        cpus: 1,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-acpitable", CROSEC_TABLE],
+        script: framework_ec,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "smbus",
+        about: "the kernel drives the SMBus controller of q35's ICH9 and finds the eight memory modules' EEPROMs QEMU puts on it; Linux's /sys/bus/i2c names its adapter at the console",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "",
+        cpus: 1,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: smbus,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "msr",
+        about: "a read of an MSR the CPU lacks faults and goes on",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "qemu-exit selftest=msr",
+        cpus: 1,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: msr,
         disks: &[],
         second: None,
     },
@@ -2365,11 +2454,15 @@ fn run_case(
     let disks = make_disks(ctx, dir, case, base, root)?;
     let mut extra: Vec<String> = case.qemu.iter().map(ToString::to_string).collect();
     for arg in &mut extra {
-        if arg == POWER_TABLE {
-            let path = dir.join("power.aml");
-            std::fs::write(&path, POWER_AML).map_err(|e| format!("{}: {e}", path.display()))?;
-            *arg = format!("file={}", qemu::option_value(&path));
-        }
+        let (name, aml) = match arg.as_str() {
+            POWER_TABLE => ("power.aml", POWER_AML),
+            THERMAL_TABLE => ("thermal.aml", THERMAL_AML),
+            CROSEC_TABLE => ("crosec.aml", CROSEC_AML),
+            _ => continue,
+        };
+        let path = dir.join(name);
+        std::fs::write(&path, aml).map_err(|e| format!("{}: {e}", path.display()))?;
+        *arg = format!("file={}", qemu::option_value(&path));
     }
     if case.disks.iter().any(|disk| disk.bus == Bus::Sata) {
         extra.extend(["-device".into(), "ich9-ahci,id=sata".into()]);
@@ -3688,7 +3781,7 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Boot complete.")?;
     vm.expect("spark: Spark v2 is process ")?;
     vm.expect("spark: listening at /system/live/spark/control")?;
-    vm.expect("spark: 3 services in /system/settings/spark/services, 3 enabled")?;
+    vm.expect("spark: 4 services in /system/settings/spark/services, 4 enabled")?;
     vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
     vm.expect("consoled: console of ")?;
     vm.expect("consoled: started /system/commands/nukesh on tty1 as process ")?;
@@ -3879,6 +3972,72 @@ fn acpi_power(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.press_power_button()?;
     vm.expect("spark: the power button was pressed; powering off the machine")?;
     vm.expect("Power: powering off (ACPI S5, through uACPI)")?;
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+/// QEMU with [`THERMAL_AML`] (ADR 0203): the kernel logs the zone, Linux's
+/// `/sys/class/thermal` shows it at the console, and once the console has
+/// read its temperature twice it warms 5 °C a read: past its passive trip
+/// point, where QEMU's CPUs cannot be slowed, its hot one, and to its
+/// critical one, where Spark powers the machine off.
+fn acpi_thermal(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect_anywhere(
+        "Thermal: TZ00 is at 45 °C; critical at 80 °C; hot at 70 °C; passive at 60 °C; \
+         looked at when the firmware says it changed",
+    )?;
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // `is` between name and value, so that no needle is in a typed line.
+    vm.type_text(
+        "cd /sys/class/thermal/thermal_zone0; for f in type temp mode policy \
+         trip_point_0_type trip_point_0_temp trip_point_1_type trip_point_1_temp \
+         trip_point_2_type trip_point_2_temp trip_point_2_hyst; do echo \"$f is $(cat $f)\"; \
+         done\n",
+    )?;
+    vm.expect_screen(&[
+        "type is acpitz",
+        "temp is 45000",
+        "mode is enabled",
+        "policy is step_wise",
+        "trip_point_0_type is critical",
+        "trip_point_0_temp is 80000",
+        "trip_point_1_type is hot",
+        "trip_point_1_temp is 70000",
+        "trip_point_2_type is passive",
+        "trip_point_2_temp is 60000",
+        "trip_point_2_hyst is 0",
+    ])?;
+    // The zone as hwmon's `acpitz` shows it: its fourth read.
+    vm.type_text(
+        "clear; cd /sys/class/hwmon/hwmon0; for f in name temp1_input temp1_crit; do \
+         echo \"$f is $(cat $f)\"; done\n",
+    )?;
+    vm.expect_screen(&["name is acpitz", "temp1_input is 45000", "temp1_crit is 80000"])?;
+    // The zone's fifth read: it says it changed, and warms from there, so
+    // fast that the machine may be off before a screenshot.
+    vm.type_text("clear; cat /sys/class/thermal/thermal_zone0/temp\n")?;
+    let slow = "the firmware picks the CPUs' speed, so the kernel cannot slow them";
+    for line in [
+        format!(
+            "Thermal: TZ00 is at 60 °C, at or past its passive trip point, 60 °C: {slow} (1 of 3)"
+        ),
+        format!(
+            "Thermal: TZ00 is at 65 °C, at or past its passive trip point, 60 °C: {slow} (2 of 3)"
+        ),
+        "Thermal: TZ00 is at 70 °C, at or past its hot trip point, 70 °C".into(),
+        format!(
+            "Thermal: TZ00 is at 70 °C, at or past its passive trip point, 60 °C: {slow} (3 of 3)"
+        ),
+        "Thermal: TZ00 is at 80 °C, at or past its critical trip point, 80 °C: powering off".into(),
+        "Power: TZ00 is too hot; asking Spark to power the machine off".into(),
+        "spark: the power button was pressed; powering off the machine".into(),
+        "Power: `spark` asked to power off the machine; syncing the filesystems".into(),
+        "Power: powering off (ACPI S5, through uACPI)".into(),
+    ] {
+        vm.expect(&line)?;
+    }
     vm.expect_exit(QEMU_EXIT_POWER_OFF)
 }
 
@@ -4286,6 +4445,51 @@ fn mm_stress(vm: &mut Vm, case: &Case) -> Result<(), String> {
 fn tlb(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     selftest_passed(vm, "tlb")?;
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+/// QEMU with [`CROSEC_AML`] (ADR 0207): the kernel finds the EC's ACPI
+/// device, and the memory map it reads at 0xe00 is the empty bus's.
+fn framework_ec(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect_anywhere(
+        "EC: the firmware names FRMWC004, but its memory map does not say EC at port 0xe00; \
+         it is not used",
+    )?;
+    vm.expect("Boot complete.")?;
+    vm.expect_exit(QEMU_EXIT_SUCCESS)
+}
+
+fn smbus(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    // Said after the PCI scan, among the lines the boot report reads past.
+    vm.expect_anywhere(
+        "SMBus: Intel's controller (8086:2930) at port 0x700 (SMBus I801 adapter at 0700); \
+         memory modules' EEPROMs answer at 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57",
+    )?;
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty1)"), "# "])?;
+    // `is` between name and value, so that no needle is in a typed line.
+    vm.type_text("echo \"name is $(cat /sys/bus/i2c/devices/i2c-0/name)\"\n")?;
+    vm.expect_screen(&["name is SMBus I801 adapter at 0700"])?;
+    vm.type_text("poweroff\n")?;
+    vm.expect("spark: asked to power off the machine")?;
+    vm.expect("Power: `spark` asked to power off the machine; syncing the filesystems")?;
+    // QEMU ends when the guest enters ACPI's S5.
+    vm.expect_exit(QEMU_EXIT_POWER_OFF)
+}
+
+fn msr(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    if vm.kvm {
+        selftest_passed(vm, "msr")?;
+    } else {
+        // QEMU's emulation reads MSRs it does not know as 0, so only KVM,
+        // as on CI, makes the read fault.
+        vm.expect("selftest msr: skipped; MSR 2FFF_FFFFh, which no processor has, read as 0x0")?;
+        vm.expect("Boot complete.")?;
+    }
     vm.expect_exit(QEMU_EXIT_SUCCESS)
 }
 
@@ -6594,6 +6798,29 @@ fn spark_oom(vm: &mut Vm, case: &Case) -> Result<(), String> {
         return Err("the log does not show hog's own line, \"hog: taking memory\"".into());
     }
     Ok(())
+}
+
+/// The `logging` test: logd(8) starts with the services and keeps the
+/// kernel log; logtest (userspace/posix/logtest.c) checks what log(1),
+/// journalctl(1) and dmesg(1) show of it, and that logd started again
+/// keeps no record twice (ADR 0210).
+fn logging(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_anywhere("logd: keeping the log in /system/state/log")?;
+    vm.expect_ahead("spark: started /system/tests/posix/logtest as process ")?;
+    let code = program_line(vm, "(/system/tests/posix/logtest) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> =
+        log.lines().filter(|line| line.contains("logtest: FAILED")).map(str::trim).collect();
+    if !failed.is_empty() {
+        return Err(format!("logtest failed: {}", failed.join("; ")));
+    }
+    if code != "0x0" || !log.contains("logtest: every check passed") {
+        return Err(format!("logtest exited with code {code}"));
+    }
+    // Spark goes on supervising the services: no line ends the boot.
+    vm.expect_anywhere("logd: keeping the log in /system/state/log, after record ")
 }
 
 /// Spark starts two services that check the network capabilities they

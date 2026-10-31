@@ -26,21 +26,37 @@ const KMSG: &str = "/devices/kmsg";
 const LEVELS: [&str; 8] = ["emerg", "alert", "crit", "err", "warn", "notice", "info", "debug"];
 
 /// A record of the log.
-struct Line {
-    level: u8,
-    usec: u64,
-    text: String,
+pub struct Line {
+    /// Its syslog(3) level.
+    pub level: u8,
+    /// Whether a program wrote it (the user facility), not the kernel.
+    pub user: bool,
+    /// The sequence number of the record since boot.
+    pub seq: u64,
+    /// The process that wrote it, for a program's record.
+    pub process: Option<u64>,
+    pub usec: u64,
+    pub text: String,
 }
 
-/// Parses `/devices/kmsg`'s `PRIORITY,SEQUENCE,MICROSECONDS,-;TEXT`.
-fn parse(record: &[u8]) -> Option<Line> {
+/// Parses `/devices/kmsg`'s `PRIORITY,SEQUENCE,MICROSECONDS,-;TEXT`,
+/// with `,process=N` after the flags for a program's record.
+pub fn parse(record: &[u8]) -> Option<Line> {
     let text = String::from_utf8_lossy(record);
     let (head, body) = text.split_once(';')?;
     let mut fields = head.split(',');
     let priority: u32 = fields.next()?.parse().ok()?;
-    let _seq: u64 = fields.next()?.parse().ok()?;
+    let seq: u64 = fields.next()?.parse().ok()?;
     let usec: u64 = fields.next()?.parse().ok()?;
-    Some(Line { level: (priority & 7) as u8, usec, text: body.trim_end_matches('\n').to_string() })
+    let process = fields.find_map(|f| f.strip_prefix("process=")?.parse().ok());
+    Some(Line {
+        level: (priority & 7) as u8,
+        user: priority >> 3 == 1,
+        seq,
+        process,
+        usec,
+        text: body.trim_end_matches('\n').to_string(),
+    })
 }
 
 /// A level by name or number.
@@ -98,6 +114,8 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let mut time = Time::Boot;
     let mut raw = false;
     let mut decode = false;
+    // Only the kernel's records, or only programs'.
+    let mut only: Option<bool> = None;
     while let Some(arg) = args.next()? {
         match arg {
             Arg::Short('C') => clear = true,
@@ -120,12 +138,14 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             Arg::Long(l) if l == "raw" => raw = true,
             Arg::Short('x') => decode = true,
             Arg::Long(l) if l == "decode" => decode = true,
-            Arg::Short('k' | 'H' | 'L' | 'P') => {}
-            Arg::Long(l) if l == "kernel" || l == "color" || l == "nopager" || l == "human" => {
+            Arg::Short('k') => only = Some(false),
+            Arg::Long(l) if l == "kernel" => only = Some(false),
+            Arg::Short('u') => only = Some(true),
+            Arg::Long(l) if l == "userspace" => only = Some(true),
+            Arg::Short('H' | 'L' | 'P') => {}
+            Arg::Long(l) if l == "color" || l == "nopager" || l == "human" => {
                 let _ = args.optional_value();
             }
-            // Userspace's records: there are none of its own.
-            Arg::Short('u') => return Ok(0),
             Arg::Short('n' | 'D' | 'E') => {
                 return Err(fail("the console's log level cannot be set on Radix".into()));
             }
@@ -162,14 +182,17 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             break;
         }
         let Some(line) = parse(&buffer[..n]) else { continue };
-        if levels.as_ref().is_some_and(|l| !l.contains(&line.level)) {
+        if levels.as_ref().is_some_and(|l| !l.contains(&line.level))
+            || only.is_some_and(|user| user != line.user)
+        {
             continue;
         }
         let mut text = String::new();
         if raw {
-            text.push_str(&format!("<{}>", line.level));
+            text.push_str(&format!("<{}>", line.level + if line.user { 8 } else { 0 }));
         } else if decode {
-            text.push_str(&format!("{:<6}:{:<6}: ", "kern", LEVELS[line.level as usize]));
+            let facility = if line.user { "user" } else { "kern" };
+            text.push_str(&format!("{facility:<6}:{:<6}: ", LEVELS[line.level as usize]));
         }
         match time {
             Time::None => {}
@@ -226,8 +249,12 @@ mod tests {
     fn records_and_levels() {
         let line = parse(b"6,12,1500000,-;spark: started\n").unwrap();
         assert_eq!(line.level, 6);
+        assert!(!line.user && line.process.is_none());
         assert_eq!(line.usec, 1_500_000);
         assert_eq!(line.text, "spark: started");
+        let line = parse(b"14,13,1500001,-,process=1;spark[3]: started\n").unwrap();
+        assert_eq!((line.level, line.user, line.seq, line.process), (6, true, 13, Some(1)));
+        assert_eq!(line.text, "spark[3]: started");
         assert!(parse(b"garbage").is_none());
         assert_eq!(level("err"), Some(3));
         assert_eq!(level("warning"), Some(4));

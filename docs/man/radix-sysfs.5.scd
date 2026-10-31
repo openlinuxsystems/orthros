@@ -130,6 +130,12 @@ _/kernel/bus/pci/devices/_*address*_/subsystem_vendor_, _subsystem_device_
 	found is listed, whether or not a driver uses it. *lspci*(8) reads
 	them.
 
+_/kernel/bus/i2c/devices/i2c-0/name_
+	When the kernel drives the chipset's SMBus controller (ADR 0206),
+	its adapter's name, as Linux gives it: *SMBus I801 adapter at 0700*
+	for Intel's, with its I/O port in hexadecimal, or *SMBus PIIX4
+	adapter port 0 at 0b00* for that of AMD's FCH.
+
 _/kernel/firmware/memmap/_*n*_/start_, _end_, _type_
 	The firmware's memory map, as the boot loader gave it to the kernel,
 	a directory a range numbered from *0* in its order, as Linux's
@@ -190,6 +196,64 @@ _/kernel/class/power_supply/_*name*_/model_name_, _manufacturer_, _serial_number
 	A value the battery does not know, and any but _type_ and _present_
 	while its bay is empty, fails to read with EIO, as Linux's fail with
 	ENODEV.
+
+_/kernel/class/thermal/thermal_zone_*n*_/type_, _temp_
+	For each thermal zone of the firmware's (*dukovo-boot*(7)'s *ACPI*),
+	in the order the namespace has them, as Linux's ACPI thermal driver
+	shows it: *acpitz*, and its temperature in thousandths of a degree
+	Celsius, read from the zone's _\_TMP_ when the file is opened. It
+	fails to read with EIO if _\_TMP_ fails. The sensors program of
+	lm-sensors and the desktops' widgets read these.
+
+_/kernel/class/thermal/thermal_zone_*n*_/mode_, _policy_, _available_policies_
+	*enabled*, and *step_wise*, the only governor of the passive
+	cooling.
+
+_/kernel/class/thermal/thermal_zone_*n*_/trip_point_*k*_type_, _trip_point_*k*_temp_, _trip_point_*k*_hyst_
+	Its trip points, in Linux's order: *critical*, *hot* and *passive*,
+	each where the zone has one; its temperature, in thousandths of a
+	degree Celsius, as the firmware last said it; and *0*.
+
+_/kernel/class/thermal/cooling_device_*n*_/type_, _max_state_, _cur_state_
+	Where the CPUs pick their own speed (*dukovo-boot*(7)'s *CPU
+	FREQUENCY*), one for each: *Processor*; *3*; and how many steps,
+	each a fifth of their highest level, passive cooling slows them by.
+
+_/kernel/class/hwmon/hwmon_*n*_/name_
+	The temperature sensors, as Linux's hwmon class shows them, numbered
+	in this order: *acpitz*, the thermal zones, if the firmware has any;
+	*k10temp*, the sensors of AMD's Zen processors; a *coretemp* for
+	each package of Intel's processors (*dukovo-boot*(7)'s *SENSORS*);
+	and *cros_ec*, the fans and sensors of Framework's embedded
+	controller (*dukovo-boot*(7)'s *EMBEDDED CONTROLLER*). The sensors
+	program of lm-sensors reads these.
+
+_/kernel/class/hwmon/hwmon_*n*_/temp_*k*_input_, _temp_*k*_label_
+	A sensor's temperature, in thousandths of a degree Celsius, read
+	when the file is opened, and its name. For *acpitz*, the _k_-th
+	zone's, without a label. For *k10temp*, *Tctl* (_temp1_), the
+	temperature the processor's cooling acts on, and on models whose
+	dies' registers Linux knows *Tccd1*, *Tccd2*... (from _temp3_), each
+	core complex die's. For *coretemp*, *Package id* _p_ (_temp1_) and
+	*Core* _c_ (_temp_*c+2*), read on a CPU of that package or core at
+	most once a second. For *cros_ec*, each sensor the EC's memory map
+	has, _temp1_ for its first place, with the name the EC gives it
+	(*power-f75303*, *amd-apu*...). A sensor that gives no reading, as
+	Intel's below the temperature they can measure, fails to read with
+	EIO.
+
+_/kernel/class/hwmon/hwmon_*n*_/temp_*k*_fault_, _fan_*k*_input_, _fan_*k*_fault_
+	For *cros_ec*: *1* while the EC says the sensor failed, is not
+	powered or not calibrated, else *0*; each fan's speed, in
+	revolutions a minute, *0* when it is stopped or stalled; and *1*
+	while an older EC says the fan stalled, else *0*.
+
+_/kernel/class/hwmon/hwmon_*n*_/temp_*k*_crit_, _temp_*k*_max_, _temp_*k*_crit_alarm_
+	For *acpitz*, a zone's critical trip point, where it has one. For
+	*coretemp*: TjMax, where the processor's thermal control starts (100
+	°C where it does not say); where it gives one, the temperature the
+	control aims to keep below; and *1* once the critical temperature
+	was reached, else *0*.
 
 _/kernel/devices/system/cpu/possible_, _present_, _online_
 	The CPUs the machine has, and those that run threads, as Linux's

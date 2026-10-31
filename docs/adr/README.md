@@ -192,3 +192,9 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0200](0200-uacpi-runs-the-firmwares-aml-in-the-kernel.md) | uACPI runs the firmware's AML in the kernel | Accepted |
 | [0201](0201-batteries-adapters-and-lids-through-uacpi.md) | Batteries, AC adapters and lids through uACPI, and the embedded controller | Accepted |
 | [0202](0202-cpu-frequency-through-hwp-and-cppc.md) | CPU frequency through Intel's HWP and AMD's CPPC | Accepted |
+| [0203](0203-thermal-zones-through-uacpi.md) | Thermal zones through uACPI | Accepted |
+| [0204](0204-zens-scalable-machine-check-banks.md) | Zen's scalable machine-check banks | Accepted |
+| [0205](0205-the-cpus-temperature-sensors.md) | The CPUs' temperature sensors | Accepted |
+| [0206](0206-the-chipsets-smbus-controller.md) | The chipset's SMBus controller | Accepted |
+| [0207](0207-framework-embedded-controller.md) | Framework's embedded controller | Accepted |
+| [0210](0210-logd-keeps-the-kernel-log-as-the-system-log.md) | logd keeps the kernel log as the system's log, and the kernel says which process wrote each record | Accepted |

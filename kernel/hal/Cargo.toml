@@ -13,6 +13,7 @@ publish.workspace = true
 [dependencies]
 radix-hw = { path = "../lib/hw" }
 radix-pstate = { path = "../lib/pstate" }
+radix-sensors = { path = "../lib/sensors" }
 
 [lints]
 workspace = true

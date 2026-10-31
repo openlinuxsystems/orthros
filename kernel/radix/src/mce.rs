@@ -160,14 +160,15 @@ pub fn start(seconds: Option<&str>) {
             DEFAULT_SECONDS
         }
     };
+    let kind = if Arch::scalable_machine_checks() { " of AMD's scalable kind" } else { "" };
     match Arch::corrected_error_interrupt() {
         Some(how) => info!(
-            "Machine check: {banks} banks on each CPU, read at boot and every {seconds} s, and \
-             when {how} says they corrected errors"
+            "Machine check: {banks} banks{kind} on each CPU, read at boot and every {seconds} s, \
+             and when {how} says they corrected errors"
         ),
-        None => {
-            info!("Machine check: {banks} banks on each CPU, read at boot and every {seconds} s");
-        }
+        None => info!(
+            "Machine check: {banks} banks{kind} on each CPU, read at boot and every {seconds} s"
+        ),
     }
     Arch::set_corrected_error_handler(on_interrupt);
     let options = Options::new().pinned(HOME).policy(Policy::Fair { nice: 0 });

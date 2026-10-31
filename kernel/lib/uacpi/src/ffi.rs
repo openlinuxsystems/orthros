@@ -57,6 +57,10 @@ const LOG_WARN: u32 = 2;
 const LOG_INFO: u32 = 3;
 /// `uacpi_iteration_decision`: go on.
 const ITERATION_CONTINUE: u32 = 0;
+/// `uacpi_object_type_bits`: thermal zones.
+const THERMAL_ZONE_BIT: u32 = 1 << 13;
+/// `UACPI_MAX_DEPTH_ANY`.
+const MAX_DEPTH_ANY: u32 = u32::MAX;
 /// `uacpi_address_space`: the embedded controller's.
 const ADDRESS_SPACE_EMBEDDED_CONTROLLER: u32 = 3;
 /// `uacpi_region_op`: a read, then a write.
@@ -126,6 +130,15 @@ unsafe extern "C" {
     fn uacpi_object_get_string_or_buffer(object: Handle, out: *mut DataView) -> Status;
     fn uacpi_object_get_package(object: Handle, out: *mut ObjectArray) -> Status;
     fn uacpi_find_devices(hid: *const c_char, callback: IterationCallback, user: Handle) -> Status;
+    fn uacpi_namespace_root() -> Handle;
+    fn uacpi_namespace_for_each_child(
+        parent: Handle,
+        descending: Option<IterationCallback>,
+        ascending: Option<IterationCallback>,
+        types: u32,
+        max_depth: u32,
+        user: Handle,
+    ) -> Status;
     fn uacpi_namespace_node_name(node: Handle) -> u32;
     fn uacpi_namespace_node_generate_absolute_path(node: Handle) -> *const c_char;
     fn uacpi_free_absolute_path(path: *const c_char);
@@ -346,6 +359,36 @@ pub fn find_devices(hid: &CStr, found: &mut dyn FnMut(Node)) {
             Level::Warn,
             format_args!("could not look for {hid:?} devices: {}", Error(status)),
         );
+    }
+}
+
+/// Calls `found` with each thermal zone of the namespace, in the order
+/// uACPI walks it.
+pub fn find_thermal_zones(found: &mut dyn FnMut(Node)) {
+    extern "C" fn each(user: Handle, node: Handle, _: u32) -> u32 {
+        // SAFETY: `user` is the `&mut dyn FnMut` below, alive while
+        // `uacpi_namespace_for_each_child` runs.
+        let found = unsafe { &mut *user.cast::<&mut dyn FnMut(Node)>() };
+        if let Some(node) = NonNull::new(node) {
+            found(Node(node));
+        }
+        ITERATION_CONTINUE
+    }
+    let mut found = found;
+    // SAFETY: the root is uACPI's; `each` is handed `found` only.
+    let status = unsafe {
+        uacpi_namespace_for_each_child(
+            uacpi_namespace_root(),
+            Some(each),
+            None,
+            THERMAL_ZONE_BIT,
+            MAX_DEPTH_ANY,
+            (&raw mut found).cast(),
+        )
+    };
+    if status != OK {
+        host()
+            .log(Level::Warn, format_args!("could not look for thermal zones: {}", Error(status)));
     }
 }
 

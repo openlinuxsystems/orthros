@@ -298,6 +298,77 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
     };
 }
 
+// A read of an MSR that may not exist: the #GP an unknown one raises
+// resumes at `radix_rdmsr_safe_fault` ([`rdmsr_fixup`]), which returns
+// false.
+core::arch::global_asm!(
+    r#"
+    .section .text
+    .balign 16
+    .global radix_rdmsr_safe
+radix_rdmsr_safe:
+    mov ecx, edi
+    .global radix_rdmsr_safe_insn
+radix_rdmsr_safe_insn:
+    rdmsr
+    shl rdx, 32
+    or rax, rdx
+    mov [rsi], rax
+    mov eax, 1
+    ret
+    .global radix_rdmsr_safe_fault
+radix_rdmsr_safe_fault:
+    xor eax, eax
+    ret
+"#
+);
+
+unsafe extern "sysv64" {
+    /// Reads `msr` into `value`; returns whether it could.
+    fn radix_rdmsr_safe(msr: u32, value: *mut u64) -> bool;
+    static radix_rdmsr_safe_insn: u8;
+    static radix_rdmsr_safe_fault: u8;
+}
+
+/// Reads a model-specific register that the processor may not have:
+/// `None` if reading it faulted, as for one CPUID says nothing of or a
+/// hypervisor does not emulate.
+///
+/// # Safety
+///
+/// Reading `msr`, if it exists, must have no side effect that breaks
+/// memory safety.
+pub unsafe fn rdmsr_safe(msr: u32) -> Option<u64> {
+    let mut value = 0;
+    // SAFETY: the caller guarantees a read has no harmful side effect; a
+    // #GP from an unknown MSR resumes at the fault label (`rdmsr_fixup`),
+    // and the function writes only `value`.
+    unsafe { radix_rdmsr_safe(msr, &raw mut value) }.then_some(value)
+}
+
+/// The `msr` self-test: EFER, which every x86-64 processor has, must read
+/// as long mode's; MSR 2FFF_FFFFh, which none has, must fault, and the
+/// read go on. Returns what that read gave where it did not fault, as
+/// QEMU without KVM reads MSRs it does not know as 0.
+pub fn self_test_rdmsr_safe() -> Result<Option<u64>, &'static str> {
+    // SAFETY: reading EFER changes nothing.
+    let efer = unsafe { rdmsr_safe(msr::EFER) };
+    // EFER.LMA: long mode is active.
+    if efer.is_none_or(|value| value & (1 << 10) == 0) {
+        return Err("EFER did not read as long mode's");
+    }
+    // SAFETY: no processor or hypervisor defines an MSR outside the
+    // ranges Intel and AMD define, so the read faults or, where a
+    // hypervisor ignores it, changes nothing.
+    Ok(unsafe { rdmsr_safe(0x2fff_ffff) })
+}
+
+/// Where a #GP at `rip` resumes, if `rdmsr_safe`'s read raised it.
+pub fn rdmsr_fixup(rip: u64) -> Option<u64> {
+    (rip == &raw const radix_rdmsr_safe_insn as u64)
+        .then_some(&raw const radix_rdmsr_safe_fault as u64)
+}
+
 /// Reads CR0.
 pub fn cr0() -> u64 {
     let value: u64;

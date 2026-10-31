@@ -509,7 +509,7 @@ fn handle(vector: u8, frame: &mut TrapFrame) {
         }
         2 => nmi(frame),
         3 => breakpoint(frame),
-        13 | 14 => match copy_fixup(vector, frame) {
+        13 | 14 => match msr_fixup(vector, frame).or_else(|| copy_fixup(vector, frame)) {
             Some(resume) => frame.rip = resume,
             None => fatal_exception(frame),
         },
@@ -524,6 +524,12 @@ fn handle(vector: u8, frame: &mut TrapFrame) {
             crate::apic::end_of_interrupt();
         }
     }
+}
+
+/// Where a protection fault resumes, if it was a read of an MSR that may
+/// not exist (`cpu::rdmsr_safe`).
+fn msr_fixup(vector: u8, frame: &TrapFrame) -> Option<u64> {
+    if vector == 13 { cpu::rdmsr_fixup(frame.rip) } else { None }
 }
 
 /// Where a kernel-mode page or protection fault resumes, if it hit a user

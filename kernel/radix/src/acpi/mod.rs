@@ -17,12 +17,15 @@
 //! Once uACPI runs, `devices` finds the firmware's batteries, AC
 //! adapters, lids and power buttons of the namespace (ADR 0201); laptops
 //! reach them through the embedded controller, which uACPI's side serves
-//! before the namespace's `_INI` methods run.
+//! before the namespace's `_INI` methods run. `thermal` finds its thermal
+//! zones and watches them, slowing the CPUs at their passive trip points
+//! and powering off at their critical ones (ADR 0203).
 //!
 //! With `aml=off`, or if uACPI cannot start, no AML runs, and the kernel
 //! hears the fixed power button by itself as before (ADR 0142).
 
 pub mod devices;
+pub mod thermal;
 
 use core::alloc::Allocator;
 use core::fmt::{self, Write};
@@ -96,6 +99,7 @@ pub fn start(off: bool) {
             }
             info!("ACPI: uACPI {} runs the firmware's AML", radix_uacpi::VERSION);
             devices::find();
+            thermal::find();
         }
         Err(err) => error!("ACPI: uACPI {err}; no AML runs"),
     }

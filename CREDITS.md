@@ -45,6 +45,7 @@ project's design, it adds the project here (see
 | The other crates the uutils programs link, from crates.io, among them [clap](https://github.com/clap-rs/clap), [regex](https://github.com/rust-lang/regex), [jiff](https://github.com/BurntSushi/jiff), [memchr](https://github.com/BurntSushi/memchr) and [bstr](https://github.com/BurntSushi/bstr) by Andrew Gallant, [chrono](https://github.com/chronotope/chrono), [ICU4X](https://github.com/unicode-org/icu4x) by the Unicode Consortium, [Fluent](https://github.com/projectfluent/fluent-rs) by Mozilla, the [RustCrypto](https://github.com/RustCrypto) hashes, [BLAKE3](https://github.com/BLAKE3-team/BLAKE3), [num-bigint](https://github.com/rust-num/num-bigint), [rayon](https://github.com/rayon-rs/rayon), [crossterm](https://github.com/crossterm-rs/crossterm), [indicatif](https://github.com/console-rs/indicatif), [notify](https://github.com/notify-rs/notify) and [Oniguruma](https://github.com/kkos/oniguruma) by K. Kosako, built by onig_sys for `expr` | What the utilities are made of; every one, with its version and license, is in the image's license manifest | MIT, Apache-2.0, Unlicense, Unicode-3.0, BSD-2-Clause, BSD-3-Clause, Zlib, CC0-1.0 (each as the manifest gives it) |
 | [reedline](https://github.com/nushell/reedline) 0.52.1 by the Nushell project, with [crossterm](https://github.com/crossterm-rs/crossterm) 0.29, [signal-hook](https://github.com/vorner/signal-hook) and signal-hook-mio by Michal Vaner, [nu-ansi-term](https://github.com/nushell/nu-ansi-term), [vte](https://github.com/alacritty/vte) by the Alacritty project, [strip-ansi-escapes](https://github.com/luser/strip-ansi-escapes), [unicode-width](https://github.com/unicode-rs/unicode-width), [unicode-segmentation](https://github.com/unicode-rs/unicode-segmentation), [chrono](https://github.com/chronotope/chrono), [parking_lot](https://github.com/Amanieu/parking_lot) by Amanieu d'Antras, [strum](https://github.com/Peternator7/strum), [derive_more](https://github.com/JelteF/derive_more), [indexmap](https://github.com/indexmap-rs/indexmap) and the crates they use, from crates.io | Nukesh's line editor and the terminal handling under it ([ADR 0083](docs/adr/0083-nukesh-the-shell.md)), and the ordered tables of its variables and functions; every one, with its version and license, is in the image's license manifest | MIT, Apache-2.0 OR MIT (each as the manifest gives it; unicode-ident also Unicode-3.0, memchr Unlicense OR MIT) |
 | [vte](https://github.com/alacritty/vte) 0.14.1 by Joe Wilm and Christian Duerr of the Alacritty project, after Paul Williams' state machine of DEC's terminals, with [memchr](https://github.com/BurntSushi/memchr) by Andrew Gallant, from crates.io | The escape-sequence parser of consoled's virtual consoles ([ADR 0100](docs/adr/0100-consoled-virtual-consoles-in-a-program.md)) | Apache-2.0 OR MIT (memchr: Unlicense OR MIT) |
+| [serde](https://github.com/serde-rs/serde) 1.0.229 and [serde_json](https://github.com/serde-rs/json) 1.0.154 by Erick Tryzelaar and David Tolnay, with [itoa](https://github.com/dtolnay/itoa) and [zmij](https://github.com/dtolnay/zmij) by David Tolnay and [memchr](https://github.com/BurntSushi/memchr) by Andrew Gallant, from crates.io | The system log's records and requests as lines of JSON, in logd, log and journalctl ([ADR 0210](docs/adr/0210-logd-keeps-the-kernel-log-as-the-system-log.md)) | MIT OR Apache-2.0 (zmij: MIT; memchr: Unlicense OR MIT) |
 | [smoltcp](https://github.com/smoltcp-rs/smoltcp) 0.14.0 by whitequark and the smoltcp contributors (patched, [ADR 0182](docs/adr/0182-the-kernel-patches-smoltcp-so-socket-memory-comes-back.md)), with [heapless](https://github.com/rust-embedded/heapless) by Jorge Aparicio, Per Lindgren, Emil Fresk and its contributors, [hash32](https://github.com/japaric/hash32) by Jorge Aparicio and [stable_deref_trait](https://github.com/storyyeller/stable_deref_trait) by Robert Grosse, [managed](https://github.com/m-labs/rust-managed) by whitequark, [byteorder](https://github.com/BurntSushi/byteorder) by Andrew Gallant, [bitflags](https://github.com/bitflags/bitflags) 1 and [cfg-if](https://github.com/rust-lang/cfg-if), from crates.io | The kernel's TCP/IP stack, in `kernel/net` ([ADR 0180](docs/adr/0180-the-tcp-ip-stack-runs-in-the-kernel-on-smoltcp.md)) | 0BSD (smoltcp, managed); MIT OR Apache-2.0 (heapless, hash32, stable_deref_trait, bitflags, cfg-if); Unlicense OR MIT (byteorder) |
 | [ncurses](https://invisible-island.net/ncurses/) 6.6 by Thomas E. Dickey, and before him Zeyd M. Ben-Halim, Eric S. Raymond, Juergen Pfeifer and the Free Software Foundation | The terminal library less is built on, the terminal descriptions in `/system/resources/terminfo`, and `tput`, `tset`, `reset`, `clear`, `tic` and `infocmp` ([ADR 0086](docs/adr/0086-release-archives-and-autoconf-ports.md)) | X11-distribute-modifications-variant |
 | [zlib](https://zlib.net) 1.3.2 by Jean-loup Gailly and Mark Adler | Compression, for `man` to read compressed manual pages | Zlib |
@@ -347,6 +348,56 @@ We implement these from their published descriptions. No code is copied.
   `drivers/cpufreq/intel_pstate.c` and `amd-pstate.c` (GPL-2.0) and its
   `Documentation/admin-guide/pm/intel_pstate.rst` and `amd-pstate.rst`
   ([ADR 0202](docs/adr/0202-cpu-frequency-through-hwp-and-cppc.md)).
+  No code is taken from them.
+- Zen's scalable machine-check registers (MCA_CONFIG, MCA_IPID,
+  MCA_SYND, MCA_DESTAT and MCA_DEADDR) and the hardware IDs and types of
+  its banks' blocks are those of AMD's Processor Programming Reference
+  for family 19h and 1Ah. Setting `McaX`, reading a memory controller's
+  channel from its instance ID and clearing MCA_DESTAT follow Linux's
+  `arch/x86/kernel/cpu/mce/amd.c` and `drivers/edac/amd64_edac.c`
+  (GPL-2.0) ([ADR 0204](docs/adr/0204-zens-scalable-machine-check-banks.md)).
+  No code is taken from them.
+- Thermal zones, their trip points and the passive cooling's trend are
+  those of the ACPI specification 6.5 (chapter 11). How `radix-uacpi`
+  reads a zone, which trip points it leaves out as nonsense, the
+  step-wise steps of passive cooling, the fifth of the CPUs' highest
+  level each step takes off, the hardware protection's 30 seconds before
+  a forced power-off, and the files of `/kernel/class/thermal` follow
+  Linux's `drivers/acpi/thermal.c`, `drivers/thermal/gov_step_wise.c`,
+  `drivers/acpi/processor_thermal.c` and `kernel/reboot.c` (GPL-2.0) and
+  its `Documentation/driver-api/thermal/sysfs-api.rst`
+  ([ADR 0203](docs/adr/0203-thermal-zones-through-uacpi.md)).
+  No code is taken from them.
+- The CPUs' temperature sensors: AMD's System Management Network and the
+  SMU's thermal block, from AMD's Processor Programming Reference for
+  families 17h, 19h and 1Ah, and Intel's digital thermal sensors, from
+  Intel's SDM (volume 3, section 15.8). Which of AMD's models have which
+  die registers, the data fabric devices to look for, the root
+  complex's SMN index and data registers, TjMax's default and the files
+  of `/kernel/class/hwmon` follow Linux's `drivers/hwmon/k10temp.c`,
+  `drivers/hwmon/coretemp.c` and `arch/x86/kernel/amd_node.c` (GPL-2.0)
+  and its `Documentation/hwmon/sysfs-interface.rst`; `k10temp`'s die
+  registers come from the zenpower project's experiments
+  ([ADR 0205](docs/adr/0205-the-cpus-temperature-sensors.md)).
+  No code is taken from them.
+- The chipset's SMBus controller: Intel's, from the ICH9 and PCH
+  datasheets, and that of AMD's FCH, from AMD's BIOS and Kernel
+  Developer's Guides and Processor Programming References. The FCH's
+  port selection and host semaphore, the adapters' names and leaving
+  the controller to the firmware's AML follow Linux's
+  `drivers/i2c/busses/i2c-piix4.c` and `i2c-i801.c` (GPL-2.0)
+  ([ADR 0206](docs/adr/0206-the-chipsets-smbus-controller.md)).
+  No code is taken from them.
+- Framework's embedded controller: the Chromium EC's host command
+  protocol, its memory map and its commands, from `include/ec_commands.h`
+  of the Chromium EC (BSD-3-Clause, The ChromiumOS Authors), and
+  Framework's fan configuration command and the Framework Desktop's fans,
+  LEDs and ARGB output, from Framework's fork of it
+  (github.com/FrameworkComputer/EmbeddedController, BSD-3-Clause). Where
+  each machine has the memory map and the files of `cros_ec`'s hwmon
+  device follow Linux's `drivers/platform/chrome/cros_ec_lpc.c` and
+  `drivers/hwmon/cros_ec_hwmon.c` (GPL-2.0)
+  ([ADR 0207](docs/adr/0207-framework-embedded-controller.md)).
   No code is taken from them.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.

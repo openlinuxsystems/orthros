@@ -207,6 +207,9 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   acpi-power       a battery, AC adapter, lid and power button of an ACPI
                    table of the test's, in /sys/class/power_supply and
                    /proc/acpi/button/lid
+  acpi-thermal     a thermal zone of an ACPI table of the test's, in
+                   /sys/class/thermal, warms past its trip points to the
+                   critical one, which powers the machine off
   usb-devices      the xHCI controller names the boot stick, a keyboard, two
                    hubs and the devices behind them, follows devices
                    plugged in and pulled out, and has no Debug Capability
@@ -228,6 +231,8 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
                    swap area Linux's mkswap made on, and gets it all back
   spark-stop       Spark stops a service that ignores SIGTERM, and what a
                    service leaves behind
+  logging          logd keeps the kernel log and the services' lines; log,
+                   journalctl and dmesg read them; a restart keeps none twice
   spark-network    Spark gives each service the network its file asks for
   page-fault       a page fault's panic report, on serial and on screen
   crash-log-uefi   the panic report survives a restart (UEFI)
@@ -235,6 +240,9 @@ userspace/programs/nukesh/tests/corpus.toml. The boot tests are:
   kdb              a breakpoint and every kdb command
   mm-stress        tens of millions of heap objects on 4 CPUs and 2 NUMA nodes
   tlb              TLB shootdowns and address-space switches
+  framework-ec     a Framework EC's ACPI device with no EC behind it
+  smbus            q35's SMBus controller and its memory modules' EEPROMs
+  msr              a read of an MSR the CPU lacks faults and goes on
   caps             no capability forged or widened; revokes against 3 CPUs
   stack-overflow   a kernel stack overflow stops at its guard page
   smep, smap       the kernel cannot run or read a user page
