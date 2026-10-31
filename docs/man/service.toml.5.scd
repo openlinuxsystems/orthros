@@ -180,6 +180,8 @@ at its own path, and what every service has without asking:
   _/devices/urandom_ read-only;
 - _/system/live/notify_, read-only, as notifications are always allowed
   (*notifyd*(8));
+- _/system/live/netd_, read-only, whose _resolv.conf_ _/etc/resolv.conf_
+  leads to, so that the C library finds the DNS servers (*netd*(8));
 - its program;
 - a _/tmp_ of its own, which is _/system/live/spark/tmp/name_ in the
   tree and is emptied at each boot;

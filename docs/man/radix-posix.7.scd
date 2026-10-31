@@ -341,7 +341,12 @@ network's, fails with EACCES unless *SO_BROADCAST* is set, as on Linux.
 and keeps the socket's packets on that interface (ADR 0190); set it
 before a stream socket connects or listens, or it fails with EINVAL. A
 datagram socket bound to a card with no address sends from 0.0.0.0 and
-receives what is broadcast to the card, as a DHCP client needs.
+receives what is broadcast to the card, as a DHCP client needs. Sockets
+bound to different interfaces before their *bind* may share its port,
+one an interface, as on Linux, where one bound to none holds the port
+alone (ADR 0191); one that shares its port cannot then change its
+interface (EINVAL). At most 64 sockets share ports at once, across the
+machine.
 *if_nametoindex*, *if_indextoname* and *if_nameindex* read the
 interfaces' names and numbers from _/kernel/class/net_
 (*radix-sysfs*(5)); *getifaddrs* is not there yet. Keep-alive

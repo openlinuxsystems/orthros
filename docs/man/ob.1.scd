@@ -882,6 +882,22 @@ _target/userspace/_).
 		list; and takes the address and router away again with *ip*(8),
 		each change logged by the kernel (ADR 0190).
 
+	*dhcp*
+		Boot as for *interfaces*, with Spark's services in
+		_/system/tests/services/dhcp_: *netd*(8), which must set the
+		card up by QEMU's DHCP server and say so. Spark starts
+		_/system/tests/posix/dhcp_ beside it with its network capability:
+		the card must have 10.0.2.15/24 and the router,
+		_/etc/resolv.conf_ must lead to netd's, which names QEMU's DNS
+		server, netd must have a lease file, and a connection through
+		the card to QEMU's *cat* must echo; sockets
+		bound to *lo* must share port 68 with netd's, one at a time, and
+		others be refused it; netd started again must go on with its
+		lease, and the connection through it; and with an address of the
+		program's own added, settings that give the card an address must
+		replace the lease, and settings that say nothing bring DHCP's
+		back, the program's address staying through both (ADR 0191).
+
 	*disk-check*
 		Boot 2 CPUs under UEFI with a 128 MiB NVMe disk whose serial
 		number is _dukovo-test-0_, and run the disk check of a real

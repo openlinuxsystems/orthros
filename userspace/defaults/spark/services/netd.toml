@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The network cards: netd(8) sets each up by DHCP, or as
+# /system/settings/network says (network(5), ADR 0191).
+#
+# service.toml(5) explains each setting. `service check netd` checks
+# this file, and `service edit netd` checks it as you save.
+
+service_version = 1
+description = "Network setup"
+program = "/system/commands/netd"
+# After the consoles, before the services that use the network.
+order = 20
+# Started again whenever it ends: always, on-failure or never.
+restart = "always"
+
+[limits]
+memory = "16M"
+
+# What it holds beyond what every service reads (service.toml(5)): its
+# DHCP client's port 68 on each card, the servers' port 67 it sends to,
+# setting the cards up, its leases, and the folder of the resolv.conf it
+# writes, which /etc/resolv.conf leads to.
+[permissions]
+network.outbound = true
+network.listen = [68]
+admin.network = true
+files.read-write = ["/system/state/netd", "/system/live/netd"]

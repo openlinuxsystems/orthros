@@ -2286,6 +2286,22 @@ pub const CASES: &[Case] = &[
         disks: &[],
         second: None,
     },
+    Case {
+        name: "dhcp",
+        about: "netd sets a virtio network card with no address up by DHCP: QEMU's address, router and DNS server, a lease kept and gone on with when netd starts again, port 68 shared with sockets on other interfaces, an administrator's address kept, and the settings file's address in place of DHCP's and back",
+        firmware: Firmware::Uefi,
+        media: Media::Usb,
+        cmdline: "lockdep -- --service-dir /system/tests/services/dhcp --posix --network /system/tests/posix/dhcp",
+        cpus: 2,
+        memory: "1G",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &["-netdev", ECHO_NETDEV, "-device", "virtio-net-pci,netdev=n0"],
+        script: dhcp,
+        disks: &[],
+        second: None,
+    },
 ];
 
 /// `ob test`.
@@ -3920,7 +3936,7 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Boot complete.")?;
     vm.expect("spark: Spark v2 is process ")?;
     vm.expect("spark: listening at /system/live/spark/control")?;
-    vm.expect("spark: 5 services in /system/settings/spark/services, 5 enabled")?;
+    vm.expect("spark: 6 services in /system/settings/spark/services, 6 enabled")?;
     vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
     vm.expect("consoled: console of ")?;
     vm.expect("consoled: started /system/commands/nukesh on tty1 as process ")?;
@@ -4857,6 +4873,35 @@ fn interfaces(vm: &mut Vm, case: &Case) -> Result<(), String> {
         }
     }
     vm.expect("spark: nothing more to do; waiting")
+}
+
+/// Spark starts netd (userspace/spark/tests/services/dhcp) and
+/// userspace/posix/dhcp.c beside it, on a virtio card with no address
+/// (ADR 0191): netd's lease and what it said of it, netd started again
+/// going on with the lease, and the settings file's address and DHCP's
+/// again; the program checks what the card has at each step.
+fn dhcp(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect("spark: 1 services in /system/tests/services/dhcp, 1 enabled")?;
+    // netd and the program run at once: their lines are read ahead.
+    for line in [
+        "netd: net0: asking for an address by DHCP",
+        "netd: net0 has 10.0.2.15/24 from 10.0.2.2 for 1 day, router 10.0.2.2, DNS 10.0.2.3",
+        "dhcp: netd gave net0 10.0.2.15/24, the router and the DNS server",
+        "netd: net0 goes on with its lease of 10.0.2.15/24 from 10.0.2.2",
+        "netd: reading /system/settings/network again",
+        "dhcp: the settings set net0 up, and DHCP again once they said nothing",
+    ] {
+        vm.expect_ahead(line)?;
+    }
+    let code = program_line(vm, "(/system/tests/posix/dhcp) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> = log.lines().filter(|line| line.contains("dhcp: FAILED: ")).collect();
+    if !failed.is_empty() || !log.contains("dhcp: every check passed") || code != "0x0" {
+        return Err(format!("the dhcp test failed ({code}): {}", failed.join("; ")));
+    }
+    Ok(())
 }
 
 fn sockets(vm: &mut Vm, case: &Case) -> Result<(), String> {
@@ -7283,7 +7328,7 @@ fn principals(vm: &mut Vm, case: &Case) -> Result<(), String> {
 fn services(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
-    vm.expect_anywhere("spark: 5 services in /system/settings/spark/services, 5 enabled")?;
+    vm.expect_anywhere("spark: 6 services in /system/settings/spark/services, 6 enabled")?;
     vm.expect_ahead("spark: started /system/tests/posix/servicetest as process ")?;
     let code = program_line(vm, "(/system/tests/posix/servicetest) exited with code ")?;
     let log = vm.log();
