@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The system's log: logd(8) keeps every record of the kernel log, the
+# services' lines among them, in /system/state/log as lines of JSON, one
+# file a day, and answers log(1) and journalctl(1) (ADR 0210).
+#
+# service.toml(5) explains each setting. `service check logd` checks
+# this file, and `service edit logd` checks it as you save.
+
+service_version = 1
+description = "System log"
+program = "/system/commands/logd"
+# Lower starts first: logd does, so that it reads the kernel log before
+# its ring wraps.
+order = 5
+# Started again whenever it ends: always, on-failure or never.
+restart = "always"
+
+[limits]
+memory = "64M"
+
+# What it holds beyond what every service reads (service.toml(5)): the
+# kernel log, which it reads, and the log's folders, which it writes.
+[permissions]
+files.read = ["/devices/kmsg"]
+files.read-write = ["/system/state/log", "/system/live/log"]

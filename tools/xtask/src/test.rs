@@ -1205,6 +1205,54 @@ pub const CASES: &[Case] = &[
         second: None,
     },
     Case {
+        name: "principals",
+        about: "processes and capabilities act for names: alice, with a root stamped for her and no bypass right, cannot read bob's 0700 home, give her files away, remove bob's files from a sticky directory, run a file without an execute bit, or signal, trace or read more than the status of bob's processes, while root's bypass right reaches them all",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "lockdep -- --posix --names /system/tests/posix/principals",
+        cpus: 2,
+        memory: "512M",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: principals,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "views",
+        about: "a view made of attached capabilities, as a session's will be: alice, whose root is one, sees its names at their real paths and nothing past them, with .., getcwd, realpath and links working across them, a /tmp of the session's own, read-only entries and directories of the view's that take nothing, no mount or attach in it, and a view of her own; and what a view refuses to take",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "lockdep -- --posix --names /system/tests/posix/views",
+        cpus: 2,
+        memory: "512M",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: views,
+        disks: &[],
+        second: None,
+    },
+    Case {
+        name: "services",
+        about: "service files in TOML: every shipped one reads with service check and is kept as Spark's last good copy; Spark converts a file of before Phase 13 with its comments as it starts its service; service new writes a template and service edit puts a file in place only once it reads; a file broken under a running service leaves its last good copy running; a service sees only the view its file declares, and reads there the secret service secret set kept for it",
+        firmware: Firmware::Bios,
+        media: Media::Usb,
+        cmdline: "lockdep -- --services --posix /system/tests/posix/servicetest",
+        cpus: 2,
+        memory: "512M",
+        reboot: false,
+        image: TestImage::Plain,
+        cpu_model: None,
+        qemu: &[],
+        script: services,
+        disks: &[],
+        second: None,
+    },
+    Case {
         name: "spark-network",
         about: "Spark gives each service the network its file asks for, and none to one that asks for nothing",
         firmware: Firmware::Uefi,
@@ -2297,6 +2345,7 @@ pub const PROVED_LIBRARIES: &[&str] = &[
     "radix-ext4",
     "radix-ahci",
     "radix-nvme",
+    "radix-net",
 ];
 
 /// `ob test kani`: checks the Kani proof harnesses. They take minutes each,
@@ -3736,7 +3785,7 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     } else {
         vm.expect("Lock checker: ")?;
     }
-    vm.expect("Capabilities: ready; 20 object kinds, 12 rights")?;
+    vm.expect("Capabilities: ready; 21 object kinds, 13 rights")?;
     vm.expect("User mode: SYSCALL/SYSRET entry, user half ")?;
     vm.expect("Files: the root is a tmpfs; Spark mounts the rest")?;
     // Every test image carries the user test programs.
@@ -4729,7 +4778,7 @@ fn net(vm: &mut Vm, case: &Case) -> Result<(), String> {
 /// in the kernel's.
 fn sockets(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
-    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 9 filesystems")?;
     // Both come during the PCI scan, among lines boot_report reads past.
     let log = vm.log();
     for needle in [
@@ -5079,7 +5128,7 @@ fn spark(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: boot archive of ")?;
     vm.expect(" KiB with ")?;
     vm.expect(" files at 0x")?;
-    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 9 filesystems")?;
     // Spark's line and hello's first come in either order: hello may run
     // on another CPU before Spark logs that it started it.
     let from = vm.cursor;
@@ -5262,7 +5311,7 @@ fn volumes_mounted(vm: &mut Vm, case: &Case) -> Result<(), String> {
         ))?;
         vm.expect(&format!("spark: mounted the {said} filesystem of {name} at /volumes/{name}"))?;
     }
-    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 9 filesystems")
 }
 
 /// The end of the storage program: no failed checks, and exit code 0.
@@ -5380,11 +5429,11 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("storage: /processes lists ")?;
     vm.expect("1 spark (running)")?;
     vm.expect("storage (running)")?;
-    // Spark's nine, and the volumes.
+    // Spark's ten, and the volumes.
     let fat = filesystems.iter().filter(|disk| disk.kind().0 == "fat").count();
     vm.expect(&format!(
         "storage: /processes/mounts lists {} mounts, {fat} of them FAT",
-        9 + volumes.len()
+        10 + volumes.len()
     ))?;
     vm.expect("storage: /processes/meminfo: ")?;
     storage_end(vm, "write")
@@ -6306,7 +6355,7 @@ fn root_boot(vm: &mut Vm, first: bool) -> Result<(), String> {
     vm.expect(&mounted)?;
     vm.expect(&format!("{mounted}, compressed (zstd)"))?;
     vm.expect(&format!("spark: /system is Dukovo's root on {disk}, compressed (zstd)"))?;
-    vm.expect("spark: built the hierarchy of 9 directories and mounted 11 filesystems")?;
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 12 filesystems")?;
     let added = program_line(vm, "spark: added ")?;
     if (added == "0 default settings to /system/settings") == first {
         return Err(format!("Spark added {added}"));
@@ -6599,7 +6648,7 @@ fn btrfs_list(vm: &mut Vm, case: &Case) -> Result<(), String> {
             "spark: mounted the Btrfs filesystem of {name} at /volumes/{name}, read-only"
         ))?;
     }
-    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 9 filesystems")?;
     vm.expect_ahead("spark: started /system/tests/storage as process ")?;
     // The program lists the volumes in name order.
     let mut sorted = volumes.clone();
@@ -6888,7 +6937,7 @@ fn raid_boot(vm: &mut Vm, case: &Case, pulled: bool, behind: bool) -> Result<(),
             "spark: {other} holds no FAT, exFAT, Btrfs or ext4 filesystem; left alone"
         ))?;
     }
-    vm.expect("spark: built the hierarchy of 9 directories and mounted 8 filesystems")?;
+    vm.expect("spark: built the hierarchy of 9 directories and mounted 9 filesystems")?;
     vm.expect_ahead("spark: started /system/tests/storage as process ")?;
     Ok(())
 }
@@ -7121,6 +7170,94 @@ fn logging(vm: &mut Vm, case: &Case) -> Result<(), String> {
     }
     // Spark goes on supervising the services: no line ends the boot.
     vm.expect_anywhere("logd: keeping the log in /system/state/log, after record ")
+}
+
+/// The `principals` test: Spark starts principals
+/// (userspace/posix/principals.c) as root with the names capability,
+/// which starts itself as bob and as alice, each with a root of their own
+/// name, and checks the second gate between them (ADR 0214).
+fn principals(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_ahead("spark: started /system/tests/posix/principals as process ")?;
+    let code = program_line(vm, "(/system/tests/posix/principals) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> =
+        log.lines().filter(|line| line.contains("principals: FAILED")).map(str::trim).collect();
+    if !failed.is_empty() {
+        return Err(format!("principals failed: {}", failed.join("; ")));
+    }
+    if code != "0x0" || !log.contains("principals: every check passed") {
+        return Err(format!("principals exited with code {code}"));
+    }
+    vm.expect("spark: nothing more to do; waiting")
+}
+
+/// The `services` test: Spark starts the shipped services from their
+/// TOML files and servicetest (userspace/posix/servicetest.c), which
+/// checks them, has Spark convert an old file, writes and edits a new one,
+/// and breaks one under its running service (ADR 0216).
+fn services(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_anywhere("spark: 5 services in /system/settings/spark/services, 5 enabled")?;
+    vm.expect_ahead("spark: started /system/tests/posix/servicetest as process ")?;
+    let code = program_line(vm, "(/system/tests/posix/servicetest) exited with code ")?;
+    let log = vm.log();
+    // The inside service's lines are Spark's copies of its output.
+    let failed: Vec<&str> = log
+        .lines()
+        .filter(|line| {
+            ["servicetest: FAILED", "inside: FAILED", "is in its view"]
+                .iter()
+                .any(|f| line.contains(f))
+        })
+        .map(str::trim)
+        .collect();
+    if !failed.is_empty() {
+        return Err(format!("servicetest failed: {}", failed.join("; ")));
+    }
+    if code != "0x0" || !log.contains("servicetest: every check passed") {
+        return Err(format!("servicetest exited with code {code}"));
+    }
+    for said in [
+        "inside: every check passed",
+        "spark: could not start inside: its secret token is not set: set it with `service secret \
+         set inside token`",
+        "spark: converted /system/settings/spark/services/legacy.service to legacy.toml; the old \
+         file is legacy.service.old",
+        "spark: /system/settings/spark/services/fresh.toml: line 5: restart must be always, \
+         on-failure or never, not `sometimes`; it is not started",
+        "spark: /system/settings/spark/services/demo.toml: line 5: restart must be always, \
+         on-failure or never, not `sometimes`; it runs its last good copy",
+    ] {
+        if !log.contains(said) {
+            return Err(format!("Spark did not say \"{said}\""));
+        }
+    }
+    Ok(())
+}
+
+/// The `views` test: Spark starts views (userspace/posix/views.c) as
+/// root with the names capability, which builds a view for alice as
+/// authd will build a session's and starts itself as alice in it
+/// (ADR 0215).
+fn views(vm: &mut Vm, case: &Case) -> Result<(), String> {
+    boot_report(vm, case)?;
+    vm.expect("Boot complete.")?;
+    vm.expect_ahead("spark: started /system/tests/posix/views as process ")?;
+    let code = program_line(vm, "(/system/tests/posix/views) exited with code ")?;
+    let log = vm.log();
+    let failed: Vec<&str> =
+        log.lines().filter(|line| line.contains("views: FAILED")).map(str::trim).collect();
+    if !failed.is_empty() {
+        return Err(format!("views failed: {}", failed.join("; ")));
+    }
+    // Alice's run and root's each say so.
+    if code != "0x0" || log.matches("views: every check passed").count() != 2 {
+        return Err(format!("views exited with code {code}"));
+    }
+    vm.expect("spark: nothing more to do; waiting")
 }
 
 /// Spark starts two services that check the network capabilities they

@@ -169,8 +169,10 @@ memory ends the process as SIGKILL would.
 Real-time signals queue with their values, up to 1,024 per process
 (what *RLIMIT_SIGPENDING* says), and are taken lowest number first and
 in order within a number. *kill* may signal the caller, its descendants and the
-processes of its session; *kill(-1, ...)* signals all of those but the
-caller and process 1. Users come later in Phase 13, and with them POSIX's rules.
+processes of its session that act for the same user (EPERM otherwise);
+*kill(-1, ...)* signals all of those but the caller and process 1.
+Tracing (*rtrace*(1)) reaches only the caller's descendants, as Linux's
+Yama has it at level 1 (ADR 0214).
 
 Spark, process 1, takes only the signals it has a handler for, as Linux's
 init does: the others, SIGKILL and SIGSTOP included, are dropped, and a
@@ -319,7 +321,9 @@ EALREADY until then, and EISCONN once connected. A connection to a port
 no one listens on fails with ECONNREFUSED. A listening socket takes up
 to four handshakes at once on each interface, whatever its backlog.
 Each TCP socket has 64 KiB each way, and each UDP socket 64 KiB and 16
-datagrams each way. A TCP connection over the loopback interface passes
+datagrams each way. Each interface holds up to 16,384 sockets, and
+ENOBUFS says it holds that many. A TCP connection closed by its program
+holds no buffers in TIME-WAIT. A TCP connection over the loopback interface passes
 its bytes straight into the other end's buffer, so while it does, it
 holds 64 KiB each way, the receiver's, and a writer waits for the
 reader once that is full. A datagram is sent and received whole: *sendmsg*
@@ -333,7 +337,8 @@ nothing), *SO_KEEPALIVE*, *SO_BROADCAST*, *SO_RCVBUF* and *SO_SNDBUF*
 *TCP_KEEPIDLE*, *TCP_KEEPINTVL*, *TCP_KEEPCNT* and *IP_TTL*. Keep-alive
 probes go as on Linux: after 7,200 seconds of quiet, then 75 seconds
 apart, and 9 unanswered reset the connection. TCP's congestion control
-is CUBIC. *getsockopt* also answers *SO_TYPE*, *SO_DOMAIN*, *SO_PROTOCOL*,
+is CUBIC, its loss recovery uses SACK, and PAWS drops segments with old
+timestamps. *getsockopt* also answers *SO_TYPE*, *SO_DOMAIN*, *SO_PROTOCOL*,
 *SO_ERROR* and *SO_ACCEPTCONN*. *SOCK_RAW* fails with EPERM, and control
 messages with EOPNOTSUPP.
 
@@ -518,11 +523,46 @@ with EPERM.
 *fchmod* and *fchown* need a descriptor open for writing (EACCES
 otherwise), as *futimens* does.
 
-Users come with the rest of Phase 13. Until then every process is user 0
-and group 0, *setuid* and its kin succeed only for 0, and the modes are
-kept but not checked: *access* says a file that is there may be read,
-written and run. There are no login records, so *getlogin* fails and
-*logname* finds no login name.
+Every process acts for a name: a user, a group and other groups
+(*radix-names*(2), ADR 0214), which *getuid*, *geteuid*, *getgid*,
+*getegid* and *getgroups* give. A process gets it from the one that made
+it, by *fork* or *posix_spawn*, and keeps it through *exec*; only a holder
+of the names capability starts a process with another, as sign-in will
+(Phase 13b.5). There is no setuid: *setuid*, *setgid*, *setgroups* and
+their kin succeed when they change nothing and fail with EPERM
+otherwise. Everything Spark starts acts for root, user 0 and group 0.
+
+The kernel checks owners, groups and modes as Linux does (the second
+gate): searching a directory needs its execute bit, reading or writing
+a file its read or write bit, listing a directory its read bit, and
+making, removing or renaming in a directory its write and execute bits
+(in a sticky one, only the owner of the file or of the directory removes
+or renames a file); a hard link needs the file's owner, or its read and
+write bits, as Linux's *fs.protected_hardlinks* has it. Each fails with
+EACCES. Only the owner changes a file's mode or sets its times to given
+values, and to its own groups its group (EPERM otherwise); giving a file
+to another user needs the bypass right. *exec* needs an execute bit,
+and, unlike on Linux, a file the caller may read. *access* and
+*faccessat* ask the same through *check_access* (*radix-directory*(2)).
+A process whose root has the bypass right, as everything Spark starts
+has, passes all of it but for running a file with no execute bit, as
+Linux's root does. *opendir* and *chdir* need the directory's read and
+execute bits, as on Linux; a directory opened with *O_PATH* needs
+neither.
+
+A process's root may be a view (*radix-directory*(2), ADR 0215): a
+directory the kernel makes, with directories, files and device nodes
+attached at its names, as a mount namespace of bind mounts is on Linux.
+Each is at its real path, and nothing past them is there. *..*, *getcwd*,
+*realpath* and symbolic links work across its entries as in any tree, and
+*..* at its root stays there. What was attached without the write right,
+and the view's own directories, fail writes with EROFS, and *statvfs*
+says *ST_RDONLY* there; *mount* beneath a view fails with EOPNOTSUPP, and
+*sync* syncs each attached place's filesystem. A session's view will give
+it a */tmp* of its own (Phase 13b.5).
+
+There are no login records yet, so *getlogin* fails and *logname* finds
+no login name.
 
 # TESTS
 

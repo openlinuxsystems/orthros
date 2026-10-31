@@ -41,6 +41,8 @@
 
 mod across;
 mod loopback;
+#[cfg(kani)]
+mod proofs;
 mod sockets;
 #[cfg(test)]
 mod tests;
@@ -405,6 +407,26 @@ impl<L: Link> Stack<L> {
     /// `socket`, when the stack has no room for it.
     pub fn add_socket<S: AnySocket<'static>>(&mut self, socket: S) -> Result<SocketHandle, S> {
         self.sockets.try_add(socket)
+    }
+
+    /// How many sockets the stack has slots for.
+    pub fn socket_slots(&self) -> usize {
+        self.sockets.capacity()
+    }
+
+    /// Moves the stack's sockets into `slots`, more of them and empty,
+    /// each to the same place, so that their handles stay, and gives back
+    /// the slots they were in, empty, to take the memory of.
+    ///
+    /// # Errors
+    ///
+    /// `slots`, back, if they are not more than the stack has, or not
+    /// empty.
+    pub fn grow_sockets(
+        &mut self,
+        slots: &'static mut [SocketStorage<'static>],
+    ) -> Result<&'static mut [SocketStorage<'static>], &'static mut [SocketStorage<'static>]> {
+        self.sockets.grow(slots).map(lent)
     }
 
     /// The socket `handle` of the stack: `None` if the stack has no such

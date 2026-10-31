@@ -535,6 +535,33 @@ impl Dir {
         Ok(directory::unmount(&SYS, self.held.slot, path.as_bytes())?)
     }
 
+    /// A copy of the capability with only `rights` of those it has.
+    pub fn derive(&self, rights: Rights) -> Result<Dir> {
+        let held = Held::take()?;
+        capability::derive(&SYS, self.held.slot, held.slot, rights, 0)?;
+        Ok(Dir { held })
+    }
+
+    /// Makes an empty view acting for this capability's name (ADR 0215),
+    /// to fill with [`Dir::attach`] and [`Dir::attach_link`]: its root.
+    pub fn make_view(&self) -> Result<Dir> {
+        let held = Held::take()?;
+        directory::make_view(&SYS, self.held.slot, held.slot)?;
+        Ok(Dir { held })
+    }
+
+    /// Attaches the directory or file the capability in `what` holds at
+    /// `path` in this view: read-only unless it has the write right.
+    pub fn attach(&self, path: &str, what: u32) -> Result<()> {
+        Ok(directory::attach(&SYS, self.held.slot, path.as_bytes(), what)?)
+    }
+
+    /// Makes a symbolic link at `path` in this view, to `target`.
+    pub fn attach_link(&self, path: &str, target: &str) -> Result<()> {
+        let (slot, path) = (self.held.slot, path.as_bytes());
+        Ok(directory::attach_link(&SYS, slot, path, target.as_bytes())?)
+    }
+
     /// Writes what the directory's filesystem holds in memory to its disk.
     pub fn sync(&self) -> Result<()> {
         Ok(directory::sync(&SYS, self.held.slot)?)

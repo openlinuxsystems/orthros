@@ -135,12 +135,25 @@ int open_path(const radix::Path &path, int flags, mode_t mode, int *fd) {
 	}
 	uint8_t kind = 0;
 	bool read_only = access_mode(flags) == O_RDONLY;
+	// A directory opened to read, not only to name (O_PATH), needs its
+	// read bit, as on Linux (ADR 0214), though the kernel checks it only
+	// when it is listed: so opendir fails, not readdir.
+	auto readable = [&](int e) {
+		if(e || kind != RADIX_FILE_KIND_DIRECTORY || !read_only || (flags & O_PATH))
+			return e;
+		uint64_t status =
+				radix_directory_check_access(radix::slot_of(*fd), ".", 1, 0, RADIX_DIRECTORY_READ_OK);
+		if(!status)
+			return 0;
+		radix_capability_delete(radix::slot_of(*fd));
+		return radix::to_errno(status);
+	};
 	// A directory opened for reading gets the write right too, where its
 	// filesystem allows it: POSIX lets openat make files beneath any
 	// directory descriptor, which takes that right here.
 	if(read_only && (flags & O_DIRECTORY)) {
-		int e = open_rights(path, kernel_flags, RADIX_RIGHTS_READ | RADIX_RIGHTS_WRITE, mode, fd,
-				&kind);
+		int e = readable(open_rights(path, kernel_flags, RADIX_RIGHTS_READ | RADIX_RIGHTS_WRITE,
+				mode, fd, &kind));
 		if(e != EROFS && e != EACCES) {
 			if(!e) {
 				radix::set_dir_cursor(*fd, 0);
@@ -149,7 +162,7 @@ int open_path(const radix::Path &path, int flags, mode_t mode, int *fd) {
 			return e;
 		}
 	}
-	if(int e = open_rights(path, kernel_flags, rights, mode, fd, &kind); e)
+	if(int e = readable(open_rights(path, kernel_flags, rights, mode, fd, &kind)); e)
 		return e;
 	if(kind != RADIX_FILE_KIND_DIRECTORY)
 		return 0;
@@ -897,7 +910,8 @@ int Sysdeps<Statvfs>::operator()(const char *path, struct statvfs *out) {
 		memcpy(dir, path, len);
 	}
 	dir[len] = 0;
-	if((e = sysdep<Open>(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0, &fd)))
+	// Only to name it: statvfs needs no read bit on the directory.
+	if((e = sysdep<Open>(dir, O_PATH | O_DIRECTORY | O_CLOEXEC, 0, &fd)))
 		return e;
 	e = sysdep<Fstatvfs>(fd, out);
 	sysdep<Close>(fd);
@@ -937,16 +951,22 @@ int Sysdeps<Access>::operator()(const char *path, int mode) {
 }
 
 int Sysdeps<Faccessat>::operator()(int dirfd, const char *pathname, int mode, int flags) {
-	(void)mode;
-	// Modes are kept but not yet checked (13b.2, ADR 0213): a file that
-	// exists may be read, written and run.
+	if(mode & ~(R_OK | W_OK | X_OK))
+		return EINVAL;
 	radix::Path resolved;
 	if(int e = radix::resolve(dirfd, pathname, &resolved); e)
 		return e;
 	struct stat st;
 	if(int from = named_fd(resolved); from >= 0)
 		return stat_named(from, &st);
-	return stat_path(resolved, &st, flags);
+	// The kernel asks the second gate for the name the directory acts for
+	// (ADR 0214): a process's real and effective IDs are the same, so
+	// AT_EACCESS changes nothing.
+	uint32_t want = (mode & R_OK ? RADIX_DIRECTORY_READ_OK : 0)
+			| (mode & W_OK ? RADIX_DIRECTORY_WRITE_OK : 0)
+			| (mode & X_OK ? RADIX_DIRECTORY_EXECUTE_OK : 0);
+	return radix::to_errno(radix_directory_check_access(resolved.dir, resolved.text, resolved.len,
+			path_flags(flags), want));
 }
 
 int Sysdeps<Mkdir>::operator()(const char *path, mode_t mode) {
@@ -1069,6 +1089,11 @@ int Sysdeps<Chdir>::operator()(const char *path) {
 		return e;
 	if(int e = must_be_dir(resolved); e)
 		return e;
+	// Going in needs the directory's execute bit, as on Linux (ADR 0214).
+	if(uint64_t status = radix_directory_check_access(resolved.dir, resolved.text, resolved.len, 0,
+			   RADIX_DIRECTORY_EXECUTE_OK);
+			status)
+		return radix::to_errno(status);
 	// Where it really is, links followed, so that getcwd says so and
 	// `..` from it leads where the kernel's would.
 	char absolute[radix::PATH_MAX_BYTES];

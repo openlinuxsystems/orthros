@@ -128,6 +128,8 @@ struct Select {
     terminals: Vec<String>,
     commands: Vec<String>,
     users: Vec<u32>,
+    /// The user ps runs as, whose processes it shows by default.
+    me: u32,
     negate: bool,
     /// BSD `r`: of those, only the running ones.
     running: bool,
@@ -151,9 +153,9 @@ impl Select {
     /// Whether `p` is selected; `own` is the terminal ps runs on.
     fn selects(&self, p: &Process, own: Option<&str>) -> bool {
         let chosen = if !self.any() {
-            // Those on ps's own terminal, or, with BSD `x`, every one of
-            // the user's (every one, as every one is root's).
-            self.without_terminal || p.terminal.as_deref() == own
+            // The user's on ps's own terminal, or, with BSD `x`, every one
+            // of the user's.
+            p.user == self.me && (self.without_terminal || p.terminal.as_deref() == own)
         } else {
             let leader = p.number == p.session;
             self.all
@@ -169,7 +171,7 @@ impl Select {
                 })
                 || (p.terminal.is_none() && self.terminals.iter().any(|t| t == "?" || t == "-"))
                 || self.commands.contains(&p.name)
-                || (!self.users.is_empty() && self.users.contains(&0))
+                || self.users.contains(&p.user)
         };
         chosen != self.negate && (!self.running || proc::run_letter(&p.run) == 'R')
     }
@@ -278,6 +280,7 @@ fn bsd(options: &mut Options, word: &str) -> Result<(), Fail> {
 /// Reads the command line.
 fn options(args: &mut Args) -> Result<Options, Fail> {
     let mut o = Options::default();
+    o.select.me = util::own_user();
     while let Some(arg) = args.next()? {
         match arg {
             Arg::Short('e' | 'A') => o.select.all = true,
@@ -504,9 +507,10 @@ impl Row<'_> {
             }
             "args" => self.command(true),
             "comm" => self.command(false),
-            "uid" | "gid" => "0".into(),
-            "user" => util::user_name(0),
-            "group" => "root".into(),
+            "uid" => p.user.to_string(),
+            "gid" => p.user_group.to_string(),
+            "user" => util::user_name(p.user),
+            "group" => util::group_name(p.user_group),
             "c" => format!("{}", self.pcpu(ctx) as u64),
             "pcpu" => format!("{:.1}", self.pcpu(ctx)),
             "pmem" => {

@@ -9,7 +9,7 @@ spark - the first program, which starts every other
 
 # SYNOPSIS
 
-Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--no-volumes*] [*--compress* _disk_ ...] [*--watchdog* _seconds_] [*--test-hang*] [*--services* | *--service-dir* _directory_] [*--posix*] [*--network*] [_program_ [_argument_ ...]]]
+Kernel command line: [*init=*_path_] [_flags_ ...] [*--* [*--no-volumes*] [*--compress* _disk_ ...] [*--watchdog* _seconds_] [*--test-hang*] [*--services* | *--service-dir* _directory_] [*--posix*] [*--network*] [*--names*] [_program_ [_argument_ ...]]]
 
 # DESCRIPTION
 
@@ -63,13 +63,18 @@ Spark gets what every program gets (see *radix-startup*(2)) and more:
 - the boot archive, mapped read-only at a random address, whose place
   and size the start-up page gives;
 - the root of the system's file tree, an empty tmpfs, as a directory
-  capability with every right in *SLOT_ROOT* (7);
+  capability with every right in *SLOT_ROOT* (7), the bypass right among
+  them, acting for root (*radix-names*(2));
 - a memory object of 4 MiB in slot 8, the first of the extra slots, from
   which it makes the memory of the program a boot test names;
 - the *services* resource domain in slot 9, below the root domain, in
   which it makes a domain for each service (*radix-resource-domain*(2));
 - the power capability in slot 10, which turns the machine off,
   restarts it or halts it (*radix-power*(2)), and which only Spark holds;
+- a network capability for every port in slot 11 (below);
+- the platform capability in slot 12 (below);
+- the names capability in slot 13, the one that gives processes and
+  capabilities the names they act for (*radix-names*(2), ADR 0214);
 - an image placed at a random address, as every position-independent
   program is (see *radix-processes*(7)).
 
@@ -86,9 +91,10 @@ Init: /system/commands/spark is process 1
 . It makes the root's nine directories, _/system_, _/applications_,
   _/users_, _/shared_, _/tmp_, _/devices_, _/processes_, _/kernel_ and
   _/volumes_ (see *radix-files*(7) for what each is for).
-. It mounts tmpfs on _/tmp_, and the *dev*, *proc* and *sys* trees on
-  _/devices_, _/processes_ and _/kernel_ (*radix-proc*(5),
-  *radix-sysfs*(5)).
+. It mounts tmpfs on _/tmp_ and on _/volumes_, the second of mode 0755
+  and for this boot's volumes, as Linux's _/run/media_ is, and the *dev*,
+  *proc* and *sys* trees on _/devices_, _/processes_ and _/kernel_
+  (*radix-proc*(5), *radix-sysfs*(5)).
 . It looks for disks in _/devices_ and mounts the FAT, exFAT, Btrfs or
   ext4 filesystem of each partition, or of each disk with no partition
   table, at _/volumes/_*name*, read-write, or read-only when the device
@@ -159,7 +165,7 @@ Its lines in the kernel log start with *spark:*, after the kernel's
 ```
 spark: Spark v2 is process 1, moved by 0x10ae4974a000
 spark: boot archive of 86929 KiB with 706 files at 0x20e61a756000
-spark: built the hierarchy of 9 directories and mounted 8 filesystems
+spark: built the hierarchy of 9 directories and mounted 9 filesystems
 spark: added 6 default settings to /system/settings
 spark: listening at /system/live/spark/control
 spark: 4 services in /system/settings/spark/services, 4 enabled
@@ -174,7 +180,7 @@ hierarchy line comes after the root's:
 
 ```
 spark: /system is Dukovo's root on sda5, compressed (zstd)
-spark: built the hierarchy of 9 directories and mounted 11 filesystems
+spark: built the hierarchy of 9 directories and mounted 12 filesystems
 ```
 
 and in a boot test that names a program:
@@ -189,78 +195,41 @@ spark: nothing more to do; waiting
 # SERVICES
 
 A service is a program Spark starts at boot and keeps running. Each is
-described by a file _/system/settings/spark/services/_*name*_.service_, whose
-_name_, of 1 to 23 bytes, is the service's and its domain's. The
-system's own come from _/system/resources/default-settings/spark/services_; to
-turn one off, set *enabled = no* in its file rather than removing it,
-or the next boot brings it back.
-
-A service file is lines of _key_ *=* _value_; blank lines and lines
-that start with *#* are left out. The keys:
-
-*program* = _path_
-	The program's absolute path. The only key a file must have.
-
-*arguments* = _word_ ...
-	Its arguments, after its path. Double quotes keep blanks in a word.
-
-*description* = _text_
-	What it is, for *service*(8).
-
-*order* = _number_
-	When it starts: lower first, 50 by default. Shutting down stops the
-	highest first, so the services that others need want a low one.
-
-*restart* = *always* | *on-failure* | *never*
-	When it is started again after it ended: whatever its end (the
-	default), only after an exit code other than 0 or a signal, or not
-	at all.
-
-*weight* = _number_
-	Its domain's CPU weight, 1 to 10000, 100 by default: a busy domain
-	of weight 200 gets twice the CPU time of one of 100 when they
-	compete (*radix-scheduling*(7)).
-
-*memory* = _size_ | *none*
-	Its domain's memory limit, as bytes or with *K*, *M* or *G*, such as
-	*64M*; none by default.
-
-*oom* = *service* | *app*
-	Its domain's out-of-memory class: *service*, the default, is stopped
-	only after every app domain, when memory runs out
-	(*radix-resource-domain*(2)).
-
-*environment* = _NAME_*=*_value_ ...
-	More of its environment.
-
-*enabled* = *yes* | *no*
-	Whether Spark starts it at boot; *yes* by default. *service* _name_
-	*start* starts a disabled one.
-
-*network.outbound* = *yes* | *no*
-	Whether it may connect out, to any address and port, and send
-	datagrams; *no* by default (see *THE NETWORK*).
-
-*network.listen* = _port_ | _first_*-*_last_ ...
-	The ports it may bind to and listen on, with commas or blanks
-	between, such as *22, 8000-8009*; none by default. Ranges may not
-	overlap, and with *network.outbound* there are at most eight.
-
-*admin.hardware* = *yes* | *no*
-	Whether it may set the machine's fans, LEDs and ARGB header, with
-	the platform capability; *no* by default (see *THE PLATFORM*).
-
-A file Spark cannot read, or with a key it does not know, is logged and
-left out. For example, _consoled.service_:
+described by a file _/system/settings/spark/services/_*name*_.toml_, in
+TOML, whose _name_, of 1 to 23 bytes, is the service's and its domain's;
+*service.toml*(5) has its settings. The system's own come from
+_/system/resources/default-settings/spark/services_; to turn one off,
+set *enabled = false* in its file rather than removing it, or the next
+boot brings it back. For example, _consoled.toml_:
 
 ```
-description = Virtual consoles
-program = /system/commands/consoled
+service_version = 1
+description = "Virtual consoles"
+program = "/system/commands/consoled"
 order = 10
-restart = on-failure
-weight = 200
-memory = none
-admin.hardware = yes
+restart = "on-failure"
+
+[limits]
+cpu_weight = 200
+memory = "none"
+
+[permissions]
+admin.hardware = true
+```
+
+Spark reads a service's file at boot and again each time it starts the
+service, and keeps a copy of each file that read in
+_/system/state/spark/good_. A file that does not read never takes a
+service down: Spark logs which line is wrong and why, once, and runs the
+last copy that read; a service whose file never read is not started. A
+file added since boot is read when *start* first names its service. An
+old file, _name_*.service* with lines of _key_ *=* _value_ (ADR 0101),
+is converted to _name_*.toml* with its comments, at boot before the
+defaults are copied in, and kept as _name_*.service.old* (ADR 0216):
+
+```
+spark: converted /system/settings/spark/services/web.service to web.toml; the old file is web.service.old
+spark: /system/settings/spark/services/web.toml: line 6: restart must be always, on-failure or never, not `sometimes`; it runs its last good copy
 ```
 
 Spark starts each service as a POSIX program (*radix-posix*(7)) in a
@@ -268,8 +237,13 @@ domain of its own below *services*, which it makes the first time and
 keeps for the restarts, with _/devices/null_ as its standard input, a pipe as
 its standard output and error, _/_ as its working directory, and the
 environment *PATH=/system/commands*, *HOME=/*, *TERM=dumb*, *LANG=C.UTF-8*
-and *EDITOR=nano* with the file's *environment* over it. It copies what
-the service writes, line by line, to the kernel log, after the service's
+and *EDITOR=nano* with the file's *environment* over it, and
+*SECRETS_DIRECTORY* and *MOUNT_PLACES* when its file names secrets or
+*files.mount*. Its root is a view of
+the tree that holds what its file declares and what every service
+reads (*service.toml*(5), ADR 0217), built at each start; one whose
+file sets *runs-with-your-access* gets Spark's own root instead. It
+copies what the service writes, line by line, to the kernel log, after the service's
 name and a colon unless the line starts with them already, and keeps a
 level the line starts with (*<3>* for an error, as systemd's services
 write) in front, where the kernel takes it. *logd*(8) keeps these
@@ -332,7 +306,9 @@ presses.
 	again, or stop one and start it again, whatever its *restart*
 	says. Stopping sends it SIGTERM; one that has not ended 5 seconds
 	later has its domain stopped, as systemd sends SIGKILL after
-	TimeoutStopSec.
+	TimeoutStopSec. Starting reads its file again; *start* of a
+	service whose file was added since boot reads it then, and answers
+	with what is wrong with it if it does not read.
 
 *reload* _name_
 	Send a running service SIGHUP, which asks a service that reads
@@ -450,12 +426,24 @@ The kernel gives Spark the platform capability, with the rights to ask
 and to change: the fans' duties and curves, the LEDs and the ARGB
 header that the machine's embedded controller keeps
 (*radix-platform*(2), ADR 0208). A service whose file says
-*admin.hardware = yes* gets a copy in _SLOT_PLATFORM_
+*admin.hardware = true* gets a copy in _SLOT_PLATFORM_
 (*radix-startup*(2)), with the copy and transfer rights, so that its
 children get it through *fork* and *exec*: *consoled*(8)'s does, so that
 root's shells may run *ectool*(8). A service that does not ask cannot
 change them; the hardware monitor's files under _/kernel/class/hwmon_
 still show the fans and sensors to everyone (*radix-sysfs*(5)).
+
+# NAMES
+
+Spark acts for root, and its root directory has the bypass right, which
+passes the owners and modes of files (*radix-names*(2), ADR 0214). The
+program it starts from its command line acts for root too, with that
+right on the root it gives it, until sign-in (Phase 13b.5). A service
+acts for root without it, in its view, unless its file sets
+*runs-with-your-access* (*service.toml*(5)). With *--names* before the
+program, a POSIX program gets the names capability as its descriptor 3,
+as the *principals* boot test (*ob*(1)) needs to start processes for
+other users: *-- --posix --names /system/tests/posix/principals*.
 
 # EXAMPLES
 
@@ -619,4 +607,4 @@ _name_ *(process* _n_*) was ended by signal 9 (stopped by the out-of-memory poli
 *radix-files*(7), *radix-processes*(7), *radix-posix*(7), *radix-proc*(5),
 *radix-sysfs*(5), *radix-directory*(2), *radix-process*(2),
 *radix-resource-domain*(2), *radix-power*(2), *radix-platform*(2),
-*radix-startup*(2), *ob*(1), *watchdog*(8), *ectool*(8)
+*radix-names*(2), *radix-startup*(2), *ob*(1), *watchdog*(8), *ectool*(8)

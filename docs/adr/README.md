@@ -190,6 +190,8 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0185](0185-loopback-runs-in-the-senders-thread-and-the-network-joins-the-gate.md) | Loopback runs in the sender's thread, and the network joins the gate | Accepted |
 | [0186](0186-a-loopback-connection-passes-its-bytes-straight-across.md) | A loopback connection passes its bytes straight across | Accepted |
 | [0187](0187-tcp-keeps-quiet-connections-and-controls-congestion-as-linux-does.md) | TCP keeps quiet connections, and controls congestion, as Linux does | Accepted |
+| [0188](0188-tcp-recovers-from-losses-with-sack-and-an-interface-holds-thousands-of-sockets.md) | TCP recovers from losses with SACK, and an interface holds thousands of sockets | Accepted |
+| [0189](0189-frames-changed-at-random-break-neither-stack-and-kani-proves-the-headers.md) | Frames changed at random break neither stack, and Kani proves the headers | Accepted |
 | [0200](0200-uacpi-runs-the-firmwares-aml-in-the-kernel.md) | uACPI runs the firmware's AML in the kernel | Accepted |
 | [0201](0201-batteries-adapters-and-lids-through-uacpi.md) | Batteries, AC adapters and lids through uACPI, and the embedded controller | Accepted |
 | [0202](0202-cpu-frequency-through-hwp-and-cppc.md) | CPU frequency through Intel's HWP and AMD's CPPC | Accepted |
@@ -203,6 +205,10 @@ and [CONTRIBUTING.md](../../CONTRIBUTING.md) for how to add one.
 | [0211](0211-the-audit-log-and-trimming-the-log.md) | Security events of the kernel and Spark go to an audit log, and logd trims the log by age and size | Accepted |
 | [0212](0212-notifications-and-the-privacy-promise.md) | notifyd passes notifications to the console's bottom line, naming the sender as the kernel does, and the privacy promise | Accepted |
 | [0213](0213-files-have-owners-groups-and-modes.md) | Files have owners, groups and modes, which Btrfs, ext4 and tmpfs keep | Accepted |
+| [0214](0214-names-and-the-second-gate.md) | Processes and capabilities act for names, which the names capability gives, and owners and modes narrow what a capability reaches | Accepted |
+| [0215](0215-views-directories-made-of-attached-capabilities.md) | Views: directories made of attached capabilities, which a walk crosses onto as onto mounts | Accepted |
+| [0216](0216-service-files-in-toml.md) | Service files are TOML, read by one crate, and a file that does not read never takes a service down | Accepted |
+| [0217](0217-each-service-runs-in-a-view-of-what-its-file-declares.md) | Each service runs in a view of what its file declares, and gets its secrets as read-only files | Accepted |
 | [0230](0230-sensors-and-lsusb-with-the-usb-id-database.md) | sensors and lsusb are systools, with the USB ID database as a port | Accepted |
 | [0231](0231-the-firmwares-smbios-tables-and-hwinfo.md) | The firmware's SMBIOS tables show what the machine is, and hwinfo shows them | Accepted |
 | [0232](0232-memory-modules-spd-eeproms-over-the-smbus.md) | Memory modules' SPD EEPROMs are read over the SMBus, when first opened | Accepted |

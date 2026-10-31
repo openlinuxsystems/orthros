@@ -43,6 +43,14 @@ WireGuard. This page grows with each.
   TCP_KEEPCNT change. A connection with nothing to send stays open
   however long it is quiet; one whose data goes unacknowledged for 15
   minutes is reset.
+  A window that loses several segments resends each of them in about
+  one round trip, from the SACK blocks the other end sends, and old
+  duplicates are dropped by their timestamps (PAWS)
+  ([ADR 0188](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0188-tcp-recovers-from-losses-with-sack-and-an-interface-holds-thousands-of-sockets.md)).
+- **Thousands of sockets on each interface**: up to 16,384, in slots the
+  interface adds as they fill. A connection in TIME-WAIT that its
+  program closed keeps none of its buffers, and a client may connect
+  again from the same port at once, as on Linux (ADR 0188).
 - **Sockets for programs, through network capabilities**
   ([ADR 0183](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0183-programs-reach-the-network-through-capabilities-of-its-ports.md)).
   A program uses the network only if it was given a network
@@ -61,6 +69,13 @@ WireGuard. This page grows with each.
   ([ADR 0182](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0182-the-kernel-patches-smoltcp-so-socket-memory-comes-back.md)).
   `./ob crates` fetches it from crates.io and applies the patch, and
   every build does that first.
+- **Tested against broken and hostile networks**: `ob test` gives two
+  stacks 100,000 frames each, changed at random, alongside their own
+  traffic; neither may panic or send a malformed frame, and a new
+  connection between them must work afterwards. Kani proves that the
+  stack reads any Ethernet, ARP, IPv4, ICMP and UDP header, and any TCP
+  option, without a panic and writes it back the same
+  ([ADR 0189](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0189-frames-changed-at-random-break-neither-stack-and-kani-proves-the-headers.md)).
 
 - **The C library's BSD sockets**: `socket`, `bind`, `listen`,
   `connect`, `accept`, `send`, `recv`, `sendto`, `recvfrom`, `sendmsg`,
@@ -69,9 +84,10 @@ WireGuard. This page grows with each.
   describes. A call the program's capabilities do not allow fails with
   `EACCES`
   ([ADR 0184](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0184-services-and-the-c-library-use-the-network-capabilities-they-were-given.md)).
-- **Services get the network their files ask for**: a service file's
-  `network.outbound = yes` lets it connect out, and `network.listen`
-  names the ports it may listen on (spark(8)). A service that asks for
+- **Services get the network their files ask for**: under
+  `[permissions]`, a service file's `network.outbound = true` lets it
+  connect out, and `network.listen` names the ports it may listen on
+  (service.toml(5)). A service that asks for
   neither cannot use the network.
 
 Native programs use the sockets through radix-network(2) and

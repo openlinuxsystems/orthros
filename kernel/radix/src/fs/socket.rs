@@ -483,13 +483,15 @@ impl Node for Socket {
     }
 }
 
-/// A description of `socket`, with `flags`.
-fn file(socket: Socket, flags: PipeFlags) -> Result<FileRef, Status> {
+/// A description of `socket`, with `flags`, acting for `user`'s process's
+/// name.
+fn file(user: &crate::user::UserRef, socket: Socket, flags: PipeFlags) -> Result<FileRef, Status> {
     let mount = pipe::mount().map_err(super::status)?;
     let node: NodeRef = mem::arc(socket).map_err(|_| Kernel::NoMemory.status(0))?;
     let description =
         Description { non_blocking: flags.contains(PipeFlags::NON_BLOCKING), append: false };
-    FileObject::with(Location { mount, node }, description).ok_or(Kernel::NoMemory.status(0))
+    FileObject::with(Location::new(mount, node), description, user.process.identity())
+        .ok_or(Kernel::NoMemory.status(0))
 }
 
 /// Puts a capability to `file`, a socket's description, in `user`'s slot
@@ -526,8 +528,8 @@ pub fn make_pair(
     let process = user.process.number();
     let (one, other) = End::pair((Name::NONE, process), (Name::NONE, process))?;
     // If a step fails, the sockets made go, and with them their ends.
-    let one = file(Socket::connected_with(one, Name::NONE), flags)?;
-    let other = file(Socket::connected_with(other, Name::NONE), flags)?;
+    let one = file(user, Socket::connected_with(one, Name::NONE), flags)?;
+    let other = file(user, Socket::connected_with(other, Name::NONE), flags)?;
     install(user, first, one, flags)?;
     if let Err(err) = install(user, second, other, flags) {
         let _ = crate::caps::delete(SlotRef::new(user.process.cspace(), first));
@@ -539,7 +541,7 @@ pub fn make_pair(
 /// Makes a socket for `user`'s process, neither named nor connected, in
 /// slot `to`, with `flags`.
 pub fn make(user: &crate::user::UserRef, to: u32, flags: PipeFlags) -> Result<(), Status> {
-    install(user, to, file(Socket::new(Phase::Fresh, Name::NONE), flags)?, flags)
+    install(user, to, file(user, Socket::new(Phase::Fresh, Name::NONE), flags)?, flags)
 }
 
 /// Gives `socket` the name `path` beneath `dir` (radix-directory(2)'s
@@ -547,6 +549,7 @@ pub fn make(user: &crate::user::UserRef, to: u32, flags: PipeFlags) -> Result<()
 pub fn bind(
     socket: &Socket,
     vfs: &Vfs,
+    who: &radix_vfs::Who,
     dir: &Location,
     path: &str,
     name: Name,
@@ -565,7 +568,7 @@ pub fn bind(
         .map_err(|_| Kernel::NoMemory.status(0))
         .and_then(|binding| {
             let held: SocketBinding = binding.clone();
-            vfs.make_socket(dir, path, held, access).map_err(|err| match err {
+            vfs.make_socket(who, dir, path, held, access).map_err(|err| match err {
                 // FAT has no sockets' names: Linux says EPERM.
                 radix_vfs::Error::NotSupported => Kernel::NotPermitted.status(0),
                 err => super::status(err),
@@ -679,7 +682,7 @@ pub fn accept(
     let end = listener.accept(non_blocking)?;
     // The new socket is busy until it is in the slot and has the end,
     // which can go back until then.
-    let file = match file(Socket::new(Phase::Busy, listener.name), flags) {
+    let file = match file(user, Socket::new(Phase::Busy, listener.name), flags) {
         Ok(file) => file,
         Err(err) => {
             listener.give_back(end);

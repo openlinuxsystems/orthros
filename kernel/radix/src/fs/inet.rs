@@ -310,7 +310,7 @@ impl State {
         let mut socket = tcp_socket(tcp_memory);
         self.options.apply(&mut socket, false);
         let mut stack = interface.stack.lock();
-        let handle = match stack.add_socket(socket) {
+        let handle = match interface.add_socket(&mut stack, socket) {
             Ok(handle) => handle,
             Err(socket) => {
                 drop(stack);
@@ -1101,7 +1101,7 @@ fn release_parts(parts: &mut Vec<Part, Kmalloc>, connected: bool, mut port: Opti
                 if open {
                     let orphan = Orphan {
                         handle,
-                        leases,
+                        leases: Some(leases),
                         port: port.take(),
                         deadline_ns: sched::now_ns().saturating_add(net::ORPHAN_NS),
                     };
@@ -1137,7 +1137,7 @@ fn udp_part(
         return Err(status(Kernel::InvalidArgument));
     }
     let mut stack = interface.stack.lock();
-    match stack.add_socket(socket) {
+    match interface.add_socket(&mut stack, socket) {
         Ok(handle) => {
             Ok(Part { interface, handle, leases: Leases::Udp(leases), other: OtherEnd::default() })
         }
@@ -1165,7 +1165,7 @@ fn listening_part(
         return Err(status(Kernel::InvalidArgument));
     }
     let mut stack = interface.stack.lock();
-    match stack.add_socket(socket) {
+    match interface.add_socket(&mut stack, socket) {
         Ok(handle) => {
             Ok(Part { interface, handle, leases: Leases::Tcp(leases), other: OtherEnd::default() })
         }
@@ -1358,13 +1358,19 @@ impl Node for InetSocket {
     }
 }
 
-/// A description of `socket`, with `flags`.
-pub fn file(socket: InetSocket, flags: PipeFlags) -> Result<FileRef, Status> {
+/// A description of `socket`, with `flags`, acting for `user`'s process's
+/// name.
+pub fn file(
+    user: &crate::user::UserRef,
+    socket: InetSocket,
+    flags: PipeFlags,
+) -> Result<FileRef, Status> {
     let mount = pipe::mount().map_err(super::status)?;
     let node: NodeRef = mem::arc(socket).map_err(|_| status(Kernel::NoMemory))?;
     let description =
         Description { non_blocking: flags.contains(PipeFlags::NON_BLOCKING), append: false };
-    FileObject::with(Location { mount, node }, description).ok_or(status(Kernel::NoMemory))
+    FileObject::with(Location::new(mount, node), description, user.process.identity())
+        .ok_or(status(Kernel::NoMemory))
 }
 
 /// Makes a network socket of `kind` for `user`'s process, in slot `to`,
@@ -1375,7 +1381,7 @@ pub fn make(
     kind: Kind,
     flags: PipeFlags,
 ) -> Result<(), Status> {
-    install(user, to, file(InetSocket::new(kind)?, flags)?, flags)
+    install(user, to, file(user, InetSocket::new(kind)?, flags)?, flags)
 }
 
 /// Puts a capability to `file`, a network socket's description, in

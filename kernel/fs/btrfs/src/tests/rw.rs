@@ -19,7 +19,7 @@ use radix_block::ram::RamDisk;
 use radix_block::{BlockDevice, DeviceRef};
 use radix_vfs::mem::{self, KArc};
 use radix_vfs::mount::{OpenFlags, Vfs};
-use radix_vfs::{Access, Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
+use radix_vfs::{Access, Error, FileSystem, Kind, NodeRef, Slice, SliceMut, Who};
 
 use super::files::{contents, mount, noise};
 use super::write::{
@@ -32,6 +32,9 @@ use crate::files::{ORPHAN_ITEM, object};
 use crate::format::{Key, item, tree};
 use crate::fs::BtrfsFs;
 use crate::tree::find;
+
+/// The kernel's own calls, past the second gate.
+const K: Who = Who::KERNEL;
 
 /// What a path of a filesystem holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -437,7 +440,7 @@ fn files_written_closed_and_removed_before_a_sync_give_their_room_back_at_once()
         for n in 0..3000 {
             let file = if through_vfs {
                 let flags = OpenFlags { create: Some(FILE), ..OpenFlags::default() };
-                vfs.open(&top, "temp", flags).unwrap().node
+                vfs.open(&K, &top, "temp", flags).unwrap().node
             } else {
                 root.create("temp", Kind::File, FILE).unwrap()
             };
@@ -447,7 +450,7 @@ fn files_written_closed_and_removed_before_a_sync_give_their_room_back_at_once()
             }
             drop(file);
             if through_vfs {
-                vfs.remove(&top, "temp").unwrap();
+                vfs.remove(&K, &top, "temp").unwrap();
             } else {
                 root.remove("temp").unwrap();
             }
@@ -945,10 +948,10 @@ fn nothing_in_a_read_only_subvolume_changes() {
     assert_eq!(file.set_times(Some(1), Some(1)), ro);
     let vfs = Vfs::new(fs.clone(), "btrfs").unwrap();
     let top = vfs.root();
-    assert_eq!(vfs.resolve(&top, "sealed/file").unwrap().writable(), ro);
-    assert_eq!(vfs.resolve(&top, "open").unwrap().writable(), Ok(()));
+    assert_eq!(vfs.resolve(&K, &top, "sealed/file").unwrap().writable(), ro);
+    assert_eq!(vfs.resolve(&K, &top, "open").unwrap().writable(), Ok(()));
     let flags = OpenFlags { create: Some(FILE), ..OpenFlags::default() };
-    assert_eq!(vfs.open(&top, "sealed/inner/new", flags).map(drop), ro);
+    assert_eq!(vfs.open(&K, &top, "sealed/inner/new", flags).map(drop), ro);
     // The subvolume beside it takes changes, and what was there stays.
     let made = root.lookup("open").unwrap().create("new", Kind::File, FILE).unwrap();
     put(&made, 0, b"written");

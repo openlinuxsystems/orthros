@@ -101,8 +101,9 @@ line by line.
 *-s* is taken, but adds no report: Radix does not tell the sizes of
 stacks yet.
 
-Until users come, in Phase 13 of the roadmap, every process is root's:
-the *UID* column is 0, and *-U* names root.
+The *UID* column is the user each process acts for (*radix-names*(2)):
+root, 0, for everything Spark starts until sign-in comes later in Phase
+13 of the roadmap.
 
 # EXAMPLES
 

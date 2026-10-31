@@ -50,10 +50,10 @@ use radix_klog::warn;
 use radix_mm::Kmalloc;
 use radix_posix::exec::{Block, BlockError, Stack, aux, shebang};
 use radix_vfs::mount::{Location, OpenFlags};
-use radix_vfs::{NodeRef, SliceMut};
+use radix_vfs::{NodeRef, SliceMut, want};
 
 use super::{kmalloc, with_tree};
-use crate::fs;
+use crate::fs::{self, FileRef};
 use crate::sched::{self, Name, wait};
 use crate::user::memory::{Anon, FileSource, Placement, SpaceObject, SpaceRef};
 use crate::user::methods::{Answer, answer};
@@ -146,24 +146,26 @@ impl File {
     }
 }
 
-/// The directory a process finds interpreters from: its SLOT_ROOT.
-fn root_of(process: &ProcessObject) -> Result<Location> {
-    let (_, root) = objects::directory(process.cspace(), startup::SLOT_ROOT, Rights::READ)
+/// The directory a process finds interpreters from, its SLOT_ROOT, and
+/// whether its capability has the bypass right.
+fn root_of(process: &ProcessObject) -> Result<(FileRef, bool)> {
+    let (cap, root) = objects::directory(process.cspace(), startup::SLOT_ROOT, Rights::READ)
         .map_err(|_| radix_abi::errors::File::NotFound.status(0))?;
-    Ok(root.at.clone())
+    Ok((root, cap.rights().contains(Rights::BYPASS)))
 }
 
-/// Opens the file at `path` from `process`'s root: an interpreter's path,
-/// absolute or not.
+/// Opens the file at `path` from `process`'s root, which its root's name
+/// must be able to run: an interpreter's path, absolute or not.
 fn open_from(process: &ProcessObject, path: &[u8]) -> Result<File> {
     let mut path = path;
     while let [b'/', rest @ ..] = path {
         path = rest;
     }
     let path = radix_vfs::path::parse(path).map_err(fs::status)?;
-    let root = root_of(process)?;
+    let (root, bypass) = root_of(process)?;
     let vfs = fs::vfs().ok_or(error(Kernel::Gone))?;
-    let at = vfs.open(&root, path, OpenFlags::default()).map_err(fs::status)?;
+    let flags = OpenFlags { want: want::EXECUTE, ..OpenFlags::default() };
+    let at = vfs.open(&root.name.who(bypass), &root.at, path, flags).map_err(fs::status)?;
     File::open(&at)
 }
 
@@ -309,7 +311,10 @@ pub fn exec(
     if !own && target.state().0 != ProcessState::Created {
         return Err(Kernel::InvalidArgument.status(0));
     }
-    let (_, file) = objects::file(user.process.cspace(), file, Rights::READ)?;
+    let (cap, file) = objects::file(user.process.cspace(), file, Rights::READ)?;
+    // The name the file was opened for must be able to run it.
+    let who = file.name.who(cap.rights().contains(Rights::BYPASS));
+    who.check(&*file.at.node, want::EXECUTE).map_err(fs::status)?;
     let bytes = copy_block(block)?;
     let block = Block::read(&bytes).map_err(|err| match err {
         BlockError::TooLong => error(Kernel::ArgumentsTooLong),

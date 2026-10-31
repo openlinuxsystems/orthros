@@ -39,11 +39,12 @@ use radix_hal::UserMode;
 use radix_klog::info;
 use radix_mm::{Flags, HEAP};
 use radix_vfs::mount::{Location, OpenFlags as VfsOpen};
-use radix_vfs::{Access, AccessChange, FsKind, In, Kind, NodeRef, Out, PATH_MAX};
+use radix_vfs::{Access, AccessChange, FsKind, In, Kind, NodeRef, Out, PATH_MAX, Who, want};
 
 use super::account::Account;
 use super::memory::cap_rights;
 use super::methods::{Answer, answer};
+use super::names::Identity;
 use super::objects::{self, Found, Object};
 use super::{Result, UserRef, UserThread, cap_error, error};
 use crate::fs::{self, Description, FileObject, FileRef, inet, locks, pipe, socket, tty};
@@ -283,6 +284,24 @@ fn filesystem_kind(kind: FsKind) -> FilesystemKind {
 /// transfer.
 const OPEN_RIGHTS: Rights = Rights::READ.union(Rights::WRITE).union(Rights::CONTROL);
 
+/// The rights `make_view` gives the view's root, besides the bypass right
+/// (ADR 0215).
+const VIEW_RIGHTS: Rights = Rights::READ
+    .union(Rights::WRITE)
+    .union(Rights::CONTROL)
+    .union(Rights::COPY)
+    .union(Rights::TRANSFER);
+
+/// The status a view's error becomes: as a file's, but what cannot be
+/// attached, or is no view, is not_supported rather than an argument the
+/// call does not take.
+fn view_status(err: radix_vfs::Error) -> radix_abi::Status {
+    match err {
+        radix_vfs::Error::NotSupported => Kernel::NotSupported.status(0),
+        err => fs::status(err),
+    }
+}
+
 /// The directory `found` designates, if its capability has the rights
 /// `needs`: `found` is what the system call found in the slot the caller
 /// named, so the slot is not looked at again.
@@ -292,6 +311,13 @@ fn directory_of(found: &Found, needs: Rights) -> Result<&FileRef> {
         Some(Object::Directory(dir)) => Ok(dir),
         _ => Err(error(Kernel::Gone)),
     }
+}
+
+/// Who a call through a capability with `rights` to `object` acts for:
+/// the object's name, which passes the second gate with the bypass right
+/// (ADR 0214).
+fn who(rights: Rights, object: &FileObject) -> Who<'_> {
+    object.name.who(rights.contains(Rights::BYPASS))
 }
 
 /// The file `found` designates, if its capability has the rights `needs`,
@@ -349,7 +375,7 @@ pub fn directory_method(
             if a.flags.contains(OpenFlags::CREATE) && a.flags.contains(OpenFlags::DIRECTORY) {
                 return Err(error(Kernel::InvalidArgument));
             }
-            let asked = cap_rights(a.rights).intersection(OPEN_RIGHTS);
+            let mut asked = cap_rights(a.rights).intersection(OPEN_RIGHTS);
             let changes =
                 a.flags.contains(OpenFlags::CREATE) || a.flags.contains(OpenFlags::TRUNCATE);
             let mut needs =
@@ -358,6 +384,11 @@ pub fn directory_method(
                 needs = needs.union(Rights::WRITE);
             }
             let dir = directory_of(found, needs)?;
+            // Beneath a view, control would mount on, and attach in, the
+            // places it attaches (ADR 0215).
+            if dir.at.in_view() {
+                asked = asked.difference(Rights::CONTROL);
+            }
             let to = SlotRef::new(cspace, a.to);
             // The slot first when the open changes something, so that a
             // file is not made or cut for nothing; otherwise putting the
@@ -372,7 +403,7 @@ pub fn directory_method(
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
             let create = if a.flags.contains(OpenFlags::CREATE) {
-                Some(made_access(user, a.mode)?)
+                Some(made_access(user, &dir.name, a.mode)?)
             } else {
                 None
             };
@@ -382,8 +413,11 @@ pub fn directory_method(
                 truncate: a.flags.contains(OpenFlags::TRUNCATE),
                 directory: a.flags.contains(OpenFlags::DIRECTORY),
                 no_follow: a.flags.contains(OpenFlags::NO_FOLLOW),
+                want: if asked.contains(Rights::READ) { want::READ } else { 0 }
+                    | if asked.contains(Rights::WRITE) { want::WRITE } else { 0 },
             };
-            let mut at = vfs()?.open(&dir.at, path.as_str()?, flags).map_err(fs::status)?;
+            let who = who(found.cap.rights(), dir);
+            let mut at = vfs()?.open(&who, &dir.at, path.as_str()?, flags).map_err(fs::status)?;
             let description = Description {
                 append: a.flags.contains(OpenFlags::APPEND),
                 non_blocking: a.flags.contains(OpenFlags::NON_BLOCKING),
@@ -404,11 +438,13 @@ pub fn directory_method(
             } else if object_kind == ObjectKind::File && wanted.contains(Rights::WRITE) {
                 at.writable().map_err(fs::status)?;
             }
-            let rights = wanted.union(Rights::COPY).union(Rights::TRANSFER);
+            // The bypass right covers what is opened beneath.
+            let bypass = found.cap.rights().intersection(Rights::BYPASS);
+            let rights = wanted.union(Rights::COPY).union(Rights::TRANSFER).union(bypass);
             // The bytes the VFS took as a path above.
             let from = Some((&dir.opened, path.bytes()));
-            let object =
-                FileObject::opened(at, description, from).ok_or(error(Kernel::NoMemory))?;
+            let object = FileObject::opened(at, description, from, dir.name.clone())
+                .ok_or(error(Kernel::NoMemory))?;
             let terminal = object.tty_handle().is_some().then(|| object.at.node.clone());
             install_file(user, to, object_kind, rights, object, close_on_exec)?;
             if let Some(node) = terminal
@@ -428,9 +464,10 @@ pub fn directory_method(
             let path = path.copy(a.path)?;
             // As Linux, mkdir takes no set-user-ID or set-group-ID bit
             // from its mode; the directory's own comes from its parent.
-            let mut access = made_access(user, a.mode)?;
+            let mut access = made_access(user, &dir.name, a.mode)?;
             access.mode &= !(radix_vfs::mode::SET_USER | radix_vfs::mode::SET_GROUP);
-            vfs()?.make_directory(&dir.at, path.as_str()?, access).map_err(fs::status)?;
+            let who = who(found.cap.rights(), dir);
+            vfs()?.make_directory(&who, &dir.at, path.as_str()?, access).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::REMOVE => {
@@ -438,23 +475,28 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            vfs()?.remove(&dir.at, path.as_str()?).map_err(fs::status)?;
+            vfs()?
+                .remove(&who(found.cap.rights(), dir), &dir.at, path.as_str()?)
+                .map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::RENAME => {
             let a = directory::RenameArgs::decode(args)?;
             let dir = directory_of(found, Rights::WRITE)?;
-            let (_, to_dir) = objects::directory(cspace, a.to_dir, Rights::WRITE)?;
+            let (to_cap, to_dir) = objects::directory(cspace, a.to_dir, Rights::WRITE)?;
             let (mut from, mut to) = (Path::Empty, Path::Empty);
             let (from, to) = (from.copy(a.from)?, to.copy(a.to)?);
-            vfs()?.rename(&dir.at, from.as_str()?, &to_dir.at, to.as_str()?).map_err(fs::status)?;
+            let (who, to_who) = (who(found.cap.rights(), dir), who(to_cap.rights(), &to_dir));
+            vfs()?
+                .rename(&who, &dir.at, from.as_str()?, &to_who, &to_dir.at, to.as_str()?)
+                .map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::LIST => {
             let a = directory::ListArgs::decode(args)?;
             let dir = directory_of(found, Rights::READ)?;
             let (address, len) = user_range(a.buffer)?;
-            let results = list(&dir.at, a.cursor, address, len)?;
+            let results = list(&who(found.cap.rights(), dir), &dir.at, a.cursor, address, len)?;
             answer(label, directory::ListResults::WORDS, results.encode())
         }
         directory::STAT => {
@@ -462,7 +504,7 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::READ)?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            let at = resolve(&dir.at, path.as_str()?, a.flags)?;
+            let at = resolve(&who(found.cap.rights(), dir), &dir.at, path.as_str()?, a.flags)?;
             put_status(&at, a.buffer)?;
             answer(label, 0, [0; 8])
         }
@@ -471,8 +513,9 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            let at = resolve(&dir.at, path.as_str()?, a.flags)?;
-            set_times(&at, a.accessed, a.modified)?;
+            let who = who(found.cap.rights(), dir);
+            let at = resolve(&who, &dir.at, path.as_str()?, a.flags)?;
+            set_times(&who, &at, a.accessed, a.modified)?;
             answer(label, 0, [0; 8])
         }
         directory::SET_ACCESS => {
@@ -480,8 +523,9 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            let at = resolve(&dir.at, path.as_str()?, a.flags)?;
-            set_access(&at, a.owner, a.group, a.mode)?;
+            let who = who(found.cap.rights(), dir);
+            let at = resolve(&who, &dir.at, path.as_str()?, a.flags)?;
+            set_access(&who, &at, a.owner, a.group, a.mode)?;
             answer(label, 0, [0; 8])
         }
         directory::MAKE_LINK => {
@@ -489,21 +533,23 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let (mut path, mut target) = (Path::Empty, Path::Empty);
             let (path, target) = (path.copy(a.path)?, target.copy(a.target)?);
-            let access = made_access(user, 0o777)?;
+            let access = made_access(user, &dir.name, 0o777)?;
+            let who = who(found.cap.rights(), dir);
             vfs()?
-                .make_link(&dir.at, path.as_str()?, target.as_target()?, access)
+                .make_link(&who, &dir.at, path.as_str()?, target.as_target()?, access)
                 .map_err(refused_as_not_permitted)?;
             answer(label, 0, [0; 8])
         }
         directory::LINK => {
             let a = directory::LinkArgs::decode(args)?;
             let dir = directory_of(found, Rights::READ)?;
-            let (_, to_dir) = objects::directory(cspace, a.to_dir, Rights::WRITE)?;
+            let (to_cap, to_dir) = objects::directory(cspace, a.to_dir, Rights::WRITE)?;
             let (mut from, mut to) = (Path::Empty, Path::Empty);
             let (from, to) = (from.copy(a.path)?, to.copy(a.to)?);
             let follow = a.flags.contains(LinkFlags::FOLLOW);
+            let (who, to_who) = (who(found.cap.rights(), dir), who(to_cap.rights(), &to_dir));
             vfs()?
-                .link(&dir.at, from.as_str()?, &to_dir.at, to.as_str()?, follow)
+                .link(&who, &dir.at, from.as_str()?, &to_who, &to_dir.at, to.as_str()?, follow)
                 .map_err(refused_as_not_permitted)?;
             answer(label, 0, [0; 8])
         }
@@ -520,9 +566,10 @@ pub fn directory_method(
             };
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            let access = made_access(user, a.mode)?;
+            let access = made_access(user, &dir.name, a.mode)?;
+            let who = who(found.cap.rights(), dir);
             vfs()?
-                .make_node(&dir.at, path.as_str()?, kind, a.device, access)
+                .make_node(&who, &dir.at, path.as_str()?, kind, a.device, access)
                 .map_err(refused_as_not_permitted)?;
             answer(label, 0, [0; 8])
         }
@@ -531,17 +578,20 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            vfs()?.make_subvolume(&dir.at, path.as_str()?).map_err(fs::status)?;
+            let who = who(found.cap.rights(), dir);
+            vfs()?.make_subvolume(&who, &dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::SNAPSHOT => {
             let a = directory::SnapshotArgs::decode(args)?;
             let dir = directory_of(found, Rights::READ)?;
-            let (_, to_dir) = objects::directory(cspace, a.to_dir, Rights::WRITE)?;
+            let (to_cap, to_dir) = objects::directory(cspace, a.to_dir, Rights::WRITE)?;
             let (mut from, mut to) = (Path::Empty, Path::Empty);
             let (from, to) = (from.copy(a.path)?, to.copy(a.to)?);
+            let (who, to_who) = (who(found.cap.rights(), dir), who(to_cap.rights(), &to_dir));
+            let (from, to) = (from.as_str()?, to.as_str()?);
             vfs()?
-                .snapshot(&dir.at, from.as_str()?, &to_dir.at, to.as_str()?, a.read_only)
+                .snapshot(&who, &dir.at, from, &to_who, &to_dir.at, to, a.read_only)
                 .map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
@@ -550,7 +600,8 @@ pub fn directory_method(
             let dir = directory_of(found, Rights::WRITE)?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            vfs()?.remove_subvolume(&dir.at, path.as_str()?).map_err(fs::status)?;
+            let who = who(found.cap.rights(), dir);
+            vfs()?.remove_subvolume(&who, &dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::SCRUB => {
@@ -726,7 +777,9 @@ pub fn directory_method(
             let path = path.copy(a.path)?;
             let (address, len) = user_range(a.buffer)?;
             let mut out = UserOut { address, len };
-            let len = vfs()?.read_link(&dir.at, path.as_str()?, &mut out).map_err(fs::status)?;
+            let who = who(found.cap.rights(), dir);
+            let len =
+                vfs()?.read_link(&who, &dir.at, path.as_str()?, &mut out).map_err(fs::status)?;
             let results = directory::ReadLinkResults { len: len as u64 };
             answer(label, directory::ReadLinkResults::WORDS, results.encode())
         }
@@ -737,7 +790,9 @@ pub fn directory_method(
             let path = path.copy(a.path)?;
             let (address, len) = user_range(a.buffer)?;
             let mut out = UserOut { address, len };
-            let len = vfs()?.real_path(&dir.at, path.as_str()?, &mut out).map_err(fs::status)?;
+            let who = who(found.cap.rights(), dir);
+            let len =
+                vfs()?.real_path(&who, &dir.at, path.as_str()?, &mut out).map_err(fs::status)?;
             let results = directory::RealPathResults { len: len as u64 };
             answer(label, directory::RealPathResults::WORDS, results.encode())
         }
@@ -745,15 +800,24 @@ pub fn directory_method(
         directory::UNMOUNT => {
             let a = directory::UnmountArgs::decode(args)?;
             let dir = directory_of(found, Rights::CONTROL)?;
+            if dir.at.in_view() {
+                return Err(Kernel::NotSupported.status(0));
+            }
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            vfs()?.unmount(&dir.at, path.as_str()?).map_err(fs::status)?;
+            let who = who(found.cap.rights(), dir);
+            vfs()?.unmount(&who, &dir.at, path.as_str()?).map_err(fs::status)?;
             answer(label, 0, [0; 8])
         }
         directory::SYNC => {
             directory::SyncArgs::decode(args)?;
             let dir = directory_of(found, Rights::NONE)?;
-            dir.at.mount.fs.sync().map_err(fs::status)?;
+            // A view's are the filesystems of what it attaches.
+            if dir.at.in_view() {
+                vfs()?.sync_view(&dir.at).map_err(fs::status)?;
+            } else {
+                dir.at.mount.fs.sync().map_err(fs::status)?;
+            }
             answer(label, 0, [0; 8])
         }
         directory::INFO => {
@@ -763,7 +827,8 @@ pub fn directory_method(
             let info = mount.fs.info();
             let results = directory::InfoResults {
                 filesystem: filesystem_kind(mount.fs.kind()),
-                flags: if mount.read_only() { MountFlags::READ_ONLY } else { MountFlags::NONE },
+                // Read-only too beneath a view's read-only entry.
+                flags: if dir.at.read_only() { MountFlags::READ_ONLY } else { MountFlags::NONE },
                 block_size: info.block_size,
                 blocks: info.blocks,
                 free: info.free,
@@ -782,8 +847,9 @@ pub fn directory_method(
             let mut name = Path::Empty;
             let name = name.copy(a.name)?;
             let name = socket::Name::of(name.bytes()).ok_or(Kernel::InvalidArgument.status(2))?;
-            let access = made_access(user, 0o777)?;
-            socket::bind(socket, vfs()?, &dir.at, path.as_str()?, name, access)?;
+            let access = made_access(user, &dir.name, 0o777)?;
+            let who = who(found.cap.rights(), dir);
+            socket::bind(socket, vfs()?, &who, &dir.at, path.as_str()?, name, access)?;
             answer(label, 0, [0; 8])
         }
         directory::CONNECT_SOCKET => {
@@ -793,10 +859,47 @@ pub fn directory_method(
             let socket = file.socket().ok_or(error(Kernel::NotSocket))?;
             let mut path = Path::Empty;
             let path = path.copy(a.path)?;
-            let named = vfs()?.resolve(&dir.at, path.as_str()?).map_err(fs::status)?;
+            let who = who(found.cap.rights(), dir);
+            let named = vfs()?.resolve(&who, &dir.at, path.as_str()?).map_err(fs::status)?;
+            // As unix(7) has it, connecting needs write permission on the
+            // socket's name.
+            who.check(&*named.node, want::WRITE).map_err(fs::status)?;
             let non_blocking = file.description().non_blocking;
             socket::connect(socket, &named.node, user.process.number(), non_blocking)?;
             answer(label, 0, [0; 8])
+        }
+        directory::CHECK_ACCESS => {
+            let a = directory::CheckAccessArgs::decode(args)?;
+            let dir = directory_of(found, Rights::READ)?;
+            let asked = [
+                (directory::READ_OK, want::READ),
+                (directory::WRITE_OK, want::WRITE),
+                (directory::EXECUTE_OK, want::EXECUTE),
+            ];
+            if a.want & !asked.iter().fold(0, |all, (bit, _)| all | bit) != 0 {
+                return Err(Kernel::InvalidArgument.status(2));
+            }
+            let wanted =
+                asked.iter().filter(|(bit, _)| a.want & bit != 0).fold(0, |w, (_, b)| w | b);
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
+            let who = who(found.cap.rights(), dir);
+            let at = resolve(&who, &dir.at, path.as_str()?, a.flags)?;
+            // A device, pipe or socket is written elsewhere than its mount,
+            // as access(2) has it on Linux.
+            let kind = at.node.kind();
+            let elsewhere =
+                matches!(kind, Kind::CharDevice | Kind::BlockDevice | Kind::Pipe | Kind::Socket);
+            if wanted & want::WRITE != 0 && !elsewhere {
+                at.writable().map_err(fs::status)?;
+            }
+            if wanted != 0 {
+                who.check(&*at.node, wanted).map_err(fs::status)?;
+            }
+            answer(label, 0, [0; 8])
+        }
+        directory::MAKE_VIEW | directory::ATTACH | directory::ATTACH_LINK => {
+            view_method(user, found, label, args)
         }
         file::LOCK | file::LOCK_HOLDER => {
             lock_method(user, found, ObjectKind::Directory, label, args)
@@ -813,6 +916,9 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
     let cspace = user.cspace;
     let a = directory::MountArgs::decode(args)?;
     let dir = directory_of(found, Rights::CONTROL)?;
+    if dir.at.in_view() {
+        return Err(Kernel::NotSupported.status(0));
+    }
     let read_only = a.flags.contains(MountFlags::READ_ONLY);
     let compress = a.flags.contains(MountFlags::COMPRESS);
     let mut path = Path::Empty;
@@ -821,6 +927,7 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
     let kind = kind.copy(a.filesystem)?;
     let kind = kind.as_str()?;
     let rw = if read_only { Rights::READ } else { Rights::READ.union(Rights::WRITE) };
+    let who = who(found.cap.rights(), dir);
     // A bind mount: the directory in slot `source`, mounted again.
     if kind == "bind" {
         if compress {
@@ -828,7 +935,7 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
         }
         let (_, from) = objects::directory(cspace, a.source, rw)?;
         let mount =
-            vfs()?.bind(&dir.at, path.as_str()?, &from.at, read_only).map_err(fs::status)?;
+            vfs()?.bind(&who, &dir.at, path.as_str()?, &from.at, read_only).map_err(fs::status)?;
         info!(
             "Files: mounted a directory of {} from {} on /{}{}",
             mount.fs.kind().name(),
@@ -851,7 +958,7 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
     let flags = fs::Flags { read_only, compress };
     let made = fs::make(kind, source.as_ref().map(|s| &s.at.node), flags).map_err(fs::status)?;
     let mount = vfs()?
-        .mount(&dir.at, path.as_str()?, made.fs, made.source.as_str(), read_only)
+        .mount(&who, &dir.at, path.as_str()?, made.fs, made.source.as_str(), read_only)
         .map_err(fs::status)?;
     let mut labelled = radix_klog::TextBuf::<40>::new();
     {
@@ -871,6 +978,64 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
         labelled.as_str()
     );
     answer(label, 0, [0; 8])
+}
+
+/// The methods that make and add to views (ADR 0215), out of
+/// [`directory_method`], so as not to grow the frame every directory
+/// method shares.
+#[inline(never)]
+fn view_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> Result<Answer> {
+    let cspace = user.cspace;
+    match label {
+        directory::MAKE_VIEW => {
+            let a = directory::MakeViewArgs::decode(args)?;
+            let dir = directory_of(found, Rights::NONE)?;
+            let at = vfs()?.make_view(&who(found.cap.rights(), dir)).map_err(fs::status)?;
+            let object = FileObject::new(at, dir.name.clone()).ok_or(error(Kernel::NoMemory))?;
+            let rights = VIEW_RIGHTS.union(found.cap.rights().intersection(Rights::BYPASS));
+            install_file(
+                user,
+                SlotRef::new(cspace, a.to),
+                ObjectKind::Directory,
+                rights,
+                object,
+                false,
+            )?;
+            answer(label, 0, [0; 8])
+        }
+        directory::ATTACH => {
+            let a = directory::AttachArgs::decode(args)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
+            let (what_cap, what) = match objects::find_object(cspace, a.what) {
+                Some(Object::File(_)) => objects::file(cspace, a.what, Rights::READ)?,
+                _ => objects::directory(cspace, a.what, Rights::READ)?,
+            };
+            let mut path = Path::Empty;
+            let path = path.copy(a.path)?;
+            let read_only = !what_cap.rights().contains(Rights::WRITE);
+            vfs()?
+                .attach(
+                    &dir.at,
+                    path.as_str()?,
+                    &what.at,
+                    &who(what_cap.rights(), &what),
+                    read_only,
+                )
+                .map_err(view_status)?;
+            answer(label, 0, [0; 8])
+        }
+        directory::ATTACH_LINK => {
+            let a = directory::AttachLinkArgs::decode(args)?;
+            let dir = directory_of(found, Rights::CONTROL)?;
+            let (mut path, mut target) = (Path::Empty, Path::Empty);
+            let (path, target) = (path.copy(a.path)?, target.copy(a.target)?);
+            vfs()?
+                .attach_link(&dir.at, path.as_str()?, target.as_target()?)
+                .map_err(view_status)?;
+            answer(label, 0, [0; 8])
+        }
+        _ => Err(error(Kernel::NoSuchMethod)),
+    }
 }
 
 /// Puts a capability with `rights` to `object`, a file or directory
@@ -906,14 +1071,20 @@ pub fn install_file(
 
 /// Writes the directory's entries from `cursor` into the caller's buffer
 /// as DirEntry records.
-fn list(at: &Location, cursor: u64, address: u64, len: usize) -> Result<directory::ListResults> {
+fn list(
+    who: &Who,
+    at: &Location,
+    cursor: u64,
+    address: u64,
+    len: usize,
+) -> Result<directory::ListResults> {
     let mut used = 0usize;
     let mut count = 0u32;
     let mut next = cursor;
     let mut failed = None;
     let mut first_too_big = false;
     vfs()?
-        .list(at, cursor, &mut |after, name, kind| {
+        .list(who, at, cursor, &mut |after, name, kind| {
             let size = (directory::DirEntry::SIZE + name.len()).next_multiple_of(8);
             if used + size > len {
                 first_too_big = count == 0;
@@ -983,13 +1154,13 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
         file::SET_TIMES => {
             let a = file::SetTimesArgs::decode(args)?;
             let file = file_of(found, Rights::WRITE)?;
-            set_times(&file.at, a.accessed, a.modified)?;
+            set_times(&who(found.cap.rights(), file), &file.at, a.accessed, a.modified)?;
             answer(label, 0, [0; 8])
         }
         file::SET_ACCESS => {
             let a = file::SetAccessArgs::decode(args)?;
             let file = file_of(found, Rights::WRITE)?;
-            set_access(&file.at, a.owner, a.group, a.mode)?;
+            set_access(&who(found.cap.rights(), file), &file.at, a.owner, a.group, a.mode)?;
             answer(label, 0, [0; 8])
         }
         file::SET_SIZE => {
@@ -1159,7 +1330,7 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                 AnySocket::Inet(socket) => {
                     // A connection that cannot go in the slot, as another
                     // thread filled it first, is closed.
-                    let accepted = inet::file(socket.accept(non_blocking)?, a.flags)?;
+                    let accepted = inet::file(user, socket.accept(non_blocking)?, a.flags)?;
                     inet::install(user, a.to, accepted, a.flags)?;
                 }
             }
@@ -1886,22 +2057,24 @@ fn put_scrub(counts: &radix_vfs::Scrub, mut out: UserOut) -> Result<()> {
     out.put(0, &bytes).map_err(fs::status)
 }
 
-fn resolve(at: &Location, path: &str, flags: PathFlags) -> Result<Location> {
+fn resolve(who: &Who, at: &Location, path: &str, flags: PathFlags) -> Result<Location> {
     let vfs = vfs()?;
     if flags.contains(PathFlags::NO_FOLLOW) {
-        vfs.resolve_link(at, path)
+        vfs.resolve_link(who, at, path)
     } else {
-        vfs.resolve(at, path)
+        vfs.resolve(who, at, path)
     }
     .map_err(fs::status)
 }
 
-/// `set_times`: sets the times of the node at `at`, TIME_NOW meaning now
-/// and TIME_OMIT leaving one as it is. A node that keeps no times
-/// refuses with not_permitted, as Linux does a file whose times a
-/// process may not set.
-fn set_times(at: &Location, accessed: u64, modified: u64) -> Result<()> {
+/// `set_times`: sets the times of the node at `at` for `who`, TIME_NOW
+/// meaning now and TIME_OMIT leaving one as it is. Times it gives need
+/// the node's owner, and now its owner or write permission
+/// ([`Who::may_set_times`]). A node that keeps no times refuses with
+/// not_permitted, as Linux does a file whose times a process may not set.
+fn set_times(who: &Who, at: &Location, accessed: u64, modified: u64) -> Result<()> {
     let now = radix_vfs::now();
+    let given = [accessed, modified].iter().any(|&t| t != file::TIME_NOW && t != file::TIME_OMIT);
     let time = |t: u64| match t {
         file::TIME_OMIT => None,
         file::TIME_NOW => Some(now),
@@ -1912,31 +2085,35 @@ fn set_times(at: &Location, accessed: u64, modified: u64) -> Result<()> {
         return Ok(());
     }
     at.writable().map_err(fs::status)?;
+    if !who.bypass {
+        who.may_set_times(at.node.kind(), at.node.access(), given).map_err(fs::status)?;
+    }
     at.node.set_times(accessed, modified).map_err(|err| match err {
         radix_vfs::Error::NotSupported => error(Kernel::NotPermitted),
         err => fs::status(err),
     })
 }
 
-/// What a file the caller makes with the permission bits `mode` gets
-/// (ADR 0213): `mode` less those of the caller's file mode mask, and the
-/// caller's user and group, which are user 0's until users come (13b.2).
-/// A mode past MODE_BITS fails with invalid_argument.
-fn made_access(user: &UserThread, mode: u32) -> Result<Access> {
+/// What a file the caller makes through a directory acting for `name`
+/// with the permission bits `mode` gets (ADR 0213, 0214): `mode` less
+/// those of the caller's file mode mask, and the name's user and group. A
+/// mode past MODE_BITS fails with invalid_argument.
+fn made_access(user: &UserThread, name: &Identity, mode: u32) -> Result<Access> {
     if mode & !directory::MODE_BITS != 0 {
         return Err(error(Kernel::InvalidArgument));
     }
     let mask = user.process.posix.lock().file_mask;
-    Ok(Access { owner: 0, group: 0, mode: (mode & !mask) as u16 })
+    Ok(Access { owner: name.user, group: name.group, mode: (mode & !mask) as u16 })
 }
 
 /// `set_access`: changes the owner, group or mode of the node at `at`,
 /// each that is KEEP staying. A call that changes no mode is a chown(2),
 /// which takes a file's set-user-ID bit away (and its set-group-ID bit
 /// if its group may run it) even when its owner and group stay, as
-/// Linux does; a new mode is set after that. A filesystem that keeps no
-/// owners or modes refuses with not_permitted, as Linux's FAT does.
-fn set_access(at: &Location, owner: u32, group: u32, mode: u32) -> Result<()> {
+/// Linux does; a new mode is set after that. `who` may make only what
+/// [`Who::may_change`] lets it. A filesystem that keeps no owners or modes
+/// refuses with not_permitted, as Linux's FAT does.
+fn set_access(who: &Who, at: &Location, owner: u32, group: u32, mode: u32) -> Result<()> {
     let keep = |value: u32| (value != directory::KEEP).then_some(value);
     let (owner, group, mode) = (keep(owner), keep(group), keep(mode));
     if mode.is_some_and(|mode| mode & !directory::MODE_BITS != 0) {
@@ -1953,6 +2130,7 @@ fn set_access(at: &Location, owner: u32, group: u32, mode: u32) -> Result<()> {
         None => AccessChange::chown(kind, owner, group),
     };
     at.writable().map_err(fs::status)?;
+    let change = who.may_change(node.access(), change).map_err(fs::status)?;
     node.set_access(&change).map_err(refused_as_not_permitted)
 }
 

@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Disk health: diskhealth(8) reads each disk's SMART record or NVMe health
+# log at boot and every half hour, and writes a line to the kernel log
+# when a disk's verdict changes, as smartd(8) does on Linux.
+#
+# service.toml(5) explains each setting. `service check diskhealth`
+# checks this file, and `service edit diskhealth` checks it as you save.
+
+service_version = 1
+description = "Disk health"
+program = "/system/commands/diskhealth"
+arguments = ["--watch"]
+# After the disks are mounted and the consoles are up.
+order = 50
+# Started again if it fails: always, on-failure or never.
+restart = "on-failure"
+
+# What it holds beyond what every service reads (service.toml(5)): the
+# disks, to read their health.
+[permissions]
+files.read = ["/devices"]

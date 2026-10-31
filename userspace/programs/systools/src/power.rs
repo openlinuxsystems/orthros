@@ -3,7 +3,8 @@
 
 //! shutdown(8), reboot(8), poweroff(8), halt(8) and service(8): requests
 //! to Spark over its control socket, `/system/live/spark/control`
-//! (spark(8)).
+//! (spark(8)); service(8)'s `check`, `new` and `edit` are in
+//! `servicefiles`.
 //!
 //! Spark stops the services in order and then turns the machine off,
 //! restarts it or halts it; with `--force` it skips the services. The
@@ -14,6 +15,7 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 
 use crate::args::{Arg, Args};
+use crate::servicefiles;
 use crate::util::{self, Fail, fail, fail_with, usage};
 
 /// Spark's control socket.
@@ -265,6 +267,12 @@ pub fn service(args: &mut Args) -> Result<i32, Fail> {
                 println!(
                     "Usage: service < option > | --status-all | [ service_name [ command | --full-restart ] ]"
                 );
+                println!(
+                    "       service check [ service_name | file ]... | new service_name | edit service_name"
+                );
+                println!(
+                    "       service secret set service_name secret | list service_name | remove service_name secret"
+                );
                 return Ok(0);
             }
             Arg::Operand(value) => operands.push(value.to_string_lossy().into_owned()),
@@ -272,6 +280,14 @@ pub fn service(args: &mut Args) -> Result<i32, Fail> {
         }
     }
     operands.extend(args.rest().into_iter().map(|a| a.to_string_lossy().into_owned()));
+    // The files' own commands come first, as `service check logd`.
+    match operands.first().map(String::as_str) {
+        Some("check") => return servicefiles::check(&operands[1..]),
+        Some("new") => return servicefiles::new(&operands[1..]),
+        Some("edit") => return servicefiles::edit(&operands[1..]),
+        Some("secret") => return servicefiles::secret(&operands[1..]),
+        _ => {}
+    }
     let (Some(name), Some(command)) = (operands.first(), operands.get(1)) else {
         return Err(usage(
             "Usage: service < option > | --status-all | [ service_name [ command | --full-restart ] ]"

@@ -46,6 +46,7 @@ pub mod path;
 pub mod raw;
 pub mod synthetic;
 pub mod tmpfs;
+pub mod view;
 
 #[cfg(test)]
 mod tests;
@@ -127,6 +128,13 @@ pub enum Error {
     /// An argument the node cannot take: an offset or length a clone
     /// needs whole blocks of, or ranges of one file that overlap.
     InvalidArgument,
+    /// The second gate refuses: the node's owner, group and mode do not let
+    /// the caller's name do this (ADR 0214). POSIX's EACCES.
+    Denied,
+    /// Only the node's owner, or a caller with the bypass right, may do
+    /// this: change its mode, owner or times, or remove it from a sticky
+    /// directory (ADR 0214). POSIX's EPERM.
+    NotPermitted,
 }
 
 impl fmt::Display for Error {
@@ -158,6 +166,8 @@ impl fmt::Display for Error {
             Error::NoMemory => "out of memory",
             Error::BadAddress => "bad address",
             Error::InvalidArgument => "invalid argument",
+            Error::Denied => "permission denied",
+            Error::NotPermitted => "operation not permitted",
         })
     }
 }
@@ -279,6 +289,129 @@ impl Access {
             Kind::Socket | Kind::Symlink => 0o777,
         };
         Access { owner: 0, group: 0, mode }
+    }
+}
+
+/// What a call asks of a node, as the bits of a mode for one class: read,
+/// write and execute (search, for a directory).
+pub mod want {
+    /// Read a file, or list a directory.
+    pub const READ: u16 = 0o4;
+    /// Write a file, or change a directory's entries.
+    pub const WRITE: u16 = 0o2;
+    /// Run a file, or look in a directory.
+    pub const EXECUTE: u16 = 0o1;
+}
+
+/// Who a call acts for, which the second gate checks (ADR 0214): the name
+/// of the capability it comes through (a user, its group and the other
+/// groups it is in) and whether that capability has the bypass right
+/// (the security design's override), which passes the gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Who<'a> {
+    /// The user's number.
+    pub user: u32,
+    /// Its group's number.
+    pub group: u32,
+    /// The other groups it is in.
+    pub groups: &'a [u32],
+    /// Whether it passes the gate.
+    pub bypass: bool,
+}
+
+impl Who<'_> {
+    /// The kernel's own calls, and those of a capability with the bypass
+    /// right acting for root.
+    pub const KERNEL: Who<'static> = Who { user: 0, group: 0, groups: &[], bypass: true };
+
+    /// Whether it is in `group`.
+    pub fn in_group(&self, group: u32) -> bool {
+        self.group == group || self.groups.contains(&group)
+    }
+
+    /// Whether the gate lets it do `want` ([`want`]'s bits) to a node of
+    /// `kind` with `access`, as Linux's generic permission check without
+    /// access lists: the owner's bits if it owns the node, else the
+    /// group's if it is in the node's group, else the others'. The bypass
+    /// passes, but for running a file no one may run, as for Linux's root.
+    pub fn may(&self, access: Access, kind: Kind, want: u16) -> bool {
+        if self.bypass {
+            return want & want::EXECUTE == 0
+                || kind == Kind::Directory
+                || access.mode & 0o111 != 0;
+        }
+        let shift = if access.owner == self.user {
+            6
+        } else if self.in_group(access.group) {
+            3
+        } else {
+            0
+        };
+        (access.mode >> shift) & want == want
+    }
+
+    /// [`Who::may`] for `node`, failing with [`Error::Denied`]. With
+    /// the bypass it does not read the node's access unless it must.
+    pub fn check(&self, node: &dyn Node, want: u16) -> Result<()> {
+        let kind = node.kind();
+        if self.bypass && (want & want::EXECUTE == 0 || kind == Kind::Directory) {
+            return Ok(());
+        }
+        if self.may(node.access(), kind, want) { Ok(()) } else { Err(Error::Denied) }
+    }
+
+    /// Whether it owns a node with `access`, or passes the gate: who may
+    /// change its mode and times, as Linux's `inode_owner_or_capable`.
+    pub fn owns(&self, access: Access) -> bool {
+        self.bypass || access.owner == self.user
+    }
+
+    /// The part of `change` to a node with `access` that it may make, as
+    /// Linux's chown(2) and chmod(2) let a process, or
+    /// [`Error::NotPermitted`]. Without the bypass right: the owner stays,
+    /// but that the node's owner may name itself; the group changes only
+    /// by the owner, to one of its groups; the mode changes only by the
+    /// owner, and loses its set-group-ID bit unless the node's group (the
+    /// new one, if the change has one) is one of its. A chown that changes
+    /// neither, as `chown -1 -1`, is the owner's too when it would take a
+    /// set-ID bit away.
+    pub fn may_change(&self, access: Access, change: AccessChange) -> Result<AccessChange> {
+        if self.bypass {
+            return Ok(change);
+        }
+        let owner = access.owner == self.user;
+        let refused = change.owner.is_some_and(|new| !owner || new != access.owner)
+            || change
+                .group
+                .is_some_and(|new| !owner || (new != access.group && !self.in_group(new)))
+            || (change.mode.is_some() && !owner)
+            || (!owner && change.apply(access).mode != access.mode);
+        if refused {
+            return Err(Error::NotPermitted);
+        }
+        let mut allowed = change;
+        if let Some(mode) = &mut allowed.mode
+            && !self.in_group(change.group.unwrap_or(access.group))
+        {
+            *mode &= !mode::SET_GROUP;
+        }
+        Ok(allowed)
+    }
+
+    /// Whether it may set the times of a node with `access`: to times it
+    /// gives (`given`) as their owner, and to now as their owner or one
+    /// who may write it, as utimensat(2) has it; [`Error::NotPermitted`]
+    /// or [`Error::Denied`] otherwise.
+    pub fn may_set_times(&self, kind: Kind, access: Access, given: bool) -> Result<()> {
+        if self.owns(access) {
+            Ok(())
+        } else if given {
+            Err(Error::NotPermitted)
+        } else if self.may(access, kind, want::WRITE) {
+            Ok(())
+        } else {
+            Err(Error::Denied)
+        }
     }
 }
 

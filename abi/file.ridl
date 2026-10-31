@@ -261,7 +261,9 @@ interface file = 0x000c version 7 {
     /// either (TIME_OMIT). The filesystem keeps them as finely as it can
     /// (FAT: two seconds, and the day for reads); reading a file never
     /// changes its read time (ADR 0076). Devices and pipes keep no times
-    /// and fail with not_permitted. Needs the write right.
+    /// and fail with not_permitted. Needs the write right, and to set a
+    /// time to one given, the file's owner or the bypass right
+    /// (not_permitted), as radix-directory(2)'s `set_times`.
     method set_times = 11 (accessed: u64, modified: u64) -> ()
         raises [no_such_slot, empty_slot, missing_rights, not_permitted, read_only, io, corrupt];
     /// Sends `data` to a socket's other end, as `write` does but with
@@ -407,7 +409,8 @@ interface file = 0x000c version 7 {
         raises [no_such_slot, empty_slot, invalid_argument, not_socket, not_supported];
     /// Changes the file's owner, group or permission bits, as
     /// radix-directory(2)'s `set_access` does, each that is its KEEP
-    /// staying (ADR 0213). Pipes, sockets and devices keep none, and
+    /// staying (ADR 0213), with the owners radix-directory(2)'s
+    /// `set_access` needs. Pipes, sockets and devices keep none, and
     /// fail with not_permitted. Needs the write right.
     method set_access = 26 (owner: u32, group: u32, mode: u32) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, not_permitted,

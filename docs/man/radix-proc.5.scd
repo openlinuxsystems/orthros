@@ -34,7 +34,13 @@ tools read these instead (*ps*(1), *top*(1), *free*(1), *lsof*(8) and the
 others of *systools*(1)), and the C library's *getloadavg*(3) reads
 _/processes/loadavg_ for programs ported from Linux.
 
-This page describes _/processes_ as of Phase 10 of the roadmap.
+This page describes _/processes_ as of Phase 13 of the roadmap.
+
+Each process's directory belongs to the user and group it acts for,
+with mode 0555. Its *status* is 0444, and its other files 0400, so
+another user sees a process's number, name and state but not its
+arguments, files or threads, unless the capability they look through
+has the bypass right (*radix-names*(2), ADR 0214).
 
 # FILES
 
@@ -68,6 +74,9 @@ _/processes/_*n*_/status_
 	*kernel_memory*
 		The kernel memory charged for it, in bytes, followed by
 		*bytes*.
+
+	*user*, *user_group*
+		The user and group it acts for (*radix-names*(2)).
 
 	*parent*, *group*, *session*
 		For a POSIX process: the number of its parent, of its process
@@ -233,6 +242,8 @@ threads: 1
 anonymous_memory: 212 pages
 domain: system
 kernel_memory: 40960 bytes
+user: 0
+user_group: 0
 parent: 1
 group: 9
 session: 9

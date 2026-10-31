@@ -22,6 +22,9 @@ pub struct Process {
     pub state: String,
     pub threads: u64,
     pub domain: String,
+    /// The user and group it acts for (ADR 0214).
+    pub user: u32,
+    pub user_group: u32,
     pub parent: u64,
     pub group: u64,
     pub session: u64,
@@ -131,6 +134,8 @@ pub fn parse_status(text: &[u8]) -> Process {
             b"state" => p.state = text(),
             b"threads" => p.threads = number(value),
             b"domain" => p.domain = text(),
+            b"user" => p.user = number(value),
+            b"user_group" => p.user_group = number(value),
             b"parent" => p.parent = number(value),
             b"group" => p.group = number(value),
             b"session" => p.session = number(value),
@@ -515,13 +520,15 @@ mod tests {
     #[test]
     fn status_lines() {
         let p = parse_status(
-            b"number: 12\nname: nukesh\nstate: running\nthreads: 1\nparent: 1\ngroup: 12\n\
+            b"number: 12\nname: nukesh\nstate: running\nthreads: 1\nuser: 1000\nuser_group: 100\n\
+              parent: 1\ngroup: 12\n\
               session: 12\nterminal: pts/0\nterminal_group: 12\nrun: sleeping\nstarted_ns: 5000\nuser_ns: 10\n\
               system_ns: 20\nnice: -5\nresident_memory: 1024 KiB\ntraced: no\n\
               directory: /home/a b\n",
         );
         assert_eq!(p.number, 12);
         assert_eq!(p.name, "nukesh");
+        assert_eq!((p.user, p.user_group, p.group), (1000, 100, 12));
         assert_eq!(p.terminal.as_deref(), Some("pts/0"));
         assert_eq!(p.terminal_group, Some(12));
         assert_eq!(p.cpu_ns(), 30);

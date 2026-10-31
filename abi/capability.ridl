@@ -59,6 +59,9 @@ enum ObjectKind: u8 {
     /// keeps: its fans, their curves, its LEDs and its ARGB header
     /// (radix-platform(2)).
     platform = 19;
+    /// The authority to give processes and directories the names they
+    /// act for (radix-names(2)).
+    names = 20;
 }
 
 /// What a capability lets its holder do.
@@ -87,6 +90,11 @@ flags Rights: u64 {
     copy = 10;
     /// Move or copy the capability into another capability space.
     transfer = 11;
+    /// Pass the second gate beneath a directory: do what the owners,
+    /// groups and modes of its files would not let the name it acts for
+    /// do (radix-directory(2)). The security design calls it override,
+    /// which Rust and C++ keep as a word.
+    bypass = 12;
 }
 
 /// The flags of a slot, which stay with the slot rather than the

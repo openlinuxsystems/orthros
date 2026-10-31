@@ -384,25 +384,35 @@ impl<T: Clone, A: Allocator> Tree<T, A> {
     }
 
     /// Whether `sender` may send signals to `target`: itself, a process
-    /// below it in the tree, or one in its session. (Until Phase 13 brings
-    /// users, these stand in for POSIX's checks of user numbers.)
-    pub fn may_signal(&self, sender: u64, target: u64) -> bool {
+    /// below it in the tree, or one in its session that `same_user` says
+    /// acts for the same user as it (ADR 0214), given their handles.
+    pub fn may_signal(&self, sender: u64, target: u64, same_user: impl Fn(&T, &T) -> bool) -> bool {
         if sender == target {
             return true;
         }
         let (Some(from), Some(to)) = (self.get(sender), self.get(target)) else {
             return false;
         };
-        if from.session == to.session {
-            return true;
-        }
-        // Up from the target, at most as many steps as there are members.
-        let mut at = to.parent;
+        (from.session == to.session && same_user(&from.handle, &to.handle))
+            || self.is_below(sender, to)
+    }
+
+    /// Whether `sender` may trace `target`: itself, which the caller turns
+    /// away for its own reasons, or a process below it in the tree, as
+    /// Linux's Yama has it at level 1 (ADR 0214).
+    pub fn may_trace(&self, sender: u64, target: u64) -> bool {
+        sender == target || self.get(target).is_some_and(|to| self.is_below(sender, to))
+    }
+
+    /// Whether `member` is below `above` in the tree.
+    fn is_below(&self, above: u64, member: &Member<T>) -> bool {
+        // Up from it, at most as many steps as there are members.
+        let mut at = member.parent;
         for _ in 0..self.members.len() {
             if at == 0 {
                 break;
             }
-            if at == sender {
+            if at == above {
                 return true;
             }
             at = self.get(at).map_or(0, |m| m.parent);

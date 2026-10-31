@@ -4,6 +4,7 @@
 # The spark-oom boot test's service: it takes memory until the
 # out-of-memory policy stops it, and Spark starts it again.
 
-description = Takes all the memory there is
-program = /system/tests/posix/hog
-restart = always
+service_version = 1
+description = "Takes all the memory there is"
+program = "/system/tests/posix/hog"
+restart = "always"

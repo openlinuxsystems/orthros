@@ -324,36 +324,77 @@ int Sysdeps<SetSid>::operator()(pid_t *sid) {
 	return 0;
 }
 
-// Users come in Phase 13: until then every program is user 0, group 0,
-// and may become only that.
+// The name the process acts for (radix-names(2), ADR 0214): its user,
+// group and other groups, which it is started with and keeps. There is no
+// set-user-ID: the set*id calls succeed when they change nothing, and fail
+// with EPERM otherwise.
 
-uid_t Sysdeps<GetUid>::operator()() { return 0; }
-uid_t Sysdeps<GetEuid>::operator()() { return 0; }
-gid_t Sysdeps<GetGid>::operator()() { return 0; }
-gid_t Sysdeps<GetEgid>::operator()() { return 0; }
+namespace {
 
-int Sysdeps<SetUid>::operator()(uid_t uid) { return uid ? EPERM : 0; }
-int Sysdeps<SetEuid>::operator()(uid_t euid) { return euid ? EPERM : 0; }
-int Sysdeps<SetGid>::operator()(gid_t gid) { return gid ? EPERM : 0; }
-int Sysdeps<SetEgid>::operator()(gid_t egid) { return egid ? EPERM : 0; }
+// The process's user and group, and with `groups` up to `size` of its
+// other groups; `count` is how many it has. 0 or an errno.
+int identity(uid_t *user, gid_t *group, gid_t *groups = nullptr, size_t size = 0,
+		size_t *count = nullptr) {
+	struct radix_process_identity_results r;
+	if(uint64_t status = radix_process_identity(radix::SLOT_PROCESS, groups, size * sizeof(gid_t),
+			   &r);
+			status)
+		return radix::to_errno(status);
+	*user = r.user;
+	*group = r.group;
+	if(count)
+		*count = r.count;
+	return 0;
+}
+
+uid_t user_id() {
+	uid_t user = 0;
+	gid_t group = 0;
+	identity(&user, &group);
+	return user;
+}
+
+gid_t group_id() {
+	uid_t user = 0;
+	gid_t group = 0;
+	identity(&user, &group);
+	return group;
+}
+
+// Whether `id` leaves the process's `own` as it is: -1 or the same.
+template <typename Id> bool keeps(Id id, Id own) {
+	return id == static_cast<Id>(-1) || id == own;
+}
+
+} // namespace
+
+uid_t Sysdeps<GetUid>::operator()() { return user_id(); }
+uid_t Sysdeps<GetEuid>::operator()() { return user_id(); }
+gid_t Sysdeps<GetGid>::operator()() { return group_id(); }
+gid_t Sysdeps<GetEgid>::operator()() { return group_id(); }
+
+int Sysdeps<SetUid>::operator()(uid_t uid) { return uid == user_id() ? 0 : EPERM; }
+int Sysdeps<SetEuid>::operator()(uid_t euid) { return euid == user_id() ? 0 : EPERM; }
+int Sysdeps<SetGid>::operator()(gid_t gid) { return gid == group_id() ? 0 : EPERM; }
+int Sysdeps<SetEgid>::operator()(gid_t egid) { return egid == group_id() ? 0 : EPERM; }
 
 int Sysdeps<SetResuid>::operator()(uid_t ruid, uid_t euid, uid_t suid) {
-	auto ok = [](uid_t id) { return id == 0 || id == static_cast<uid_t>(-1); };
-	return ok(ruid) && ok(euid) && ok(suid) ? 0 : EPERM;
+	uid_t own = user_id();
+	return keeps(ruid, own) && keeps(euid, own) && keeps(suid, own) ? 0 : EPERM;
 }
 
 int Sysdeps<SetResgid>::operator()(gid_t rgid, gid_t egid, gid_t sgid) {
-	auto ok = [](gid_t id) { return id == 0 || id == static_cast<gid_t>(-1); };
-	return ok(rgid) && ok(egid) && ok(sgid) ? 0 : EPERM;
+	gid_t own = group_id();
+	return keeps(rgid, own) && keeps(egid, own) && keeps(sgid, own) ? 0 : EPERM;
 }
 
 int Sysdeps<GetResuid>::operator()(uid_t *ruid, uid_t *euid, uid_t *suid) {
-	*ruid = *euid = *suid = 0;
+	*ruid = *euid = *suid = user_id();
 	return 0;
 }
 
 int Sysdeps<GetResgid>::operator()(gid_t *rgid, gid_t *egid, gid_t *sgid) {
-	*rgid = *egid = *sgid = 0;
+	*rgid = *egid = *sgid = group_id();
 	return 0;
 }
 
@@ -366,15 +407,37 @@ int Sysdeps<SetRegid>::operator()(gid_t rgid, gid_t egid) {
 }
 
 int Sysdeps<GetGroups>::operator()(size_t size, gid_t *list, int *ret) {
-	(void)size;
-	(void)list;
-	*ret = 0;
+	uid_t user;
+	gid_t group;
+	size_t count;
+	if(int e = identity(&user, &group, size ? list : nullptr, size, &count); e)
+		return e;
+	// As on Linux, a list too small for them all is EINVAL, and size 0
+	// only counts them.
+	if(size && size < count)
+		return EINVAL;
+	*ret = static_cast<int>(count);
 	return 0;
 }
 
 int Sysdeps<SetGroups>::operator()(size_t size, const gid_t *list) {
-	(void)list;
-	return size ? EPERM : 0;
+	uid_t user;
+	gid_t group;
+	gid_t own[RADIX_NAMES_GROUPS_MAX];
+	size_t count;
+	if(int e = identity(&user, &group, own, RADIX_NAMES_GROUPS_MAX, &count); e)
+		return e;
+	// Only the groups it has, in any order.
+	if(size != count)
+		return EPERM;
+	for(size_t i = 0; i < size; i++) {
+		bool found = false;
+		for(size_t k = 0; k < count && !found; k++)
+			found = own[k] == list[i];
+		if(!found)
+			return EPERM;
+	}
+	return 0;
 }
 
 int Sysdeps<GetPriority>::operator()(int which, id_t who, int *value) {

@@ -49,7 +49,7 @@ use radix_klog::{TextBuf, error, info, warn};
 use radix_mm::lease::{self, Lease};
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_net::smoltcp::iface::{SocketHandle, SocketStorage};
-use radix_net::smoltcp::socket::{icmp, tcp};
+use radix_net::smoltcp::socket::{AnySocket, icmp, tcp};
 use radix_net::{
     FRAME, Ipv4Address, Ipv4Cidr, Link, Loopback, Medium, Memory, PingMemory, Pinger, Stack,
 };
@@ -65,8 +65,11 @@ use crate::user::posix::poll::Polled;
 const MAX_CARDS: usize = 8;
 /// The most interfaces: the loopback one, and the cards.
 pub const MAX_INTERFACES: usize = MAX_CARDS + 1;
-/// The most sockets on one interface.
+/// The sockets an interface has slots for at first. When every slot is
+/// taken it makes twice as many, up to [`MAX_SOCKETS`] (ADR 0188).
 const SOCKETS: usize = 128;
+/// The most sockets on one interface: 16,384 slots of 688 bytes, 11 MiB.
+const MAX_SOCKETS: usize = 16_384;
 /// How long the thread sleeps when nothing is due: an interrupt wakes
 /// it sooner, and a card without one is polled this often.
 const IDLE_NS: u64 = 10_000_000;
@@ -185,7 +188,9 @@ impl Drop for Card {
 /// or resets it at `deadline_ns`.
 pub struct Orphan {
     pub handle: SocketHandle,
-    pub leases: memory::TcpLeases,
+    /// The leases of its memory, until it gives the memory back: on a
+    /// card, at once in TIME-WAIT.
+    pub leases: Option<memory::TcpLeases>,
     /// The port the kernel picked for it, held until it goes.
     #[expect(dead_code, reason = "held only to keep the port taken")]
     pub port: Option<ports::Held>,
@@ -203,6 +208,9 @@ pub struct Interface {
     /// Its orphans, with room for as many as it has socket slots. Taken
     /// with the stack's lock held.
     orphans: Mutex<Vec<Orphan, Kmalloc>>,
+    /// The lease of its stack's socket slots, which come back when the
+    /// stack moves to more. Taken with the stack's lock held.
+    slots: Mutex<Lease<SocketStorage<'static>, Kmalloc>>,
     thread: Once<ThreadRef>,
     /// When its thread is next to wake by itself, by the clock of
     /// `sched::now_ns` (`u64::MAX`: only when woken), set with the stack's
@@ -256,6 +264,93 @@ impl Interface {
         self.number == 0
     }
 
+    /// Adds `socket` to `stack`, its own, locked, making room for it if
+    /// every slot is taken; or gives it back if there is none to make.
+    ///
+    /// # Errors
+    ///
+    /// `socket`, when there is no room for it.
+    pub fn add_socket<S: AnySocket<'static>>(
+        &self,
+        stack: &mut Stack<Card>,
+        socket: S,
+    ) -> Result<SocketHandle, S> {
+        match stack.add_socket(socket) {
+            Err(socket) if self.make_room(stack) => stack.add_socket(socket),
+            added => added,
+        }
+    }
+
+    /// Makes room on `stack`, its own, locked, for one more socket: twice
+    /// the slots, up to [`MAX_SOCKETS`]; with that many, the slot of its
+    /// oldest orphan in TIME-WAIT, which ends at once, as Linux ends one
+    /// past `tcp_max_tw_buckets`. False if there is no room to make.
+    fn make_room(&self, stack: &mut Stack<Card>) -> bool {
+        let slots = stack.socket_slots();
+        (slots < MAX_SOCKETS && self.grow(stack, (slots * 2).min(MAX_SOCKETS)))
+            || self.end_oldest_time_wait(stack)
+    }
+
+    /// Moves `stack`'s sockets to `len` slots, more than it has, and takes
+    /// the memory of the slots they were in back: false if there is no
+    /// memory for them.
+    #[allow(unsafe_code)]
+    fn grow(&self, stack: &mut Stack<Card>, len: usize) -> bool {
+        {
+            // Room for an orphan in each slot, as `adopt` counts on.
+            let mut orphans = self.orphans.lock();
+            let more = len.saturating_sub(orphans.len());
+            if orphans.try_reserve_exact(more).is_err() {
+                return false;
+            }
+        }
+        let Some((lease, slots)) = slots(len) else { return false };
+        match stack.grow_sockets(slots) {
+            Ok(old) => {
+                let old = ptr::from_mut(old);
+                let old_lease = core::mem::replace(&mut *self.slots.lock(), lease);
+                // SAFETY: `old` is the slots the stack had, given back as the
+                // return value of `grow_sockets` and turned into a raw pointer
+                // at once: nothing else reaches them. `end` checks they are
+                // where they were lent.
+                if unsafe { old_lease.end(old) }.is_err() {
+                    warn!("Net: {}: its old socket slots did not come back", self.name);
+                }
+                info!("Net: {} has room for {len} sockets", self.name);
+                true
+            }
+            Err(slots) => {
+                // SAFETY: as above: `slots` came back as `grow_sockets`'
+                // return value.
+                if unsafe { lease.end(ptr::from_mut(slots)) }.is_err() {
+                    warn!("Net: {}: socket slots did not come back", self.name);
+                }
+                false
+            }
+        }
+    }
+
+    /// Ends the oldest of its orphans in TIME-WAIT on `stack`, its own,
+    /// locked, which frees its slot: false if none is.
+    fn end_oldest_time_wait(&self, stack: &mut Stack<Card>) -> bool {
+        let mut orphans = self.orphans.lock();
+        let oldest = orphans
+            .iter()
+            .enumerate()
+            .filter(|(_, orphan)| {
+                stack
+                    .socket_mut::<tcp::Socket<'static>>(orphan.handle)
+                    .is_some_and(|socket| socket.state() == tcp::State::TimeWait)
+            })
+            .min_by_key(|(_, orphan)| orphan.deadline_ns)
+            .map(|(index, _)| index);
+        let Some(index) = oldest else { return false };
+        let orphan = orphans.swap_remove(index);
+        drop(orphans);
+        end_orphan(stack, orphan, self.name.as_str());
+        true
+    }
+
     /// Takes `orphan`, on `stack`, its own, locked, to finish closing.
     pub fn adopt(&self, _stack: &mut Stack<Card>, orphan: Orphan) {
         let mut orphans = self.orphans.lock();
@@ -275,7 +370,7 @@ impl Interface {
         let mut next: Option<u64> = None;
         let mut index = 0;
         while index < orphans.len() {
-            let orphan = &orphans[index];
+            let orphan = &mut orphans[index];
             let state = stack.socket_mut::<tcp::Socket<'static>>(orphan.handle).map(|s| s.state());
             // On the loopback link a connection in TIME_WAIT goes at once,
             // with its memory and socket slot, rather than holding them for
@@ -290,8 +385,16 @@ impl Interface {
             };
             if gone {
                 let orphan = orphans.swap_remove(index);
-                memory::end_tcp(stack, orphan.handle, orphan.leases, self.name.as_str());
+                end_orphan(stack, orphan, self.name.as_str());
                 continue;
+            }
+            // On a card, it keeps only its slot through TIME-WAIT, as Linux
+            // keeps a small record of its own: what it sent is acknowledged,
+            // and what it received no one will read (ADR 0188).
+            if state == Some(tcp::State::TimeWait)
+                && let Some(leases) = orphan.leases.take()
+            {
+                memory::shed_tcp(stack, orphan.handle, leases, self.name.as_str());
             }
             if now_ns >= orphan.deadline_ns {
                 // Closed now; the stack sends the reset, and the next look
@@ -305,6 +408,16 @@ impl Interface {
             index += 1;
         }
         next
+    }
+}
+
+/// Takes `orphan` out of `stack`, the interface `name`'s, and its memory
+/// back, if it still has any.
+fn end_orphan(stack: &mut Stack<Card>, orphan: Orphan, name: &str) {
+    match orphan.leases {
+        Some(leases) => memory::end_tcp(stack, orphan.handle, leases, name),
+        // Its buffers are empty: nothing lent is left in it.
+        None => drop(stack.remove_tcp(orphan.handle)),
     }
 }
 
@@ -397,16 +510,17 @@ pub fn init(ip: Option<&str>, gateway: Option<&str>) {
 fn start_loopback() -> Result<(), &'static str> {
     let ring = forever(LOOPBACK_RING).ok_or("out of memory")?;
     let card = Card::Loopback(Loopback::new(ring, LOOPBACK_MTU));
+    let (slots, sockets) = slots(SOCKETS).ok_or("out of memory")?;
     let memory = Memory {
         receive: forever(LOOPBACK_MTU).ok_or("out of memory")?,
         transmit: forever(LOOPBACK_MTU).ok_or("out of memory")?,
-        sockets: forever_of(|| SocketStorage::EMPTY, SOCKETS).ok_or("out of memory")?,
+        sockets,
     };
     let mut stack = Stack::new(card, memory, radix_random::u64(), sched::now_ns());
     stack.set_ipv4_addresses(&[Ipv4Cidr::new(LOOPBACK, 8)]);
     let mut name = TextBuf::<8>::new();
     let _ = name.write_str("lo");
-    let interface = interface(name, 0, stack).ok_or("out of memory")?;
+    let interface = interface(name, 0, stack, slots).ok_or("out of memory")?;
     if LO.set(interface).is_err() {
         return Err("it was started already");
     }
@@ -415,15 +529,22 @@ fn start_loopback() -> Result<(), &'static str> {
     run_thread(lo)
 }
 
-/// An interface named `name`, numbered `number`, of `stack`.
-fn interface(name: TextBuf<8>, number: usize, stack: Stack<Card>) -> Option<Interface> {
+/// An interface named `name`, numbered `number`, of `stack`, whose socket
+/// slots `slots` lent.
+fn interface(
+    name: TextBuf<8>,
+    number: usize,
+    stack: Stack<Card>,
+    slots: Lease<SocketStorage<'static>, Kmalloc>,
+) -> Option<Interface> {
     let mut orphans = Vec::new_in(kmalloc());
-    orphans.try_reserve_exact(SOCKETS).ok()?;
+    orphans.try_reserve_exact(stack.socket_slots()).ok()?;
     Some(Interface {
         name,
         number,
         stack: Mutex::new(stack),
         orphans: Mutex::new(orphans),
+        slots: Mutex::new(slots),
         thread: Once::new(),
         wake_at: AtomicU64::new(u64::MAX),
     })
@@ -473,10 +594,11 @@ fn values<T>(make: fn() -> T, len: usize) -> Option<Vec<T, Kmalloc>> {
     Some(items)
 }
 
-/// `len` values made by `make` on the heap, for as long as the kernel
-/// runs.
-fn forever_of<T>(make: fn() -> T, len: usize) -> Option<&'static mut [T]> {
-    values(make, len).map(Vec::leak)
+/// Slots for `len` sockets, lent from the heap.
+fn slots(
+    len: usize,
+) -> Option<(Lease<SocketStorage<'static>, Kmalloc>, &'static mut [SocketStorage<'static>])> {
+    values(|| SocketStorage::EMPTY, len).map(lease::lend)
 }
 
 /// The leases of a pinger's memory, which comes back when it closes.
@@ -632,10 +754,11 @@ fn start(function: &Function, index: usize) -> Result<(), Failure> {
     // From here a failure drops the card, which stops it.
     let info = net.info();
     let card = Card::Virtio { net, vector: interrupt };
+    let (slots, sockets) = slots(SOCKETS).ok_or("out of memory")?;
     let memory = Memory {
         receive: forever(FRAME).ok_or("out of memory")?,
         transmit: forever(FRAME).ok_or("out of memory")?,
-        sockets: forever_of(|| SocketStorage::EMPTY, SOCKETS).ok_or("out of memory")?,
+        sockets,
     };
     let mut stack = Stack::new(card, memory, radix_random::u64(), sched::now_ns());
     let flags = FLAGS.get().copied().unwrap_or((None, None));
@@ -647,7 +770,7 @@ fn start(function: &Function, index: usize) -> Result<(), Failure> {
     let mut name = TextBuf::<8>::new();
     let _ = write!(name, "net{index}");
     let interface =
-        interface(name.clone(), index + 1, stack).ok_or(Failure::Other("out of memory"))?;
+        interface(name.clone(), index + 1, stack, slots).ok_or(Failure::Other("out of memory"))?;
     if INTERFACES[index].set(interface).is_err() {
         return Err(Failure::Other("its slot is taken"));
     }

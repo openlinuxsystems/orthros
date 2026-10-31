@@ -14,6 +14,9 @@ publish.workspace = true
 # keymap(1)'s layouts and their setting (ADR 0149).
 keymap = { path = "../keymap" }
 libc = "0.2.191"
+# service(8)'s check, new and edit read service files as Spark does
+# (ADR 0216).
+manifest = { path = "../manifest" }
 # The system call interface, generated from abi/*.ridl, for what the C
 # library does not wrap: affinity, I/O priority, tracing.
 radix-abi = { path = "../../../kernel/abi" }

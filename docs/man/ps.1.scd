@@ -19,7 +19,8 @@ three kinds of options: UNIX options, which start with a dash (*-ef*);
 BSD options, letters without a dash (*aux*); and GNU long options
 (*--sort*).
 
-Without options it lists the processes on its own terminal. A list of
+Without options it lists the processes on its own terminal that act
+for the same user as it (*radix-names*(2)). A list of
 numbers alone (*ps 1,7*) selects those processes.
 
 # SELECTING
@@ -61,7 +62,7 @@ numbers alone (*ps 1,7*) selects those processes.
 	(BSD) Every process with a terminal.
 
 *x*
-	(BSD) Processes without a terminal too.
+	(BSD) The user's processes without a terminal too.
 
 *e*, *g*, *A*
 	(BSD) Every process.

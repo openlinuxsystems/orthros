@@ -11,6 +11,7 @@
 //! renamed since keeps its old path, and a path too long to keep shows
 //! its start, marked `(cut)`.
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -203,7 +204,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let searching =
         !s.files.is_empty() || !s.dirs.is_empty() || !s.pids.is_empty() || !s.commands.is_empty();
     let processes = proc::processes().map_err(|e| util::failed(&proc::PROC, e))?;
-    let user = util::user_name(0);
+    let mut users = HashMap::new();
     let mut table = vec![
         [
             "COMMAND",
@@ -229,6 +230,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     for p in processes.iter().filter(|p| !p.zombie() && s.process_chosen(p)) {
         let Ok(held) = proc::files(p.number) else { continue };
         let mut lines: Vec<Vec<String>> = Vec::new();
+        let user: &String = users.entry(p.user).or_insert_with(|| util::user_name(p.user));
         // Its working directory first, as lsof lists it.
         if let Some(dir) = &p.directory {
             let cwd = Held {
@@ -241,13 +243,13 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             };
             if s.line_chosen(&cwd, "cwd") {
                 let node = std::fs::metadata(dir).map_or(0, |m| m.ino());
-                lines.push(row(p, &user, "cwd".into(), &cwd, node, offsets, sizes));
+                lines.push(row(p, user, "cwd".into(), &cwd, node, offsets, sizes));
             }
         }
         for h in &held {
             let fd = fd_name(h);
             if s.line_chosen(h, &fd) {
-                lines.push(row(p, &user, fd, h, h.id, offsets, sizes));
+                lines.push(row(p, user, fd, h, h.id, offsets, sizes));
             }
         }
         if !lines.is_empty() {

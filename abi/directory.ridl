@@ -26,8 +26,44 @@
 //! the write right creates, removes and renames, and opens for writing;
 //! the control right mounts and unmounts. A capability `open` makes has
 //! the rights it asks for, which must be among the directory's own (for
-//! a file: read and write; for a directory: read, write and control), and
-//! the copy and transfer rights.
+//! a file: read and write; for a directory: read, write and control), the
+//! directory's bypass right if it has it, and the copy and transfer
+//! rights.
+//!
+//! The second gate (Phase 13, ADR 0214). A directory capability acts for
+//! a name, a user with a group and up to GROUPS_MAX more (radix-names(2)),
+//! which what is opened or made through it keeps; the caller's process
+//! has its own for what it makes without a path, as pipes. Every call that
+//! resolves a path checks the owners, groups and modes of the files it
+//! meets against that name, as Linux checks a process's: the owner's bits
+//! if the name's user owns the file, else the group's if its group is one
+//! of the name's, else the others'. Resolving needs search (execute) on
+//! each directory it looks in, this one included; opening needs read for
+//! the read right and write for the write right or to truncate, but for a
+//! file the call makes; listing needs read; making, removing and renaming
+//! need write and search on the directory the name is in, and moving a
+//! directory to another needs write on it. In a directory with the sticky
+//! bit only the owner of a file or of the directory may remove or rename
+//! it (not_permitted). Each failure is denied (EACCES) unless the method
+//! says otherwise. A capability with the bypass right passes the second
+//! gate, but for running a file that no execute bit lets anyone run
+//! (radix-process(2)'s `exec`), as Linux's root does.
+//!
+//! Views (Phase 13, ADR 0215). A view is a directory the kernel makes,
+//! with directories and files that capabilities hold attached at its
+//! names, as a mount namespace of bind mounts: a program whose root is a
+//! view finds each at its real path and nothing past them. `make_view`
+//! makes one and `attach` and `attach_link` fill it, which needs the
+//! control right on it. A path resolved beneath a view goes onto what is
+//! attached as onto a mount; `..` at the view's root stays there, a
+//! link's target that starts with `/` starts again from it, and
+//! `real_path` gives the view's names. A view acts for the name of the
+//! capability it was made from, and takes only capabilities acting for
+//! that name, with the bypass right if it has it; one attached without
+//! the write right is read-only beneath the view (read_only). The view's
+//! own directories take no files, nothing is mounted beneath a view
+//! (not_supported), and a capability `open` makes beneath one never has
+//! the control right.
 
 module directory;
 
@@ -37,6 +73,12 @@ const NAME_MAX: u64 = 255;
 const PATH_MAX: u64 = 4096;
 /// An owner, group or mode `set_access` leaves as it is.
 const KEEP: u32 = 0xffff_ffff;
+/// What `check_access` asks for: to read the file.
+const READ_OK: u32 = 4;
+/// To write it.
+const WRITE_OK: u32 = 2;
+/// To run it, or to search the directory.
+const EXECUTE_OK: u32 = 1;
 /// The bits a mode may have, 07777: read, write and execute for the
 /// owner, the group and the others, with set-user-ID, set-group-ID and
 /// sticky.
@@ -273,7 +315,7 @@ struct ScrubProgress {
 }
 
 /// A directory.
-interface directory = 0x000b version 6 {
+interface directory = 0x000b version 8 {
     kind = directory;
     /// Opens the file or directory at `path` (`.` for this one) and puts
     /// a capability to it with `rights` in slot `to`. Returns what it is.
@@ -282,27 +324,28 @@ interface directory = 0x000b version 6 {
     /// (radix-process(2)'s `file_mask`), and belongs to the caller's user
     /// and group, or to the directory's group if it has the set-group-ID
     /// bit; `mode` is not looked at otherwise. Needs the read right, and
-    /// the write right to create or truncate or to ask for it.
+    /// the write right to create or truncate or to ask for it. Beneath a
+    /// view, the capability it makes never has the control right.
     method open = 1 (path: in bytes, flags: OpenFlags, rights: Rights, to: slot, mode: u32)
         -> (kind: FileKind)
         raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument, no_memory,
                 bad_address, not_found, exists, not_directory, is_directory, read_only, no_space,
                 quota_exceeded, name_too_long, bad_name, outside, io, corrupt, no_device,
-                too_many_links];
+                too_many_links, denied];
     /// Makes an empty directory at `path`, with the mode and owners `open`
     /// gives a file it makes, and the set-group-ID bit too if this
     /// directory has it. Needs the write right.
     method make_directory = 2 (path: in bytes, mode: u32) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory, bad_address,
                 not_found, exists, not_directory, read_only, no_space, quota_exceeded,
-                name_too_long, bad_name, outside, io, corrupt, too_many_links];
+                name_too_long, bad_name, outside, io, corrupt, too_many_links, denied];
     /// Removes the file, symbolic link or empty directory, an empty Btrfs
     /// subvolume too, at `path`. A file still open lives on until its last
     /// capability goes. Needs the write right.
     method remove = 3 (path: in bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, not_empty, read_only, name_too_long,
-                bad_name, outside, in_use, io, corrupt, too_many_links];
+                bad_name, outside, in_use, io, corrupt, too_many_links, denied, not_permitted];
     /// Moves the file or directory at `from` to `to` beneath the
     /// directory in slot `to_dir`, on the same filesystem, replacing a
     /// file (or an empty directory, for a directory) there. Needs the
@@ -311,21 +354,21 @@ interface directory = 0x000b version 6 {
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, is_directory, not_empty, read_only, no_space,
                 quota_exceeded, name_too_long, bad_name, outside, cross_mount, in_use, io, corrupt,
-                too_many_links];
+                too_many_links, denied, not_permitted];
     /// Writes the directory's entries from `cursor` (0 for the first) into
     /// `buffer` as DirEntry records, other than `.` and `..`; returns how
     /// many it wrote (0 at the end), the bytes they take, and the cursor
     /// that continues after them. Needs the read right.
     method list = 5 (cursor: u64, buffer: out bytes) -> (count: u32, used: u64, next: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, bad_address, io,
-                corrupt];
+                corrupt, denied];
     /// Writes what the file at `path` (`.` for this directory) is into
     /// `buffer`, as a FileStatus; a buffer smaller than one fails with
     /// invalid_argument. Needs the read right.
     method stat = 6 (path: in bytes, flags: PathFlags, buffer: out bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, io,
-                corrupt, too_many_links];
+                corrupt, too_many_links, denied];
     /// Mounts a filesystem of kind `filesystem` (its name, as
     /// FilesystemKind lists them) on the directory at `path`: `fat`,
     /// `exfat`, `btrfs` and `ext4` on the block device whose file capability
@@ -337,18 +380,21 @@ interface directory = 0x000b version 6 {
     /// `flags` has read_only). A Btrfs that Radix cannot write yet, or an
     /// ext4 with features Radix only reads, fails with invalid_argument
     /// unless `flags` has read_only, as on Linux, and so does compress for
-    /// a filesystem other than `btrfs`.
+    /// a filesystem other than `btrfs`. Beneath a view it fails with
+    /// not_supported.
     method mount = 7 (path: in bytes, filesystem: in bytes, source: u32, flags: MountFlags) -> ()
-        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
-                no_memory, bad_address, not_found, not_directory, name_too_long, bad_name,
-                outside, in_use, io, corrupt, unknown_filesystem, not_block_device, too_many_links];
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside, in_use, io,
+                corrupt, unknown_filesystem, not_block_device, too_many_links, denied,
+                not_supported];
     /// Unmounts the filesystem whose root is at `path`, after writing what
     /// it holds in memory to its disk. Fails with in_use while anything
-    /// is mounted on it or open on it. Needs the control right.
+    /// is mounted on it or open on it, and with not_supported beneath a
+    /// view. Needs the control right.
     method unmount = 8 (path: in bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, in_use,
-                io, corrupt, too_many_links];
+                io, corrupt, too_many_links, denied, not_supported];
     /// Writes everything the directory's filesystem holds in memory to its
     /// disk.
     method sync = 9 () -> ()
@@ -363,10 +409,13 @@ interface directory = 0x000b version 6 {
         raises [no_such_slot, empty_slot, missing_rights];
     /// Sets the times of the file or directory at `path` (`.` for this
     /// one), as radix-file(2)'s `set_times` does. Needs the write right.
+    /// Setting a time to one given needs the file's owner or the bypass
+    /// right (not_permitted); setting both to now needs that or write
+    /// permission on it, as touch(1) needs.
     method set_times = 11 (path: in bytes, accessed: u64, modified: u64, flags: PathFlags) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside,
-                not_permitted, read_only, io, corrupt, too_many_links];
+                not_permitted, read_only, io, corrupt, too_many_links, denied];
     /// Makes a symbolic link at `path` that points to `target`: any text
     /// of at most PATH_MAX bytes but the empty one and one with a NUL,
     /// which is not looked at until the link is followed. A filesystem
@@ -375,7 +424,8 @@ interface directory = 0x000b version 6 {
     method make_link = 12 (path: in bytes, target: in bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory, bad_address,
                 not_found, exists, not_directory, read_only, no_space, quota_exceeded,
-                name_too_long, bad_name, outside, io, corrupt, not_permitted, too_many_links];
+                name_too_long, bad_name, outside, io, corrupt, not_permitted, too_many_links,
+                denied];
     /// Reads where the symbolic link at `path` points into `buffer`;
     /// returns the target's length, which is more than `buffer` holds if
     /// it was cut short. Fails with not_link if it is not a link. Needs
@@ -383,7 +433,7 @@ interface directory = 0x000b version 6 {
     method read_link = 13 (path: in bytes, buffer: out bytes) -> (len: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, io,
-                corrupt, not_link, too_many_links];
+                corrupt, not_link, too_many_links, denied];
     /// Writes where `path` leads into `buffer`: the names from this
     /// directory that resolving it took, every symbolic link followed and
     /// `.` and `..` worked out, joined by `/` (`.` for this directory
@@ -392,7 +442,7 @@ interface directory = 0x000b version 6 {
     method real_path = 14 (path: in bytes, buffer: out bytes) -> (len: u64)
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside, io,
-                corrupt, too_many_links];
+                corrupt, too_many_links, denied];
     /// Names the socket in slot `socket` (radix-process(2)'s `socket`)
     /// `path`: makes a socket's name there, a file of kind socket, which
     /// `connect_socket` connects through while the socket listens. The
@@ -408,7 +458,7 @@ interface directory = 0x000b version 6 {
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, exists, not_directory, read_only, no_space, quota_exceeded,
                 name_too_long, bad_name, outside, io, corrupt, not_permitted, too_many_links,
-                not_socket, busy];
+                not_socket, busy, denied];
     /// Connects the socket in slot `socket`, which must be neither
     /// connected nor listening, to the socket listening at the name
     /// `path`: the connection waits there until radix-file(2)'s `accept`
@@ -422,7 +472,7 @@ interface directory = 0x000b version 6 {
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
                 no_memory, bad_address, not_found, not_directory, name_too_long, bad_name,
                 outside, io, corrupt, too_many_links, not_socket, refused, connected, busy,
-                would_block, interrupted];
+                would_block, interrupted, denied];
     /// Makes `to` beneath the directory in slot `to_dir` another name of
     /// the file at `path`, a hard link: of the symbolic link itself when
     /// `path` ends in one, unless `flags` has follow, as linkat(2) has
@@ -430,12 +480,14 @@ interface directory = 0x000b version 6 {
     /// Btrfs subvolume), or cross_mount. A filesystem that has no hard
     /// links, as FAT has none, refuses with not_permitted, and a file
     /// with as many names as it keeps fails with too_many_names. Needs
-    /// the write right on `to_dir`.
+    /// the write right on `to_dir`, and the file's owner or read and
+    /// write permission on it (not_permitted), as Linux's
+    /// `fs.protected_hardlinks` has it.
     method link = 17 (path: in bytes, flags: LinkFlags, to_dir: slot, to: in bytes) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, exists, not_directory, is_directory, read_only, no_space,
                 quota_exceeded, name_too_long, bad_name, outside, cross_mount, io, corrupt,
-                not_permitted, too_many_links, too_many_names];
+                not_permitted, too_many_links, too_many_names, denied];
     /// Makes a file of `kind` at `path`: a named pipe (pipe), which
     /// opening reads or writes as a pipe; a device node (char_device or
     /// block_device) that stands for device number `device`, as
@@ -448,7 +500,8 @@ interface directory = 0x000b version 6 {
     method make_node = 18 (path: in bytes, kind: FileKind, device: u64, mode: u32) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory, bad_address,
                 not_found, exists, not_directory, read_only, no_space, quota_exceeded,
-                name_too_long, bad_name, outside, io, corrupt, not_permitted, too_many_links];
+                name_too_long, bad_name, outside, io, corrupt, not_permitted, too_many_links,
+                denied];
     /// Makes a new, empty Btrfs subvolume at `path`, as
     /// btrfs-subvolume(8)'s `create` does: a directory whose files are a
     /// tree of their own, which `snapshot` copies at once (ADR 0138).
@@ -457,7 +510,7 @@ interface directory = 0x000b version 6 {
     method make_subvolume = 19 (path: in bytes) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory, bad_address,
                 not_found, exists, not_directory, read_only, no_space, quota_exceeded,
-                name_too_long, bad_name, outside, io, corrupt, too_many_links];
+                name_too_long, bad_name, outside, io, corrupt, too_many_links, denied];
     /// Makes `to` beneath the directory in slot `to_dir` a snapshot of
     /// the Btrfs subvolume that holds `path`, read-only if `read_only`, as
     /// btrfs-subvolume(8)'s `snapshot` makes one: what the subvolume holds
@@ -465,22 +518,26 @@ interface directory = 0x000b version 6 {
     /// two share until either changes them. A subvolume in the source is
     /// an empty directory in the snapshot, as on Linux. On the same
     /// filesystem, or cross_mount; other filesystems fail with
-    /// invalid_argument. Needs the write right on `to_dir`.
+    /// invalid_argument. Needs the write right on `to_dir`, and the
+    /// subvolume's owner or the bypass right (not_permitted).
     method snapshot = 20 (path: in bytes, to_dir: slot, to: in bytes, read_only: bool) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, exists, not_directory, read_only, no_space, quota_exceeded,
-                name_too_long, bad_name, outside, cross_mount, io, corrupt, too_many_links];
+                name_too_long, bad_name, outside, cross_mount, io, corrupt, too_many_links, denied,
+                not_permitted];
     /// Removes the Btrfs subvolume at `path` with everything in it, as
     /// btrfs-subvolume(8)'s `delete` does, freeing what no snapshot
     /// shares; `remove` takes an empty one too. Fails with not_empty while
     /// it holds a subvolume, with in_use while a file in it is open or
     /// while it is the filesystem's default subvolume (Linux lets open
     /// files live on, and refuses the default with EPERM), and with
-    /// invalid_argument if it is no subvolume. Needs the write right.
+    /// invalid_argument if it is no subvolume. Needs the write right, and
+    /// write and search permission on the subvolume as well as what
+    /// `remove` needs, as Linux's `user_subvol_rm_allowed` has it.
     method remove_subvolume = 21 (path: in bytes) -> ()
-        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
-                bad_address, not_found, not_directory, not_empty, read_only, no_space,
-                name_too_long, bad_name, outside, in_use, io, corrupt, too_many_links];
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory, bad_address,
+                not_found, not_directory, not_empty, read_only, no_space, name_too_long, bad_name,
+                outside, in_use, io, corrupt, too_many_links, denied, not_permitted];
     /// Reads every block of the directory's Btrfs filesystem that its
     /// last commit holds, every copy, and checks each against its
     /// checksum, as btrfs-scrub(8)'s `start -B` does; with `repair`, writes
@@ -603,11 +660,58 @@ interface directory = 0x000b version 6 {
     /// no_follow). A filesystem that keeps no owners or modes, as FAT
     /// keeps none, takes a change of permission bits alone, or to owner
     /// and group 0, and changes nothing, as Linux's vfat does, and refuses
-    /// any other with not_permitted. Needs the write right.
+    /// any other with not_permitted. Needs the write right. Changing the
+    /// owner needs the bypass right; the group, the file's owner, to a
+    /// group of the name's, or the bypass right; the mode, the owner or
+    /// the bypass right, and without that right a file whose group is
+    /// not one of the name's loses its set-group-ID bit, as on Linux. Each
+    /// fails with not_permitted otherwise.
     method set_access = 31 (path: in bytes, flags: PathFlags, owner: u32, group: u32, mode: u32)
         -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside,
                 not_permitted, not_supported, read_only, no_space, quota_exceeded, io, corrupt,
-                too_many_links];
+                too_many_links, denied];
+    /// Says whether the name this capability acts for may do what `want`
+    /// asks with the file or directory at `path` (`.` for this one): read
+    /// it (READ_OK), write it (WRITE_OK) or run or search it (EXECUTE_OK),
+    /// or with none of them only that it is there, as access(2) and
+    /// faccessat(2) ask. Fails with denied if the second gate refuses, and
+    /// with read_only for WRITE_OK on a file of a read-only mount but a
+    /// device, pipe or socket. Needs the read right.
+    method check_access = 32 (path: in bytes, flags: PathFlags, want: u32) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside,
+                read_only, io, corrupt, too_many_links, denied];
+    /// Makes an empty view (ADR 0215) acting for this capability's name,
+    /// and puts a capability to its root in slot `to` with the read,
+    /// write, control, copy and transfer rights, and this capability's
+    /// bypass right if it has it, which the view then has too. Deriving a
+    /// copy without the control right gives a program a view it cannot
+    /// add to.
+    method make_view = 33 (to: slot) -> ()
+        raises [no_such_slot, empty_slot, occupied, no_memory];
+    /// Attaches the directory, file or device node the capability in slot
+    /// `what` holds at `path` in this view, making the view's directories
+    /// on the way: beneath the view, `path` leads to it as `what` does,
+    /// read-only unless `what` has the write right. Needs the control
+    /// right on a view's directory (not_supported on any other), and the
+    /// read right on `what`, which must act for the view's name and have
+    /// the bypass right if the view has it (not_permitted). Fails with
+    /// exists if `path` is taken, in_use if it goes through what is
+    /// attached already, bad_name if it has a `..`, and not_supported for
+    /// a capability to a view's own directory or to anything but a
+    /// directory, a file or a device node of the tree.
+    method attach = 34 (path: in bytes, what: slot) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                no_memory, bad_address, exists, not_directory, no_space, name_too_long, bad_name,
+                in_use, not_permitted, not_supported];
+    /// Makes a symbolic link at `path` in this view that points to
+    /// `target`, as `make_link` does, making the view's directories on
+    /// the way as `attach` does. Needs the control right on a view's
+    /// directory.
+    method attach_link = 35 (path: in bytes, target: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, exists, not_directory, no_space, name_too_long, bad_name, in_use,
+                not_supported];
 }

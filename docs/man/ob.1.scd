@@ -476,6 +476,63 @@ _target/userspace/_).
 		does, whatever name it claims, refusing a flood and keeping
 		nothing of a notification in the log.
 
+	*principals*
+		Boot 2 CPUs with _/system/tests/posix/principals_ as a program
+		that holds the names capability (Spark's *--names*), which makes
+		a tree in _/tmp_ for two users and starts itself as bob and as
+		alice, each with a root that acts for them and has no bypass
+		right (*radix-names*(2)). Alice checks her name and that it
+		cannot change; that she cannot read bob's 0700 home or list it,
+		give her files to another or a group not hers, change bob's
+		files' modes, remove or rename them in a sticky directory, link
+		to his files she may not write, set his files' times, or run a
+		file without an execute bit; that what she makes in a
+		set-group-ID directory takes its group; and that she can
+		neither signal nor trace bob's processes or root's, and reads
+		only their *status* in _/processes_. Root, whose root has the
+		bypass right, then reads both homes, and a capability stamped
+		for bob makes files that are his and reaches alice's only with
+		the bypass right (ADR 0214).
+
+	*views*
+		Boot 2 CPUs with _/system/tests/posix/views_ as a program that
+		holds the names capability, which builds a view for alice as
+		authd will build a session's (*radix-directory*(2)'s
+		*make_view* and *attach*): the system's files, the devices, her
+		home, a message of the day attached read-only, a link with
+		Unix's name, and a _/tmp_ of the session's own; then starts
+		itself as alice with the view as her root, without the right to
+		add to it. Alice checks that she sees the view's names and
+		nothing past them, not the system's _/tmp_; that _.._, getcwd,
+		realpath and links work across its entries; that what was
+		attached read-only and the view's own directories take nothing;
+		that she can neither mount nor attach in it; and that she can
+		make a view of her own from what she holds. Root then finds what
+		she made where the view put it, and checks that a view refuses
+		another name's capabilities, one without the bypass right when
+		it has it, a view's own, a pipe, a taken name and a path through
+		what it attached, and mounts beneath it (ADR 0215).
+
+	*services*
+		Boot 2 CPUs with the shipped services and
+		_/system/tests/posix/servicetest_, which checks their TOML files
+		with *service check* and finds each kept as Spark's last good
+		copy; writes a file of before Phase 13, which Spark converts to
+		TOML with its comments as it starts the service, keeping the old
+		one as _legacy.service.old_; writes a new file with *service
+		new* and edits it with *service edit*, which leaves the file as
+		it was when an edit does not read and is given up, and puts it in
+		place once it is fixed; has Spark start the new service, and
+		refuse one whose file does not read; and breaks the file of a
+		running service, which Spark then restarts from its last good
+		copy, saying which line is wrong (ADR 0216). Then gives the
+		service _inside_ a secret with *service secret set*, after Spark
+		has refused to start it without one, and has it check from
+		inside its view (ADR 0217): its secret as a read-only file and in
+		no variable, what every service reads, _/bin/sh_ and
+		_/usr/bin/env_, its own folder and _/tmp_, nothing past them,
+		and a file of mode 000 closed to it.
+
 	*spark-network*
 		Boot 2 CPUs under UEFI from USB and point Spark at two test
 		services that run _/system/tests/posix/netgrant_: _granted_ asks

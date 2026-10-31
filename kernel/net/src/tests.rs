@@ -30,6 +30,8 @@ struct End {
     /// Every frame this end sent, for the tests to look at.
     sent: Rc<RefCell<Vec<Vec<u8>>>>,
     flushes: usize,
+    /// Whether the stack makes and checks checksums on it.
+    checksums: bool,
 }
 
 impl Link for End {
@@ -57,6 +59,10 @@ impl Link for End {
     fn flush(&mut self) {
         self.flushes += 1;
     }
+
+    fn needs_checksums(&self) -> bool {
+        self.checksums
+    }
 }
 
 fn leak<T: Clone>(value: T, len: usize) -> &'static mut [T] {
@@ -82,6 +88,12 @@ fn ping_memory() -> PingMemory {
 
 /// Two stacks on one wire, at 10.0.0.1 and 10.0.0.2, and what each sent.
 fn pair() -> (Stack<End>, Stack<End>) {
+    wire(true)
+}
+
+/// Two stacks on one wire, as [`pair`], which make and check checksums or
+/// not, as `checksums` says.
+fn wire(checksums: bool) -> (Stack<End>, Stack<End>) {
     let (a_to_b, b_to_a): (Queue, Queue) = Default::default();
     let a = End {
         mac: [2, 0, 0, 0, 0, 1],
@@ -89,6 +101,7 @@ fn pair() -> (Stack<End>, Stack<End>) {
         out: a_to_b.clone(),
         sent: Rc::default(),
         flushes: 0,
+        checksums,
     };
     let b = End {
         mac: [2, 0, 0, 0, 0, 2],
@@ -96,6 +109,7 @@ fn pair() -> (Stack<End>, Stack<End>) {
         out: b_to_a,
         sent: Rc::default(),
         flushes: 0,
+        checksums,
     };
     let mut a = Stack::new(a, memory(), 1, 0);
     let mut b = Stack::new(b, memory(), 2, 0);
@@ -162,6 +176,7 @@ fn an_unconfigured_stack_cannot_ping() {
         out: Rc::default(),
         sent: Rc::default(),
         flushes: 0,
+        checksums: true,
     };
     let mut a = Stack::new(link, memory(), 3, 0);
     let pinger = Pinger::new(&mut a, ping_memory(), 1).ok().unwrap();
@@ -868,4 +883,395 @@ fn bytes_go_across_only_to_the_next_byte_expected() {
     let client_socket = lo.socket_mut::<tcp::Socket<'static>>(client).unwrap();
     assert!(!client_socket.heard_window_across(ack + 1, window, smoltcp::time::Instant::ZERO));
     assert!(client_socket.heard_window_across(ack, window, smoltcp::time::Instant::ZERO));
+}
+
+fn slots(len: usize) -> &'static mut [SocketStorage<'static>] {
+    let mut slots = Vec::new();
+    slots.resize_with(len, || SocketStorage::EMPTY);
+    slots.leak()
+}
+
+#[test]
+fn grows_its_socket_slots_and_keeps_its_sockets() {
+    let (mut a, mut b) = pair();
+    let server = b.add_socket(tcp_memory().socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(7).unwrap();
+    let client = a.add_socket(tcp_memory().socket()).ok().unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 10);
+    for _ in 1..4 {
+        a.add_socket(udp_memory().socket()).ok().unwrap();
+    }
+    assert_eq!(a.socket_slots(), 4);
+    let refused = a.add_socket(udp_memory().socket()).err().unwrap();
+    // Not more slots are given back.
+    let same = slots(4);
+    let same_place = same.as_ptr();
+    assert_eq!(a.grow_sockets(same).err().unwrap().as_ptr(), same_place);
+    // Twice as many: the old slots come back empty, and the sockets keep
+    // their handles and their connection.
+    let more = slots(8);
+    let old = a.grow_sockets(more).ok().unwrap();
+    assert_eq!(old.len(), 4);
+    assert_eq!(a.socket_slots(), 8);
+    a.add_socket(refused).ok().unwrap();
+    a.socket_mut::<tcp::Socket<'static>>(client).unwrap().send_slice(b"hello").unwrap();
+    run(&mut a, &mut b, &mut now, 10);
+    let mut got = [0; 16];
+    let len = b.socket_mut::<tcp::Socket<'static>>(server).unwrap().recv_slice(&mut got).unwrap();
+    assert_eq!(&got[..len], b"hello");
+}
+
+/// A clock for timestamps in milliseconds, which the tests move.
+static CLOCK_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+fn clock_ms() -> u32 {
+    CLOCK_MS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A TCP socket that sends timestamps from [`clock_ms`].
+fn timed_tcp_socket() -> tcp::Socket<'static> {
+    let mut socket = tcp_memory().socket();
+    socket.set_tsval_generator(Some(clock_ms));
+    socket
+}
+
+#[test]
+fn a_connection_in_time_wait_gives_its_memory_back_and_lasts() {
+    let (mut a, mut b) = pair();
+    let server = b.add_socket(tcp_memory().socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(7).unwrap();
+    let memory = tcp_memory();
+    let lent = tcp_places(&memory);
+    let client = a.add_socket(memory.socket()).ok().unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 10);
+    assert!(a.shed_tcp(client).is_none(), "only in TIME-WAIT");
+    a.socket_mut::<tcp::Socket<'static>>(client).unwrap().close();
+    run(&mut a, &mut b, &mut now, 10);
+    b.socket_mut::<tcp::Socket<'static>>(server).unwrap().close();
+    run(&mut a, &mut b, &mut now, 10);
+    assert_eq!(a.socket_mut::<tcp::Socket<'static>>(client).unwrap().state(), tcp::State::TimeWait);
+    assert_eq!(tcp_places(&a.shed_tcp(client).unwrap()), lent);
+    assert!(a.shed_tcp(client).unwrap().receive.is_empty(), "shed already");
+    // It stays until TIME-WAIT ends, and then holds nothing.
+    run(&mut a, &mut b, &mut now, 100);
+    assert_eq!(a.socket_mut::<tcp::Socket<'static>>(client).unwrap().state(), tcp::State::TimeWait);
+    now += 10_000_000_000;
+    run(&mut a, &mut b, &mut now, 1);
+    assert_eq!(a.socket_mut::<tcp::Socket<'static>>(client).unwrap().state(), tcp::State::Closed);
+    let left = a.remove_tcp(client).unwrap();
+    assert!(left.receive.is_empty() && left.transmit.is_empty());
+}
+
+#[test]
+fn a_new_connection_takes_the_place_of_one_in_time_wait() {
+    // The server closes first, so it is the one in TIME-WAIT, in the slot
+    // before the socket that listens now; the client connects again from
+    // the same port. As on Linux, the SYN goes to the connection first,
+    // which gives way to it, and the listening socket takes it at once,
+    // rather than the old connection answering it and the client trying
+    // again a second later.
+    let (mut a, mut b) = pair();
+    let first = b.add_socket(timed_tcp_socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(first).unwrap().listen(7).unwrap();
+    let client = a.add_socket(timed_tcp_socket()).ok().unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    let mut now = 0;
+    run(&mut a, &mut b, &mut now, 10);
+    assert_eq!(
+        b.socket_mut::<tcp::Socket<'static>>(first).unwrap().state(),
+        tcp::State::Established
+    );
+    let listener = b.add_socket(timed_tcp_socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(listener).unwrap().listen(7).unwrap();
+    CLOCK_MS.store(100, std::sync::atomic::Ordering::Relaxed);
+    b.socket_mut::<tcp::Socket<'static>>(first).unwrap().close();
+    run(&mut a, &mut b, &mut now, 10);
+    a.socket_mut::<tcp::Socket<'static>>(client).unwrap().close();
+    run(&mut a, &mut b, &mut now, 10);
+    assert_eq!(b.socket_mut::<tcp::Socket<'static>>(first).unwrap().state(), tcp::State::TimeWait);
+    a.remove_tcp(client).unwrap();
+
+    CLOCK_MS.store(200, std::sync::atomic::Ordering::Relaxed);
+    let again = a.add_socket(timed_tcp_socket()).ok().unwrap();
+    a.connect(again, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    run(&mut a, &mut b, &mut now, 10);
+    assert_eq!(
+        a.socket_mut::<tcp::Socket<'static>>(again).unwrap().state(),
+        tcp::State::Established
+    );
+    assert_eq!(b.socket_mut::<tcp::Socket<'static>>(first).unwrap().state(), tcp::State::Closed);
+    assert_eq!(
+        b.socket_mut::<tcp::Socket<'static>>(listener).unwrap().state(),
+        tcp::State::Established
+    );
+}
+
+/// Random numbers for the fuzzer: xorshift, from a seed of each test's,
+/// so that a failure comes back on every run.
+struct Random(u64);
+
+impl Random {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    /// A number below `n`, which is not 0.
+    fn below(&mut self, n: usize) -> usize {
+        usize::try_from(self.next() % u64::try_from(n).unwrap()).unwrap()
+    }
+
+    fn byte(&mut self) -> u8 {
+        self.next().to_le_bytes()[0]
+    }
+}
+
+/// Bytes at the edges of what a header's fields hold: lengths, version
+/// and header-length nibbles, flags, the ends of a signed byte.
+const EDGES: [u8; 12] = [0, 1, 2, 4, 5, 6, 0x0f, 0x11, 0x40, 0x7f, 0x80, 0xff];
+
+/// Writes `bytes` into `frame` at `at`, as far as the frame goes.
+fn put(frame: &mut [u8], at: usize, bytes: &[u8]) {
+    for (to, &byte) in frame.iter_mut().skip(at).zip(bytes) {
+        *to = byte;
+    }
+}
+
+/// Changes `frame` one to four times: a bit flipped; a byte set to an
+/// edge or at random; a 16-bit field (a length, a port, a window) set to
+/// an edge; a 32-bit one (a sequence number, an acknowledgment, an
+/// address) moved a little, so that it may still land in a window; the
+/// frame cut short or made longer; or a piece of another frame copied
+/// over it, where it was in that one. Three changes in four are in the
+/// first 80 bytes, where the headers are.
+fn mutate(frame: &mut Vec<u8>, others: &[Vec<u8>], random: &mut Random) {
+    for _ in 0..=random.below(4) {
+        if frame.is_empty() {
+            frame.push(random.byte());
+        }
+        let at = if random.below(4) == 0 {
+            random.below(frame.len())
+        } else {
+            random.below(frame.len().min(80))
+        };
+        match random.below(8) {
+            0 => frame[at] ^= 1 << random.below(8),
+            1 => frame[at] = EDGES[random.below(EDGES.len())],
+            2 => frame[at] = random.byte(),
+            3 => {
+                let len = u16::try_from(frame.len()).unwrap_or(u16::MAX);
+                let edges = [0, 1, 0x7fff, 0x8000, u16::MAX, len, len.wrapping_sub(14)];
+                put(frame, at, &edges[random.below(edges.len())].to_be_bytes());
+            }
+            4 => {
+                let mut word = [0; 4];
+                put(&mut word, 0, frame.get(at..).unwrap_or_default());
+                let moved = u32::from_be_bytes(word)
+                    .wrapping_add(u32::try_from(random.below(4096)).unwrap())
+                    .wrapping_sub(2048);
+                put(frame, at, &moved.to_be_bytes());
+            }
+            5 => frame.truncate(random.below(frame.len() + 1)),
+            6 => {
+                for _ in 0..=random.below(64) {
+                    frame.push(random.byte());
+                }
+            }
+            _ => {
+                let other = &others[random.below(others.len())];
+                let start = random.below(other.len());
+                let end = (start + 1 + random.below(16)).min(other.len());
+                if frame.len() < end {
+                    frame.resize(end, 0);
+                }
+                frame[start..end].copy_from_slice(&other[start..end]);
+            }
+        }
+    }
+}
+
+/// Checks that `frame`, which a stack sent, is one any stack would take:
+/// no longer than [`FRAME`], ARP or IPv4 over Ethernet, every header
+/// whole, and with checksums that check when its link makes them.
+fn assert_well_formed(frame: &[u8], checksums: bool) {
+    use smoltcp::phy::ChecksumCapabilities;
+    use smoltcp::wire::{
+        ArpPacket, ArpRepr, EthernetFrame, EthernetProtocol, Icmpv4Message, Icmpv4Packet,
+        Icmpv4Repr, IpProtocol, Ipv4Packet, Ipv4Repr, TcpPacket, TcpRepr, UdpPacket, UdpRepr,
+    };
+
+    assert!(frame.len() <= FRAME, "a frame of {} bytes", frame.len());
+    let caps =
+        if checksums { ChecksumCapabilities::default() } else { ChecksumCapabilities::ignored() };
+    let ethernet = EthernetFrame::new_checked(frame).expect("an Ethernet header");
+    match ethernet.ethertype() {
+        EthernetProtocol::Arp => {
+            ArpRepr::parse(&ArpPacket::new_checked(ethernet.payload()).unwrap()).unwrap();
+        }
+        EthernetProtocol::Ipv4 => {
+            let packet = Ipv4Packet::new_checked(ethernet.payload()).unwrap();
+            let repr = Ipv4Repr::parse(&packet, &caps).unwrap();
+            let (from, to) = (IpAddress::Ipv4(repr.src_addr), IpAddress::Ipv4(repr.dst_addr));
+            let payload = packet.payload();
+            match repr.next_header {
+                IpProtocol::Tcp => {
+                    let segment = TcpPacket::new_checked(payload).unwrap();
+                    TcpRepr::parse(&segment, &from, &to, &caps).unwrap();
+                }
+                IpProtocol::Udp => {
+                    let datagram = UdpPacket::new_checked(payload).unwrap();
+                    UdpRepr::parse(&datagram, &from, &to, &caps).unwrap();
+                }
+                IpProtocol::Icmp => {
+                    let message = Icmpv4Packet::new_checked(payload).unwrap();
+                    match message.msg_type() {
+                        // An error quotes the header of the packet it is
+                        // about, and as much of its payload as there was,
+                        // up to 8 bytes: smoltcp's parser takes no fewer.
+                        Icmpv4Message::DstUnreachable | Icmpv4Message::TimeExceeded => {
+                            assert!(!checksums || message.verify_checksum());
+                            assert_eq!(&payload[4..8], &[0; 4], "unused, and zero");
+                            let quoted = Ipv4Packet::new_unchecked(message.data());
+                            assert_eq!(quoted.version(), 4);
+                            assert!(usize::from(quoted.header_len()) <= message.data().len());
+                        }
+                        _ => drop(Icmpv4Repr::parse(&message, &caps).unwrap()),
+                    }
+                }
+                other => panic!("sent IPv4 of protocol {other}"),
+            }
+        }
+        other => panic!("sent a frame of type {other}"),
+    }
+}
+
+/// The rounds of each fuzzing test: a frame each way in each.
+const FUZZ_ROUNDS: usize = 100_000;
+
+/// Two stacks with sockets of every kind and a connection open, then
+/// frames each sent, changed at random, given to the other with the
+/// frames on their way, as a broken or hostile network would: neither
+/// panics, every frame either sends is well formed, and once the network
+/// is sound again a new connection between them is made and carries
+/// bytes each way.
+fn fuzz(checksums: bool, seed: u64) {
+    let (mut a, mut b) = wire(checksums);
+    assert!(a.grow_sockets(slots(16)).is_ok() && b.grow_sockets(slots(16)).is_ok());
+    let mut now = 0;
+
+    // A connection with bytes each way, which stays open.
+    let server = b.add_socket(timed_tcp_socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(7).unwrap();
+    let client = a.add_socket(timed_tcp_socket()).ok().unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    run(&mut a, &mut b, &mut now, 10);
+    a.socket_mut::<tcp::Socket<'static>>(client).unwrap().send_slice(b"hello").unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(server).unwrap().send_slice(b"world").unwrap();
+    run(&mut a, &mut b, &mut now, 10);
+    // One closed by each end in turn, and one refused.
+    let closing = b.add_socket(timed_tcp_socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(closing).unwrap().listen(8).unwrap();
+    let closed = a.add_socket(timed_tcp_socket()).ok().unwrap();
+    a.connect(closed, (Ipv4Address::new(10, 0, 0, 2), 8), None, 49153).unwrap();
+    run(&mut a, &mut b, &mut now, 10);
+    a.socket_mut::<tcp::Socket<'static>>(closed).unwrap().close();
+    run(&mut a, &mut b, &mut now, 10);
+    b.socket_mut::<tcp::Socket<'static>>(closing).unwrap().close();
+    let refused = a.add_socket(timed_tcp_socket()).ok().unwrap();
+    a.connect(refused, (Ipv4Address::new(10, 0, 0, 2), 9), None, 49154).unwrap();
+    run(&mut a, &mut b, &mut now, 10);
+    // A socket that listens through it all.
+    let listener = b.add_socket(timed_tcp_socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(listener).unwrap().listen(7).unwrap();
+    // A datagram each way, and pings each way.
+    let to_b = IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 2)), 53);
+    let to_a = IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 1)), 40000);
+    for (stack, port, to) in [(&mut a, 40000, to_b), (&mut b, 53, to_a)] {
+        let handle = stack.add_socket(udp_memory().socket()).ok().unwrap();
+        let socket = stack.socket_mut::<udp::Socket<'static>>(handle).unwrap();
+        socket.bind(port).unwrap();
+        socket.send_slice(b"datagram", to).unwrap();
+    }
+    let pingers = [Pinger::new(&mut a, ping_memory(), 1), Pinger::new(&mut b, ping_memory(), 2)]
+        .map(|pinger| pinger.ok().unwrap());
+    pingers[0].send(&mut a, Ipv4Address::new(10, 0, 0, 2), 1).unwrap();
+    pingers[1].send(&mut b, Ipv4Address::new(10, 0, 0, 1), 1).unwrap();
+    run(&mut a, &mut b, &mut now, 10);
+
+    // What each sent so far is what the fuzzer starts from.
+    let from_a = core::mem::take(&mut *a.link().sent.borrow_mut());
+    let from_b = core::mem::take(&mut *b.link().sent.borrow_mut());
+    assert!(from_a.len() >= 10 && from_b.len() >= 10);
+    let mut random = Random(seed);
+    for round in 0..FUZZ_ROUNDS {
+        for (frames, to) in [(&from_a, &mut b), (&from_b, &mut a)] {
+            let mut frame = frames[random.below(frames.len())].clone();
+            // One in eight goes again as it was, a duplicate.
+            if random.below(8) != 0 {
+                mutate(&mut frame, frames, &mut random);
+            }
+            to.link().inbox.borrow_mut().push_back(frame);
+        }
+        // Bytes on the connection now and then, and time moves on: by a
+        // millisecond mostly, now and then far enough for timers to fire.
+        if round % 16 == 0
+            && let Some(socket) = a.socket_mut::<tcp::Socket<'static>>(client)
+            && socket.can_send()
+        {
+            socket.send_slice(b"more").unwrap();
+        }
+        now += match random.below(64) {
+            0 => 3_000_000_000,
+            1..=4 => 200_000_000,
+            _ => 1_000_000,
+        };
+        a.poll(now);
+        b.poll(now);
+        for stack in [&mut a, &mut b] {
+            for frame in stack.link().sent.borrow_mut().drain(..) {
+                assert_well_formed(&frame, checksums);
+            }
+        }
+    }
+
+    // The network sound again, and long enough after for what was learned
+    // from it, such as where an address is, to be forgotten: a new
+    // connection, from and to ports of its own, carries bytes each way.
+    a.link().inbox.borrow_mut().clear();
+    b.link().inbox.borrow_mut().clear();
+    now += 120_000_000_000;
+    run(&mut a, &mut b, &mut now, 20);
+    let server = b.add_socket(timed_tcp_socket()).ok().unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(10).unwrap();
+    let client = a.add_socket(timed_tcp_socket()).ok().unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 10), None, 50000).unwrap();
+    run(&mut a, &mut b, &mut now, 2_000);
+    let socket = a.socket_mut::<tcp::Socket<'static>>(client).unwrap();
+    assert_eq!(socket.state(), tcp::State::Established);
+    socket.send_slice(b"after").unwrap();
+    b.socket_mut::<tcp::Socket<'static>>(server).unwrap().send_slice(b"all").unwrap();
+    run(&mut a, &mut b, &mut now, 20);
+    let mut got = [0; 8];
+    let len = b.socket_mut::<tcp::Socket<'static>>(server).unwrap().recv_slice(&mut got).unwrap();
+    assert_eq!(&got[..len], b"after");
+    let len = a.socket_mut::<tcp::Socket<'static>>(client).unwrap().recv_slice(&mut got).unwrap();
+    assert_eq!(&got[..len], b"all");
+}
+
+#[test]
+fn frames_changed_at_random_break_neither_stack() {
+    fuzz(true, 0x2545_f491_4f6c_dd1d);
+}
+
+#[test]
+fn frames_changed_at_random_break_neither_stack_without_checksums() {
+    // As on the loopback link: every change gets past the checksums to
+    // the headers and the sockets behind them.
+    fuzz(false, 0x9e37_79b9_7f4a_7c15);
 }

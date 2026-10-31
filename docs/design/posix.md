@@ -497,6 +497,7 @@ and why:
 | 0046 | Semaphores shared between processes |
 | 0047 | The root's folders by their plain names in `paths.h` and `ctermid` |
 | 0048 | `/system/commands` and `/system/resources/man` in `paths.h` |
+| 0049 | `readdir` and `readdir_r` give an error, not end the program, when a directory cannot be read |
 
 Patches 0013 to 0022 fix what libc-test found (below); each says which
 of its tests it answers. One of mlibc's own tests changes with patch

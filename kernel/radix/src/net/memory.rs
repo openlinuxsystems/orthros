@@ -226,6 +226,20 @@ pub fn end_tcp(stack: &mut Stack<Card>, handle: SocketHandle, leases: TcpLeases,
     }
 }
 
+/// Takes back the memory of the TCP socket `handle` of `stack`, the
+/// interface `name`'s, in TIME-WAIT, through `leases`: the socket stays in
+/// its slot, with none, until TIME-WAIT ends (ADR 0188). Memory that does
+/// not come back stays lent, which leaks it, and is said.
+pub fn shed_tcp(stack: &mut Stack<Card>, handle: SocketHandle, leases: TcpLeases, name: &str) {
+    let ended = match stack.shed_tcp(handle) {
+        Some(memory) => leases.end(&TcpPlaces::of(memory)),
+        None => false,
+    };
+    if !ended {
+        warn!("Net: {name}: a TCP socket's memory did not come back from TIME-WAIT");
+    }
+}
+
 /// Takes the UDP socket `handle` out of `stack`, as [`end_tcp`] does.
 pub fn end_udp(stack: &mut Stack<Card>, handle: SocketHandle, leases: UdpLeases, name: &str) {
     let ended = match stack.remove_udp(handle) {

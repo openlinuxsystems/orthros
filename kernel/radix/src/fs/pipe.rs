@@ -50,6 +50,7 @@ use radix_vfs::{
 use super::{Description, FileObject, FileRef};
 use crate::sched::{self, wait};
 use crate::user::Fifo;
+use crate::user::names::Identity;
 use crate::user::posix::poll::{self, Polled};
 use crate::user::posix::signal::{Restart, interrupted};
 
@@ -568,11 +569,12 @@ pub fn make(
     let pipe = Pipe::new()?;
     let description =
         Description { non_blocking: flags.contains(PipeFlags::NON_BLOCKING), append: false };
+    let name = user.process.identity();
     let end = |write: bool| -> Result<FileRef, Status> {
         let node: NodeRef = mem::arc(End { pipe: pipe.clone(), write, reads_too: false })
             .map_err(|_| Kernel::NoMemory.status(0))?;
-        let at = Location { mount: mount.clone(), node };
-        FileObject::with(at, description).ok_or(Kernel::NoMemory.status(0))
+        let at = Location::new(mount.clone(), node);
+        FileObject::with(at, description, name.clone()).ok_or(Kernel::NoMemory.status(0))
     };
     // Each end counts as open from here: if a step fails, its node goes,
     // and the other end sees it gone.
@@ -611,7 +613,8 @@ pub(super) fn for_kernel() -> Result<(KArc<Pipe>, FileRef), Status> {
     let pipe = Pipe::new()?;
     let node: NodeRef = mem::arc(End { pipe: pipe.clone(), write: false, reads_too: false })
         .map_err(|_| Kernel::NoMemory.status(0))?;
-    let reader = FileObject::new(Location { mount, node }).ok_or(Kernel::NoMemory.status(0))?;
+    let reader = FileObject::new(Location::new(mount, node), Identity::ROOT)
+        .ok_or(Kernel::NoMemory.status(0))?;
     Ok((pipe, reader))
 }
 
