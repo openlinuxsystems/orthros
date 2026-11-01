@@ -31,7 +31,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use radix_sync::{Once, SpinLock};
+use radix_sync::{Once, RawSpinLock, SpinLock};
 
 use crate::class::{self, CLASSES, Class};
 use crate::context::{AllocError, Context, Flags};
@@ -58,7 +58,11 @@ const BOOKKEEPING: Flags = Flags::MAY_SLEEP;
 
 /// One CPU's magazines, in a frame of its own on the CPU's node.
 struct CpuCache {
-    classes: SpinLock<[Loaded; CLASSES]>,
+    /// Taken only with interrupts masked (`NoInterrupts`), where nothing
+    /// can preempt its holder, and almost always by its own CPU: a raw
+    /// lock, without the preemption and lock checker hooks a `SpinLock`
+    /// calls, which cost every allocation and free more than the lock.
+    classes: RawSpinLock<[Loaded; CLASSES]>,
 }
 
 const _: () = {
@@ -476,7 +480,7 @@ impl Heap {
         let flags = BOOKKEEPING.prefer_node(node);
         let phys = self.frames.alloc_inner(0, flags, Owner::PerCpu, 0, false, false).ok()?;
         let addr = platform.direct_map() + phys as usize;
-        let empty = CpuCache { classes: SpinLock::new([const { Loaded::new() }; CLASSES]) };
+        let empty = CpuCache { classes: RawSpinLock::new([const { Loaded::new() }; CLASSES]) };
         // SAFETY: the frame was just allocated for this cache, is mapped by
         // the direct map and is never freed: a CPU's cache lives as long as
         // the kernel.
