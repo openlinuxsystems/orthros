@@ -1417,12 +1417,14 @@ _target/userspace/_).
 		six more times, each operation keeping its fastest run.
 
 	*--linux-kernel* _file_
-		The Linux kernel to boot. Without it, *ob* uses
-		*OB_LINUX_KERNEL*, else this machine's own
-		_/boot/vmlinuz-$(uname -r)_ if it may read it. Debian, Ubuntu
-		and Mint make that file readable only by root; copy it once with
-		*sudo install -m 644 /boot/vmlinuz-$(uname -r) .cache/vmlinuz*
-		and pass *--linux-kernel .cache/vmlinuz*.
+		The Linux kernel to boot instead of the baseline. Without it,
+		*ob* uses *OB_LINUX_KERNEL*, else the pinned baseline: one
+		release of Ubuntu's Azure kernel, the flavour CI's runners boot,
+		named in _tools/xtask/src/baseline.rs_. *ob* fetches its two
+		packages once into _.cache/linux-baseline_, checks their SHA-256
+		and unpacks them there with *dpkg-deb* and *depmod*, without
+		installing them, so that every machine and every run holds Radix
+		to the same Linux (ADR 0290).
 
 	*--runs* _n_
 		Measure Radix and the Linux virtual machine in turn _n_ times

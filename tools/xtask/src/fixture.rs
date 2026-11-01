@@ -60,7 +60,7 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
 /// `ob fixture btrfs-log`.
 fn btrfs_log(ctx: &Ctx, kernel: Option<String>) -> Result<()> {
     qemu::require_qemu()?;
-    let Some(kernel) = bench::linux_kernel(kernel)? else {
+    let Some(kernel) = bench::fixture_kernel(kernel)? else {
         crate::bail!(
             "no Linux kernel to boot: give one with --linux-kernel or OB_LINUX_KERNEL, or let \
              this user read /boot/vmlinuz-$(uname -r)"
@@ -68,7 +68,7 @@ fn btrfs_log(ctx: &Ctx, kernel: Option<String>) -> Result<()> {
     };
     let dir = ctx.out.join("fixture");
     process::create_dir(&dir)?;
-    let initrd = bench::linux_init(ctx, &dir, None, &kernel)?;
+    let initrd = bench::linux_init(ctx, &dir, None, &kernel, None)?;
     let disk = dir.join("btrfs-log.img");
     let file = std::fs::File::create(&disk).context(|| format!("making {}", disk.display()))?;
     file.set_len(DISK_BYTES).context(|| format!("sizing {}", disk.display()))?;
@@ -112,7 +112,7 @@ fn btrfs_log(ctx: &Ctx, kernel: Option<String>) -> Result<()> {
 /// it replays the log, and `btrfs check` checks what its replay left.
 fn btrfs_radix_log(ctx: &Ctx, kernel: Option<String>) -> Result<()> {
     qemu::require_qemu()?;
-    let Some(kernel) = bench::linux_kernel(kernel)? else {
+    let Some(kernel) = bench::fixture_kernel(kernel)? else {
         crate::bail!(
             "no Linux kernel to boot: give one with --linux-kernel or OB_LINUX_KERNEL, or let \
              this user read /boot/vmlinuz-$(uname -r)"
@@ -120,7 +120,7 @@ fn btrfs_radix_log(ctx: &Ctx, kernel: Option<String>) -> Result<()> {
     };
     let dir = ctx.out.join("fixture");
     process::create_dir(&dir)?;
-    let initrd = bench::linux_init(ctx, &dir, None, &kernel)?;
+    let initrd = bench::linux_init(ctx, &dir, None, &kernel, None)?;
     let disk = dir.join("btrfs-radix-log.img");
     step("Writing a log of fsyncs with Radix's Btrfs, in a host test");
     let mkfs = crate::btrfs::mkfs(ctx)?;

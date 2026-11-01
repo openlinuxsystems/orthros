@@ -104,14 +104,14 @@ fresh pages, TLB shootdowns, file operations, memory copies and, with one
 C program on both systems, fork, exec, pipes, signals, `poll` and
 futexes (ADR 0106) on Radix and the closest operations of Linux in a
 virtual machine set up the same way, and writes a report to
-`out/bench/report.md` (ADR 0039). It needs KVM, and a Linux
-kernel it may read: on Debian, Ubuntu and Mint, copy your own once with
-`sudo install -m 644 /boot/vmlinuz-$(uname -r) .cache/vmlinuz` and run
-`./ob bench --linux-kernel .cache/vmlinuz`. It measures both systems
-three times in turn and keeps each operation's fastest run (ADR 0046).
-CI runs it with `--gate` on every pull request and merge, and fails if
-Radix is slower than Linux at any operation, after measuring both again,
-up to six more times, while one is (ADR 0107).
+`out/bench/report.md` (ADR 0039). It needs KVM. The Linux it boots is
+one pinned release of Ubuntu's kernel, which it fetches once into
+`.cache/linux-baseline` (ADR 0290); `--linux-kernel` boots another. It
+measures both systems three times in turn and keeps each operation's
+fastest run (ADR 0046). CI runs it with `--gate` on every pull request
+and merge, and every night on main, and fails if Radix is slower than
+Linux at any operation, after measuring both again, up to six more
+times, while one is (ADR 0107).
 `./ob bench --instructions` needs neither: it counts the instructions
 each operation takes under QEMU, and with `--gate` fails if one on one
 CPU goes over its budget in `tools/xtask/src/bench.rs`, as CI does
