@@ -39,11 +39,14 @@ pub struct ShellHinter {
     /// What is shown, and what → takes of it.
     shown: String,
     taken: String,
+    /// The empty line's hint, worked out once per prompt: for which last
+    /// command, status and folder, and what it is.
+    empty: Option<((String, i32, String), String, String)>,
 }
 
 impl ShellHinter {
     pub fn new(shell: Handle, style: nu_ansi_term::Style, history: bool, options: bool) -> Self {
-        ShellHinter { shell, style, history, options, shown: String::new(), taken: String::new() }
+        ShellHinter { shell, style, history, options, shown: String::new(), taken: String::new(), empty: None }
     }
 }
 
@@ -58,10 +61,27 @@ impl Hinter for ShellHinter {
     ) -> String {
         self.shown.clear();
         self.taken.clear();
-        if pos != line.len() || line.trim().is_empty() {
+        if pos != line.len() || (line.trim().is_empty() && !line.is_empty()) {
             return String::new();
         }
         let Ok(mut shell) = self.shell.0.try_borrow_mut() else { return String::new() };
+        if line.is_empty() {
+            let key = (shell.last_command.clone(), shell.status, shell.get("PWD").unwrap_or_default());
+            if self.empty.as_ref().is_none_or(|(k, _, _)| *k != key) {
+                let (shown, taken) = empty_line_hint(&shell, &key.0, key.1, &key.2);
+                self.empty = Some((key, shown, taken));
+            }
+            if let Some((_, shown, taken)) = &self.empty {
+                self.shown.clone_from(shown);
+                self.taken.clone_from(taken);
+            }
+            if self.shown.is_empty() || !use_ansi_coloring {
+                self.taken.clear();
+                self.shown.clear();
+                return String::new();
+            }
+            return self.style.paint(&self.shown).to_string();
+        }
         if self.options
             && let Some((rest, about)) = option_help(&mut shell, line)
         {
@@ -100,6 +120,29 @@ impl Hinter for ShellHinter {
         let start = rest.len() - rest.trim_start().len();
         let end = rest[start..].find(char::is_whitespace).map_or(rest.len(), |i| start + i);
         rest[..end].to_string()
+    }
+}
+
+/// What an empty line shows (ADRs 0268 and 0270), and what → takes of
+/// it: after a failure, the offer of Alt+E; otherwise the command most
+/// often run after the last one, from the record, or Nebix's better
+/// guess when it is running.
+fn empty_line_hint(shell: &Shell, last: &str, status: i32, folder: &str) -> (String, String) {
+    let settings = &shell.settings;
+    if last.is_empty() || settings.screen_reader {
+        return (String::new(), String::new());
+    }
+    if status != 0 && status != 130 && settings.explain_offer {
+        return ("Alt+E explains what went wrong".into(), String::new());
+    }
+    if !settings.suggest_next {
+        return (String::new(), String::new());
+    }
+    let guess = shell.records.as_ref().and_then(|r| r.next_after(last, folder)).map(str::to_string);
+    let better = crate::nebix::next(&crate::explain::mask(last), status, folder, guess.as_deref());
+    match better.or(guess) {
+        Some(command) => (command.clone(), command),
+        None => (String::new(), String::new()),
     }
 }
 

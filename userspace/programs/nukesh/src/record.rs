@@ -181,6 +181,40 @@ impl Records {
             .map(|r| r.command.as_str())
     }
 
+    /// The command most often run next after `last` (ADR 0270): of the
+    /// records right after one of `last`, within 15 minutes, each counts
+    /// once, twice if in `folder`; the most counted wins if it came next
+    /// at least twice, the newest of equals first. Nothing if it is `last`
+    /// itself or it failed the last time.
+    pub fn next_after(&self, last: &str, folder: &str) -> Option<&str> {
+        if last.is_empty() {
+            return None;
+        }
+        // Command, weight, where last seen, whether it worked, times seen.
+        let mut counts: Vec<(&str, u32, usize, bool, u32)> = Vec::new();
+        for (at, pair) in self.all.windows(2).enumerate() {
+            let (before, after) = (&pair[0], &pair[1]);
+            if before.command != last || after.command == last || after.time - before.time > 900 {
+                continue;
+            }
+            let weight = if after.folder == folder { 2 } else { 1 };
+            match counts.iter_mut().find(|c| c.0 == after.command) {
+                Some(c) => {
+                    c.1 += weight;
+                    c.2 = at;
+                    c.3 = after.status == 0;
+                    c.4 += 1;
+                }
+                None => counts.push((after.command.as_str(), weight, at, after.status == 0, 1)),
+            }
+        }
+        counts
+            .into_iter()
+            .filter(|c| c.4 >= 2 && c.3)
+            .max_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)))
+            .map(|c| c.0)
+    }
+
     /// The commands that match `typed` loosely (its letters in order), the
     /// best first: closer matches, then those run in `folder`, then the
     /// newest. Each command once, with its newest record.
@@ -339,6 +373,29 @@ mod tests {
         assert!(fuzzy("lstn", "grep -rn listen").is_some());
         assert!(fuzzy("xyz", "grep").is_none());
         assert!(fuzzy("gs", "git status").unwrap() > fuzzy("gs", "grep -rn something").unwrap());
+    }
+
+    #[test]
+    fn the_next_command_is_what_usually_comes_next() {
+        let mut all = Vec::new();
+        for (i, folder) in ["/p", "/p", "/q"].iter().enumerate() {
+            let t = i as i64 * 10_000;
+            all.push(record(t, folder, "git add -A"));
+            all.push(record(t + 5, folder, "git commit"));
+        }
+        all.push(record(40_000, "/p", "git add -A"));
+        all.push(record(40_001, "/p", "ls"));
+        let records = Records { all, ..Records::default() };
+        assert_eq!(records.next_after("git add -A", "/p"), Some("git commit"));
+        // Once is not a habit.
+        assert_eq!(records.next_after("git commit", "/p"), None);
+        assert_eq!(records.next_after("", "/p"), None);
+        // Too long after is not next.
+        let records = Records {
+            all: vec![record(0, "/p", "a"), record(5000, "/p", "b"), record(6000, "/p", "a"), record(9000, "/p", "b")],
+            ..Records::default()
+        };
+        assert_eq!(records.next_after("a", "/p"), None);
     }
 
     #[test]

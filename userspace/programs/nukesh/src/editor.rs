@@ -216,6 +216,21 @@ impl Editor {
                     EditCommand::MoveToPosition { position: at, select: false },
                 ]);
             }
+            KEY_EXPLAIN => {
+                // Alt+E: what the line does, under it; with an empty
+                // line, why the last command failed (ADR 0268). The line
+                // is kept, and the prompt is drawn again below.
+                let mut shell = self.shell.borrow_mut();
+                let paint = colors(&shell);
+                let text = crate::explain::for_prompt(&mut shell, &buffer, paint);
+                let text = if text.is_empty() {
+                    "Type a command, then Alt+E says what it does.\n".to_string()
+                } else {
+                    text
+                };
+                let shown = format!("\n{}", text).replace('\n', "\r\n");
+                let _ = sys::write_all(1, shown.as_bytes());
+            }
             KEY_BACK | KEY_FORWARD if !buffer.is_empty() => {
                 let command = if key == KEY_BACK {
                     EditCommand::MoveWordLeft { select: false }
@@ -396,6 +411,7 @@ const KEY_SPACE: &str = "nukesh:space";
 const KEY_BACK: &str = "nukesh:back";
 const KEY_FORWARD: &str = "nukesh:forward";
 const KEY_ELEVATE: &str = "nukesh:elevate";
+const KEY_EXPLAIN: &str = "nukesh:explain";
 
 /// Whether reedline can run: input and output at a terminal that is not
 /// dumb.
@@ -506,6 +522,7 @@ fn edit_mode(vi: bool, abbrs: bool) -> Box<dyn reedline::EditMode> {
         keys.add_binding(KeyModifiers::ALT, KeyCode::Left, host(KEY_BACK));
         keys.add_binding(KeyModifiers::ALT, KeyCode::Right, host(KEY_FORWARD));
         keys.add_binding(KeyModifiers::ALT, KeyCode::Char('s'), host(KEY_ELEVATE));
+        keys.add_binding(KeyModifiers::ALT, KeyCode::Char('e'), host(KEY_EXPLAIN));
         if abbrs {
             keys.add_binding(KeyModifiers::NONE, KeyCode::Char(' '), host(KEY_SPACE));
         }

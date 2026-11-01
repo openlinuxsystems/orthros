@@ -313,6 +313,8 @@ pub struct Shell {
     pub records: Option<crate::record::Records>,
     /// How long the last command line took, for the prompt.
     pub last_millis: u64,
+    /// The last command typed, for Alt+E on an empty line.
+    pub last_command: String,
     /// The folders `cd` left, for Alt+Left, and those Alt+Left left, for
     /// Alt+Right; and the folder at the last prompt (ADR 0262).
     pub dirs_back: Vec<String>,
@@ -423,6 +425,7 @@ impl Shell {
             settings: Rc::default(),
             records: None,
             last_millis: 0,
+            last_command: String::new(),
             dirs_back: Vec::new(),
             dirs_forward: Vec::new(),
             last_dir: String::new(),

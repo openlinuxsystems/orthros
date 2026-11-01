@@ -194,6 +194,9 @@ fn after_command(shell: &mut Shell, text: &str, folder: &str, started: std::time
     let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     shell.last_millis = millis;
     let command = text.trim_end_matches('\n');
+    if !command.trim().is_empty() {
+        shell.last_command = command.to_string();
+    }
     // A command after a space is kept out of the record, as bash's
     // HISTCONTROL=ignorespace keeps it out of the history.
     if command.trim().is_empty() || command.starts_with(' ') || !shell.history.on {

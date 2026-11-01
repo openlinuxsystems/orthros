@@ -29,6 +29,7 @@ mod coproc;
 mod editor;
 mod exec;
 mod expand;
+mod explain;
 mod folders;
 #[cfg(test)]
 mod fuzz;
@@ -38,6 +39,7 @@ mod highlight;
 mod history;
 mod interactive;
 mod jobs;
+mod nebix;
 mod notify;
 mod parse;
 mod pattern;

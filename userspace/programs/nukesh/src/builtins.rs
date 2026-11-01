@@ -68,6 +68,7 @@ table! {
     "eval" => eval, "eval [argument ...]", "Run the arguments as shell commands.";
     "exec" => exec, "exec [-cl] [-a name] [command [argument ...]]", "Replace the shell with a program.";
     "exit" => exit, "exit [n]", "Leave the shell.";
+    "explain" => crate::explain::builtin, "explain [command ...]", "Say what a command does, from the manual.";
     "export" => declare::export, "export [-fn] [-p] [name[=value] ...]", "Put variables in the environment of programs.";
     "false" => false_, "false", "Fail.";
     "fc" => crate::history::fc, "fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]", "List, edit and run commands from the history.";

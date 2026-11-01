@@ -21,21 +21,58 @@ use crate::colors::Problem;
 pub const SYSTEM_FILE: &str = "/system/settings/nukesh/settings.toml";
 
 /// A person's own, under their home.
+const SECTIONS: &[&str] =
+    &["files", "prompt", "notify", "nebix", "suggest", "accessibility", "terminal", "history", "commands", "folders"];
+
 pub const USER_FILE: &str = ".config/nukesh/settings.toml";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub show_hidden: bool,
-    /// `[prompt] git-dirty`: a `*` after the branch on the right.
     pub git_dirty: bool,
     pub notify: bool,
-    /// Seconds.
     pub notify_after: u64,
+    /// `[nebix] offer`: after a command fails, the empty line offers
+    /// Alt+E (ADR 0268).
+    pub explain_offer: bool,
+    /// `[suggest] next`: on an empty line, the command you usually run
+    /// next, faded (ADR 0270).
+    pub suggest_next: bool,
+    /// `[accessibility] screen-reader`: plain output for screen readers
+    /// (ADR 0269).
+    pub screen_reader: bool,
+    /// `[terminal] marks`: OSC 133 marks around prompts and output.
+    pub marks: bool,
+    /// `[terminal] links`: OSC 8 links on paths in messages.
+    pub links: bool,
+    /// `[history] skip-secrets`: commands holding a secret are not kept.
+    pub skip_secrets: bool,
+    /// `[commands] offer-install`: a missing command names its package.
+    pub offer_install: bool,
+    /// `[folders] project-files`: a trusted folder's `.nukesh.toml` applies.
+    pub project_files: bool,
+    /// `[folders] resume`: a new shell on a console starts where the last
+    /// one there left off.
+    pub resume: bool,
 }
 
 impl Default for Settings {
     fn default() -> Settings {
-        Settings { show_hidden: false, git_dirty: true, notify: true, notify_after: 30 }
+        Settings {
+            show_hidden: false,
+            git_dirty: true,
+            notify: true,
+            notify_after: 30,
+            explain_offer: true,
+            suggest_next: true,
+            screen_reader: false,
+            marks: true,
+            links: true,
+            skip_secrets: true,
+            offer_install: true,
+            project_files: true,
+            resume: true,
+        }
     }
 }
 
@@ -59,6 +96,25 @@ impl Settings {
     }
 
     /// Takes the keys `text` sets; returns what was wrong in it.
+    /// The on-off key `[section] key`.
+    fn switch(&mut self, section: &str, key: &str) -> Option<&mut bool> {
+        Some(match (section, key) {
+            ("files", "show-hidden") => &mut self.show_hidden,
+            ("prompt", "git-dirty") => &mut self.git_dirty,
+            ("notify", "enabled") => &mut self.notify,
+            ("nebix", "offer") => &mut self.explain_offer,
+            ("suggest", "next") => &mut self.suggest_next,
+            ("accessibility", "screen-reader") => &mut self.screen_reader,
+            ("terminal", "marks") => &mut self.marks,
+            ("terminal", "links") => &mut self.links,
+            ("history", "skip-secrets") => &mut self.skip_secrets,
+            ("commands", "offer-install") => &mut self.offer_install,
+            ("folders", "project-files") => &mut self.project_files,
+            ("folders", "resume") => &mut self.resume,
+            _ => return None,
+        })
+    }
+
     pub fn apply(&mut self, text: &str) -> Vec<String> {
         let table: toml::Table = match text.parse() {
             Ok(table) => table,
@@ -72,23 +128,15 @@ impl Settings {
             };
             for (key, value) in keys {
                 match (section.as_str(), key.as_str()) {
-                    ("files", "show-hidden") => match value.as_bool() {
-                        Some(on) => self.show_hidden = on,
-                        None => problems.push(format!("[files] {key}: true or false")),
-                    },
-                    ("prompt", "git-dirty") => match value.as_bool() {
-                        Some(on) => self.git_dirty = on,
-                        None => problems.push(format!("[prompt] {key}: true or false")),
-                    },
-                    ("notify", "enabled") => match value.as_bool() {
-                        Some(on) => self.notify = on,
-                        None => problems.push(format!("[notify] {key}: true or false")),
-                    },
                     ("notify", "after") => match value.as_integer().and_then(|n| u64::try_from(n).ok()) {
                         Some(n) => self.notify_after = n,
                         None => problems.push(format!("[notify] {key}: a number of seconds")),
                     },
-                    ("files" | "notify" | "prompt", _) => problems.push(format!("[{section}] {key}: no such key")),
+                    (section, key) if self.switch(section, key).is_some() => match value.as_bool() {
+                        Some(on) => *self.switch(section, key).unwrap_or_else(|| unreachable!()) = on,
+                        None => problems.push(format!("[{section}] {key}: true or false")),
+                    },
+                    (section, _) if SECTIONS.contains(&section) => problems.push(format!("[{section}] {key}: no such key")),
                     _ => {
                         problems.push(format!("[{section}]: no such section"));
                         break;

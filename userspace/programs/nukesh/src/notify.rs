@@ -47,7 +47,7 @@ pub fn terminal() -> Option<String> {
     Some(name.to_string())
 }
 
-fn json(text: &str) -> String {
+pub fn json(text: &str) -> String {
     let mut out = String::from("\"");
     for c in text.chars() {
         match c {
