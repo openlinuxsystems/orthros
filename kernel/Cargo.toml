@@ -36,6 +36,7 @@ members = [
     "drivers/usbhc",
     "drivers/virtio",
     "drivers/vmd",
+    "drivers/vmxnet3",
     "drivers/vtd",
     "drivers/watchdog",
     "drivers/xhci",

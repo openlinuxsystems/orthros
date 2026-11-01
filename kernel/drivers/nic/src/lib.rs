@@ -55,6 +55,17 @@ pub struct Info {
     pub transmit_slots: u16,
 }
 
+/// The interrupt the kernel set up for a card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interrupt {
+    /// None: the kernel looks at the card from time to time, and the
+    /// card raises nothing.
+    Polled,
+    /// A message-signalled interrupt (MSI), which the card raises for
+    /// every cause it has.
+    Msi,
+}
+
 /// The state of a card's link, as the card says.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Link {

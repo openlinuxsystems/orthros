@@ -4,20 +4,21 @@
 //! The network cards QEMU emulates besides virtio's, side by side behind
 //! its Intel IOMMU, each on a user network of its own (ADR 0197): an
 //! e1000 (82540EM, as QEMU's and VirtualBox's) and an 82545EM (VMware's),
-//! which have no MSI and are polled, an e1000e (82574L) and an igb
-//! (82576), with an MSI each. The kernel must name each card, its MAC
-//! address and its interrupt; netd must set each up by DHCP, from the
-//! network behind it; and userspace/posix/nics.c must send 2 MiB through
-//! each to QEMU's `cat` and get every byte back in order.
+//! which have no MSI and are polled, an e1000e (82574L), an igb (82576)
+//! and VMware's paravirtual VMXNET3, with an MSI each. The kernel must
+//! name each card, its MAC address and its interrupt; netd must set each
+//! up by DHCP, from the network behind it; and userspace/posix/nics.c
+//! must send 2 MiB through each to QEMU's `cat` and get every byte back
+//! in order.
 
 use super::super::*;
 
 pub const CASE: Case = Case {
     name: "network-cards",
-    about: "QEMU's e1000, 82545EM, e1000e and igb behind its IOMMU, each on its own network: the kernel drives each, netd sets each up by DHCP, and 2 MiB go through each and back (ADR 0197)",
+    about: "QEMU's e1000, 82545EM, e1000e, igb and vmxnet3 behind its IOMMU, each on its own network: the kernel drives each, netd sets each up by DHCP, and 2 MiB go through each and back (ADR 0197)",
     firmware: Firmware::Uefi,
     media: Media::Usb,
-    cmdline: "lockdep -- --service-dir /system/tests/services/dhcp --posix --network /system/tests/posix/nics net0 10.0.2 net1 10.0.3 net2 10.0.4 net3 10.0.5",
+    cmdline: "lockdep -- --service-dir /system/tests/services/dhcp --posix --network /system/tests/posix/nics net0 10.0.2 net1 10.0.3 net2 10.0.4 net3 10.0.5 net4 10.0.6",
     cpus: 2,
     memory: "1G",
     reboot: false,
@@ -42,6 +43,10 @@ pub const CASE: Case = Case {
         "user,id=n3,net=10.0.5.0/24,guestfwd=tcp:10.0.5.100:7-cmd:cat",
         "-device",
         "igb,netdev=n3,mac=52:54:00:12:34:63",
+        "-netdev",
+        "user,id=n4,net=10.0.6.0/24,guestfwd=tcp:10.0.6.100:7-cmd:cat",
+        "-device",
+        "vmxnet3,netdev=n4,mac=52:54:00:12:34:64",
     ],
     script: network_cards,
     disks: &[],
@@ -55,6 +60,7 @@ const CARDS: &[(&str, &str, &str, &str, &str)] = &[
     ("net1", "an Intel 82545EM", "52:54:00:12:34:61, 255 receive and 255 transmit", "polled", "10.0.3"),
     ("net2", "an Intel 82574L", "52:54:00:12:34:62, 255 receive and 255 transmit", "MSI vector ", "10.0.4"),
     ("net3", "an Intel 82576", "52:54:00:12:34:63, 255 receive and 255 transmit", "MSI vector ", "10.0.5"),
+    ("net4", "a VMware VMXNET3", "52:54:00:12:34:64, 256 receive and 255 transmit", "MSI vector ", "10.0.6"),
 ];
 
 fn network_cards(vm: &mut Vm, case: &Case) -> Result<(), String> {

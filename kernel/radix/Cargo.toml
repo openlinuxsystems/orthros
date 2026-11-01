@@ -69,6 +69,7 @@ radix-uacpi = { path = "../lib/uacpi" }
 radix-usb = { path = "../drivers/usb" }
 radix-vfs = { path = "../fs/vfs" }
 radix-virtio = { path = "../drivers/virtio" }
+radix-vmxnet3 = { path = "../drivers/vmxnet3" }
 radix-usbhc = { path = "../drivers/usbhc" }
 radix-xhci = { path = "../drivers/xhci" }
 # The BitLocker keys unlock(8) hands the kernel, wiped once used

@@ -33,23 +33,13 @@ mod rings;
 mod shared;
 
 use radix_hw::{Dma, Mmio};
+pub use radix_nic::Interrupt;
 use radix_nic::{Error, Info, Link, Nic};
 
 use crate::rings::Rings;
 
 /// Intel's PCI vendor ID.
 pub const VENDOR: u16 = 0x8086;
-
-/// The interrupt the kernel set up for a card.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Interrupt {
-    /// None: the kernel looks at the card from time to time, and the
-    /// card raises nothing.
-    Polled,
-    /// A message-signalled interrupt (MSI), which the card raises for
-    /// every cause it has.
-    Msi,
-}
 
 /// A card the drivers know, from its device ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

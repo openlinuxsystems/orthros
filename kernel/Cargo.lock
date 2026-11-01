@@ -302,6 +302,7 @@ dependencies = [
  "radix-vfs",
  "radix-virtio",
  "radix-vmd",
+ "radix-vmxnet3",
  "radix-xhci",
  "zeroize",
 ]
@@ -774,6 +775,14 @@ dependencies = [
 [[package]]
 name = "radix-vmd"
 version = "0.11.0"
+
+[[package]]
+name = "radix-vmxnet3"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
+]
 
 [[package]]
 name = "radix-vtd"

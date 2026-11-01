@@ -51,6 +51,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use radix_hal::{Devices, Timer};
+use radix_hw::Mmio;
 use radix_hw::pci::{Bar, Function, Msi, MsiX};
 use radix_klog::{TextBuf, error, info, warn};
 use radix_mm::lease::{self, Lease};
@@ -808,6 +809,8 @@ pub fn bind(function: &Function) {
 pub enum Known {
     /// One of Intel's (`radix-intel-net`).
     Intel(radix_intel_net::Model),
+    /// VMware's paravirtual card (`radix-vmxnet3`).
+    Vmxnet3,
 }
 
 impl Known {
@@ -815,6 +818,7 @@ impl Known {
     fn msi(self) -> bool {
         match self {
             Known::Intel(model) => model.msi(),
+            Known::Vmxnet3 => true,
         }
     }
 
@@ -822,6 +826,7 @@ impl Known {
     fn article(self) -> &'static str {
         match self {
             Known::Intel(_) => "an",
+            Known::Vmxnet3 => "a",
         }
     }
 }
@@ -831,6 +836,7 @@ impl fmt::Display for Known {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Known::Intel(model) => write!(f, "Intel {}", model.name),
+            Known::Vmxnet3 => f.write_str("VMware VMXNET3"),
         }
     }
 }
@@ -838,7 +844,11 @@ impl fmt::Display for Known {
 /// The network card `function` is, if a driver that shares `radix-nic`
 /// knows it.
 pub fn identify(function: &Function) -> Option<Known> {
-    radix_intel_net::identify(function.vendor_id(), function.device_id()).map(Known::Intel)
+    let (vendor, device) = (function.vendor_id(), function.device_id());
+    if (vendor, device) == (radix_vmxnet3::VENDOR, radix_vmxnet3::DEVICE) {
+        return Some(Known::Vmxnet3);
+    }
+    radix_intel_net::identify(vendor, device).map(Known::Intel)
 }
 
 /// Sets up the network card `function`, which [`identify`] knew as
@@ -947,14 +957,25 @@ fn start(function: &Function, index: usize) -> Result<(), Failure> {
     attach(function, index, Card::Virtio { net, vector: interrupt }, &about)
 }
 
-fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Failure> {
-    function.enable_memory_and_dma();
-    let Some(Bar::Memory { address, size, .. }) = function.bar(0) else {
+/// The registers of `function`'s BAR `bar`, mapped.
+fn map_registers(function: &Function, bar: usize) -> Result<Mmio, Failure> {
+    let Some(Bar::Memory { address, size, .. }) = function.bar(bar) else {
         return Err(Failure::Other("its registers are not in memory"));
     };
     let len = usize::try_from(size).map_err(|_| "its registers are too large")?;
     let regs =
         <Arch as Devices>::map_device(address, len).ok_or("its registers could not be mapped")?;
+    Ok(regs)
+}
+
+fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Failure> {
+    function.enable_memory_and_dma();
+    let regs = map_registers(function, 0)?;
+    // VMXNET3's commands are in a second BAR.
+    let commands = match card {
+        Known::Vmxnet3 => Some(map_registers(function, 1)?),
+        Known::Intel(_) => None,
+    };
     let source = function.address();
     // One MSI, for everything, if the card should have one and it and
     // the kernel have one; otherwise the card is polled.
@@ -965,15 +986,21 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
     });
     let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(source, pages, false);
     let mut delay = delay;
+    let how = match interrupt {
+        Some(_) => radix_nic::Interrupt::Msi,
+        None => radix_nic::Interrupt::Polled,
+    };
     let started = match card {
         Known::Intel(model) => {
-            let how = match interrupt {
-                Some(_) => radix_intel_net::Interrupt::Msi,
-                None => radix_intel_net::Interrupt::Polled,
-            };
             radix_intel_net::start(model, regs, how, fallback_mac(), &mut alloc, &mut delay)
                 .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory))
         }
+        Known::Vmxnet3 => commands
+            .ok_or(radix_nic::Error::Registers)
+            .and_then(|commands| {
+                radix_vmxnet3::start(regs, commands, how, fallback_mac(), &mut alloc)
+            })
+            .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
     };
     let nic = started.map_err(|err| {
         if let Some(vector) = interrupt {
@@ -1096,15 +1123,19 @@ fn run(number: usize) {
             let mut stack = interface.stack.lock();
             let now = sched::now_ns();
             let changed = stack.poll(now);
-            if stack.link().failed() {
+            let counted = stack.counters();
+            let packets = counted.received_packets + counted.sent_packets;
+            let quiet = packets == moved;
+            moved = packets;
+            // A card that stopped moves nothing, so it is asked whether
+            // it failed only then: asking can cost a register read, a
+            // trip to the hypervisor in a virtual machine.
+            if quiet && stack.link().failed() {
                 error!("Net: {}: the card stopped with an error", interface.name);
                 return;
             }
             if polled {
-                let counted = stack.counters();
-                let packets = counted.received_packets + counted.sent_packets;
-                idle = Some(if packets == moved { IDLE_NS } else { BUSY_NS });
-                moved = packets;
+                idle = Some(if quiet { IDLE_NS } else { BUSY_NS });
             }
             let orphans = interface.reap(&mut stack, now);
             let now = sched::now_ns();
