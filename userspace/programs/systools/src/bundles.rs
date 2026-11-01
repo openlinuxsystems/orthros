@@ -21,10 +21,14 @@
 //! - `bundle install FILE.dkv`, `bundle list`, `bundle info ID` and
 //!   `bundle remove ID` ask bundled(8), which installs, seals and removes
 //!   bundles (ADR 0223).
+//! - `bundle grant ID PERMISSION [WORD...]` and `bundle revoke ID
+//!   PERMISSION` change what an app may do (ADR 0224): bundled gives a
+//!   permission only after the trusted prompt's yes.
 
 mod base64;
 pub(crate) mod confine;
 pub(crate) mod folder;
+pub(crate) mod grants;
 pub(crate) mod minisign;
 pub(crate) mod protocol;
 pub(crate) mod registry;
@@ -65,7 +69,9 @@ const USAGE: &str =
        bundle list
        bundle info ID
        bundle remove ID [--for-everyone] [--keep-data | --purge]
-       bundle run [--command NAME] ID [ARGUMENT...]";
+       bundle run [--command NAME] ID [ARGUMENT...]
+       bundle grant ID PERMISSION [FOLDER=read|read-write | APP-ID]...
+       bundle revoke ID PERMISSION";
 
 /// The manifest's name in a bundle's folder.
 pub(crate) const MANIFEST: &str = "manifest.json";
@@ -159,6 +165,8 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         (Some("list"), []) => list(),
         (Some("info"), [id]) => info(id),
         (Some("remove"), [id]) => remove(id, everyone, data),
+        (Some("grant"), [id, permission, words @ ..]) => grant(id, permission, words),
+        (Some("revoke"), [id, permission]) => revoke(id, permission),
         _ => Err(usage(USAGE.into())),
     }
 }
@@ -590,15 +598,35 @@ fn list() -> Result<i32, Fail> {
     Ok(0)
 }
 
-/// `bundle info ID`: an installed bundle's sheet, where it is and when it
-/// was installed.
+/// A line of `bundle info` for what the person said of a permission.
+fn said_line(grant: &grants::Grant) -> String {
+    let when = util::time_text(i64::try_from(grant.since).unwrap_or(0), "%Y-%m-%d", true);
+    let what = match grant.said {
+        grants::Said::Allow if grant.given.is_empty() => "allowed".to_string(),
+        grants::Said::Allow => format!("allowed: {}", grant.given.join(", ")),
+        grants::Said::Never => "not allowed".to_string(),
+    };
+    format!("    {}: {what}, since {when}", grant.permission)
+}
+
+/// `bundle info ID`: an installed bundle's sheet, what you said of its
+/// permissions, where it is and when it was installed.
 fn info(id: &str) -> Result<i32, Fail> {
     bundle::check_id(id).map_err(usage)?;
     let (_stream, mut input) = ask(&Request::Info { id: id.into() }, None).map_err(fail)?;
+    let mut said = Vec::new();
     loop {
         match answer(&mut input)? {
             Answer::Sheet(text) => print!("{text}"),
+            Answer::Granted(grant) => said.push(grant),
             Answer::Ok(what) => {
+                if !said.is_empty() {
+                    println!("  You said:");
+                    said.sort_by(|a, b| a.permission.cmp(&b.permission));
+                    for grant in &said {
+                        println!("{}", said_line(grant));
+                    }
+                }
                 for part in what.split("; ") {
                     let mut chars = part.chars();
                     let first = chars.next().map(|c| c.to_uppercase().to_string());
@@ -640,6 +668,49 @@ fn remove(id: &str, everyone: bool, data: Option<bool>) -> Result<i32, Fail> {
             if !purge && !everyone {
                 println!("its settings and data stay; a later version of it picks them up");
             }
+            Ok(0)
+        }
+        Answer::Error(why) => {
+            eprintln!("bundle: {why}");
+            Ok(1)
+        }
+        _ => Err(fail("bundled answered out of turn".into())),
+    }
+}
+
+/// `bundle grant ID PERMISSION [WORD...]`: gives an app a permission it
+/// asks for, as it asks for it, or with less (`documents=read` for its
+/// `documents=read-write`), after the trusted prompt's yes on this
+/// console (ADR 0224).
+fn grant(id: &str, permission: &str, words: &[String]) -> Result<i32, Fail> {
+    bundle::check_id(id).map_err(usage)?;
+    let found = bundle::permissions::find(permission).ok_or_else(|| {
+        usage(format!("{permission} is no permission of manifest.json(5)'s list"))
+    })?;
+    for word in words {
+        grants::check_word(found, word).map_err(usage)?;
+    }
+    let request =
+        Request::Grant { id: id.into(), permission: permission.into(), words: words.to_vec() };
+    said(&request)
+}
+
+/// `bundle revoke ID PERMISSION`: takes a permission away from an app,
+/// now and from now on; a run of it that holds it stops.
+fn revoke(id: &str, permission: &str) -> Result<i32, Fail> {
+    bundle::check_id(id).map_err(usage)?;
+    if bundle::permissions::find(permission).is_none() {
+        return Err(usage(format!("{permission} is no permission of manifest.json(5)'s list")));
+    }
+    said(&Request::Revoke { id: id.into(), permission: permission.into() })
+}
+
+/// Sends a grant or a revoke, and says what came of it.
+fn said(request: &Request) -> Result<i32, Fail> {
+    let (_stream, mut input) = ask(request, None).map_err(fail)?;
+    match answer(&mut input)? {
+        Answer::Ok(what) => {
+            println!("{what}");
             Ok(0)
         }
         Answer::Error(why) => {

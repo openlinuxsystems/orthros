@@ -165,10 +165,18 @@ closes the connection, but for a session (below):
 	connection stays open for *ask* and *done* lines (PROMPTS). Only
 	root may, as *consoled*(8) runs; a later one takes over.
 
-*prompted* _number_ *password*|*cancelled*|*elsewhere* _password_
-	What came of prompt _number_: the password typed, a prompt closed,
-	or a terminal that is not a console's, with an empty _password_ for
-	the last two. Only the process that asked *prompts* may.
+*prompted* _number_ *password*|*once*|*always*|*never*|*cancelled*|*elsewhere* _password_
+	What came of prompt _number_: the password typed, what the person
+	chose at a question, a prompt closed, or a terminal that is not a
+	console's, with an empty _password_ for all but the first. Only the
+	process that asked *prompts* may.
+
+*choose* _terminal_ _name_ *permission*|*warning*|*grant* _text_
+	Asks _name_, on the console of _terminal_, a question of
+	*bundled*(8)'s about an app's permission (ADR 0224), whose words
+	are _text_, one line: *ok* and what they chose, *ok cancelled*, or
+	*ok elsewhere* when the terminal is not a console's or nothing asks
+	on the consoles. Only root may, as bundled runs.
 
 authd knows who asks by the connection: the kernel gives it the process
 at the other end, and the user and group it acted for when it connected
@@ -389,6 +397,16 @@ asks itself. A prompt not answered in 5 minutes is given up. When its
 elevate goes away first, authd writes *done* _number_, and consoled
 takes the prompt off. While no program asks *prompts*, and when it
 goes away, *ask* is answered as *none* is.
+
+A *choose* request is passed on the same way,
+
+```
+choose 13 pts/0 alice permission Notes (org.example.notes) asks to: use your documents folder, to read and change it
+```
+
+and answered with what consoled says the person chose: *once*,
+*always* or *never*, *cancelled*, or *elsewhere*. Without consoled, or
+after 5 minutes, it is answered *elsewhere* or *cancelled*.
 
 # ACCOUNTS
 

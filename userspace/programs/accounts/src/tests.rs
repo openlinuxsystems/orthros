@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use super::request::{
-    Answer, CONTINUE, Mode, PROMPT_SHOWN_MAX, Prompt, Prompted, REQUEST_MAX, Relay, Request, ended,
-    ended_status, signal, stopped, stopped_signal,
+    Answer, CONTINUE, Choice, Mode, PROMPT_SHOWN_MAX, Prompt, Prompted, Question, REQUEST_MAX,
+    Relay, Request, ended, ended_status, signal, stopped, stopped_signal,
 };
 use super::*;
 
@@ -245,6 +245,15 @@ fn requests_go_and_come_back() {
         Request::Prompted { id: 0, typed: Prompted::Password(Vec::new()) },
         Request::Prompted { id: u64::MAX, typed: Prompted::Cancelled },
         Request::Prompted { id: 8, typed: Prompted::Elsewhere },
+        Request::Prompted { id: 9, typed: Prompted::Chose(Choice::Once) },
+        Request::Prompted { id: 10, typed: Prompted::Chose(Choice::Always) },
+        Request::Prompted { id: 11, typed: Prompted::Chose(Choice::Never) },
+        Request::Choose {
+            terminal: "pts/1".into(),
+            name: "alice".into(),
+            question: Question::Warning,
+            text: "Notes asks to: use all of your files".into(),
+        },
         Request::Disable { name: "bob".into() },
         Request::Enable { name: "bob".into() },
         Request::Remove { name: "bob".into() },
@@ -291,6 +300,29 @@ fn requests_go_and_come_back() {
         Request::Prompted { id: 12, typed: Prompted::Password(b"pw".to_vec()) }.encode(),
         b"prompted\x0012\0password\0pw\0"
     );
+    assert_eq!(
+        Request::Prompted { id: 3, typed: Prompted::Chose(Choice::Always) }.encode(),
+        b"prompted\x003\0always\0\0"
+    );
+    let choose = Request::Choose {
+        terminal: "pts/2".into(),
+        name: "bob".into(),
+        question: Question::Grant,
+        text: "Give Notes".into(),
+    };
+    assert_eq!(choose.encode(), b"choose\0pts/2\0bob\0grant\0Give Notes\0");
+    // A question with a line break, an empty field or a kind authd does
+    // not know is no request.
+    for bad in [
+        &b"choose\0pts/2\0bob\0grant\0a\nb\0"[..],
+        b"choose\0pts/2\0bob\0grant\0\0",
+        b"choose\0\0bob\0grant\0x\0",
+        b"choose\0pts/2\0bob\0maybe\0x\0",
+        b"prompted\x003\0sometimes\0\0",
+        b"prompted\x003\0always\0x\0",
+    ] {
+        assert!(Request::decode(bad).is_err(), "{bad:?}");
+    }
     for bad in [
         &b"check\0a\0"[..],
         b"check\0a\0b",
@@ -399,9 +431,39 @@ fn prompt_lines() {
         shown: "x".repeat(PROMPT_SHOWN_MAX + 10),
     };
     assert_eq!(long.encode().len(), "ask 1 pts/1 a \n".len() + PROMPT_SHOWN_MAX);
-    for bad in
-        ["ask", "ask 1 pts/1", "ask x pts/1 a b", "ask 1  a b", "done", "done x", "wait 1", ""]
-    {
+    let choose = Prompt::Choose {
+        id: 8,
+        terminal: "pts/3".into(),
+        name: "alice".into(),
+        question: Question::Permission,
+        text: "Notes asks to: use your documents folder".into(),
+    };
+    assert_eq!(
+        choose.encode(),
+        "choose 8 pts/3 alice permission Notes asks to: use your documents folder\n"
+    );
+    assert_eq!(Prompt::decode(&choose.encode()), Some(choose));
+    let sneaky = Prompt::Choose {
+        id: 9,
+        terminal: "pts/3".into(),
+        name: "alice".into(),
+        question: Question::Grant,
+        text: "x\ndone 8".into(),
+    };
+    assert_eq!(sneaky.encode(), "choose 9 pts/3 alice grant x?done 8\n");
+    for bad in [
+        "ask",
+        "ask 1 pts/1",
+        "ask x pts/1 a b",
+        "ask 1  a b",
+        "done",
+        "done x",
+        "wait 1",
+        "",
+        "choose 1 pts/1 a permission",
+        "choose 1 pts/1 a maybe x",
+        "choose 1 pts/1 a grant ",
+    ] {
         assert_eq!(Prompt::decode(bad), None, "{bad}");
     }
 }

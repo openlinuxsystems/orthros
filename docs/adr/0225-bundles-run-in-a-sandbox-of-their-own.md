@@ -5,7 +5,8 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0225. Bundles run in a sandbox of their own
 
-- Status: Accepted
+- Status: Accepted; what a program gets of the permissions asked on
+  first use and with a warning is ADR 0224's
 - Date: 2026-11-01
 
 ## Context

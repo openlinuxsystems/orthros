@@ -5,7 +5,7 @@ bundled(8) "Dukovo" "Dukovo Manual"
 
 # NAME
 
-bundled - install, seal and remove bundles
+bundled - install, seal and remove bundles, and keep what they may do
 
 # SYNOPSIS
 
@@ -17,7 +17,8 @@ bundled installs bundles, seals them so that nothing changes them, and
 removes them, for whoever asks with *bundle*(1) (ADR 0223). It links the
 commands of the bundles it installed where the shell finds them, and
 tells *bundle run* which bundle to run and what it recorded of it (ADR
-0225). Spark runs it as the *bundled* service, after authd, whose
+0225). It keeps what each person said of each bundle's permissions, and
+asks them through the console's trusted prompt (ADR 0224). Spark runs it as the *bundled* service, after authd, whose
 accounts say where each home is, and before the consoles. It acts for
 root, past the owners and modes of files, since it seals each bundle as
 root's in each person's home.
@@ -84,10 +85,33 @@ answers with the asker's own bundle before everyone's: its place, ID and
 key, and the SHA-256 of the signed list it recorded at install. *bundle
 run* checks the folder against them before it runs anything.
 
+# GRANTS
+
+bundled keeps what each person said of each bundle's permissions, the
+grants: for each, the bundle's ID and its publisher's key, the
+permission, allow or never, since when, what it gives (each folder, read
+or read-write, or app) and what the bundle asked for then. *bundle run*
+gets those of the asker's, for the bundle's key only, and decides what
+the program gets (*bundle*(1), PERMISSIONS).
+
+Asked *ask* about a permission the asker has not answered for good,
+bundled checks that the bundle is the one installed, reads the
+permission from its sealed manifest itself, and words the question in
+the system's own words. It finds the terminal of the process that asks,
+its session's, from _/processes_, and asks *authd*(8) to have
+*consoled*(8) ask it on that console's bottom line, where no program
+draws, reads or answers. *bundle grant* asks the same way, *Y* or *N*.
+An answer for good is recorded, and every answer is a security event of
+the audit log. A terminal that is not a console's is answered
+*elsewhere*, and nothing is given. Taking a permission away needs no
+question: bundled records it, and tells each run of the bundle that
+watches, on the *watch* connection its runner keeps, at once.
+
 # REMOVING
 
 bundled removes the sealed folder and the record, and with *--purge* the
-asker's _app-data/ID_ too, and unlinks its commands. The ID stays bound
+asker's _app-data/ID_ and what they said of its permissions too, and
+unlinks its commands. The ID stays bound
 to its key, so a later version from the same publisher picks kept data
 up and one from anyone else is refused. At its start it forgets a
 recorded bundle whose folder is gone, and removes the working folders
@@ -107,6 +131,11 @@ _/system/state/bundled/developer-keys_
 	Each person's developer key, which *bundle new* and *bundle key*
 	tell bundled.
 
+_/system/state/grants/UID_
+	Each person's grants, by their user number, mode 0600. One bundled
+	cannot read is set aside as _UID.bad_, and its person is asked
+	again.
+
 _/system/live/bundled/socket_
 	Where it answers.
 
@@ -116,4 +145,4 @@ _/applications_, _~/applications_
 
 # SEE ALSO
 
-*bundle*(1), *manifest.json*(5), *service*(8), *elevate*(8), *log*(1)
+*bundle*(1), *manifest.json*(5), *authd*(8), *consoled*(8), *service*(8), *elevate*(8), *log*(1)

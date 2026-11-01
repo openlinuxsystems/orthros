@@ -2,14 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! What bundle(1) and bundled(8) say to each other on bundled's socket
-//! (ADRs 0223 and 0225). A request is one line, tab-separated; an
+//! (ADRs 0223, 0224 and 0225). A request is one line, tab-separated; an
 //! `install` request comes with the archive's descriptor (SCM_RIGHTS).
 //! bundled answers with lines too: the install sheet (`sheet N` and N bytes
 //! of text), a question for a yes or a no, a listed bundle, the bundle to
-//! run, and last `ok` or `error` with why.
+//! run, what the asker said of its permissions, and last `ok` or `error`
+//! with why. A `watch` connection then stays open, for the permissions
+//! the person takes away while the app runs.
 
 use std::io::{self, BufRead, Read};
 
+use super::grants::{self, Grant, Said};
 use super::minisign::PublicKey;
 use super::registry::Place;
 
@@ -37,6 +40,18 @@ pub enum Request {
     DeveloperKey { key: PublicKey },
     /// Finds the bundle to run, of the asker's or everyone's.
     Run { find: Find },
+    /// Asks the person, through the trusted prompt, whether app `id`,
+    /// whose signed list's SHA-256 is `list`, may have `permission`, as
+    /// its manifest asks for it (ADR 0224).
+    Ask { id: String, permission: String, list: String },
+    /// Gives app `id` `permission`, with `words`, or as it asks for it
+    /// with none, after the trusted prompt's yes.
+    Grant { id: String, permission: String, words: Vec<String> },
+    /// Takes `permission` away from app `id`, at once.
+    Revoke { id: String, permission: String },
+    /// Keeps the connection, to say each permission the person takes
+    /// away from app `id` while it runs.
+    Watch { id: String },
 }
 
 /// Which bundle `run` asks for.
@@ -57,6 +72,38 @@ fn checked_id(id: &str) -> Result<String, String> {
     Ok(id.into())
 }
 
+fn checked_permission(name: &str) -> Result<String, String> {
+    manifest::bundle::permissions::find(name)
+        .map(|p| p.name.to_string())
+        .ok_or_else(|| format!("{name:?} is no permission of the list"))
+}
+
+/// A list's SHA-256, as 64 hex digits, in lowercase.
+fn checked_list(list: &str) -> Result<String, String> {
+    let hex = list.len() == 64 && list.bytes().all(|b| b.is_ascii_hexdigit());
+    hex.then(|| list.to_ascii_lowercase()).ok_or_else(|| "not a list's SHA-256".into())
+}
+
+/// Words, separated by commas, `-` for none.
+fn word_list(words: &[String]) -> String {
+    if words.is_empty() { "-".into() } else { words.join(",") }
+}
+
+/// Words a request or an answer carries: each of a permission's words
+/// as [`grants::check_word`] takes them.
+fn read_words(permission: &str, field: &str) -> Result<Vec<String>, String> {
+    if field == "-" {
+        return Ok(Vec::new());
+    }
+    let found = manifest::bundle::permissions::find(permission)
+        .ok_or_else(|| format!("{permission:?} is no permission of the list"))?;
+    let words: Vec<String> = field.split(',').map(String::from).collect();
+    for word in &words {
+        grants::check_word(found, word)?;
+    }
+    Ok(words)
+}
+
 impl Request {
     /// The request's line, with its newline.
     pub fn line(&self) -> String {
@@ -73,6 +120,12 @@ impl Request {
             Request::DeveloperKey { key } => format!("developer-key\t{}\n", key.encoded()),
             Request::Run { find: Find::Id(id) } => format!("run\tid\t{id}\n"),
             Request::Run { find: Find::Command(name) } => format!("run\tcommand\t{name}\n"),
+            Request::Ask { id, permission, list } => format!("ask\t{id}\t{permission}\t{list}\n"),
+            Request::Grant { id, permission, words } => {
+                format!("grant\t{id}\t{permission}\t{}\n", word_list(words))
+            }
+            Request::Revoke { id, permission } => format!("revoke\t{id}\t{permission}\n"),
+            Request::Watch { id } => format!("watch\t{id}\n"),
         }
     }
 
@@ -109,6 +162,21 @@ impl Request {
                 manifest::bundle::check_command_name(name)?;
                 Ok(Request::Run { find: Find::Command((*name).into()) })
             }
+            ["ask", id, permission, list] => Ok(Request::Ask {
+                id: checked_id(id)?,
+                permission: checked_permission(permission)?,
+                list: checked_list(list)?,
+            }),
+            ["grant", id, permission, words] => {
+                let permission = checked_permission(permission)?;
+                let words = read_words(&permission, words)?;
+                Ok(Request::Grant { id: checked_id(id)?, permission, words })
+            }
+            ["revoke", id, permission] => Ok(Request::Revoke {
+                id: checked_id(id)?,
+                permission: checked_permission(permission)?,
+            }),
+            ["watch", id] => Ok(Request::Watch { id: checked_id(id)? }),
             _ => Err("not a request bundled knows".into()),
         }
     }
@@ -149,6 +217,10 @@ pub enum Answer {
     Listed(Listed),
     /// The bundle to run.
     Found(Found),
+    /// What the asker said of one of its permissions.
+    Granted(Grant),
+    /// A permission the person took away, on a `watch` connection.
+    Revoked(String),
     /// Done, and what was done.
     Ok(String),
     /// Not done, and why.
@@ -183,6 +255,16 @@ impl Answer {
                 format!("found\t{}\t{}\t{}\t{}\n", f.place, f.id, f.key.encoded(), f.list)
                     .into_bytes()
             }
+            Answer::Granted(g) => format!(
+                "granted\t{}\t{}\t{}\t{}\t{}\n",
+                g.permission,
+                g.said.word(),
+                g.since,
+                word_list(&g.given),
+                word_list(&g.asked)
+            )
+            .into_bytes(),
+            Answer::Revoked(permission) => format!("revoked\t{permission}\n").into_bytes(),
             Answer::Ok(what) => format!("ok {}\n", one_line(what)).into_bytes(),
             Answer::Error(why) => format!("error {}\n", one_line(why)).into_bytes(),
         }
@@ -227,16 +309,26 @@ impl Answer {
             uid => uid.parse().map(Place::User).map_err(|_| bad("a bundle's place")),
         };
         if let ["found", at, id, key, list] = words.as_slice() {
-            let hex = list.len() == 64 && list.bytes().all(|b| b.is_ascii_hexdigit());
-            if !hex {
-                return Err(bad("a found bundle's list"));
-            }
             return Ok(Some(Answer::Found(Found {
                 place: place(at)?,
                 id: checked_id(id).map_err(|why| bad(&why))?,
                 key: PublicKey::decode(key).map_err(|why| bad(&why))?,
-                list: list.to_ascii_lowercase(),
+                list: checked_list(list).map_err(|_| bad("a found bundle's list"))?,
             })));
+        }
+        if let ["granted", permission, said, since, given, asked] = words.as_slice() {
+            let permission = checked_permission(permission).map_err(|why| bad(&why))?;
+            return Ok(Some(Answer::Granted(Grant {
+                said: Said::from_word(said).ok_or_else(|| bad("neither allow nor never"))?,
+                since: since.parse().map_err(|_| bad("a grant's time"))?,
+                given: read_words(&permission, given).map_err(|why| bad(&why))?,
+                asked: read_words(&permission, asked).map_err(|why| bad(&why))?,
+                permission,
+            })));
+        }
+        if let ["revoked", permission] = words.as_slice() {
+            let permission = checked_permission(permission).map_err(|why| bad(&why))?;
+            return Ok(Some(Answer::Revoked(permission)));
         }
         if let ["listed", place_word, id, version, key, when, name] = words.as_slice() {
             let place = place(place_word)?;
@@ -276,6 +368,26 @@ mod tests {
             Request::DeveloperKey { key: key() },
             Request::Run { find: Find::Id("org.example.notes".into()) },
             Request::Run { find: Find::Command("notes".into()) },
+            Request::Ask {
+                id: "org.example.notes".into(),
+                permission: "files.folder".into(),
+                list: "ab".repeat(32),
+            },
+            Request::Grant {
+                id: "org.example.notes".into(),
+                permission: "files.folder".into(),
+                words: vec!["documents=read".into(), "music=read-write".into()],
+            },
+            Request::Grant {
+                id: "org.example.notes".into(),
+                permission: "files.home".into(),
+                words: Vec::new(),
+            },
+            Request::Revoke {
+                id: "org.example.notes".into(),
+                permission: "network.outbound".into(),
+            },
+            Request::Watch { id: "org.example.notes".into() },
         ] {
             let line = request.line();
             assert!(line.ends_with('\n') && line.matches('\n').count() == 1);
@@ -295,6 +407,13 @@ mod tests {
             "run\tcommand\t-rf",
             "run\tcommand\ta/b",
             "run\tprogram\tnotes",
+            "ask\torg.example.notes\tfiles.folder\tab",
+            "ask\torg.example.notes\tfiles.everything\t-",
+            "grant\torg.example.notes\tfiles.folder\tsecrets=read",
+            "grant\torg.example.notes\tfiles.home\tdocuments=read",
+            "grant\torg.example.notes\tfiles.folder",
+            "revoke\torg.example.notes",
+            "watch\tNotes",
         ] {
             assert!(Request::read(bad).is_err(), "{bad:?}");
         }
@@ -320,6 +439,21 @@ mod tests {
                 key: key(),
                 list: "ab".repeat(32),
             }),
+            Answer::Granted(Grant {
+                permission: "files.folder".into(),
+                said: Said::Allow,
+                since: 1_793_000_000,
+                given: vec!["documents=read".into()],
+                asked: vec!["documents=read-write".into()],
+            }),
+            Answer::Granted(Grant {
+                permission: "network.outbound".into(),
+                said: Said::Never,
+                since: 1,
+                given: Vec::new(),
+                asked: Vec::new(),
+            }),
+            Answer::Revoked("files.folder".into()),
             Answer::Ok("installed org.example.notes 0.1.0".into()),
             Answer::Error("it is not signed".into()),
         ];
@@ -342,6 +476,9 @@ mod tests {
             b"ok fine",
             b"sheet 99999999\n",
             b"found\teveryone\torg.example.notes\tRWnope\tab\n",
+            b"granted\tfiles.folder\tmaybe\t1\t-\t-\n",
+            b"granted\tfiles.folder\tallow\t1\tsecrets=read\t-\n",
+            b"revoked\tfiles.everything\n",
         ] {
             assert!(Answer::read(&mut io::Cursor::new(bad.to_vec())).is_err(), "{bad:?}");
         }
