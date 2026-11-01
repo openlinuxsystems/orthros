@@ -121,6 +121,37 @@ impl Style {
         if codes.is_empty() { "0".into() } else { codes.join(";") }
     }
 
+    /// The style in git-config(1)'s words for a colour: attributes, then
+    /// the text's colour and the background's, `normal` for the
+    /// terminal's own.
+    pub fn git(self) -> String {
+        const NAMES: [&str; 8] =
+            ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
+        let name = |c: u8| {
+            let base = NAMES[usize::from(c % 8)];
+            if c < 8 { base.to_string() } else { format!("bright{base}") }
+        };
+        let mut words: Vec<String> = Vec::new();
+        for (on, word) in [
+            (self.bold, "bold"),
+            (self.dim, "dim"),
+            (self.italic, "italic"),
+            (self.underline, "ul"),
+            (self.reverse, "reverse"),
+        ] {
+            if on {
+                words.push(word.into());
+            }
+        }
+        match (self.fg, self.bg) {
+            (Some(fg), Some(bg)) => words.extend([name(fg), name(bg)]),
+            (Some(fg), None) => words.push(name(fg)),
+            (None, Some(bg)) => words.extend(["normal".into(), name(bg)]),
+            (None, None) => {}
+        }
+        if words.is_empty() { "normal".into() } else { words.join(" ") }
+    }
+
     /// `text` in this style, reset after it.
     pub fn paint(self, text: &str) -> String {
         if self == Style::default() || text.is_empty() {
@@ -304,6 +335,10 @@ const SECTIONS: &[Section] = &[
             key("removed", "red", "lines removed"),
             key("header", "bold", "the files' names"),
             key("hunk", "cyan", "the @@ line of each change"),
+            key("added-word", "green reverse", "the words a changed line gained, in git's diffs"),
+            key("removed-word", "red reverse", "the words a changed line lost, in git's diffs"),
+            key("moved-added", "bold cyan", "lines git saw moved, where they went"),
+            key("moved-removed", "bold magenta", "lines git saw moved, where they were"),
         ],
     },
     Section {
@@ -365,6 +400,10 @@ pub const THEMES: &[Theme] = &[
             ("diff.added", "bold bright-green"),
             ("diff.removed", "bold bright-red"),
             ("diff.hunk", "bold bright-cyan"),
+            ("diff.added-word", "bold bright-green reverse"),
+            ("diff.removed-word", "bold bright-red reverse"),
+            ("diff.moved-added", "bold bright-cyan"),
+            ("diff.moved-removed", "bold bright-magenta"),
         ],
     ),
     (
@@ -403,6 +442,8 @@ pub const THEMES: &[Theme] = &[
             ("grep.line", "blue"),
             ("diff.added", "blue"),
             ("diff.removed", "yellow"),
+            ("diff.added-word", "blue reverse"),
+            ("diff.removed-word", "yellow reverse"),
             ("ip.up", "blue"),
             ("ip.down", "yellow"),
         ],
@@ -642,6 +683,46 @@ impl Colors {
         format!("ad={}:de={}:hd={}:ln={}", s("added"), s("removed"), s("header"), s("hunk"))
     }
 
+    /// The settings git takes from colors.toml (ADR 0293), as a
+    /// git-config(1) file that the system's gitconfig includes: diffs,
+    /// status and branches in the shell's colours, and diffs shown with
+    /// the words that changed marked. Empty with diff's colours off.
+    pub fn git_config(&self) -> String {
+        if !self.on("diff") {
+            return String::new();
+        }
+        let s = |key: &str| self.style(key).git();
+        let mut out = String::from(GIT_CONFIG_HEADER);
+        let _ = write!(
+            out,
+            "[color \"diff\"]\n\tnew = {}\n\told = {}\n\tmeta = {}\n\tfrag = {}\n\
+             \tnewMoved = {}\n\toldMoved = {}\n",
+            s("diff.added"),
+            s("diff.removed"),
+            s("diff.header"),
+            s("diff.hunk"),
+            s("diff.moved-added"),
+            s("diff.moved-removed"),
+        );
+        if self.on("prompt") {
+            let _ = write!(
+                out,
+                "[color \"status\"]\n\tadded = {}\n\tchanged = {}\n\tuntracked = {}\n\
+                 \tunmerged = {}\n[color \"branch\"]\n\tcurrent = {}\n",
+                s("prompt.git-staged"),
+                s("prompt.git-changed"),
+                s("prompt.git-untracked"),
+                s("prompt.git-conflict"),
+                s("prompt.branch"),
+            );
+        }
+        out.push_str(
+            "[pager]\n\tdiff = nukesh --diff-pager\n\tshow = nukesh --diff-pager\n\
+             \tlog = nukesh --diff-pager\n[interactive]\n\tdiffFilter = nukesh --diff-highlight\n",
+        );
+        out
+    }
+
     /// `IP_COLORS`, which ip(8) reads, in `GREP_COLORS`'s form.
     pub fn ip_colors(&self) -> String {
         let keys = ["name", "up", "down", "address", "address6", "mac"];
@@ -650,6 +731,29 @@ impl Colors {
             .collect::<Vec<_>>()
             .join(":")
     }
+}
+
+/// What the file of [`Colors::git_config`] says of itself.
+const GIT_CONFIG_HEADER: &str = "# Made by Nukesh from colors.toml(5) each time a shell starts, for the\n\
+# system's gitconfig to include (ADR 0293). Change colors.toml, not this\n\
+# file; settings in ~/.gitconfig win over these.\n";
+
+/// Where [`write_git_config`] puts git's settings, beneath the user's
+/// folder.
+pub const GIT_CONFIG: &str = ".local/state/nukesh/gitconfig";
+
+/// Writes git's settings from colors.toml to [`GIT_CONFIG`] in `home`,
+/// if they changed (ADR 0293).
+pub fn write_git_config(colors: &Colors, home: &str) {
+    let path = format!("{}/{GIT_CONFIG}", home.trim_end_matches('/'));
+    let text = colors.git_config();
+    if std::fs::read_to_string(&path).is_ok_and(|old| old == text) {
+        return;
+    }
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, text);
 }
 
 /// The file name endings `ls` colours as archives.

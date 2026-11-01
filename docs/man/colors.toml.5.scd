@@ -100,8 +100,16 @@ example *"bold blue"*, *"red underline"*, *"bold bright-white on red"*.
 *[grep]* *match*, *file*, *line*, *separator*
 	*GREP_COLORS*, and an alias *grep --color=auto*.
 
-*[diff]* *added*, *removed*, *header*, *hunk*
-	An alias *diff --color=auto --palette=*_..._.
+*[diff]* *added*, *removed*, *header*, *hunk*, *added-word*, *removed-word*, *moved-added*, *moved-removed*
+	An alias *diff --color=auto --palette=*_..._, and git's colours:
+	each interactive shell writes _~/.local/state/nukesh/gitconfig_,
+	which the system's gitconfig includes, so a user's _~/.gitconfig_
+	still wins. It gives git's diffs these colours, *git status* and
+	*git branch* the prompt's git colours, and *git diff*, *show* and
+	*log* the pager *nukesh --diff-pager*, which marks the words of a
+	changed line that changed in *added-word* and *removed-word*
+	(*nukesh*(1)). Lines git saw moved are in *moved-added* and
+	*moved-removed*. With *enabled = false* here, the file is empty.
 
 *[ip]* *name*, *up*, *down*, *address*, *address6*, *mac*
 	*IP_COLORS*, and an alias *ip -color=auto* (*ip*(8)).

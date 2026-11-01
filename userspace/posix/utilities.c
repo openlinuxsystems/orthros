@@ -893,6 +893,12 @@ static void versioning(void) {
 	// Its manual pages, which `git help` shows.
 	OUTPUT("", "/system/resources/man/man1/git-commit.1\n/system/resources/man/man7/gitglossary.7\n",
 			"/bin/man", "-w", "git-commit", "gitglossary");
+	// Nukesh's colours for git (ADR 0293): an interactive shell writes them, the system's
+	// gitconfig includes them, and the pager marks the words a changed line gained.
+	OUTPUT("", "green\nnukesh --diff-pager\n", "/bin/sh", "-c",
+			"nukesh -i -c true </dev/null >/dev/null 2>&1; cd /tmp/git/a && git config color.diff.new && git config pager.log");
+	OUTPUT("", "1\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && sed -i 's/^two$/two and 2/' f && git -c color.ui=always diff | nukesh --diff-highlight | grep -cF \"$(printf '\\033[7;32mand')\"");
 	STATUS(0, "/bin/rm", "-rf", "/tmp/git");
 	for(size_t i = 0; i < sizeof(ENV) / sizeof(ENV[0]); i++)
 		unsetenv(ENV[i][0]);

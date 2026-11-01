@@ -37,3 +37,8 @@
 	# memory, by git credential-cache, for 8 hours, and never written
 	# to disk (ADR 0292). The keyring takes over in Phase 13g.
 	helper = cache --timeout=28800
+[include]
+	# Diff, status and branch colours from Nukesh's colors.toml, and
+	# diffs shown with the words that changed marked, which each shell
+	# writes here (ADR 0293). A user's ~/.gitconfig wins over them.
+	path = ~/.local/state/nukesh/gitconfig
