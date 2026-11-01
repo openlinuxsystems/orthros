@@ -11,10 +11,10 @@
 #
 # A volume a power cut left (its name ends in -cut) is mended with
 # `chkdsk /f` first. Then `chkdsk` must find nothing wrong, each path its
-# .txt lists must be there, a directory, a link or a file of the bytes
-# it gives, and, but for a cut volume and one whose list names only what
-# a test changed (-some), nothing else may be there but what Windows
-# makes itself.
+# .txt lists must be there, a directory, a link, a file or a file's
+# stream of the bytes it gives, and, but for a cut volume and one whose
+# list names only what a test changed (-some), nothing else may be there
+# but what Windows makes itself.
 
 param([Parameter(Mandatory)] [string] $Images)
 
@@ -67,6 +67,14 @@ foreach ($vhd in $vhds) {
             }
             $what, $path = $line -split "`t", 2
             [void]$listed.Add($path)
+            # A stream of a file or directory: `s <hash>`, its path
+            # `path:stream` (ADR 0241).
+            $stream = $null
+            if ($what.StartsWith('s ')) {
+                $at = $path.LastIndexOf(':')
+                $stream = $path.Substring($at + 1)
+                $path = $path.Substring(0, $at)
+            }
             $full = Join-Path $root ($path -replace '/', '\')
             $item = Get-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue
             if (-not $item) {
@@ -74,7 +82,20 @@ foreach ($vhd in $vhds) {
                 continue
             }
             $link = [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
-            if ($what -eq 'd') {
+            if ($stream) {
+                # Opened as `file:stream`, as Windows names it; a
+                # directory's too.
+                try {
+                    $bytes = [IO.File]::ReadAllBytes("$full`:$stream")
+                } catch {
+                    $problems.Add("Missing stream: $path`:$stream ($_)")
+                    continue
+                }
+                $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+                if ("s $($hash.ToLowerInvariant())" -ne $what) {
+                    $problems.Add("Other bytes: $path`:$stream")
+                }
+            } elseif ($what -eq 'd') {
                 if (-not $item.PSIsContainer -or $link) {
                     $problems.Add("Not a directory: $path")
                 }

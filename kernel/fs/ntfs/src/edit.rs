@@ -20,10 +20,13 @@
 //! Windows and ntfs-3g count them), and [`insert`] and [`remove`] keep
 //! the count.
 
+use core::cmp::Ordering;
+
 use radix_vfs::mem::{self, KVec};
 use radix_vfs::{Error, Result};
 
 use crate::record::{STRIDE, attr_flags, kind, u16_at, u32_at};
+use crate::upcase::Upcase;
 
 pub(crate) fn put_u16(b: &mut [u8], at: usize, v: u16) {
     b[at..at + 2].copy_from_slice(&v.to_le_bytes());
@@ -160,11 +163,11 @@ pub fn find_all(buf: &[u8], kind: u32) -> impl Iterator<Item = usize> + '_ {
 
 /// Where an attribute of type `kind` named `name` goes among those of
 /// `buf`: after every one of a lower type, or of its type and a name that
-/// is not greater.
-fn place(buf: &[u8], kind: u32, name: &[u8]) -> usize {
+/// is not greater ([`collate`]).
+fn place(buf: &[u8], kind: u32, name: &[u8], upcase: &Upcase) -> usize {
     for at in offsets(buf) {
         let k = u32_at(buf, at);
-        if k > kind || (k == kind && name_greater(name_at(buf, at), name)) {
+        if k > kind || (k == kind && collate(upcase, name_at(buf, at), name) == Ordering::Greater) {
             return at;
         }
     }
@@ -172,25 +175,37 @@ fn place(buf: &[u8], kind: u32, name: &[u8]) -> usize {
     used(buf) - 8
 }
 
-/// Whether the UTF-16 name `a` (bytes) sorts after `b`, unit by unit, an
-/// unnamed attribute first.
-fn name_greater(a: &[u8], b: &[u8]) -> bool {
-    let a_units = a.as_chunks::<2>().0.iter().map(|u| u16::from_le_bytes(*u));
-    let b_units = b.as_chunks::<2>().0.iter().map(|u| u16::from_le_bytes(*u));
-    a_units.cmp(b_units) == core::cmp::Ordering::Greater
+/// How the UTF-16 names `a` and `b` (bytes) of two attributes of one
+/// type order, as Windows and ntfs-3g sort them in a record and an
+/// attribute list: by their upper cases (`upcase`, the volume's), then
+/// unit by unit, an unnamed attribute first.
+pub fn collate(upcase: &Upcase, a: &[u8], b: &[u8]) -> Ordering {
+    fn units(name: &[u8]) -> impl Iterator<Item = u16> + '_ {
+        name.as_chunks::<2>().0.iter().map(|u| u16::from_le_bytes(*u))
+    }
+    upcase.compare(units(a), units(b)).then_with(|| units(a).cmp(units(b)))
 }
 
 /// Puts the attribute `attr` (whole, its instance already set) into the
 /// record `buf` where its type and name go; returns where. Fails with
-/// [`Error::NoSpace`] if the record has no room for it.
+/// [`Error::NoSpace`] if the record has no room for it. Its name orders
+/// unit by unit among those of its type, which is how NTFS orders them
+/// but for a type of names of more than one case: [`insert_in`] puts
+/// one of those, a stream.
 pub fn insert(buf: &mut [u8], attr: &[u8]) -> Result<usize> {
+    insert_in(buf, attr, &Upcase::identity())
+}
+
+/// [`insert`], its name ordered among those of its type through the
+/// volume's up-case table `upcase` ([`collate`]).
+pub fn insert_in(buf: &mut [u8], attr: &[u8], upcase: &Upcase) -> Result<usize> {
     if attr.len() > room(buf) {
         return Err(Error::NoSpace);
     }
     let kind = u32_at(attr, 0);
     let name_off = usize::from(u16_at(attr, 0x0a));
     let name = &attr[name_off..name_off + 2 * usize::from(attr[9])];
-    let at = place(buf, kind, name);
+    let at = place(buf, kind, name, upcase);
     let end = used(buf);
     buf.copy_within(at..end, at + attr.len());
     buf[at..at + attr.len()].copy_from_slice(attr);

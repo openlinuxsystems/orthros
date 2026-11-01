@@ -6490,7 +6490,9 @@ fn volumes(vm: &mut Vm, case: &Case) -> Result<(), String> {
     let file = vm.dir().join(format!("{}-disk0.img", case.name));
     vm.add_disk_file("again", &file)?;
     vm.monitor(&format!("device_add usb-storage,drive=again,bus=xhci.0,port={port},id=again"))?;
-    vm.expect(&format!("volumed: mounted the FAT filesystem of {name} at /volumes/{label}"))?;
+    // The program writes as soon as the volume is there, which may be
+    // before volumed's own line about it reaches the log.
+    vm.expect_ahead(&format!("volumed: mounted the FAT filesystem of {name} at /volumes/{label}"))?;
     vm.expect(&format!("volumetest: wrote /volumes/{label}/ejected.txt"))?;
     vm.expect(&format!("volumetest: ejected /volumes/{label}"))?;
     vm.expect("volumetest: every check passed")?;

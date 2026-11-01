@@ -233,7 +233,7 @@ pub(crate) struct Loaded {
 
 /// Adds the attribute `attr` to the value in `slot`: a resident one, or a
 /// non-resident one's first or next piece.
-fn piece(slot: &mut Option<Value>, attr: &Attr<'_>, clusters: u64) -> Result<()> {
+pub(crate) fn piece(slot: &mut Option<Value>, attr: &Attr<'_>, clusters: u64) -> Result<()> {
     if !attr.non_resident() {
         if slot.is_some() {
             return Err(Error::Corrupt);
@@ -467,6 +467,66 @@ impl Volume {
             take(&mut loaded, &hit.ok_or(Error::Corrupt)?, clusters)?;
         }
         Ok(loaded)
+    }
+
+    /// Calls `f` with each attribute of the file whose base record is
+    /// `number`: those of its base record, and of the extension records
+    /// its attribute list names, in the list's order, a non-resident
+    /// attribute's pieces by their first VCN.
+    #[inline(never)]
+    pub(crate) fn each_attr(
+        &self,
+        number: u64,
+        f: &mut dyn FnMut(&Attr<'_>) -> Result<()>,
+    ) -> Result<()> {
+        let rs = self.geo.record_size as usize;
+        let mut base = zeroed(rs)?;
+        self.read_record(number, &mut base)?;
+        let rec = Record::new(&base)?;
+        let mut list = None;
+        for attr in rec.attrs() {
+            let attr = attr?;
+            if attr.kind() == kind::ATTRIBUTE_LIST {
+                list = Some(self.whole(&attr, MAX_LIST)?);
+                break;
+            }
+        }
+        let Some(list) = list else {
+            for attr in rec.attrs() {
+                f(&attr?)?;
+            }
+            return Ok(());
+        };
+        let mut other = zeroed(rs)?;
+        let mut other_number = None;
+        for entry in list_entries(&list) {
+            let entry = entry?;
+            let at = record_of(entry.reference());
+            let bytes: &[u8] = if at == number {
+                &base
+            } else {
+                if other_number != Some(at) {
+                    self.read_record(at, &mut other)?;
+                    let rec = Record::new(&other)?;
+                    if !rec.in_use() || record_of(rec.base()) != number {
+                        return Err(Error::Corrupt);
+                    }
+                    other_number = Some(at);
+                }
+                &other
+            };
+            let rec = Record::new(bytes)?;
+            let mut hit = None;
+            for attr in rec.attrs() {
+                let attr = attr?;
+                if attr.kind() == entry.kind() && attr.id() == entry.id() {
+                    hit = Some(attr);
+                    break;
+                }
+            }
+            f(&hit.ok_or(Error::Corrupt)?)?;
+        }
+        Ok(())
     }
 
     /// The whole value of `attr`, of `max` bytes at most.

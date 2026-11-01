@@ -957,13 +957,7 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
         let (_, from) = objects::directory(cspace, a.source, rw)?;
         let mount =
             vfs()?.bind(&who, &dir.at, path.as_str()?, &from.at, read_only).map_err(fs::status)?;
-        info!(
-            "Files: mounted a directory of {} from {} on /{}{}",
-            mount.fs.kind().name(),
-            mount.source(),
-            mount.path(),
-            if mount.read_only() { ", read-only" } else { "" },
-        );
+        log_mount(mount, true);
         return answer(label, 0, [0; 8]);
     }
     let source = if matches!(kind, "fat" | "exfat" | "btrfs" | "ext4" | "ntfs" | "iso9660" | "udf")
@@ -982,24 +976,40 @@ fn mount_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -> R
     let mount = vfs()?
         .mount(&who, &dir.at, path.as_str()?, made.fs, made.source.as_str(), read_only)
         .map_err(fs::status)?;
-    let mut labelled = radix_klog::TextBuf::<40>::new();
-    {
-        use core::fmt::Write;
-        let mut name = radix_klog::TextBuf::<32>::new();
-        let _ = mount.fs.label(&mut name);
-        if !name.as_str().is_empty() {
-            let _ = write!(labelled, ", labelled {}", name.as_str());
-        }
-    }
-    info!(
-        "Files: mounted {} from {} on /{}{}{}",
+    log_mount(mount, false);
+    answer(label, 0, [0; 8])
+}
+
+/// Logs what `mount` mounted, a directory of another mount's if `bind`,
+/// having let go of it first. A program may find it mounted as soon as it
+/// is in the table, and an unmount fails while a handle holds a mount,
+/// as this one would while the log waits for other lines: the `volumes`
+/// boot test's remount and eject, run as soon as volumed's mount was
+/// there, failed with EBUSY. Out of line, so its buffer is not in
+/// [`mount_method`]'s frame, which Btrfs's mount makes the deepest.
+#[inline(never)]
+fn log_mount(mount: radix_vfs::mount::MountRef, bind: bool) {
+    use core::fmt::Write;
+    // As much as the log keeps of a line.
+    let mut said = radix_klog::TextBuf::<496>::new();
+    let _ = write!(
+        said,
+        "{}{} from {} on /{}{}",
+        if bind { "a directory of " } else { "" },
         mount.fs.kind().name(),
         mount.source(),
         mount.path(),
         if mount.read_only() { ", read-only" } else { "" },
-        labelled.as_str()
     );
-    answer(label, 0, [0; 8])
+    if !bind {
+        let mut name = radix_klog::TextBuf::<32>::new();
+        let _ = mount.fs.label(&mut name);
+        if !name.as_str().is_empty() {
+            let _ = write!(said, ", labelled {}", name.as_str());
+        }
+    }
+    drop(mount);
+    info!("Files: mounted {said}");
 }
 
 /// The methods that make and add to views (ADR 0215), out of
