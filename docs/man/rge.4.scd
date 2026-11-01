@@ -31,11 +31,11 @@ What it leaves out:
 - *Realtek's firmware*. OpenBSD's and Linux's drivers load patches for
   the processors in the chip's MAC and PHY, which Realtek ships as
   firmware: its source is not published, and Realtek's notice allows
-  only passing it on. The base image carries no closed firmware, so the chips run on
-  the code in their own ROMs, as Linux runs them without its *rtl_nic*
-  files. Realtek does not say what its patches fix; a link that is slow
-  to come up or drops on one of these chips should be reported with the
-  chip the kernel log names.
+  only passing it on. The base image carries no closed firmware, so the
+  chips run on the code in their own ROMs, as Linux runs them without
+  its *rtl_nic* files. Realtek does not say what its patches fix; a
+  link that is slow to come up or drops on one of these chips should be
+  reported with the chip the kernel log names.
 - *The RTL8127*, Realtek's 10 Gb/s chip, which is not driven yet.
 - *Offloads*: no checksums, VLAN tag stripping, receive side scaling,
   interrupt moderation or wake on LAN (ADR 0197).

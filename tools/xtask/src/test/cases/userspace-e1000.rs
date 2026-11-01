@@ -99,15 +99,20 @@ fn userspace_e1000(vm: &mut Vm, case: &Case) -> Result<(), String> {
     )?;
     // Halfway through net1's echo: the card stops before its memory goes,
     // both its interfaces go down, and Spark starts e1000d again, which
-    // brings them back.
-    vm.expect("nics: killed e1000d (process ")?;
+    // brings them back. nics says it killed e1000d once kill() returns,
+    // and through Spark, by when the kernel may have said the cards went
+    // down: those lines are read ahead from before nics' own, as only the
+    // kill makes them.
+    vm.expect_ahead("nics: killed e1000d (process ")?;
     for ((name, ..), address) in DRIVEN.iter().zip(&addresses) {
         vm.expect_ahead(&format!("Net: {name} is down: its driver let go of it"))?;
         vm.expect_ahead(&format!("Device: {address} stopped, as its driver let go of it"))?;
     }
     vm.expect_ahead("spark: e1000d (process ")?;
     vm.expect_ahead(" was ended by signal 9")?;
-    vm.expect_ahead("spark: starting e1000d again in ")?;
+    // Spark starts e1000d again only once it has ended, and the cards are
+    // opened again after that.
+    vm.expect("spark: starting e1000d again in ")?;
     for ((name, _, _, mac, ..), address) in DRIVEN.iter().zip(&addresses) {
         vm.expect_ahead(&format!("Device: {address} is open for spark"))?;
         vm.expect_ahead(&format!("Net: {name} is attached to its driver, e1000d, MAC {mac}"))?;
