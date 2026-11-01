@@ -15,12 +15,13 @@
 set -eu
 
 # The configure script is made from the source, which is the release's
-# commit; the copy keeps the fetched source as it was.
+# commit; the copy keeps the fetched source as it was. aclocal.m4 is in
+# the source, so Autoconf alone makes it, without Automake.
 rm -rf "$PORT_BUILD/src"
 cp -R "$PORT_SRC" "$PORT_BUILD/src"
 cd "$PORT_BUILD/src"
-autoreconf >"$PORT_BUILD/autoreconf.log" 2>&1 || {
-	tail -n 40 "$PORT_BUILD/autoreconf.log" >&2
+{ autoconf && autoheader; } >"$PORT_BUILD/autoconf.log" 2>&1 || {
+	tail -n 40 "$PORT_BUILD/autoconf.log" >&2
 	exit 1
 }
 # mlibc's getopt moves options from after the first argument to the

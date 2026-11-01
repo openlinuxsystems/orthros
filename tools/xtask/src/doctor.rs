@@ -547,7 +547,7 @@ fn requirements() -> Vec<Requirement> {
         Requirement {
             name: "Autoconf",
             purpose: "makes OpenSSH's configure script from the release's commit",
-            found: |_| program_version("autoreconf", "--version"),
+            found: |_| program_version("autoconf", "--version"),
             packages: all("autoconf"),
             fallback: None,
         },
