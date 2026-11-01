@@ -1102,8 +1102,11 @@ pub const ABBREVIATIONS: &[(&str, &str)] = &[
 mod tests {
     use super::*;
 
-    fn git(dir: &Path, args: &[&str]) {
-        let ok = Command::new("git")
+    /// git in `dir` with a name to commit as and none of this
+    /// computer's settings.
+    fn git_in(dir: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new("git");
+        command
             .args(args)
             .current_dir(dir)
             .env("GIT_AUTHOR_NAME", "T")
@@ -1113,10 +1116,12 @@ mod tests {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("HOME", dir)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success();
+            .stderr(Stdio::null());
+        command
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = git_in(dir, args).status().unwrap().success();
         assert!(ok, "git {args:?}");
     }
 
@@ -1180,7 +1185,8 @@ mod tests {
         git(&dir, &["switch", "-q", "main"]);
         std::fs::write(dir.join("f"), "main\n").unwrap();
         git(&dir, &["commit", "-q", "-am", "Main"]);
-        let _ = Command::new("git").args(["merge", "-q", "side"]).current_dir(&dir).output();
+        // It fails, at the conflict.
+        let _ = git_in(&dir, &["merge", "-q", "side"]).status();
         assert_eq!(operation(&repo), Some(Operation::Merge));
         let status = run_status(&dir).unwrap();
         assert_eq!(status.conflicts, 1);
