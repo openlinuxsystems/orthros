@@ -32,6 +32,7 @@ const SECTIONS: &[&str] = &[
     "history",
     "commands",
     "folders",
+    "git",
 ];
 
 pub const USER_FILE: &str = ".config/nukesh/settings.toml";
@@ -42,6 +43,9 @@ pub struct Settings {
     pub git_dirty: bool,
     pub notify: bool,
     pub notify_after: u64,
+    /// `[git] status-wait`: how many milliseconds the prompt waits for
+    /// `git status` before it shows the last count found (ADR 0288).
+    pub git_status_wait: u64,
     /// `[nebix] offer`: after a command fails, the empty line offers
     /// Alt+E (ADR 0268).
     pub explain_offer: bool,
@@ -64,6 +68,14 @@ pub struct Settings {
     /// `[folders] resume`: a new shell on a console starts where the last
     /// one there left off.
     pub resume: bool,
+    /// `[git] abbreviations`: the oh-my-zsh git abbreviations (ADR 0288).
+    pub git_abbreviations: bool,
+    /// `[git] guardrails`: a note before a commit on a detached head or
+    /// straight to the main branch.
+    pub git_guardrails: bool,
+    /// `[git] reminders`: a note on entering a repository with month-old
+    /// stashes.
+    pub git_reminders: bool,
 }
 
 impl Default for Settings {
@@ -73,6 +85,7 @@ impl Default for Settings {
             git_dirty: true,
             notify: true,
             notify_after: 30,
+            git_status_wait: 500,
             explain_offer: true,
             suggest_next: true,
             screen_reader: false,
@@ -82,6 +95,9 @@ impl Default for Settings {
             offer_install: true,
             project_files: true,
             resume: true,
+            git_abbreviations: false,
+            git_guardrails: true,
+            git_reminders: true,
         }
     }
 }
@@ -121,6 +137,9 @@ impl Settings {
             ("commands", "offer-install") => &mut self.offer_install,
             ("folders", "project-files") => &mut self.project_files,
             ("folders", "resume") => &mut self.resume,
+            ("git", "abbreviations") => &mut self.git_abbreviations,
+            ("git", "guardrails") => &mut self.git_guardrails,
+            ("git", "reminders") => &mut self.git_reminders,
             _ => return None,
         })
     }
@@ -142,6 +161,14 @@ impl Settings {
                         match value.as_integer().and_then(|n| u64::try_from(n).ok()) {
                             Some(n) => self.notify_after = n,
                             None => problems.push(format!("[notify] {key}: a number of seconds")),
+                        }
+                    }
+                    ("git", "status-wait") => {
+                        match value.as_integer().and_then(|n| u64::try_from(n).ok()) {
+                            Some(n) => self.git_status_wait = n,
+                            None => {
+                                problems.push(format!("[git] {key}: a number of milliseconds"));
+                            }
                         }
                     }
                     (section, key) if self.switch(section, key).is_some() => {
@@ -185,6 +212,15 @@ pub fn apply_to(shell: &mut crate::shell::Shell) {
     }
     if ls != had {
         shell.aliases.insert("ls".into(), ls);
+    }
+    // `[git] abbreviations`: oh-my-zsh's, where the person has none of
+    // the same name (ADR 0288).
+    if shell.settings.git_abbreviations {
+        for (name, expansion) in crate::git::ABBREVIATIONS {
+            if !shell.abbrs.contains_key(*name) {
+                shell.abbrs.insert((*name).to_string(), (*expansion).to_string());
+            }
+        }
     }
 }
 

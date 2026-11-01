@@ -162,7 +162,18 @@ fn empty_line_hint(shell: &Shell, last: &str, status: i32, folder: &str) -> (Str
     if !settings.suggest_next {
         return (String::new(), String::new());
     }
-    let guess = shell.records.as_ref().and_then(|r| r.next_after(last, folder)).map(str::to_string);
+    // git's next step (ADR 0288): a --continue once the last conflict is
+    // resolved comes before habit; the rest only when habit has nothing.
+    let git = crate::git::next_after(std::path::Path::new(folder), last);
+    let guess = match git {
+        Some(step) if step.ends_with("--continue") => Some(step),
+        git => shell
+            .records
+            .as_ref()
+            .and_then(|r| r.next_after(last, folder))
+            .map(str::to_string)
+            .or(git),
+    };
     let better = crate::nebix::next(&crate::explain::mask(last), status, folder, guess.as_deref());
     match better.or(guess) {
         Some(command) => (command.clone(), command),
@@ -271,83 +282,24 @@ pub fn right_prompt(shell: &Shell, paint: bool) -> String {
         parts.push(style("jobs", &format!("{jobs} {word}")));
     }
     let here = shell.get("PWD").unwrap_or_default();
-    if let Some(branch) = git_branch(&here) {
-        let dirty = shell.settings.git_dirty
-            && shell.search_path("git", false).is_some()
-            && git_dirty(&here);
-        let mark = if dirty { "*" } else { "" };
-        parts.push(style("branch", &format!("git {branch}{mark}")));
+    if let Some(repo) = crate::git::find(std::path::Path::new(&here)) {
+        let status = (shell.settings.git_dirty && shell.search_path("git", false).is_some())
+            .then(|| {
+                crate::git::status(
+                    &repo,
+                    std::time::Duration::from_millis(shell.settings.git_status_wait),
+                )
+            })
+            .flatten();
+        // The console's font lacks ⎇, ↑ and ↓.
+        let plain = shell.get("TERM").is_none_or(|t| t == "linux" || t == "dumb");
+        let git: Vec<String> = crate::git::prompt_parts(&repo, status.as_ref(), plain)
+            .into_iter()
+            .map(|(key, text)| style(key, &text))
+            .collect();
+        parts.push(git.join(" "));
     }
     parts.join("  ")
-}
-
-/// The git branch of the folder `dir` is in: `.git/HEAD` in it or the
-/// nearest folder above; a detached head is its commit, shortened.
-pub fn git_branch(dir: &str) -> Option<String> {
-    let mut dir = std::path::PathBuf::from(dir);
-    loop {
-        let git = dir.join(".git");
-        if let Ok(meta) = std::fs::metadata(&git) {
-            let head = if meta.is_dir() {
-                git.join("HEAD")
-            } else {
-                // A worktree's .git is a file: `gitdir: path`.
-                let text = std::fs::read_to_string(&git).ok()?;
-                let target = text.trim().strip_prefix("gitdir:")?.trim();
-                dir.join(target).join("HEAD")
-            };
-            let text = std::fs::read_to_string(head).ok()?;
-            return branch_of(&text);
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
-}
-
-/// Whether the work tree at `dir` has changes not committed, by `git
-/// status` with untracked files left out; no answer within 100 ms is
-/// taken as clean, so that a big repository never holds the prompt.
-fn git_dirty(dir: &str) -> bool {
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-    let child = Command::new("git")
-        .args(["--no-optional-locks", "status", "--porcelain", "-uno", "--ignore-submodules"])
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn();
-    let Ok(mut child) = child else { return false };
-    let started = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(_)) | Err(_) => return false,
-            Ok(None) if started.elapsed() > std::time::Duration::from_millis(100) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
-            }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(1)),
-        }
-    }
-    let mut out = [0u8; 1];
-    child.stdout.take().is_some_and(|mut o| o.read(&mut out).is_ok_and(|n| n > 0))
-}
-
-fn branch_of(head: &str) -> Option<String> {
-    let head = head.trim();
-    match head.strip_prefix("ref:") {
-        Some(name) => {
-            let name = name.trim();
-            Some(name.strip_prefix("refs/heads/").unwrap_or(name).to_string())
-        }
-        None if head.len() >= 7 && head.chars().all(|c| c.is_ascii_hexdigit()) => {
-            Some(head[..7].to_string())
-        }
-        None => None,
-    }
 }
 
 #[cfg(test)]
@@ -389,16 +341,5 @@ mod tests {
         assert_eq!(help(&mut shell, "tool --x"), None);
         assert_eq!(help(&mut shell, "other -l"), None);
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn heads_name_their_branch() {
-        assert_eq!(branch_of("ref: refs/heads/main\n").as_deref(), Some("main"));
-        assert_eq!(branch_of("ref: refs/heads/feature/x").as_deref(), Some("feature/x"));
-        assert_eq!(
-            branch_of("8f5747610fc618b79e7901b5f1b36a1f95968c44").as_deref(),
-            Some("8f57476")
-        );
-        assert_eq!(branch_of("junk"), None);
     }
 }

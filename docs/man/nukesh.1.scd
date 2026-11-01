@@ -281,7 +281,53 @@ words in order, the last in its last part, as *zoxide* and *z.sh* do:
 after *cd ~/projects/site* once, *z site* goes there from anywhere.
 *z -l* _word_ ... lists the matches with their scores. Each folder an
 interactive shell goes into is counted in _~/.local/state/nukesh/folders_;
-those not used for long fade from it.
+those not used for long fade from it. A git repository's top folder
+counts half again, so *z site* goes to the repository rather than a
+folder inside it, and *cdr* goes to the top folder of the repository
+the shell is in.
+
+## git
+
+In a git repository (ADR 0288) the right of the prompt shows the branch,
+or the tag or commit when HEAD is detached, an operation under way
+(*REBASING 2/5*, *MERGING*, *BISECTING*), how far ahead (*↑2*) and
+behind (*↓1*) the upstream it is, and the files staged (*+3*), changed
+(*~2*), untracked (*?1*) and in conflict (*!1 conflict*), and the
+stashes (*≡1*); see *settings.toml*(5) for *git-dirty*.
+
+Tab knows git: its commands, with what each does; branches, with their
+last commit and its age, and a remote's branches you have not got yet;
+tags, and for *git tag* the next versions after the newest, as an
+annotated tag; remotes; stashes; and for *git add* and *git restore*
+only the files that changed, those in conflict first. Each command's
+options come from its own manual page.
+
+After a git command fails, the empty line shows the command corrected:
+a mistyped command (*git psuh*), a first push without an upstream (*git
+push -u origin* _branch_), a branch one typo away, a commit with nothing
+staged (*git commit -a*). After one that worked, it shows the usual next
+step: a commit after *git add*, a push after a commit,
+*git push --follow-tags* after a tag, the *--continue* once the last conflict is
+resolved, and *git branch -d* for branches already merged.
+
+Alt-E on a git command warns first of what cannot be undone, with this
+repository's numbers (the files a hard reset throws away, the commits a
+forced push replaces, the files *git clean* deletes), and says how to
+undo it. Alt-E on an empty line says what state the repository is in
+and the next step. Before *git commit* runs, a note says when HEAD is
+detached or the commit goes straight to the main branch; on entering a
+repository, a note names stashes a month old.
+
+Alt-C opens the commit sheet under the line: the staged files, a
+prefix (*feat*, *fix*, *docs*, *refactor*, *test*, *chore*, or none) that
+Tab chooses, and the subject with a count of its letters, yellow past
+50 and red past 72. Alt-N asks Nebix, on this computer, for a draft;
+Alt-A takes every changed file (*-a*). Enter puts the *git commit -m*
+command on the line, to run or not.
+
+*[git] abbreviations* in *settings.toml*(5) turns on oh-my-zsh's git
+abbreviations: *gst*, *gco*, *gp*, *gl* and the rest, which *abbr*
+lists.
 
 ## Abbreviations
 
@@ -421,8 +467,8 @@ Each builtin is described by *help* _name_. They are bash's: *.*, *:*,
 *logout*, *mapfile*, *popd*, *printf*, *pushd*, *pwd*, *read*, *readarray*,
 *readonly*, *return*, *set*, *shift*, *shopt*, *source*, *suspend*,
 *test*, *times*, *trap*, *true*, *type*, *typeset*, *ulimit*, *umask*,
-*unalias*, *unset* and *wait*, and Nukesh's own *abbr*, *explain*,
-*trust* and *z*. *shopt* takes each of bash 5.2's options;
+*unalias*, *unset* and *wait*, and Nukesh's own *abbr*, *cdr*,
+*explain*, *trust* and *z*. *shopt* takes each of bash 5.2's options;
 those for what the shell does not do (the *compat* levels, *cdspell*,
 *dirspell*, *direxpand*, *gnu_errfmt*, *hostcomplete*, *mailwarn*,
 *no_empty_cmd_completion*) change nothing, and *restricted_shell* cannot

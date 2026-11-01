@@ -45,9 +45,16 @@ it is when it starts, and the key keeps its default.
 	*true* and 30.
 
 *[prompt]* *git-dirty =* *true* | *false*
-	After the folder's git branch at the right of the prompt, a *\**
-	when the work tree has changes not committed (*git status*, given
-	100 ms at most). The default is *true*.
+	In a git repository, the right of the prompt shows the branch, or
+	the tag or commit when HEAD is detached, and an operation under way
+	(*REBASING 2/5*, *MERGING*); with *git-dirty*, also how far ahead
+	(*↑2*) and behind (*↓1*) its upstream the branch is, and the files
+	staged (*+3*), changed (*~2*), untracked (*?1*) and in conflict
+	(*!1 conflict*), and the stashes (*≡1*), from *git status* run in the
+	background: the prompt waits for it 150 ms at most and otherwise
+	shows what it found the last time. On the console, whose font lacks
+	some of these signs, they are *git*, *^*, *v* and *stash* (ADR 0288).
+	The default is *true*.
 
 *[nebix]* *offer =* *true* | *false*
 	After a command fails, the empty line offers Alt-E, which says what
@@ -87,6 +94,19 @@ it is when it starts, and the key keeps its default.
 	FILES). *resume*: a console's first shell, starting at home, goes
 	to the folder the last shell on that console was in (ADR 0286).
 	The defaults are *true*.
+
+*[git]* *abbreviations =* *true* | *false*, *guardrails =* *true* | *false*, *reminders =* *true* | *false*, *status-wait =* _milliseconds_
+	*abbreviations*: oh-my-zsh's git abbreviations, so that *gst* grows
+	into *git status*, *gco* into *git checkout* and *gp* into *git
+	push* (*abbr* lists them); yours of the same name win. *guardrails*:
+	before *git commit* runs, a note when HEAD is detached, as the
+	commit would be on no branch, and when it goes straight to the main
+	branch of a repository with a remote. *reminders*: on entering a
+	repository, once a session, a note of stashes a month old (ADR
+	0288). *status-wait*: how long the prompt waits for *git status*
+	to count a repository's files; past it, the prompt shows the
+	last count it found there. The defaults are *false*, *true*,
+	*true* and *500*.
 
 # EXAMPLES
 

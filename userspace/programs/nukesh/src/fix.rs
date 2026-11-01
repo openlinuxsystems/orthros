@@ -64,6 +64,12 @@ pub fn fix(shell: &Shell, last: &str, status: i32) -> Option<String> {
     if last.contains(['|', ';', '&', '(', '`', '$', '\n']) {
         return None;
     }
+    // git's own mistakes (ADR 0288).
+    if first.rsplit('/').next() == Some("git") {
+        let dir = std::path::PathBuf::from(shell.get("PWD").unwrap_or_default());
+        let man = shell.get("NUKESH_MAN_DIR").unwrap_or_else(|| "/system/resources/man".into());
+        return crate::git::fix(&dir, &words, status, &man);
+    }
     let rest = || words[1..].join(" ");
     let joined =
         |head: &str| if words.len() > 1 { format!("{head} {}", rest()) } else { head.to_string() };

@@ -59,14 +59,19 @@ example *"bold blue"*, *"red underline"*, *"bold bright-white on red"*.
 	may choose another theme than the system's. *nukesh --colors*
 	shows the theme's styles.
 
-*[prompt]* *user*, *at*, *host*, *path*, *symbol*, *error*, *admin*, *took*, *jobs*, *branch*
+*[prompt]* *user*, *at*, *host*, *path*, *symbol*, *error*, *admin*, *took*, *jobs*, *branch*, *git-state*, *git-sync*, *git-conflict*, *git-staged*, *git-changed*, *git-untracked*, *git-stash*, *git-clean*
 	While *PS1* is left at its default, the prompt is
 	_name_*@*_host_ _folder_ *$*, with a *✗* _status_ badge after a
 	command that failed and an *admin* badge, and *#*, while the shell
 	is root's. *error* and *admin* are the badges' styles. At the
 	right of the line (ADR 0262): *took* _time_ after a command that
 	took *took-after* seconds or more, how many jobs there are, and
-	*git* _branch_ in a folder of a git repository.
+	in a folder of a git repository, its branch and state (ADR 0288):
+	*git-state* for an operation under way (*REBASING 2/5*) and a tag or
+	commit when HEAD is detached, *git-sync* for how far ahead and
+	behind the upstream, *git-conflict*, *git-staged*, *git-changed* and
+	*git-untracked* for the files' counts, *git-stash* for the stashes,
+	and *git-clean* for the mark of a work tree with nothing changed.
 
 *[prompt]* *took-after =* _seconds_
 	How long a command takes before the right prompt says how long.

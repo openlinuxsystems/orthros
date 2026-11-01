@@ -336,8 +336,30 @@ fn explain_command(
     let Some((name, start)) = command_name(words) else { return };
     let summary =
         sources.summary(&name).unwrap_or_else(|| "not in the manual on this computer".into());
-    plain.push(format!("{name}  {summary}"));
-    let args = &words[start..];
+    // git's commands each have a page and options of their own (ADR 0288).
+    let sub = (name == "git")
+        .then(|| {
+            let mut shifted = vec![name.clone()];
+            shifted.extend_from_slice(&words[start..]);
+            let (at, rest) = crate::git::subcommand_words(&shifted);
+            rest.first().cloned().map(|sub| (sub, start + at))
+        })
+        .flatten();
+    let (lookup, args) = match &sub {
+        Some((sub, at)) => {
+            let about = sources
+                .summary(&format!("git-{sub}"))
+                .unwrap_or_else(|| "a git command not in the manual here, or an alias".into());
+            plain.push(format!("{name} {sub}  {about}"));
+            (format!("git-{sub}"), &words[*at..])
+        }
+        None => {
+            plain.push(format!("{name}  {summary}"));
+            (name.clone(), &words[start..])
+        }
+    };
+    let name_for_warnings = name.clone();
+    let name = lookup;
     let mut options: Vec<String> = Vec::new();
     let mut operands: Vec<String> = Vec::new();
     let mut i = 0;
@@ -414,7 +436,13 @@ fn explain_command(
         };
         plain.push(format!("  {text}"));
     }
-    warn(&name, &options, args, warnings);
+    if sub.is_some() {
+        let mut all = vec![sub.as_ref().map_or_default(|s| s.0.clone())];
+        all.extend_from_slice(args);
+        warn(&name_for_warnings, &options, &all, warnings);
+    } else {
+        warn(&name, &options, args, warnings);
+    }
 }
 
 fn show_option(form: &str, value: Option<&str>) -> String {
@@ -495,6 +523,14 @@ fn warn(name: &str, options: &[String], args: &[String], warnings: &mut Vec<Stri
     };
     warnings.push(text.to_string());
 }
+
+/// The warnings [`warn`] gives any git command, which those with this
+/// repository's numbers replace.
+const GENERAL_GIT: &[&str] = &[
+    "Rewrites the shared branch's history, which can lose others' work",
+    "Throws away changes not committed",
+    "Deletes files git does not track",
+];
 
 /// The summary line of `name`'s manual page, from `.Nd` (mdoc) or the
 /// line after `.SH NAME` (man).
@@ -639,15 +675,32 @@ pub fn render(parts: &[Part], nebix: Option<&str>, paint: bool) -> String {
 /// What Alt+E shows for `line`; with an empty line, why the last command
 /// failed.
 pub fn for_prompt(shell: &mut crate::shell::Shell, line: &str, paint: bool) -> String {
+    let here = std::path::PathBuf::from(shell.get("PWD").unwrap_or_default());
     let (line, status) = if line.trim().is_empty() {
         if shell.status == 0 || shell.last_command.is_empty() {
-            return String::new();
+            // In a repository: what state it is in, and the next step.
+            return crate::git::describe(&here).map_or_default(|d| format!("{d}\n"));
         }
         (shell.last_command.clone(), Some(shell.status))
     } else {
         (line.to_string(), None)
     };
-    let parts = explain(&line, &mut ShellSources(shell));
+    let mut parts = explain(&line, &mut ShellSources(shell));
+    // A git command's warnings with this repository's numbers, in place
+    // of the general ones, and how to undo it.
+    let words: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+    if words.first().is_some_and(|w| w == "git") && !line.contains(['|', ';', '&']) {
+        let specific = crate::git::warnings(&here, &words);
+        if !specific.is_empty() {
+            parts.retain(|p| !p.warning || !GENERAL_GIT.contains(&p.text.as_str()));
+            for (at, text) in specific.into_iter().enumerate() {
+                parts.insert(at, Part { warning: true, text });
+            }
+        }
+        if let Some(undo) = crate::git::undo(&here, &words) {
+            parts.push(Part { warning: false, text: format!("Undo: {undo}") });
+        }
+    }
     let mut out = String::new();
     if let Some(status) = status {
         let head =

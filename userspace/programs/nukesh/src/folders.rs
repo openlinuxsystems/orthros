@@ -105,8 +105,37 @@ pub fn best<'a>(
 ) -> Option<&'a Folder> {
     let mut found: Vec<&Folder> =
         folders.iter().filter(|f| f.path != here && matches(&f.path, words)).collect();
-    found.sort_by(|a, b| score(b, now).total_cmp(&score(a, now)));
+    // A repository's top folder counts half again: `z site` goes to the
+    // repository, not a folder inside it used as often (ADR 0288).
+    let weighed = |f: &Folder| {
+        let top = std::path::Path::new(&f.path).join(".git").exists();
+        score(f, now) * if top { 1.5 } else { 1.0 }
+    };
+    found.sort_by(|a, b| weighed(b).total_cmp(&weighed(a)));
     found.into_iter().find(|f| std::fs::metadata(&f.path).is_ok_and(|m| m.is_dir()))
+}
+
+/// `cdr`: to the top folder of the git repository the shell is in, or
+/// of the one above it if already at a top (ADR 0288).
+pub fn cdr(shell: &mut Shell, args: &[String]) -> crate::shell::Res {
+    if args.len() > 1 {
+        shell.error("cdr: takes no arguments");
+        return Ok(2);
+    }
+    let here = std::path::PathBuf::from(shell.get("PWD").unwrap_or_default());
+    let Some(repo) = crate::git::find(&here) else {
+        shell.error("cdr: not in a git repository");
+        return Ok(1);
+    };
+    let mut top = repo.work;
+    // At a submodule's top, its superproject's.
+    if top == here
+        && let Some(parent) = top.parent().and_then(crate::git::find)
+    {
+        top = parent.work;
+    }
+    let path = top.to_string_lossy().into_owned();
+    Ok(i32::from(!crate::builtins::cd_to(shell, &path)))
 }
 
 fn path_of(shell: &Shell) -> Option<String> {

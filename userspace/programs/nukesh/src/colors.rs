@@ -247,6 +247,18 @@ const SECTIONS: &[Section] = &[
             key("took", "yellow", "how long the last command took, on the right"),
             key("jobs", "cyan", "how many jobs are running or stopped, on the right"),
             key("branch", "magenta", "the git branch of the folder, on the right"),
+            key(
+                "git-state",
+                "bold yellow",
+                "an operation under way, or a tag or commit when HEAD is detached",
+            ),
+            key("git-sync", "cyan", "how far ahead of and behind its upstream the branch is"),
+            key("git-conflict", "bold red", "the files in conflict"),
+            key("git-staged", "green", "the files staged for the next commit"),
+            key("git-changed", "yellow", "the files changed and not staged"),
+            key("git-untracked", "red", "the files git does not track"),
+            key("git-stash", "bright-black", "the stashes"),
+            key("git-clean", "green", "the mark of a work tree with nothing changed"),
         ],
     },
     Section {

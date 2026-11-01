@@ -55,6 +55,7 @@ table! {
     "builtin" => builtin, "builtin [builtin [arguments]]", "Run a builtin, skipping functions.";
     "caller" => misc::caller, "caller [n]", "Show where the current function was called from.";
     "cd" => dirs::cd, "cd [-L|-P [-e]] [dir]", "Change the working directory.";
+    "cdr" => crate::folders::cdr, "cdr", "Go to the top folder of the git repository.";
     "command" => command, "command [-pVv] command [arguments]", "Run a command, skipping functions, or describe it.";
     "compgen" => crate::complete::compgen, "compgen [-abcdefgjksuv] [-o option] [-A action] [-G glob] [-W words] [-F function] [-C command] [-X filter] [-P prefix] [-S suffix] [word]", "Show the completions of a word.";
     "complete" => crate::complete::complete, "complete [-abcdefgjksuv] [-pr] [-DEI] [-o option] [-A action] [-G glob] [-W words] [-F function] [-C command] [-X filter] [-P prefix] [-S suffix] [name ...]", "Set how a command's arguments are completed.";

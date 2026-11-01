@@ -167,8 +167,26 @@ pub fn install(ctx: &Ctx, files: &mut Vec<(String, PathBuf)>) -> Result<()> {
         std::fs::write(&file, text).context(|| format!("writing {}", file.display()))?;
         files.push((format!("{COMPLETIONS_DIR}/{program}"), file));
     }
+    // git's commands each have a page, git-<name>, from which Nukesh
+    // completes `git <name>`'s options (ADR 0288).
+    let mut subcommands = 0;
+    if programs.iter().any(|p| p.as_str() == "git") {
+        for (page, text) in &texts {
+            let Some(name) = page_name(page).filter(|n| n.starts_with("git-")) else { continue };
+            if programs.iter().any(|p| p.as_str() == name) || page_section(page) != Some('1') {
+                continue;
+            }
+            let found = parse_options(text);
+            options += found.len();
+            subcommands += 1;
+            let file = dir.join(name);
+            std::fs::write(&file, completion_file(name, page, &found))
+                .context(|| format!("writing {}", file.display()))?;
+            files.push((format!("{COMPLETIONS_DIR}/{name}"), file));
+        }
+    }
     step(&format!(
-        "Every one of the {} programs has its manual page, and its completion file ({options} options)",
+        "Every one of the {} programs has its manual page, and its completion file, with {subcommands} for git's commands ({options} options)",
         programs.len()
     ));
     Ok(())

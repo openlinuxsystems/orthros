@@ -34,6 +34,7 @@ mod fix;
 mod folders;
 #[cfg(test)]
 mod fuzz;
+mod git;
 mod glob;
 mod hangup;
 mod highlight;
@@ -50,6 +51,7 @@ mod record;
 mod redir;
 mod script;
 mod settings;
+mod sheet;
 mod shell;
 mod show;
 mod suggest;

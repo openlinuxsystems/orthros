@@ -83,6 +83,17 @@ pub fn next(last: &str, status: i32, folder: &str, guess: Option<&str>) -> Optio
     (!first.is_empty()).then_some(first)
 }
 
+/// A commit subject Nebix drafts from the staged diff (masked), in the
+/// imperative and under 50 characters; at most 5 seconds, as it is asked
+/// for on a key (ADR 0288).
+pub fn commit_subject(diff: &str) -> Option<String> {
+    let diff: String = crate::explain::mask(diff).chars().take(16 * 1024).collect();
+    let request = format!("{{\"commit\":{}}}", crate::notify::json(&diff));
+    let answer = text_of(&ask(&request, Duration::from_secs(5))?);
+    let first = answer.lines().next()?.trim().to_string();
+    (!first.is_empty()).then_some(first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
