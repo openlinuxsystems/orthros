@@ -557,6 +557,18 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     std::fs::create_dir_all(dir).map_err(|e| util::failed(&dir.display(), e))?;
     let _ = std::fs::remove_file(SOCKET);
     let listener = UnixListener::bind(SOCKET).map_err(|e| util::failed(&SOCKET, e))?;
+    // Every program may send, whoever runs it (the limiter keeps any one
+    // from flooding): the folder and the socket are open to all, as
+    // authd's is.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let open = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                .map_err(|e| util::failed(&path.display(), e))
+        };
+        open(dir, 0o755)?;
+        open(Path::new(SOCKET), 0o666)?;
+    }
     listener.set_nonblocking(true).map_err(|e| util::failed(&SOCKET, e))?;
     eprintln!("notifyd: taking notifications at {SOCKET}");
     let mut notifyd = Notifyd {
