@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The interactive shell's settings that are not colours
+# (settings.toml(5)); the colours are in colors.toml.
+#
+# To change them for everyone, edit this file. To change them for
+# yourself, copy the keys you want into ~/.config/nukesh/settings.toml:
+# yours win, key by key. Changes show in the next shell you start.
+
+# Hidden files: names that start with a dot, and those a folder's
+# .hidden file lists (such as /etc and /dev in /). With show-hidden,
+# ls shows them (ls -A), * matches them (shopt -s dotglob), and Tab
+# completes them.
+[files]
+show-hidden = false
+
+# A command that runs for `after` seconds or more and ends while you are
+# on another console says so in a notice on the console you are on.
+[notify]
+enabled = true
+after = 30

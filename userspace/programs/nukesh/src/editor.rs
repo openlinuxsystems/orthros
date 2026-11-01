@@ -430,7 +430,9 @@ fn rich_prompt(shell: &mut Shell) -> Option<String> {
     let style = |key: &str, text: &str| {
         if paint { palette.style(&format!("prompt.{key}")).paint(text) } else { text.to_string() }
     };
-    let user = prompt::expand(shell, "\\u");
+    // The name, looked up once: it is the same at every prompt.
+    thread_local!(static USER: std::cell::OnceCell<String> = const { std::cell::OnceCell::new() });
+    let user = USER.with(|cell| cell.get_or_init(|| prompt::expand(shell, "\\u")).clone());
     let host = prompt::expand(shell, "\\h");
     let path = prompt::expand(shell, "\\w");
     let mut out = format!(

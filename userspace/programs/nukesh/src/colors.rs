@@ -304,9 +304,6 @@ const SECTIONS: &[Section] = &[
             key("mac", "yellow", "hardware addresses"),
         ],
     },
-    // Not colours: whether a long command that ends while you are on
-    // another console tells you, and after how long (ADR 0263).
-    Section { name: "notify", keys: &[] },
 ];
 
 /// The `suggest` section's switches.
@@ -319,7 +316,6 @@ const SUGGEST: &[(&str, &str)] = &[
 /// The numbers: section, key, default and what it is.
 pub const NUMBERS: &[(&str, &str, u64, &str)] = &[
     ("prompt", "took-after", 3, "seconds a command takes before the right prompt says how long"),
-    ("notify", "after", 30, "seconds a command takes before you are told it ended elsewhere"),
 ];
 
 /// The themes, and the keys each changes from the defaults.
@@ -876,9 +872,9 @@ mod tests {
         assert_eq!(colors.theme, "colorblind");
         assert!(!Colors::default().apply("theme = \"neon\"").is_empty());
         let mut colors = Colors::default();
-        assert_eq!(colors.apply("[prompt]\ntook-after = 10\n[notify]\nafter = -1").len(), 1);
+        assert_eq!(colors.apply("[prompt]\ntook-after = 10\n[ls]\nenabled = 1").len(), 1);
         assert_eq!(colors.number("prompt.took-after"), 10);
-        assert_eq!(colors.number("notify.after"), 30);
+        assert_eq!(colors.apply("[prompt]\ntook-after = -1").len(), 1);
     }
 
     /// The shipped file sets every key to its default, so that what it

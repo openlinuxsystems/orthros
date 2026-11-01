@@ -44,6 +44,7 @@ mod prompt;
 mod record;
 mod redir;
 mod script;
+mod settings;
 mod shell;
 mod show;
 mod suggest;
@@ -196,6 +197,12 @@ fn run(args: &[String]) -> i32 {
         }
         shell.colors = Rc::new(colors);
         colors::color_the_tools(&mut shell);
+        let (settings, problems) = settings::Settings::load(shell.get("HOME").as_deref());
+        for problem in &problems {
+            shell.error(&format!("{}: {}", problem.file, problem.message));
+        }
+        shell.settings = Rc::new(settings);
+        settings::apply_to(&mut shell);
         // The command record every shell of the person's shares (ADR 0262).
         shell.records = Some(record::Records::new(shell.get("HOME").as_deref()));
     }

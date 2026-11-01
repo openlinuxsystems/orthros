@@ -674,7 +674,7 @@ pub fn files(shell: &Shell, word: &str, dirs_only: bool) -> Vec<String> {
         if name.starts_with('.') && !base.starts_with('.') && !shell.shopt("dotglob") {
             continue;
         }
-        if name != base && hidden.contains(&name) {
+        if name != base && hidden.contains(&name) && !shell.settings.show_hidden {
             continue;
         }
         let full = format!("{}/{name}", dir.trim_end_matches('/'));

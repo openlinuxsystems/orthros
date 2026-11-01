@@ -101,11 +101,15 @@ impl Records {
         records
     }
 
-    /// Reads what other shells have added since the last look.
+    /// Reads what other shells have added since the last look: one
+    /// stat when nothing was.
     pub fn refresh(&mut self) {
         let Some(path) = &self.path else { return };
+        let Ok(length) = std::fs::metadata(path).map(|m| m.len()) else { return };
+        if length == self.offset {
+            return;
+        }
         let Ok(mut file) = std::fs::File::open(path) else { return };
-        let Ok(length) = file.metadata().map(|m| m.len()) else { return };
         if length < self.offset {
             // Trimmed by another shell: read it all again.
             self.offset = 0;
@@ -125,24 +129,26 @@ impl Records {
         self.offset += end as u64 + 1;
     }
 
-    /// Adds a record, to the file at once.
+    /// Adds a record, to the file at once; it is read back, with those
+    /// of other shells, at the next [`Records::refresh`].
     pub fn add(&mut self, record: &Record) {
         let Some(path) = &self.path else { return };
-        if let Some(dir) = std::path::Path::new(path).parent() {
-            let _ = std::fs::create_dir_all(dir);
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-        }
-        let opened = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .open(path);
+        let open = || {
+            std::fs::OpenOptions::new().append(true).create(true).mode(0o600).open(path)
+        };
+        let opened = open().or_else(|err| {
+            // The first: its folder, which only its owner may read.
+            let dir = std::path::Path::new(path).parent().ok_or(err)?;
+            std::fs::create_dir_all(dir)?;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            open()
+        });
         if let Ok(mut file) = opened {
             // One write, so that shells writing at once do not interleave.
             let _ = file.write_all(record.line().as_bytes());
         }
-        self.refresh();
         if self.all.len() > KEEP + KEEP / 2 {
+            self.refresh();
             self.trim();
         }
     }
@@ -291,6 +297,7 @@ mod tests {
         let mut one = Records::new(Some(home));
         let mut two = Records::new(Some(home));
         one.add(&record(1, "/a", "make test"));
+        one.refresh();
         two.refresh();
         assert_eq!(two.all.len(), 1);
         two.add(&record(2, "/b", "make clean"));

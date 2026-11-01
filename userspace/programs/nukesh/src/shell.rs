@@ -305,6 +305,8 @@ pub struct Shell {
     pub history: crate::history::History,
     /// colors.toml(5), read when the shell is interactive (ADR 0258).
     pub colors: Rc<crate::colors::Colors>,
+    /// settings.toml(5), read when the shell is interactive.
+    pub settings: Rc<crate::settings::Settings>,
     /// The command record every interactive shell shares (ADR 0262).
     pub records: Option<crate::record::Records>,
     /// How long the last command line took, for the prompt.
@@ -415,6 +417,7 @@ impl Shell {
             completions: crate::complete::Specs::default(),
             history: crate::history::History::default(),
             colors: Rc::default(),
+            settings: Rc::default(),
             records: None,
             last_millis: 0,
             dirs_back: Vec::new(),

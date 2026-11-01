@@ -105,9 +105,3 @@ down = "red"
 address = "magenta"
 address6 = "blue"
 mac = "yellow"
-
-# A command that runs for `after` seconds or more and ends while you are
-# on another console says so in a notice on the console you are on.
-[notify]
-enabled = true
-after = 30

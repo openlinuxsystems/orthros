@@ -150,11 +150,16 @@ run: status 126. One that is not found: 127.
 When standard input and standard error are a terminal and *TERM* is set
 and not *dumb*, lines are typed in a line editor (reedline): Emacs keys
 by default, or vi keys after *set -o vi*. Tab completes, showing a menu
-of the choices; the up and down arrows go through the history, and
-Ctrl-R searches it; a command that is not finished, such as an open
+of the choices; the up and down arrows go through this shell's history,
+and Ctrl-R opens the picker (COMMAND RECORD); a command that is not finished, such as an open
 quote, an *if* without its *fi* or a line ending in a backslash, goes on
 to the next line with *PS2*. Pasted text is taken as typed, without
-running each line as it comes.
+running each line as it comes: a paste of several lines waits in the
+line for Enter, so it can be read, changed or dropped with Ctrl-C first.
+
+Alt-← and Alt-→ on an empty line go back to the folder this shell was in
+before, and forward again, as a file manager's arrows do; on a line with
+text they move a word.
 
 With *TERM=dumb*, or no terminal, lines are read as they come, with the
 terminal's own editing.
@@ -165,19 +170,63 @@ The line is coloured as it is typed: commands, reserved words, options,
 quoted text, variables, operators and comments; a command that runs
 nothing is red and underlined before Enter. A command from the history
 that starts with what was typed shows faded after the cursor, and → or
-End takes it. After "command not found" at the prompt, the shell names
+End takes it; while an option is typed, the rest of its name and what it
+does show faded after it, from its completion file. After "command not
+found" at the prompt, the shell names
 the closest command it knows: "Did you mean service?". While *PS1* is
 left at its default, the prompt is _name_*@*_host_ _folder_ *$*, with a
 *✗* _status_ badge after a command that failed and an *admin* badge,
-and *#*, while the shell is root's. An interactive shell also gives
+and *#*, while the shell is root's; at the right of the line, how long
+the last command took when it took three seconds or more, the jobs, and
+the folder's git branch. An interactive shell also gives
 *ls*, *grep*, *diff* and *ip* colours on a terminal, through aliases
 and *LS_COLORS*, *GREP_COLORS* and *IP_COLORS*.
 
 *colors.toml*(5) has every colour and switch: the system's file, then
 one's own, _~/.config/nukesh/colors.toml_. Only the terminal's 16
-standard colours are used. With *NO_COLOR* set, a dumb terminal or
-*enabled = false*, the shell writes no colour, and the hint is not
-shown.
+standard colours are used, and themes for high contrast, light
+backgrounds and colour blindness change them all at once. With
+*NO_COLOR* set, a dumb terminal or *enabled = false*, the shell writes
+no colour, and the hint is not shown.
+
+*settings.toml*(5) has the rest: hidden files shown everywhere, and the
+notice that a long command ended while you were on another console.
+
+## Command record
+
+Every command typed at an interactive shell is written at once to
+_~/.local/state/nukesh/commands_, readable only by its user, with when
+it ran, its exit status, how long it took and its folder (ADR 0262).
+Every shell of a person's shares it: a command typed in one is found in
+the others at their next prompt. A command after a space, and commands
+while *set +o history*, are left out. The history (*HISTFILE*, *fc*,
+*history*, the up arrow) is unchanged.
+
+Ctrl-R opens the picker: each command of the record once, matched
+loosely as you type (*gst* finds *git status*), the best match first,
+then those run in this folder, then the newest; each shows how it ended
+(*✗ 2*), how long it took, when and where. Enter takes it into the line;
+Ctrl-R again goes down. The hint after the cursor comes from the record
+too, one run in this folder first.
+
+## Folders
+
+*z* _word_ ... goes to the folder most used lately whose path has the
+words in order, the last in its last part, as *zoxide* and *z.sh* do:
+after *cd ~/projects/site* once, *z site* goes there from anywhere.
+*z -l* _word_ ... lists the matches with their scores. Each folder an
+interactive shell goes into is counted in _~/.local/state/nukesh/folders_;
+those not used for long fade from it.
+
+## Abbreviations
+
+*abbr* _name_ _expansion_ ... makes _name_, typed as a command, grow into
+its expansion when Space or Enter follows it, as in fish: after
+*abbr gs git status*, *gs* and Space shows *git status *. What runs is
+what was seen, and the history keeps it whole. *abbr* lists them and
+*abbr -r* _name_ removes one; put them in _~/.nukeshrc_. Unlike an
+alias, an abbreviation is only in the line editor: scripts never see
+one.
 
 ## Prompts
 
@@ -307,7 +356,7 @@ Each builtin is described by *help* _name_. They are bash's: *.*, *:*,
 *logout*, *mapfile*, *popd*, *printf*, *pushd*, *pwd*, *read*, *readarray*,
 *readonly*, *return*, *set*, *shift*, *shopt*, *source*, *suspend*,
 *test*, *times*, *trap*, *true*, *type*, *typeset*, *ulimit*, *umask*,
-*unalias*, *unset* and *wait*. *shopt* takes each of bash 5.2's options;
+*unalias*, *unset* and *wait*, and Nukesh's own *abbr* and *z*. *shopt* takes each of bash 5.2's options;
 those for what the shell does not do (the *compat* levels, *cdspell*,
 *dirspell*, *direxpand*, *gnu_errfmt*, *hostcomplete*, *mailwarn*,
 *no_empty_cmd_completion*) change nothing, and *restricted_shell* cannot
@@ -372,6 +421,12 @@ _~/.profile_, _~/.nukeshrc_, _~/.nukesh_logout_: the start-up files.
 
 _~/.nukesh_history_: the history.
 
+_~/.local/state/nukesh/commands_ and _~/.local/state/nukesh/folders_: the
+command record and the folders *z* knows.
+
+_/system/settings/nukesh/colors.toml_, _/system/settings/nukesh/settings.toml_
+and the same under _~/.config/nukesh_: colours and settings.
+
 _/system/resources/nukesh/completions_ and
 _~/.local/share/nukesh/completions_: completion files.
 
@@ -382,6 +437,6 @@ the rest.
 
 # SEE ALSO
 
-*man*(1), *makewhatis*(8), *radix-posix*(7), *spark*(8), *colors.toml*(5)
+*man*(1), *makewhatis*(8), *radix-posix*(7), *spark*(8), *colors.toml*(5), *settings.toml*(5)
 
 The Bash Reference Manual, for what each bash feature does.

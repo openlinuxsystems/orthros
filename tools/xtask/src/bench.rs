@@ -434,8 +434,12 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     let summary = args.value("--summary")?;
     let given_kernel = args.value("--linux-kernel")?;
     let from = args.value("--from")?;
+    let shell = args.flag("--shell");
     let profile = args.profile(&ctx.config)?;
     args.finish()?;
+    if shell {
+        return crate::shellbench::command(ctx, summary.as_deref());
+    }
     if let Some(path) = from {
         if gate || instructions || !linux || given_kernel.is_some() {
             crate::bail!(

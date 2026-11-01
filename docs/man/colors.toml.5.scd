@@ -50,11 +50,27 @@ example *"bold blue"*, *"red underline"*, *"bold bright-white on red"*.
 	Colours at all. Every section but *[suggest]* takes *enabled* as
 	well, for that section alone.
 
-*[prompt]* *user*, *at*, *host*, *path*, *symbol*, *error*, *admin*
+*theme =* *"default"* | *"high-contrast"* | *"light"* | *"colorblind"*
+	Where every style starts from (ADR 0265): the defaults below;
+	bright and bold, with nothing faded; for a terminal with a light
+	background, with no yellow or white text; or blue and yellow in
+	place of green and red, for red-green colour blindness. The keys
+	a file sets change the theme's, one by one, and a person's file
+	may choose another theme than the system's. *nukesh --colors*
+	shows the theme's styles.
+
+*[prompt]* *user*, *at*, *host*, *path*, *symbol*, *error*, *admin*, *took*, *jobs*, *branch*
 	While *PS1* is left at its default, the prompt is
 	_name_*@*_host_ _folder_ *$*, with a *✗* _status_ badge after a
 	command that failed and an *admin* badge, and *#*, while the shell
-	is root's. *error* and *admin* are the badges' styles.
+	is root's. *error* and *admin* are the badges' styles. At the
+	right of the line (ADR 0262): *took* _time_ after a command that
+	took *took-after* seconds or more, how many jobs there are, and
+	*git* _branch_ in a folder of a git repository.
+
+*[prompt]* *took-after =* _seconds_
+	How long a command takes before the right prompt says how long.
+	The default is 3.
 
 *[line]* *command*, *unknown*, *keyword*, *option*, *string*, *variable*, *operator*, *comment*, *hint*
 	The command line as it is typed: a command that runs something,
@@ -62,12 +78,16 @@ example *"bold blue"*, *"red underline"*, *"bold bright-white on red"*.
 	text, variables and substitutions, operators and redirections,
 	comments, and the hint from the history.
 
-*[suggest]* *history =* *true* | *false*, *did-you-mean =* *true* | *false*
-	*history*: a command from the history that starts with what was
-	typed shows faded after the cursor; → or End takes it. It shows
-	only with colours. *did-you-mean*: after "command not found" at
-	the prompt, the closest command's name, within two letters changed.
-	Neither ever runs a command.
+*[suggest]* *history =* *true* | *false*, *did-you-mean =* *true* | *false*, *options =* *true* | *false*
+	*history*: the newest command of the command record (*nukesh*(1),
+	COMMAND RECORD) that starts with what was typed, one run in this
+	folder first, shows faded after the cursor; → or End takes it.
+	*options*: while an option is typed, the rest of its name and what
+	it does show faded after it, from the program's completion file;
+	→ takes the rest of the name only. Both show only with colours.
+	*did-you-mean*: after "command not found" at the prompt, the
+	closest command's name, within two letters changed. None ever runs
+	a command.
 
 *[ls]* *directory*, *program*, *link*, *broken-link*, *archive*, *pipe*, *socket*, *device*
 	*LS_COLORS*, and an alias *ls --color=auto*.
@@ -85,6 +105,15 @@ An alias or variable that is already there when the shell starts is
 kept; the startup files may change or remove them (*unalias ls*).
 
 # EXAMPLES
+
+The colour-blind theme, with added lines in diff cyan:
+
+```
+theme = "colorblind"
+
+[diff]
+added = "cyan"
+```
 
 Commands in bright green and no colours in *ls*, in
 _~/.config/nukesh/colors.toml_:
@@ -105,4 +134,4 @@ _/system/settings/nukesh/colors.toml_
 
 # SEE ALSO
 
-*nukesh*(1), *ip*(8), *welcome.toml*(5)
+*nukesh*(1), *settings.toml*(5), *ip*(8), *welcome.toml*(5)

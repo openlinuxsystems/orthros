@@ -1,0 +1,143 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! The interactive shell's settings that are not colours, from
+//! settings.toml(5) (ADRs 0263 and 0264): the system's file,
+//! `/system/settings/nukesh/settings.toml`, then a person's own,
+//! `~/.config/nukesh/settings.toml`, key by key.
+//!
+//! `[files] show-hidden` shows hidden files everywhere the shell lists
+//! them: `ls` is `ls -A`, `*` matches names that start with a dot
+//! (`shopt -s dotglob`), and Tab completes those names and the ones a
+//! folder's `.hidden` file lists. The startup files run after, so they
+//! can still change any of the three.
+//!
+//! `[notify]` says whether a long command that ends while you are on
+//! another console tells you, and after how many seconds (notify.rs).
+
+use crate::colors::Problem;
+
+/// The system's settings file.
+pub const SYSTEM_FILE: &str = "/system/settings/nukesh/settings.toml";
+
+/// A person's own, under their home.
+pub const USER_FILE: &str = ".config/nukesh/settings.toml";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Settings {
+    pub show_hidden: bool,
+    pub notify: bool,
+    /// Seconds.
+    pub notify_after: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Settings {
+        Settings { show_hidden: false, notify: true, notify_after: 30 }
+    }
+}
+
+impl Settings {
+    /// The system's file, then the person's, over the defaults.
+    pub fn load(home: Option<&str>) -> (Settings, Vec<Problem>) {
+        let mut settings = Settings::default();
+        let mut problems = Vec::new();
+        let mut files = vec![SYSTEM_FILE.to_string()];
+        if let Some(home) = home.filter(|h| !h.is_empty()) {
+            files.push(format!("{}/{USER_FILE}", home.trim_end_matches('/')));
+        }
+        for file in files {
+            if let Ok(text) = std::fs::read_to_string(&file) {
+                for message in settings.apply(&text) {
+                    problems.push(Problem { file: file.clone(), message });
+                }
+            }
+        }
+        (settings, problems)
+    }
+
+    /// Takes the keys `text` sets; returns what was wrong in it.
+    pub fn apply(&mut self, text: &str) -> Vec<String> {
+        let table: toml::Table = match text.parse() {
+            Ok(table) => table,
+            Err(err) => return vec![err.to_string().trim().replace('\n', " ")],
+        };
+        let mut problems = Vec::new();
+        for (section, value) in &table {
+            let Some(keys) = value.as_table() else {
+                problems.push(format!("{section}: no such key"));
+                continue;
+            };
+            for (key, value) in keys {
+                match (section.as_str(), key.as_str()) {
+                    ("files", "show-hidden") => match value.as_bool() {
+                        Some(on) => self.show_hidden = on,
+                        None => problems.push(format!("[files] {key}: true or false")),
+                    },
+                    ("notify", "enabled") => match value.as_bool() {
+                        Some(on) => self.notify = on,
+                        None => problems.push(format!("[notify] {key}: true or false")),
+                    },
+                    ("notify", "after") => match value.as_integer().and_then(|n| u64::try_from(n).ok()) {
+                        Some(n) => self.notify_after = n,
+                        None => problems.push(format!("[notify] {key}: a number of seconds")),
+                    },
+                    ("files" | "notify", _) => problems.push(format!("[{section}] {key}: no such key")),
+                    _ => {
+                        problems.push(format!("[{section}]: no such section"));
+                        break;
+                    }
+                }
+            }
+        }
+        problems
+    }
+}
+
+/// At the start of an interactive shell, before its startup files:
+/// `show-hidden` turns on `dotglob` and adds `-A` to `ls`.
+pub fn apply_to(shell: &mut crate::shell::Shell) {
+    if !shell.settings.show_hidden {
+        return;
+    }
+    shell.shopts.insert("dotglob", true);
+    let ls = shell.aliases.get("ls").cloned().unwrap_or_else(|| "ls".into());
+    if !ls.split_whitespace().any(|w| w == "-A" || w == "-a") {
+        shell.aliases.insert("ls".into(), format!("{ls} -A"));
+    }
+}
+
+/// The file shipped as /system/settings/nukesh/settings.toml.
+#[cfg(test)]
+const SHIPPED: &str = include_str!("../../../defaults/nukesh/settings.toml");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_shipped_file_says_the_defaults() {
+        let mut settings = Settings::default();
+        assert!(settings.apply(SHIPPED).is_empty());
+        assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn keys_are_checked() {
+        let mut settings = Settings::default();
+        let problems = settings.apply("[files]\nshow-hidden = true\n[notify]\nafter = \"x\"\nloud = 1\n[nope]\na = 1\n");
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(settings.show_hidden);
+        assert_eq!(settings.notify_after, 30);
+    }
+
+    #[test]
+    fn show_hidden_shows_them() {
+        let mut shell = crate::shell::Shell::new("test", false);
+        shell.aliases.insert("ls".into(), "ls --color=auto".into());
+        shell.settings = std::rc::Rc::new(Settings { show_hidden: true, ..Settings::default() });
+        apply_to(&mut shell);
+        assert!(shell.shopt("dotglob"));
+        assert_eq!(shell.aliases.get("ls").map(String::as_str), Some("ls --color=auto -A"));
+    }
+}

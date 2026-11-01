@@ -3,7 +3,7 @@
 
 //! A long command that ends while you are on another console says so
 //! (ADR 0263): when a command typed at an interactive shell ran for
-//! colors.toml's `[notify] after` seconds or more, the shell sends
+//! settings.toml's `[notify] after` seconds or more, the shell sends
 //! notifyd(8) a notification naming the command, how it ended and how
 //! long it took, with the shell's terminal. consoled(8) does not show it
 //! while that terminal's console is the one on the screen: you saw it
@@ -85,9 +85,9 @@ pub fn request(command: &str, status: i32, millis: u64, terminal: Option<&str>) 
 
 /// After a command: tells notifyd when it was long enough.
 pub fn after_command(shell: &crate::shell::Shell, command: &str, status: i32, millis: u64) {
-    let colors = &shell.colors;
-    let after = colors.number("notify.after").saturating_mul(1000);
-    if !colors.on("notify") || after == 0 || millis < after || !worth_telling(command) {
+    let settings = &shell.settings;
+    let after = settings.notify_after.saturating_mul(1000);
+    if !settings.notify || after == 0 || millis < after || !worth_telling(command) {
         return;
     }
     let Ok(mut socket) = std::os::unix::net::UnixStream::connect(SOCKET) else { return };

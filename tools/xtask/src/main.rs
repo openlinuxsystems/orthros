@@ -30,6 +30,7 @@ mod ports;
 mod process;
 mod qemu;
 mod screen;
+mod shellbench;
 mod signoff;
 mod test;
 mod tla;
@@ -378,7 +379,7 @@ boot test; those that Phases 11 to 13 add from now on are listed only there
         }
         "bench" => {
             "Usage: ./ob bench [--no-linux] [--gate] [--linux-kernel <file>] [--runs <n>]
-                [--instructions] [--from <file>] [--summary <file>]
+                [--instructions] [--shell] [--from <file>] [--summary <file>]
                 [--debug | --release]
 
 Boots Radix in QEMU on 2 CPUs with selftest=bench, where user programs time
@@ -391,6 +392,7 @@ prints the report. Without KVM the Radix numbers measure QEMU's emulation
 and take minutes.
 
   --no-linux          Skip the Linux baseline
+  --shell             Only time nukesh next to bash on this machine
   --gate              Fail if Radix takes longer than Linux in the same
                       virtual machine at any operation, measuring both
                       again (up to 6 more runs) while one is over
