@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# How resolved(8), the DNS resolver every program asks, looks names up
+# (resolved(5), ADR 0193). With no servers here it asks those DHCP gave,
+# over DNS over TLS when they answer it. `service resolved reload` reads
+# this file again and empties the cache.
+#
+# Servers of your own, asked in turn, up to eight: by address, asked over
+# DNS over TLS if they answer it; with the name their certificate
+# carries, over DNS over TLS only; or by an https:// URL, over DNS over
+# HTTPS, with the address to reach its host at after a '#':
+#
+#   servers = 9.9.9.9#dns.quad9.net 1.1.1.1#cloudflare-dns.com
+#   servers = https://dns.quad9.net/dns-query#9.9.9.9
+#
+# Whether servers named by address alone are asked over DNS over TLS:
+# opportunistic (the default), yes (only, their certificates checked) or
+# no:
+#
+#   dns-over-tls = opportunistic
+#
+# The answers kept, 4096 by default; 0 keeps none:
+#
+#   cache-size = 4096

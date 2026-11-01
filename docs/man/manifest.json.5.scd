@@ -267,11 +267,11 @@ given. Version 1 defines these:
 |  *admin.users*, *admin.services*, *admin.network*, *admin.firewall*,
    *admin.storage*, *admin.updates*, *admin.apps*, *admin.logs*,
    *admin.settings*, *admin.power*, *admin.printers*, *admin.hardware*,
-   *admin.users-files*
+   *admin.time*, *admin.users-files*
 :  Administer accounts, services, the network, the firewall, disks,
    updates, apps for everyone, read the logs, change the system's
-   settings, shut down, administer printers, drive fans and lights, and
-   reach every person's files
+   settings, shut down, administer printers, drive fans and lights, set
+   the clock, and reach every person's files
 :  by an administrator
 
 These are reserved, and defined in the manifest version of the release

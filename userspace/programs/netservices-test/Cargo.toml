@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "netservices-test"
+description = "Tests the network services, resolved, timed, curl and netlog, against servers of its own on lo, in the network-services boot test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The servers' DNS and NTS messages, as resolved(8) and timed(8) read
+# them (ADRs 0193 and 0194).
+netproto = { path = "../netproto" }
+# The servers' TLS: rustls on ring, which ob patches in from the
+# rust-crates port (ADR 0192), and ring's random numbers for the NTS
+# cookies.
+ring = "0.17.14"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+
+[lints]
+workspace = true

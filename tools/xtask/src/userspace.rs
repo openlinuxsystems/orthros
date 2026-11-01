@@ -91,6 +91,7 @@ pub const STD_ARCHIVE: &[(&str, &str)] = &[
     ("system/commands/consoled", "consoled"),
     ("system/commands/nukesh", "nukesh"),
     ("system/commands/systools", "systools"),
+    ("system/tests/posix/netservices-test", "netservices-test"),
     ("system/tests/posix/std-test", "std-test"),
     ("system/tests/posix/tls-test", "tls-test"),
 ];
@@ -150,6 +151,7 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/commands/lsusb", "systools"),
     ("system/commands/mkswap", "systools"),
     ("system/commands/netd", "systools"),
+    ("system/commands/netlog", "systools"),
     ("system/commands/notifications", "systools"),
     ("system/commands/notify-send", "systools"),
     ("system/commands/notifyd", "systools"),

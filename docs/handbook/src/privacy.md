@@ -40,20 +40,22 @@ A crash report goes nowhere by itself: to report a crash, copy what
 
 ## What the machine sends on its own
 
-Today, nothing: Dukovo's network stack is still being built, and no
-service talks to the network by itself. These are the ones planned,
-each to be listed here in full before it ships:
+Only what a network needs to work, each listed here with how to turn it
+off; anything else sent on its own is a bug:
+
+| Service | What it sends, and where | How to turn it off |
+| --- | --- | --- |
+| netd | On each network card, a DHCP request for an address, router and DNS servers, which carries the card's hardware (MAC) address and no host name, and a renewal at half the lease's time | Give the card an address of its own, or `dhcp = no`, in network(5) |
+| resolved | Only the names programs look up, to the DNS servers DHCP gave or that you name, over DNS over TLS when they take it; `localhost` and `.local` names never leave the machine | It sends nothing on its own |
+| timed | A request for the time to `time.cloudflare.com`, `nts.netnod.se` or `ptbtime1.ptb.de`, over Network Time Security, every 1 to 17 minutes, and to `pool.ntp.org` over plain NTP only while none of them answers; the requests carry random numbers and the server's own cookies, nothing about the machine | Other servers, or none, in timed(5); `enabled = false` in its service file |
+| netlog | The log, to a computer you name, only when you name one to debug a machine | It sends nothing by default |
+
+Still to come, each to be listed here in full before it ships:
 
 | Service | What it will send, and where | Roadmap |
 | --- | --- | --- |
-| netd | On a network you connect to, a DHCP request for an address, which carries the network card's hardware address; a static address sends none | Phase 12 |
-| timed | A request for the time to a time server | Phase 12 |
 | Discovery | The machine's name, announced on the local network only, so that `ssh name.local` works | Phase 12 |
-| netlog | The log, to a machine you name, only when you turn it on to debug a machine | Phase 12 |
 | updated | A check for updates at `updates.dukovo.org`, which can be turned off | Phase 13 |
-
-Looking up a name (DNS) happens only when a program you run asks for
-one.
 
 ## Reporting a security problem
 

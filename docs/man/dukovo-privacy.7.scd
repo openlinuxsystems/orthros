@@ -42,28 +42,44 @@ that is not listed is a bug.
 
 # SENT ON ITS OWN
 
-Nothing yet: no service talks to the network by itself. Planned, each to
-be described here in full before it ships:
+*netd*
+	A DHCP request on each network card, from boot, asking for an
+	address, router and DNS servers, and carrying the card's hardware
+	(MAC) address as its client identifier, and no host name; then a
+	renewal at half the lease's time (*netd*(8)). None for a card with
+	addresses of its own, or that *network*(5) has netd leave alone.
 
-*netd* (Phase 12)
-	A DHCP request on a network the user connects to, carrying the
-	network card's hardware address; none with a static address.
+*resolved*
+	Only the names programs ask for, to the DNS servers that
+	*resolved*(5) names or else DHCP gave, over DNS over TLS when they
+	take it, so that the network on the way does not read them
+	(*resolved*(8)); _localhost_, _.local_ and _invalid_ names never
+	leave the machine. It sends nothing on its own.
 
-*timed* (Phase 12)
-	A request for the time to a time server.
+*timed*
+	A request for the time, over Network Time Security, to
+	_time.cloudflare.com_, _nts.netnod.se_ or _ptbtime1.ptb.de_, the
+	first that answers, every 64 seconds to 17 minutes: a TLS
+	connection, then NTP packets with random numbers and the cookies
+	the server gave, which say nothing of the machine; and to
+	_pool.ntp.org_ over plain NTP only while none of them answers
+	(*timed*(8)). Another server is named, or none, in *timed*(5);
+	*enabled = false* in its service file, *service edit timed*
+	(*service*(8)), turns it off.
+
+*netlog*
+	The log, to a computer the user names, only when *netlog*(5) or
+	the *netlog=* flag (*dukovo-boot*(7)) names one, to debug a
+	machine; by default it sends nothing (*netlog*(8)).
+
+Planned, each to be described here in full before it ships:
 
 *Discovery* (Phase 12)
 	The machine's name, announced on the local network only.
 
-*netlog* (Phase 12)
-	The log, to a machine the user names, only when turned on to debug
-	a machine.
-
 *updated* (Phase 13)
 	A check for updates at _updates.dukovo.org_, which can be turned
 	off.
-
-A name is looked up (DNS) only when a program asks for one.
 
 # REPORTING A SECURITY PROBLEM
 
@@ -73,4 +89,5 @@ public issue.
 
 # SEE ALSO
 
-*logd*(8), *log*(5), *notifyd*(8), *radix-debug*(7)
+*logd*(8), *log*(5), *netd*(8), *netlog*(8), *notifyd*(8),
+*radix-debug*(7), *resolved*(8), *timed*(8)

@@ -35,8 +35,8 @@ ln -s ../../../options/linux/include/malloc.h "$PORT_SRC/sysdeps/radix/include/m
 
 # Code from musl 1.2.5 that the patches use: exact floating-point
 # conversions (0004), strftime (0006), the calendar arithmetic (0007),
-# scanf's integers (0018), Internet addresses (0021) and message
-# catalogs (0028).
+# scanf's integers (0018), Internet addresses (0021), message catalogs
+# (0028) and the time zone (0051).
 cp "$PORT_DIR"/musl/*.hpp "$PORT_SRC/options/internal/include/mlibc/"
 
 # The C library with the POSIX, glibc and BSD interfaces, using Clang's C

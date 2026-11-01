@@ -147,6 +147,12 @@ pub const FLAGS: &[Flag] = &[
                   as the boot tests run it",
     },
     Flag {
+        name: "netlog",
+        value: Some("host:port"),
+        summary: "for netlog, not the kernel: send the log over UDP to this host as it is \
+                  written, to port 6666 if no port is given",
+    },
+    Flag {
         name: "startup-trouble",
         value: None,
         summary: "for login and authd, not the kernel: the consoles' sign-in offers the \

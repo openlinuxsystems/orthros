@@ -4,8 +4,8 @@
 # Keeps the clock right from the network: timed(8) asks the time servers
 # /system/settings/timed names (timed(5)), or Cloudflare's, Netnod's and
 # PTB's, over Network Time Security, and slews or steps the clock and
-# writes the real-time clock (ADR 0194). `service stop timed` and
-# `service disable timed` turn it off.
+# writes the real-time clock (ADR 0194). `service timed stop` stops it
+# until the next boot; `enabled = false` after `program` keeps it off.
 #
 # service.toml(5) explains each setting. `service check timed` checks
 # this file, and `service edit timed` checks it as you save.

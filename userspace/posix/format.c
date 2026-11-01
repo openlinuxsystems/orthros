@@ -297,8 +297,10 @@ static void characters(void) {
 	char text[32];
 	CHECK(snprintf(text, sizeof(text), "%lc|%ls", (wint_t)0x3c0, L"\u00e9t\u00e9") == 8);
 	CHECK(!strcmp(text, "\xcf\x80|\xc3\xa9t\xc3\xa9"));
-	// Named locales come with Phase 12; C is still there.
-	CHECK(setlocale(LC_ALL, "en_US.UTF-8") == NULL);
+	// English's locales are there (the zones test checks them), others
+	// not yet; C is still there.
+	CHECK(setlocale(LC_ALL, "en_US.UTF-8") != NULL);
+	CHECK(setlocale(LC_ALL, "fr_FR.UTF-8") == NULL);
 	CHECK(setlocale(LC_ALL, "C") && !strcmp(setlocale(LC_ALL, NULL), "C"));
 	CHECK(MB_CUR_MAX == 1);
 	CHECK(setlocale(LC_ALL, "C.utf8") != NULL && MB_CUR_MAX == 4);

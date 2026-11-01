@@ -19,7 +19,8 @@
 //! `netd` sets the network cards up (ADR 0191), and `resolved` answers
 //! every program's DNS queries, which `resolvectl` shows (ADR 0193);
 //! `timed` keeps the clock right from the network over NTS, and
-//! `timedatectl` shows it and sets the time zone (ADR 0194).
+//! `timedatectl` shows it and sets the time zone (ADR 0194); `netlog`
+//! sends the log to another computer as it is written (ADR 0196).
 //! `authd` keeps the accounts, which `user` and `passwd` change, `login`
 //! signs people in through it, and `elevate`, and `sudo` in front of it,
 //! run a command as an administrator (ADRs 0218, 0250 and 0219); `last`,
@@ -68,6 +69,7 @@ mod lsusb;
 mod memory;
 mod modes;
 mod netd;
+mod netlog;
 mod notifyd;
 mod nvme;
 mod pidstat;
@@ -166,6 +168,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("lsusb", lsusb::main),
     ("mkswap", swap::mkswap),
     ("netd", netd::main),
+    ("netlog", netlog::main),
     ("notifications", notifyd::notifications),
     ("notify-send", notifyd::notify_send),
     ("notifyd", notifyd::main),

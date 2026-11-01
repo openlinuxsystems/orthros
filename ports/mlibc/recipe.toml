@@ -33,9 +33,9 @@ git = "https://github.com/managarm/libsmarter.git"
 commit = "f7d061bc37d485418344452c7ceb28d5df3ba85d"
 license = "MIT"
 
-# musl 1.2.5's floating-point conversions, strftime and calendar code,
-# which ports/mlibc/musl keeps and build.sh copies in (ADR 0072). Its
-# COPYRIGHT file is musl's, verbatim.
+# musl 1.2.5's floating-point conversions, strftime, calendar and time
+# zone code, which ports/mlibc/musl keeps and build.sh copies in (ADRs
+# 0072 and 0194). Its COPYRIGHT file is musl's, verbatim.
 [[bundled]]
 name = "musl"
 version = "1.2.5"

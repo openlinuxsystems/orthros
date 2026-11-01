@@ -61,10 +61,11 @@ pub const ALWAYS: &[(&str, bool)] = &[
     ("/devices/urandom", false),
 ];
 
-/// What a bundle that connects out also gets: netd's folder, which holds
-/// the resolver's settings that `/system/settings/resolv.conf` leads to.
+/// What a bundle that connects out also gets: resolved's folder, which
+/// holds the resolver's settings that `/system/settings/resolv.conf`
+/// leads to (ADR 0193), and netd's, which an older one leads to.
 #[cfg_attr(not(target_os = "radix"), allow(dead_code))]
-pub const NETWORK: &str = "/system/live/netd";
+pub const NETWORK: &[&str] = &["/system/live/resolved", "/system/live/netd"];
 
 /// `bundle run [--command NAME] ID [ARGUMENT...]`.
 pub fn run(id: &str, command: Option<&str>, args: Vec<OsString>) -> Result<i32, Fail> {
@@ -492,8 +493,10 @@ mod sandbox {
                 attach(path, write)?;
             }
         }
-        if plan.given.outbound && std::fs::symlink_metadata(NETWORK).is_ok() {
-            attach(NETWORK, false)?;
+        for path in NETWORK.iter().filter(|_| plan.given.outbound) {
+            if std::fs::symlink_metadata(path).is_ok() {
+                attach(path, false)?;
+            }
         }
         // The bundle's folder: the very one checked, read-only.
         let folder = sys::slot_of(plan.sealed.folder.0.as_raw_fd());

@@ -256,8 +256,10 @@ pub struct Place {
 /// What every service's view holds without asking (ADR 0217): the
 /// system's programs, libraries, resources and settings, the processes'
 /// and the kernel's files, read-only; the devices every program uses;
-/// notifyd's folder, as notifications are always allowed; and netd's,
-/// whose resolv.conf `/etc/resolv.conf` leads to (ADR 0191). Its program,
+/// notifyd's folder, as notifications are always allowed; and resolved's,
+/// whose resolv.conf `/etc/resolv.conf` leads to (ADR 0193), and netd's,
+/// which an `/etc/resolv.conf` from before resolved leads to (ADR 0191).
+/// Its program,
 /// its own `/tmp`, the root's links and its secrets come on top. A place
 /// a file names that is one of these takes its place.
 pub const ALWAYS: &[(&str, bool)] = &[
@@ -266,6 +268,7 @@ pub const ALWAYS: &[(&str, bool)] = &[
     ("/system/resources", false),
     ("/system/settings", false),
     ("/system/live/notify", false),
+    ("/system/live/resolved", false),
     ("/system/live/netd", false),
     ("/processes", false),
     ("/kernel", false),

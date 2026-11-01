@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Sends the log to another computer over UDP as it is written: netlog(8)
+# sends to netlog=HOST:PORT on the kernel command line, or to the target
+# /system/settings/netlog names (netlog(5)), and waits, sending nothing,
+# while neither does (ADR 0196).
+#
+# service.toml(5) explains each setting. `service check netlog` checks
+# this file, and `service edit netlog` checks it as you save.
+
+service_version = 1
+description = "Log over the network"
+program = "/system/commands/netlog"
+# After resolved, which finds the target's address.
+order = 23
+# Started again whenever it ends: always, on-failure or never.
+restart = "always"
+
+[limits]
+memory = "8M"
+
+# What it holds beyond what every service reads (service.toml(5)): the
+# kernel log, which holds the services' lines too, and the target it
+# sends to.
+[permissions]
+network.outbound = true
+files.read = ["/devices/kmsg"]

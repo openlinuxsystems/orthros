@@ -25,7 +25,8 @@
 //! behind the time it last synced (kept in `/system/state/timed`) forward
 //! to that; and if a server's certificate is not valid by the clock, it
 //! asks the same server for the time over plain NTP once, checks the
-//! certificate at that time instead, and if it passes, goes on over NTS.
+//! certificate at that time instead, unless it is before the last sync,
+//! and if it passes, goes on over NTS.
 //!
 //! What it did last goes to `/system/live/timed/status`, which
 //! timedatectl(1) shows. SIGHUP reads the settings again; SIGTERM ends it.
@@ -275,6 +276,17 @@ impl Timed {
                     format!("its certificate is not valid by the clock, and it gave no plain time: {e}")
                 })?;
                 let told = (now_ns() + sample.offset) / 1_000_000_000;
+                // An unauthenticated time before the last sync could make
+                // a certificate that expired since valid again.
+                if let Some(last) = Self::last_synced()
+                    && told < i128::from(last)
+                {
+                    return Err(
+                        "its certificate is not valid by the clock, and its plain time is before \
+                         timed last synced"
+                            .into(),
+                    );
+                }
                 eprintln!(
                     "timed: {host}'s certificate is not valid by the clock; checking it by the time its NTP gives"
                 );
@@ -453,10 +465,15 @@ impl Timed {
         Ok(did)
     }
 
+    /// When timed last synced, in seconds since 1970, as kept from boot to
+    /// boot.
+    fn last_synced() -> Option<u64> {
+        fs::read_to_string(LAST).ok().and_then(|t| t.trim().parse::<u64>().ok())
+    }
+
     /// Sets a clock behind the time timed last synced forward to it.
     fn not_before_last() {
-        let Some(last) = fs::read_to_string(LAST).ok().and_then(|t| t.trim().parse::<u64>().ok())
-        else {
+        let Some(last) = Self::last_synced() else {
             return;
         };
         let now = now_ns() / 1_000_000_000;

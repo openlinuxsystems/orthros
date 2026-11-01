@@ -206,7 +206,7 @@ fn parse_local(text: &str) -> Option<i64> {
 fn set_time(text: &str) -> Result<(), Fail> {
     if timed_runs() {
         return Err(fail(
-            "timedatectl: timed keeps the clock from the network; `service stop timed` first".into(),
+            "timedatectl: timed keeps the clock from the network; `service timed stop` first".into(),
         ));
     }
     let seconds = parse_local(text)

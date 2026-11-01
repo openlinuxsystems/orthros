@@ -141,6 +141,8 @@ error that starts with the tool's name.
 :  make a swap area on a disk or partition
 |  *netd*(8)
 :  set the network cards up, by DHCP or as their settings say
+|  *netlog*(8)
+:  send the log to another computer as it is written
 |  *notifications*(1)
 :  the notifications notifyd keeps
 |  *notify-send*(1)
@@ -165,6 +167,10 @@ error that starts with the tool's name.
 :  a process's nice level
 |  *replace*(8)
 :  put a new disk in the place of one of a Btrfs filesystem's
+|  *resolvectl*(1)
+:  look names up, and show what resolved asks and how
+|  *resolved*(8)
+:  the DNS resolver every program asks
 |  *rtrace*(1)
 :  trace a process's system calls
 |  *script*(1)
@@ -187,6 +193,10 @@ error that starts with the tool's name.
 :  turn swap areas on and off, and list them
 |  *taskset*(1)
 :  the CPUs a process may run on
+|  *timed*(8)
+:  keep the clock right from the network
+|  *timedatectl*(1)
+:  the clock, the time zone, and how timed keeps the time
 |  *top*(1)
 :  the processes, refreshed
 |  *tree*(1)
