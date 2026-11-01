@@ -1080,6 +1080,17 @@ pub fn fetch(ctx: &Ctx, name: &str, git: &str, commit: &str, paths: &[String]) -
     }
 }
 
+/// The source of the port `name`, from its release archive, fetched if
+/// it is not yet: for builds of it outside Radix, such as `ob bench`'s
+/// git for Linux.
+pub fn archive_source(ctx: &Ctx, name: &str) -> Result<PathBuf> {
+    let Some((recipe, _)) = recipes(ctx)?.into_iter().find(|(recipe, _)| recipe.name == name)
+    else {
+        return Err(Error::new(format!("there is no port {name}")));
+    };
+    fetch_archive(ctx, &recipe.name, &recipe.source)
+}
+
 /// Fetches a release archive into `target/ports/sources`, once, from its
 /// URL or, failing that, from each mirror in turn, checks its SHA-256,
 /// and unpacks it there. Returns where it is unpacked: the directory the

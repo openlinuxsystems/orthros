@@ -68,7 +68,7 @@ fn btrfs_log(ctx: &Ctx, kernel: Option<String>) -> Result<()> {
     };
     let dir = ctx.out.join("fixture");
     process::create_dir(&dir)?;
-    let initrd = bench::linux_init(ctx, &dir, None, &kernel, None)?;
+    let initrd = bench::linux_init(ctx, &dir, None, None, &kernel, None)?;
     let disk = dir.join("btrfs-log.img");
     let file = std::fs::File::create(&disk).context(|| format!("making {}", disk.display()))?;
     file.set_len(DISK_BYTES).context(|| format!("sizing {}", disk.display()))?;
@@ -120,7 +120,7 @@ fn btrfs_radix_log(ctx: &Ctx, kernel: Option<String>) -> Result<()> {
     };
     let dir = ctx.out.join("fixture");
     process::create_dir(&dir)?;
-    let initrd = bench::linux_init(ctx, &dir, None, &kernel, None)?;
+    let initrd = bench::linux_init(ctx, &dir, None, None, &kernel, None)?;
     let disk = dir.join("btrfs-radix-log.img");
     step("Writing a log of fsyncs with Radix's Btrfs, in a host test");
     let mkfs = crate::btrfs::mkfs(ctx)?;

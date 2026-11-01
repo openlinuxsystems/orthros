@@ -5,7 +5,7 @@
 //! measures on Radix, as a baseline (docs/design/ipc.md).
 //!
 //! ```text
-//! linux-bench [--rounds <count>] [--posix-bench <program>]
+//! linux-bench [--rounds <count>] [--posix-bench <program>] [--git <program>]
 //! ```
 //!
 //! It prints one line per benchmark, in the format of the Radix benchmark
@@ -35,7 +35,8 @@
 //! where it also gives them the virtual machine's disks, `/dev/vda` and
 //! `/dev/nvme0n1`, for their disk benchmarks. They time TCP and UDP over
 //! the loopback interface too, which process 1 brings up first, as a
-//! booting system does.
+//! booting system does, and `git status` with the git given with
+//! `--git`, or at `/git` as process 1 (ADR 0294).
 //!
 //! After the TLB shootdowns it prints how many TLB interrupts reached the
 //! other CPU (the `TLB` line of `/proc/interrupts`), as Radix prints its
@@ -68,6 +69,9 @@ use std::time::Instant;
 /// Where the POSIX benchmarks are in the virtual machine's initramfs.
 const POSIX_BENCH: &str = "/posix-bench";
 
+/// Where git is in the initramfs, for the git benchmark.
+const GIT: &str = "/git";
+
 /// The virtual machine's disks, for the POSIX benchmarks' disk benchmarks:
 /// a virtio disk and an NVMe one.
 const DISK: &str = "/dev/vda";
@@ -91,6 +95,7 @@ fn main() {
     let mut rounds = 100_000u64;
     let mut posix = None;
     let mut btrfs_log = None;
+    let mut git = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let value = args.next();
@@ -99,13 +104,14 @@ fn main() {
                 rounds = count.parse().unwrap_or(rounds);
             }
             ("--posix-bench", Some(program)) => posix = Some(PathBuf::from(program)),
+            ("--git", Some(program)) => git = Some(PathBuf::from(program)),
             ("--btrfs-log", Some(mode)) if mode == "make" || mode == "list" => {
                 btrfs_log = Some(mode);
             }
             _ => {
                 eprintln!(
                     "usage: linux-bench [--rounds <count>] [--posix-bench <program>] \
-                     [--btrfs-log make|list]"
+                     [--git <program>] [--btrfs-log make|list]"
                 );
                 std::process::exit(2);
             }
@@ -187,6 +193,16 @@ fn main() {
             disks.push(("--btrfs", Path::new(BTRFS_AT)));
         }
         let network = std::process::id() != 1 || loopback_up();
+        // The initramfs holds git when `ob bench` built one; an empty
+        // file stands for none.
+        let git = git.or_else(|| {
+            let at = Path::new(GIT);
+            (std::process::id() == 1 && at.metadata().is_ok_and(|m| m.len() > 0))
+                .then(|| at.to_path_buf())
+        });
+        if let Some(git) = &git {
+            disks.push(("--git", git.as_path()));
+        }
         posix_bench(&program, &cpus, &disks, network);
     }
 
@@ -835,7 +851,8 @@ fn loopback_up() -> bool {
 
 /// Runs the POSIX benchmarks at `program`, which print their own lines,
 /// on every CPU this process may run on: it pins itself and its threads
-/// as it needs, as on Radix. With `network` they time the loopback
+/// as it needs, as on Radix, given each option of `disks` with its path
+/// (the disks, and git). With `network` they time the loopback
 /// interface too.
 fn posix_bench(program: &Path, cpus: &[usize], disks: &[(&str, &Path)], network: bool) {
     allow(cpus);

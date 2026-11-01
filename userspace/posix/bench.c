@@ -19,9 +19,12 @@
 // directory, where `ob bench` has each system mount the same Btrfs disk.
 // With --network it also times TCP and UDP over the loopback interface
 // (127.0.0.1), which Radix's Spark lets it reach and linux-bench brings
-// up on Linux.
+// up on Linux. With --git <program> it times `git status` in a
+// repository it makes in /tmp, with that git: the same release on both,
+// built for each (ADR 0294).
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -756,10 +759,107 @@ static void btrfs(const char *dir) {
 	btrfs_writes(dir);
 }
 
+// The repository of the git benchmark: GIT_FOLDERS folders of
+// GIT_FILES files each, every one committed.
+#define GIT_FOLDERS 10
+#define GIT_FILES 100
+
+// Runs git with `args` in the repository `dir`, its output thrown away,
+// and fails unless it succeeds.
+static void run_git(const char *git, const char *dir, const char *const *args) {
+	const char *argv[16] = {git, "-C", dir};
+	size_t n = 3;
+	for(size_t i = 0; args[i] && n < 15; i++)
+		argv[n++] = args[i];
+	argv[n] = NULL;
+	pid_t child = fork();
+	if(child < 0)
+		fail("fork");
+	if(child == 0) {
+		int null = open("/dev/null", O_WRONLY);
+		if(null >= 0) {
+			dup2(null, 1);
+			dup2(null, 2);
+		}
+		execv(git, (char *const *)argv);
+		_exit(127);
+	}
+	int status;
+	if(waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status)) {
+		errno = 0;
+		fail(args[0]);
+	}
+}
+
+// Removes `path` and everything beneath it.
+static void remove_tree(const char *path) {
+	DIR *dir = opendir(path);
+	if(dir) {
+		struct dirent *entry;
+		while((entry = readdir(dir))) {
+			if(!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+				continue;
+			char below[512];
+			snprintf(below, sizeof(below), "%s/%s", path, entry->d_name);
+			remove_tree(below);
+		}
+		closedir(dir);
+		rmdir(path);
+	} else {
+		unlink(path);
+	}
+}
+
+// `git status` in a repository of 1,000 files in 10 folders, all
+// committed and none changed since: git reads its index, looks at each
+// file's status against it, and finds nothing to say. Both systems run
+// it with no settings of the system's or the user's.
+static void git_status(const char *git, uint64_t rounds) {
+	mkdir("/tmp", 01777);
+	char dir[] = "/tmp/posix-bench-git-XXXXXX";
+	if(!mkdtemp(dir))
+		fail("making the git benchmark's folder");
+	char path[256];
+	for(int d = 0; d < GIT_FOLDERS; d++) {
+		snprintf(path, sizeof(path), "%s/folder%d", dir, d);
+		if(mkdir(path, 0755) != 0)
+			fail(path);
+		for(int f = 0; f < GIT_FILES; f++) {
+			snprintf(path, sizeof(path), "%s/folder%d/file%d.c", dir, d, f);
+			FILE *file = fopen(path, "w");
+			if(!file)
+				fail(path);
+			fprintf(file, "// File %d of folder %d.\nint value_%d_%d = %d;\n", f, d, d, f, d * f);
+			fclose(file);
+		}
+	}
+	static const char *const env[][2] = {{"GIT_CONFIG_NOSYSTEM", "1"},
+			{"GIT_CONFIG_GLOBAL", "/dev/null"}, {"GIT_AUTHOR_NAME", "Bench"},
+			{"GIT_AUTHOR_EMAIL", "bench@dukovo.org"}, {"GIT_COMMITTER_NAME", "Bench"},
+			{"GIT_COMMITTER_EMAIL", "bench@dukovo.org"},
+			{"GIT_AUTHOR_DATE", "2026-11-01T12:00:00Z"},
+			{"GIT_COMMITTER_DATE", "2026-11-01T12:00:00Z"}};
+	for(size_t i = 0; i < sizeof(env) / sizeof(env[0]); i++)
+		setenv(env[i][0], env[i][1], 1);
+	setenv("HOME", dir, 1);
+	run_git(git, dir, (const char *const[]){"init", "-q", "-b", "main", NULL});
+	run_git(git, dir, (const char *const[]){"add", "-A", NULL});
+	run_git(git, dir, (const char *const[]){"commit", "-q", "-m", "Files", NULL});
+	// Once before timing, so that the index's times are settled and
+	// every file's status is in the file cache, as when one works.
+	const char *const status[] = {"status", "--porcelain", NULL};
+	run_git(git, dir, status);
+	struct mark started = start();
+	for(uint64_t i = 0; i < rounds; i++)
+		run_git(git, dir, status);
+	report("posix_git_status", started, rounds);
+	remove_tree(dir);
+}
+
 int main(int argc, char **argv) {
 	if(argc > 1 && !strcmp(argv[1], "--exit"))
 		return 0;
-	const char *disk_path = NULL, *nvme_path = NULL, *btrfs_path = NULL;
+	const char *disk_path = NULL, *nvme_path = NULL, *btrfs_path = NULL, *git = NULL;
 	int networked = 0;
 	for(int i = 1; i < argc; i++) {
 		if(!strcmp(argv[i], "--network"))
@@ -770,6 +870,8 @@ int main(int argc, char **argv) {
 			nvme_path = argv[++i];
 		else if(i + 1 < argc && !strcmp(argv[i], "--btrfs"))
 			btrfs_path = argv[++i];
+		else if(i + 1 < argc && !strcmp(argv[i], "--git"))
+			git = argv[++i];
 	}
 	const char *self = argv[0];
 	if(!self || !strchr(self, '/')) {
@@ -802,6 +904,8 @@ int main(int argc, char **argv) {
 		disk(nvme_path, 1);
 	if(btrfs_path)
 		btrfs(btrfs_path);
+	if(git)
+		git_status(git, 50);
 	printf("posix-bench: done\n");
 	fflush(stdout);
 	return 0;
