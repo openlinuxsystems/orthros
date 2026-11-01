@@ -51,8 +51,8 @@ permission bits with it, and one that says no more than a mode is kept
 as the mode alone. A directory's default list is what a file or
 directory made in it takes, in place of the umask (*radix-posix*(7)).
 A symbolic link has no list: one named is changed through. tmpfs,
-Btrfs and ext4 keep lists, as Linux keeps them on the disk; FAT and
-exFAT keep none, and take only a list that says no more than a mode.
+Btrfs and ext4 keep lists, as Linux keeps them on the disk; FAT, exFAT
+and NTFS keep none, and take only a list that says no more than a mode.
 
 # OPTIONS
 

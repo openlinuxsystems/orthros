@@ -13,7 +13,8 @@
 //!   (2006), which Windows mounts as it is;
 //! - `<name>.txt`: what Windows must find on it, a line for each path:
 //!   `d` for a directory, `l` for a link, or `f` and the SHA-256 of its
-//!   bytes, then a tab and the path.
+//!   bytes, then a tab and the path; or `s` and the SHA-256 of a stream's
+//!   bytes, then a tab and `path:stream` (ADR 0241).
 //!
 //! A name ending in `-cut` is of a volume a power cut left: `chkdsk /f`
 //! must mend it, and only what was synced before the cut is listed, as
@@ -35,6 +36,9 @@ pub(crate) enum Found<'a> {
     Dir,
     File(&'a [u8]),
     Link,
+    /// A stream of a file or directory, its path `file:stream`
+    /// (ADR 0241).
+    Stream(&'a [u8]),
 }
 
 /// What a kept volume's list names.
@@ -72,9 +76,10 @@ pub(crate) fn keep(image: &[u8], find: &[(&str, Found<'_>)], listed: Listed) {
         let what = match found {
             Found::Dir => String::from("d"),
             Found::Link => String::from("l"),
-            Found::File(data) => {
+            Found::File(data) | Found::Stream(data) => {
                 let hash = Sha256::digest(data);
-                let mut what = String::from("f ");
+                let kind = if matches!(found, Found::File(_)) { 'f' } else { 's' };
+                let mut what = format!("{kind} ");
                 for b in hash {
                     let _ = write!(what, "{b:02x}");
                 }

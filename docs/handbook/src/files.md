@@ -175,7 +175,10 @@ names Windows can open, and compressed and sparse files as Windows
 does. A symbolic link Dukovo makes is a Windows link when Windows can
 follow it (a relative path of names Windows takes), and a WSL link
 otherwise. A file so fragmented that where its clusters are overflows
-its record goes on in more records, as Windows spreads it. Encrypted
+its record goes on in more records, as Windows spreads it. A file's
+alternate data streams, where Windows keeps where a download came from,
+are its `user.` extended attributes, as ntfs-3g shows them:
+`user.Zone.Identifier` is the stream `Zone.Identifier`. Encrypted
 files, and files of so many names that Windows moved them out of their
 record, are not written yet. An NTFS that Windows hibernated with
 (Fast Startup), left dirty or with changes in its journal to replay is

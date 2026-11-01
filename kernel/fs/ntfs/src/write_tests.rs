@@ -20,7 +20,7 @@ use proptest::prelude::*;
 use radix_block::ram::RamDisk;
 use radix_block::{BlockDevice, DeviceRef};
 use radix_vfs::mem::{self, KArc};
-use radix_vfs::{Access, Error, FileSystem, Kind, NodeRef, Slice, SliceMut};
+use radix_vfs::{Access, Error, FileSystem, Kind, NodeRef, Setting, Slice, SliceMut};
 
 use crate::NtfsFs;
 use crate::fs::Options;
@@ -151,7 +151,9 @@ fn fls(image: &Scratch) -> BTreeMap<String, (Kind, String)> {
         // `r/r 64-128-1:	dir/name`, or `d/d 65-144-2:	dir`.
         let (number, path) = line.split_once(":\t").unwrap();
         assert!(!path.starts_with("$OrphanFiles/"), "a file in no directory: {line}");
-        if path.starts_with('$') {
+        // A directory's streams are listed at its path, and again in it,
+        // under its `.`.
+        if path.starts_with('$') || path.rsplit('/').next().is_some_and(|n| n.starts_with(".:")) {
             continue;
         }
         let (kind, number) = number.split_once(' ').unwrap();
@@ -167,7 +169,8 @@ fn sleuthkit_files(image: &[u8]) -> BTreeMap<String, Vec<u8>> {
     let file = Scratch::new(image);
     let mut files = BTreeMap::new();
     for (path, (kind, number)) in fls(&file) {
-        let data = if kind == Kind::Directory {
+        // A directory's streams are read as files' are.
+        let data = if kind == Kind::Directory && !path.contains(':') {
             Vec::new()
         } else {
             run(Command::new(tool("icat")).args(["-f", "ntfs"]).arg(&file.0).arg(&number))
@@ -194,8 +197,23 @@ fn ntfscat(image: &[u8], path: &str) -> Vec<u8> {
     run(Command::new(tool("ntfscat")).arg(&file.0).arg(path))
 }
 
+/// The bytes of the stream `stream` of the file at `path` in `image`, as
+/// `ntfscat` reads them.
+fn ntfscat_stream(image: &[u8], path: &str, stream: &str) -> Vec<u8> {
+    let file = Scratch::new(image);
+    run(Command::new(tool("ntfscat")).arg("-n").arg(stream).arg(&file.0).arg(path))
+}
+
+/// The path of the file and the name of the stream that `path` names, as
+/// `file:stream`, if it names one.
+fn stream_of(path: &str) -> Option<(&str, &str)> {
+    path.rsplit_once(':')
+}
+
 /// Checks that `image` is sound and holds exactly `expected`, as ntfs-3g
-/// and The Sleuth Kit read it, and as Radix reads it mounted again.
+/// and The Sleuth Kit read it, and as Radix reads it mounted again: a
+/// path `file:stream` is a stream, which Radix reads as the attribute
+/// `user.stream` (ADR 0241).
 fn check(image: &[u8], block: u32, expected: &BTreeMap<String, Vec<u8>>) {
     ntfs_3g_check(image);
     let seen = sleuthkit_files(image);
@@ -207,6 +225,14 @@ fn check(image: &[u8], block: u32, expected: &BTreeMap<String, Vec<u8>>) {
     assert!(!volume.fs.dirty(), "synced, the volume is clean");
     let mut find = Vec::new();
     for (path, data) in expected {
+        if let Some((file, stream)) = stream_of(path) {
+            let node = walk(&volume.root(), file).unwrap();
+            let name = format!("user.{stream}");
+            let value = node.get_attribute(name.as_bytes()).unwrap();
+            assert!(value[..] == data[..], "{path}: Radix reads other bytes");
+            find.push((path.as_str(), Found::Stream(data)));
+            continue;
+        }
         let node = walk(&volume.root(), path).unwrap();
         if node.stat().kind == Kind::File {
             assert!(read_all(&node) == *data, "{path}: Radix reads other bytes");
@@ -642,6 +668,153 @@ fn what_ntfs_3g_wrote_is_written_to() {
     windows_tests::keep(&written, &find, Listed::Some);
 }
 
+/// Sets `node`'s attribute `name` to `value`, as `how` says.
+fn set(node: &NodeRef, name: &str, value: &[u8], how: Setting) {
+    node.set_attribute(name.as_bytes(), value, how).unwrap();
+}
+
+/// `node`'s attribute `name`'s value.
+fn attribute(node: &NodeRef, name: &str) -> Result<Vec<u8>, Error> {
+    node.get_attribute(name.as_bytes())
+}
+
+/// The names of `node`'s attributes, in order.
+fn attributes(node: &NodeRef) -> Vec<String> {
+    let list = String::from_utf8(node.list_attributes().unwrap()).unwrap();
+    let names = list.strip_suffix('\0').unwrap_or(&list);
+    if names.is_empty() { Vec::new() } else { names.split('\0').map(String::from).collect() }
+}
+
+#[test]
+fn what_ntfs_3g_streamed_is_an_attribute() {
+    let image = crate::tests::ntfs_3g();
+    let volume = Volume::new_in(512, &image);
+    let root = volume.root();
+    let file = walk(&root, "streams.txt").unwrap();
+    assert_eq!(attributes(&file), ["user.extra"]);
+    assert_eq!(attribute(&file, "user.extra").unwrap(), b"in a stream");
+    assert_eq!(attribute(&file, "user.other"), Err(Error::NoAttribute));
+    assert_eq!(attribute(&file, "user.a:b"), Err(Error::BadName));
+    // NTFS keeps no attributes of the other namespaces.
+    for name in ["trusted.x", "security.selinux", "system.posix_acl_access"] {
+        assert_eq!(attribute(&file, name), Err(Error::NotSupported), "{name}");
+        assert_eq!(
+            file.set_attribute(name.as_bytes(), b"x", Setting::Either),
+            Err(Error::NotSupported)
+        );
+    }
+    assert!(attributes(&walk(&root, "Documents/report.txt").unwrap()).is_empty());
+    assert!(attributes(&root).is_empty());
+    // Written: ntfs-3g reads the stream's new bytes, and a new one.
+    set(&file, "user.extra", b"changed by Radix", Setting::Replace);
+    set(&file, "user.more", b"added by Radix", Setting::Create);
+    // A file whose names overflow its record is not written yet.
+    let linked = walk(&root, "linked.txt").unwrap();
+    assert_eq!(linked.set_attribute(b"user.x", b"x", Setting::Either), Err(Error::NotSupported));
+    assert_eq!(linked.remove_attribute(b"user.x"), Err(Error::NotSupported));
+    assert!(attributes(&linked).is_empty());
+    drop((root, file, linked));
+    let written = volume.image();
+    ntfs_3g_check(&written);
+    assert_eq!(ntfscat_stream(&written, "/streams.txt", "extra"), b"changed by Radix");
+    assert_eq!(ntfscat_stream(&written, "/streams.txt", "more"), b"added by Radix");
+    assert_eq!(ntfscat(&written, "/streams.txt"), b"main\n");
+    let find = [
+        ("streams.txt", Found::File(b"main\n")),
+        ("streams.txt:extra", Found::Stream(b"changed by Radix")),
+        ("streams.txt:more", Found::Stream(b"added by Radix")),
+    ];
+    windows_tests::keep(&written, &find, Listed::Some);
+}
+
+#[test]
+fn streams_are_written_as_windows_keeps_them() {
+    for (mib, sector, cluster) in VOLUMES {
+        let image = Image::mkntfs(mib, sector, cluster);
+        let volume = Volume::new_in(sector, &image.bytes());
+        let root = volume.root();
+        let mut expected = BTreeMap::new();
+        let zone = b"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://dukovo.org/\r\n";
+        let big = pattern(7, 40_000);
+        // A download's zone, in its record, and a stream in clusters.
+        let file = make_file(&root, "downloaded.txt", b"fetched\n", usize::MAX);
+        set(&file, "user.Zone.Identifier", zone, Setting::Create);
+        set(&file, "user.big", &big, Setting::Either);
+        assert_eq!(file.set_attribute(b"user.big", b"x", Setting::Create), Err(Error::Exists));
+        assert_eq!(file.set_attribute(b"user.no", b"x", Setting::Replace), Err(Error::NoAttribute));
+        assert_eq!(file.remove_attribute(b"user.no"), Err(Error::NoAttribute));
+        for name in ["user.a/b", "user.a:b", "user.a\\b"] {
+            assert_eq!(
+                file.set_attribute(name.as_bytes(), b"x", Setting::Either),
+                Err(Error::BadName)
+            );
+        }
+        // Gone again, its clusters with it.
+        set(&file, "user.gone", &pattern(5, 10_000), Setting::Either);
+        file.remove_attribute(b"user.gone").unwrap();
+        assert_eq!(attribute(&file, "user.gone"), Err(Error::NoAttribute));
+        // In the record's order: by their names' upper cases.
+        assert_eq!(attributes(&file), ["user.big", "user.Zone.Identifier"]);
+        // The file's own data grows in its record, and out of it.
+        write_all(&file, 8, b"and grown\n");
+        let mut data = b"fetched\nand grown\n".to_vec();
+        expected.insert(String::from("downloaded.txt"), data.clone());
+        let grown = make_file(&root, "grown.txt", &pattern(3, 600), usize::MAX);
+        set(&grown, "user.s", &pattern(4, 300), Setting::Either);
+        data = pattern(3, 900);
+        write_all(&grown, 0, &data);
+        expected.insert(String::from("grown.txt"), data);
+        // A stream that grows out of the record, and one that comes back.
+        set(&grown, "user.s", &pattern(4, 9000), Setting::Replace);
+        let back = make_file(&root, "back.txt", b"", 1);
+        set(&back, "user.s", &pattern(6, 20_000), Setting::Either);
+        set(&back, "user.s", b"back in the record", Setting::Replace);
+        set(&back, "user.empty", b"", Setting::Either);
+        expected.insert(String::from("back.txt"), Vec::new());
+        // A directory's, its name not ASCII.
+        let dir = root.create("tagged", Kind::Directory, DIR).unwrap();
+        let name = "\u{dc}n\u{ef}c\u{f6}d\u{e9} \u{2713}";
+        set(&dir, &format!("user.{name}"), b"a directory's", Setting::Either);
+        expected.insert(String::from("tagged"), Vec::new());
+        // A file removed with a stream in clusters gives them back.
+        let doomed = make_file(&root, "doomed.txt", b"doomed\n", usize::MAX);
+        set(&doomed, "user.big", &pattern(8, 30_000), Setting::Either);
+        drop(doomed);
+        root.remove("doomed.txt").unwrap();
+        drop((root, file, grown, back, dir));
+        let written = volume.image();
+        let streams: [(&str, Vec<u8>); 6] = [
+            ("downloaded.txt:Zone.Identifier", zone.to_vec()),
+            ("downloaded.txt:big", big.clone()),
+            ("grown.txt:s", pattern(4, 9000)),
+            ("back.txt:s", b"back in the record".to_vec()),
+            ("back.txt:empty", Vec::new()),
+            (&format!("tagged:{name}"), b"a directory's".to_vec()),
+        ];
+        for (path, data) in &streams {
+            expected.insert(String::from(*path), data.clone());
+        }
+        check(&written, sector, &expected);
+        assert!(ntfscat_stream(&written, "/downloaded.txt", "big") == big);
+        assert!(ntfscat_stream(&written, "/tagged", name) == b"a directory's");
+        // Mounted again, each stream goes, and the files.
+        let volume = volume.remount();
+        let root = volume.root();
+        for (path, _) in &streams {
+            let (file, stream) = stream_of(path).unwrap();
+            let node = walk(&root, file).unwrap();
+            node.remove_attribute(format!("user.{stream}").as_bytes()).unwrap();
+        }
+        for name in ["downloaded.txt", "grown.txt", "back.txt"] {
+            root.remove(name).unwrap();
+        }
+        root.remove("tagged").unwrap();
+        drop(root);
+        // ntfs-3g finds no cluster in use that no file holds.
+        ntfs_3g_check(&volume.image());
+    }
+}
+
 /// What `$Extend\$Reparse` lists in `volume`: each reparse point's tag
 /// and its file's record.
 fn reparse_points(volume: &Volume) -> Vec<(u32, u64)> {
@@ -911,8 +1084,19 @@ fn fragmented_files_spread_over_records() {
         root.remove("gone.bin").unwrap();
         expected.remove("gone.bin");
         expected.insert(String::from("big link.bin"), expected["big.bin"].clone());
+        // Streams, which its attribute list names too, in the order of
+        // their names' upper cases (ADR 0241); each name has them.
+        let zone = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+        set(&big, "user.Zone.Identifier", zone, Setting::Create);
+        set(&big, "user.big", &pattern(4, 3000), Setting::Create);
+        for name in ["big.bin", "big link.bin"] {
+            expected.insert(format!("{name}:Zone.Identifier"), zone.to_vec());
+            expected.insert(format!("{name}:big"), pattern(4, 3000));
+        }
         let image = volume.image();
         check(&image, sector, &expected);
+        assert_eq!(ntfscat_stream(&image, "/big.bin", "Zone.Identifier"), zone);
+        assert!(ntfscat_stream(&image, "/big.bin", "big") == pattern(4, 3000));
         let table = mft(&image);
         let (listed, pieces) = data_records(&table, big_id, rs);
         assert!(listed && pieces.len() >= 2, "{pieces:?}");
@@ -925,7 +1109,9 @@ fn fragmented_files_spread_over_records() {
         // with it the records it named.
         big.set_size(10 * u64::from(cluster)).unwrap();
         root.remove("big link.bin").unwrap();
-        expected.remove("big link.bin");
+        for name in ["big link.bin", "big link.bin:Zone.Identifier", "big link.bin:big"] {
+            expected.remove(name);
+        }
         expected.get_mut("big.bin").unwrap().truncate(10 * cluster as usize);
         drop((root, big));
         let image = volume.image();
@@ -1127,7 +1313,18 @@ enum Step {
     Move { file: usize, dir: usize },
     /// Takes a file out.
     Remove { file: usize },
+    /// Sets one of a file's streams to `len` bytes (ADR 0241).
+    Stream { file: usize, name: usize, len: usize },
+    /// Takes one of a file's streams out.
+    Unstream { file: usize, name: usize },
 }
+
+/// The names of the streams [`Step::Stream`] sets.
+const STREAMS: [&str; 3] = ["s", "Zone.Identifier", "another"];
+
+/// A file [`random_changes_read_back`] made: its path, its bytes and its
+/// streams'.
+type Made = (String, Vec<u8>, BTreeMap<&'static str, Vec<u8>>);
 
 fn step() -> impl Strategy<Value = Step> {
     prop_oneof![
@@ -1141,6 +1338,12 @@ fn step() -> impl Strategy<Value = Step> {
         (0..32usize, 0..40_000usize).prop_map(|(file, len)| Step::Size { file, len }),
         (0..32usize, 0..8usize).prop_map(|(file, dir)| Step::Move { file, dir }),
         (0..32usize).prop_map(|file| Step::Remove { file }),
+        (0..32usize, 0..3usize, 0..3000usize).prop_map(|(file, name, len)| Step::Stream {
+            file,
+            name,
+            len
+        }),
+        (0..32usize, 0..3usize).prop_map(|(file, name)| Step::Unstream { file, name }),
     ]
 }
 
@@ -1162,7 +1365,7 @@ proptest! {
         // The directories made, by path ("" the root), and the files, by
         // path, with what they hold.
         let mut dirs = vec![String::new()];
-        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut files: Vec<Made> = Vec::new();
         let mut made = 0u32;
         let node = |path: &str| walk(&volume.root(), path).unwrap();
         let join = |dir: &str, name: &str| if dir.is_empty() { String::from(name) } else { format!("{dir}/{name}") };
@@ -1174,7 +1377,7 @@ proptest! {
                     let path = join(&dir, &format!("file {made}.dat"));
                     let data = pattern(made, len);
                     make_file(&node(&dir), &format!("file {made}.dat"), &data, 4096);
-                    files.push((path, data));
+                    files.push((path, data, BTreeMap::new()));
                 }
                 Step::Dir { dir } => {
                     let dir = dirs[dir % dirs.len()].clone();
@@ -1183,7 +1386,7 @@ proptest! {
                 }
                 Step::Write { file, at, len } if !files.is_empty() => {
                     let i = file % files.len();
-                    let (path, data) = &mut files[i];
+                    let (path, data, _) = &mut files[i];
                     let part = pattern(made, len);
                     write_all(&node(path), at as u64, &part);
                     if data.len() < at + len {
@@ -1193,28 +1396,58 @@ proptest! {
                 }
                 Step::Size { file, len } if !files.is_empty() => {
                     let i = file % files.len();
-                    let (path, data) = &mut files[i];
+                    let (path, data, _) = &mut files[i];
                     node(path).set_size(len as u64).unwrap();
                     data.resize(len, 0);
                 }
                 Step::Move { file, dir } if !files.is_empty() => {
                     let to = dirs[dir % dirs.len()].clone();
                     let i = file % files.len();
-                    let (path, _) = &mut files[i];
+                    let (path, _, _) = &mut files[i];
                     let (from, name) = path.rsplit_once('/').unwrap_or(("", path.as_str()));
                     let new = format!("moved {made}");
                     node(from).rename(name, &*node(&to), &new).unwrap();
                     *path = join(&to, &new);
                 }
                 Step::Remove { file } if !files.is_empty() => {
-                    let (path, _) = files.remove(file % files.len());
+                    let (path, _, _) = files.remove(file % files.len());
                     let (from, name) = path.rsplit_once('/').unwrap_or(("", path.as_str()));
                     node(from).remove(name).unwrap();
+                }
+                Step::Stream { file, name, len } if !files.is_empty() => {
+                    let i = file % files.len();
+                    let (path, _, streams) = &mut files[i];
+                    let value = pattern(made, len);
+                    let name = STREAMS[name];
+                    // A record full of streams says so.
+                    match node(path).set_attribute(format!("user.{name}").as_bytes(), &value, Setting::Either) {
+                        Ok(()) => {
+                            streams.insert(name, value);
+                        }
+                        Err(Error::NoSpace) => {}
+                        Err(err) => panic!("{path}: {err:?}"),
+                    }
+                }
+                Step::Unstream { file, name } if !files.is_empty() => {
+                    let i = file % files.len();
+                    let (path, _, streams) = &mut files[i];
+                    let name = STREAMS[name];
+                    let removed = node(path).remove_attribute(format!("user.{name}").as_bytes());
+                    match streams.remove(name) {
+                        Some(_) => removed.unwrap(),
+                        None => assert_eq!(removed, Err(Error::NoAttribute)),
+                    }
                 }
                 _ => {}
             }
         }
-        let mut expected: BTreeMap<String, Vec<u8>> = files.into_iter().collect();
+        let mut expected: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for (path, data, streams) in files {
+            for (name, value) in streams {
+                expected.insert(format!("{path}:{name}"), value);
+            }
+            expected.insert(path, data);
+        }
         for dir in dirs.into_iter().skip(1) {
             expected.insert(dir, Vec::new());
         }
@@ -1254,6 +1487,11 @@ fn read_everything(dir: &NodeRef, seen: &mut BTreeSet<u64>) {
         if !seen.insert(stat.id) {
             continue;
         }
+        if let Ok(names) = node.list_attributes() {
+            for name in names.split(|&b| b == 0).filter(|n| !n.is_empty()) {
+                let _ = node.get_attribute(name);
+            }
+        }
         match stat.kind {
             Kind::Directory => read_everything(&node, seen),
             Kind::Symlink => {
@@ -1289,6 +1527,10 @@ fn change_everything(dir: &NodeRef, seen: &mut BTreeSet<u64>) {
             }
             _ => {}
         }
+        // Its streams: one changed, one made in clusters, one taken out.
+        let _ = node.set_attribute(b"user.extra", b"changed", Setting::Either);
+        let _ = node.set_attribute(b"user.new", &pattern(i as u32, 5000), Setting::Either);
+        let _ = node.remove_attribute(b"user.more");
         if i % 2 == 1 {
             let _ = dir.remove(name);
         } else if i % 4 == 0 {

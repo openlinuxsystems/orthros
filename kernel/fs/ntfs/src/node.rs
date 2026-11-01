@@ -45,7 +45,8 @@
 //!
 //! A file whose runs outgrow its record has its data cut into pieces in
 //! extension records, which its attribute list names, and back when they
-//! fit again (ADR 0239). Radix does not write encrypted data, nor a file
+//! fit again (ADR 0239). A file's alternate data streams are its `user.`
+//! extended attributes ([`streams`], ADR 0241). Radix does not write encrypted data, nor a file
 //! whose other attributes are in more than one record, nor a directory
 //! whose index has a list or its bitmap in clusters: those fail with
 //! [`Error::NotSupported`].
@@ -62,7 +63,7 @@ use radix_vfs::cache::{Backing, FileCache, READ_RUN, page_len};
 use radix_vfs::mem::{self, Alloc, KArc, KVec};
 use radix_vfs::path::check_name;
 use radix_vfs::{
-    Access, AccessChange, Error, In, Kind, ListFn, Node, NodeRef, Out, Result, Stat, now,
+    Access, AccessChange, Error, In, Kind, ListFn, Node, NodeRef, Out, Result, Setting, Stat, now,
 };
 
 use crate::edit::{self, I30, put_u16, put_u32};
@@ -78,6 +79,8 @@ use crate::reparse::{self, Target};
 use crate::runs::{HOLE, Runs};
 use crate::space::write_runs;
 use crate::tree::{self, Store};
+
+mod streams;
 
 const PAGE: u64 = PAGE_SIZE as u64;
 
@@ -667,7 +670,7 @@ impl NtfsNode {
     fn write_base(&self, buf: &mut [u8], st: &State) -> Result<()> {
         if st.list {
             let reference = self.record | (u64::from(st.sequence) << 48);
-            let value = list::build(buf, reference, &st.extents)?;
+            let value = list::build(buf, reference, &st.extents, &self.fs.upcase)?;
             list::put(buf, &value)?;
         }
         self.fs.vol.write_record(self.record, buf, false)
@@ -778,10 +781,10 @@ impl NtfsNode {
 
     /// The base record `buf` with its data out and an attribute list
     /// naming `extents` in, as [`list::build`] makes it.
-    fn listed_base(buf: &[u8], reference: u64, extents: &[Extent]) -> Result<KVec<u8>> {
+    fn listed_base(&self, buf: &[u8], reference: u64, extents: &[Extent]) -> Result<KVec<u8>> {
         let mut base = mem::copy(buf)?;
         list::remove_data(&mut base);
-        let value = list::build(&base, reference, extents)?;
+        let value = list::build(&base, reference, extents, &self.fs.upcase)?;
         list::put(&mut base, &value)?;
         Ok(base)
     }
@@ -804,7 +807,7 @@ impl NtfsNode {
             from = cut;
         }
         // The list must fit, whatever the records it names.
-        Self::listed_base(buf, reference, &extents)?;
+        self.listed_base(buf, reference, &extents)?;
         let flags = stream.flags & (attr_flags::COMPRESSED | attr_flags::SPARSE);
         let rs = fs.vol.geo.record_size as usize;
         let mut rec = zeroed(rs)?;
@@ -852,7 +855,7 @@ impl NtfsNode {
             }
             from = cut;
         }
-        let base = Self::listed_base(buf, reference, &extents)?;
+        let base = self.listed_base(buf, reference, &extents)?;
         buf.copy_from_slice(&base);
         let freed = collect(st.extents.iter().skip(cuts.len()).map(|e| record_of(e.reference)))?;
         st.extents = extents;
@@ -996,7 +999,7 @@ impl NtfsNode {
             let _ = extents.push_within_capacity(Extent { reference: 0, lowest: from, id: 0 });
             from = cut;
         }
-        Self::listed_base(&buf, 0, &extents).map(|_| ())
+        self.listed_base(&buf, 0, &extents).map(|_| ())
     }
 
     /// Gives the holes of the sparse `stream` that bytes `from..to` fall
@@ -1070,23 +1073,28 @@ impl NtfsNode {
         Ok(())
     }
 
-    /// Makes room for `need` more bytes in its record `buf`, for a name:
-    /// a file's resident data moves to clusters. `size` is the file's.
-    fn make_room(&self, buf: &mut [u8], need: usize, size: u64) -> Result<()> {
-        let mut st = self.state.lock();
-        if st.fixed.is_some()
-            || !matches!(&st.data, Some(Data::Resident(bytes)) if !bytes.is_empty())
+    /// Makes room for `need` more bytes in its record `buf`, for a name
+    /// or a stream: a file's resident data moves to clusters, then its
+    /// streams do, the largest first, as Windows makes room. `size` is
+    /// the file's. Returns the clusters the streams took, for the caller
+    /// to give back if `buf` is not written after all.
+    fn make_room(&self, buf: &mut [u8], need: usize, size: u64) -> Result<KVec<(u64, u64)>> {
         {
-            return Err(Error::NoSpace);
+            let mut st = self.state.lock();
+            if st.fixed.is_none()
+                && matches!(&st.data, Some(Data::Resident(bytes)) if !bytes.is_empty())
+            {
+                self.fs.changing()?;
+                self.to_clusters(&mut st, size)?;
+                // Data that was in the record has no extension records to
+                // free.
+                self.put_data(&mut st, buf, size, false)?;
+            }
         }
-        self.fs.changing()?;
-        self.to_clusters(&mut st, size)?;
-        // Data that was in the record has no extension records to free.
-        self.put_data(&mut st, buf, size, false)?;
-        if edit::room(buf) < need {
-            return Err(Error::NoSpace);
+        if edit::room(buf) >= need {
+            return Ok(mem::vec());
         }
-        Ok(())
+        self.streams_out(buf, need)
     }
 
     /// Frees record `number`, which a new file was to have: no file is in
@@ -1636,19 +1644,28 @@ impl NtfsNode {
         let key = names::file_name(self.reference(), &dup, units, ns)?;
         let mut buf = node.read_rec()?;
         let need = (0x18 + key.len()).next_multiple_of(8) + node.listing();
-        if edit::room(&buf) < need {
-            node.make_room(&mut buf, need, size)?;
+        let moved = if edit::room(&buf) < need {
+            node.make_room(&mut buf, need, size)?
+        } else {
+            mem::vec()
+        };
+        let named = (|| {
+            let i = u16_at(&buf, 0x28);
+            let attr = edit::resident(kind::FILE_NAME, &[], i, &key, true)?;
+            edit::insert(&mut buf, &attr)?;
+            edit::next_instance(&mut buf);
+            let entry = tree::make_entry(reference, &key, None)?;
+            let upcase = &self.fs.upcase;
+            self.change_index(Some(entry.len()), &mut |root, store| {
+                tree::insert(root, store, tree::Order::Names(upcase), &entry)
+            })?;
+            node.write_rec(&mut buf)
+        })();
+        if let Err(err) = named {
+            // The streams that moved out for it are in the record still.
+            node.give_back(&moved);
+            return Err(err);
         }
-        let i = u16_at(&buf, 0x28);
-        let attr = edit::resident(kind::FILE_NAME, &[], i, &key, true)?;
-        edit::insert(&mut buf, &attr)?;
-        edit::next_instance(&mut buf);
-        let entry = tree::make_entry(reference, &key, None)?;
-        let upcase = &self.fs.upcase;
-        self.change_index(Some(entry.len()), &mut |root, store| {
-            tree::insert(root, store, tree::Order::Names(upcase), &entry)
-        })?;
-        node.write_rec(&mut buf)?;
         if ns != namespace::DOS {
             node.state.lock().links += 1;
         }
@@ -2399,6 +2416,22 @@ impl Node for NtfsNode {
         Ok(())
     }
 
+    fn get_attribute(&self, name: &[u8]) -> Result<KVec<u8>> {
+        self.get_stream(name)
+    }
+
+    fn set_attribute(&self, name: &[u8], value: &[u8], how: Setting) -> Result<()> {
+        self.set_stream(name, value, how)
+    }
+
+    fn list_attributes(&self) -> Result<KVec<u8>> {
+        self.list_streams()
+    }
+
+    fn remove_attribute(&self, name: &[u8]) -> Result<()> {
+        self.remove_stream(name)
+    }
+
     fn sync(&self) -> Result<()> {
         // The whole volume: the bitmaps a file's clusters are in are
         // shared, and the volume is then consistent on the disk.
@@ -2413,11 +2446,22 @@ impl Node for NtfsNode {
 impl Drop for NtfsNode {
     fn drop(&mut self) {
         // A removed file's record and clusters were kept for it; they go
-        // with it.
-        let st = self.state.get_mut();
-        if self.fs.read_only || !st.removed || st.listed {
+        // with it, its streams' too.
+        let (removed, listed) = {
+            let st = self.state.get_mut();
+            (st.removed, st.listed)
+        };
+        if self.fs.read_only || !removed || listed {
             return;
         }
+        let streams = self
+            .read_rec()
+            .and_then(|buf| self.streams_clusters(&buf))
+            .unwrap_or_else(|_| mem::vec());
+        for &(lcn, n) in &streams {
+            let _ = self.fs.give_clusters(lcn, n, false);
+        }
+        let st = self.state.get_mut();
         for extent in &st.extents {
             let _ = NtfsNode::free_record(&self.fs, record_of(extent.reference));
         }

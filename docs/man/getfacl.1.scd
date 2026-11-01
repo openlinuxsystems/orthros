@@ -49,8 +49,8 @@ of *-* reads the names from standard input, one a line.
 
 tmpfs, Btrfs and ext4 keep access lists, in the attributes
 *system.posix_acl_access* and *system.posix_acl_default*, as Linux
-keeps them on the disk. FAT and exFAT keep none, and show what the mode
-says.
+keeps them on the disk. FAT, exFAT and NTFS keep none, and show what
+the mode says.
 
 # OPTIONS
 

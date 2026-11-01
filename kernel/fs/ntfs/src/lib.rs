@@ -15,7 +15,8 @@
 //! In CI, Windows' own `chkdsk` checks the volumes the tests write
 //! (`windows_tests`). ADRs 0236 (reading), 0237 (writing), 0238
 //! (compressed and sparse data, links, the hibernation override and
-//! power cuts) and 0239 (attribute lists) record the decisions.
+//! power cuts), 0239 (attribute lists) and 0241 (alternate data streams
+//! as `user.` extended attributes) record the decisions.
 //!
 //! - [`boot`] reads the boot sector: how big clusters and records are,
 //!   and where the master file table is.
@@ -36,7 +37,8 @@
 //! - [`reparse`] reads reparse points, links and junctions, and makes
 //!   links.
 //! - [`fs::NtfsFs`] is the filesystem; [`node::NtfsNode`] its files,
-//!   directories and links. Metadata goes through a cache of the device's
+//!   directories and links, whose alternate data streams are their
+//!   extended attributes. Metadata goes through a cache of the device's
 //!   sectors ([`radix_block::cache::BlockCache`]); file data goes through
 //!   each file's page cache, straight from the clusters on the disk.
 //!

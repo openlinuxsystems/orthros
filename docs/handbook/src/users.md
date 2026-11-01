@@ -268,7 +268,8 @@ hers. `setfacl -x u:bob shared` takes his entry away, and `setfacl -b`
 the whole list. A default list decides the permissions of what is made
 under it, in place of your umask. The lists are kept on the disk as
 Linux keeps them, so they go with a Btrfs or ext4 disk moved between the
-two; FAT and exFAT keep none. See setfacl(1) and getfacl(1).
+two; FAT, exFAT and NTFS keep none (an NTFS keeps a file's streams as
+its `user.` attributes instead). See setfacl(1) and getfacl(1).
 
 ## Changing a password
 

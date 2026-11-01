@@ -26,6 +26,7 @@ use radix_vfs::{Error, Result};
 
 use crate::edit::{self, put_u16, put_u32, put_u64};
 use crate::record::{kind, u16_at, u32_at, u64_at};
+use crate::upcase::Upcase;
 
 /// A piece of a file's data in an extension record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,13 +56,10 @@ impl Entry<'_> {
         (ENTRY + self.name.len()).next_multiple_of(8)
     }
 
-    fn order(&self, other: &Entry<'_>) -> Ordering {
-        fn units(name: &[u8]) -> impl Iterator<Item = u16> + '_ {
-            name.as_chunks::<2>().0.iter().map(|u| u16::from_le_bytes(*u))
-        }
+    fn order(&self, other: &Entry<'_>, upcase: &Upcase) -> Ordering {
         self.kind
             .cmp(&other.kind)
-            .then_with(|| units(self.name).cmp(units(other.name)))
+            .then_with(|| edit::collate(upcase, self.name, other.name))
             .then(self.lowest.cmp(&other.lowest))
     }
 }
@@ -69,8 +67,9 @@ impl Entry<'_> {
 /// The value of the attribute list of the file whose base record is
 /// `buf`, its reference `base`, with its data's pieces `extents` in
 /// extension records: an entry for each attribute of `buf` but the list,
-/// and for each piece.
-pub fn build(buf: &[u8], base: u64, extents: &[Extent]) -> Result<KVec<u8>> {
+/// and for each piece, names ordered through the volume's up-case table
+/// `upcase` ([`edit::collate`]).
+pub fn build(buf: &[u8], base: u64, extents: &[Extent], upcase: &Upcase) -> Result<KVec<u8>> {
     let mut entries: KVec<Entry<'_>> = mem::vec();
     for at in edit::attrs(buf) {
         let kind = u32_at(buf, at);
@@ -101,7 +100,7 @@ pub fn build(buf: &[u8], base: u64, extents: &[Extent]) -> Result<KVec<u8>> {
     // has them.
     for i in 1..entries.len() {
         let mut j = i;
-        while j > 0 && entries[j - 1].order(&entries[j]) == Ordering::Greater {
+        while j > 0 && entries[j - 1].order(&entries[j], upcase) == Ordering::Greater {
             entries.swap(j - 1, j);
             j -= 1;
         }
