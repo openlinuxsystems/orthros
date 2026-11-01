@@ -27,7 +27,7 @@ means they may run a command as root with `elevate` (see below).
 Each console, Alt+F1 to Alt+F6, asks for a name and a password:
 
 ```
-Dukovo Server 0.10.4 (tty1)
+Dukovo Server 0.11.0 (tty1)
 
 Name: alice
 Password:

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "accounts"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "argon2",
  "base64ct",
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "consoled"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "accounts",
  "keymap",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "keymap"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "radix-abi",
 ]
@@ -554,7 +554,7 @@ checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
 
 [[package]]
 name = "manifest"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "radix-abi",
  "schemars",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "nukesh"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "indexmap",
  "libc",
@@ -685,14 +685,14 @@ dependencies = [
 
 [[package]]
 name = "radix-abi"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "ridlc",
 ]
 
 [[package]]
 name = "radix-bitlocker"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "aes",
  "ccm",
@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "radix-fbcon"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "radix-hal",
  "radix-klog",
@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "radix-hal"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "radix-hw",
  "radix-pstate",
@@ -719,37 +719,37 @@ dependencies = [
 
 [[package]]
 name = "radix-hw"
-version = "0.10.4"
+version = "0.11.0"
 
 [[package]]
 name = "radix-klog"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "radix-sync",
 ]
 
 [[package]]
 name = "radix-pstate"
-version = "0.10.4"
+version = "0.11.0"
 
 [[package]]
 name = "radix-sensors"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "radix-hw",
 ]
 
 [[package]]
 name = "radix-smbios"
-version = "0.10.4"
+version = "0.11.0"
 
 [[package]]
 name = "radix-spd"
-version = "0.10.4"
+version = "0.11.0"
 
 [[package]]
 name = "radix-sync"
-version = "0.10.4"
+version = "0.11.0"
 
 [[package]]
 name = "rand_core"
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "ridlc"
-version = "0.10.4"
+version = "0.11.0"
 
 [[package]]
 name = "ring"
@@ -1065,7 +1065,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "std-test"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "libc",
 ]
@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "systools"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "accounts",
  "blake2",
@@ -1171,7 +1171,7 @@ dependencies = [
 
 [[package]]
 name = "tls-test"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "ring",
  "rustls",

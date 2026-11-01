@@ -13,7 +13,7 @@ members = ["hello", "libradix", "radix-rt", "sockets", "spark", "storage", "user
 
 [workspace.package]
 # Keep in step with the root Cargo.toml (a unit test of ob checks it).
-version = "0.10.4"
+version = "0.11.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/openlinuxsystems/orthros"

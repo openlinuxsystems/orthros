@@ -30,7 +30,7 @@ add devices and settings, and settings that can be changed.
 
 _/kernel/version_
 	The kernel's name and version, and the Dukovo release it is part
-	of: *Radix 0.10.4 (Dukovo Server 0.10.4)*. The C library gives the
+	of: *Radix 0.11.0 (Dukovo Server 0.11.0)*. The C library gives the
 	second word as the release, and the whole line as the version, in
 	uname(3)'s *struct utsname*.
 
