@@ -174,6 +174,19 @@ wrong in plain words:
 		file sets it, and *authd*(8)'s, so that *date*(1)'s *--set*
 		works inside *elevate*(8).
 
+	*devices.pci* = [_"vendor:device"_, ...]
+		The PCI cards it drives, for a driver program, each by its
+		vendor's and its device's ID in hexadecimal, as *lspci*(8)
+		writes them: *"8086:100e"*, or *"8086:\*"* for any of the
+		vendor's; none unless set, and none twice (ADR 0198). Spark
+		gives it a capability to each card the kernel left for a
+		program that one names, at most 4, in the slots from
+		SLOT_DEVICE on (*radix-device*(2)), and keeps none itself, so
+		a card is free again for the service's next start once it
+		ends. A service that names cards of which the kernel left none,
+		as on a machine where the kernel drives them itself, is not
+		started. *e1000d*(8)'s file names *"8086:\*"*.
+
 	Paths are absolute, without *.*, *..* or *//*; none is _/_ itself
 	or within another, none is within a place every service reads
 	(name that whole place instead), and none is or holds
@@ -320,4 +333,4 @@ _/system/live/spark/tmp/name_
 
 # SEE ALSO
 
-*spark*(8), *service*(8), *logd*(8)
+*spark*(8), *service*(8), *logd*(8), *e1000d*(8)

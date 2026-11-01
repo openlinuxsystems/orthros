@@ -118,6 +118,7 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/commands/device", "systools"),
     ("system/commands/diskhealth", "systools"),
     ("system/commands/dmesg", "systools"),
+    ("system/commands/e1000d", "systools"),
     ("system/commands/ectool", "systools"),
     ("system/commands/eject", "systools"),
     ("system/commands/elevate", "systools"),

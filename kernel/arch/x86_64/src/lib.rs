@@ -438,6 +438,10 @@ impl Devices for Arch {
         devices::alloc_dma(source, pages, below_4g)
     }
 
+    fn isolate(source: radix_hal::PciAddress) -> bool {
+        iommu::isolate(source)
+    }
+
     fn map_dma(source: radix_hal::PciAddress, frames: &[(u64, u32)]) -> bool {
         iommu::map(source, frames)
     }
@@ -738,6 +742,14 @@ impl UserMode for Arch {
             "{pages} pages at {virt:#x} go outside the user half"
         );
         space.space().map_run(virt, phys, pages, space::access(access))
+    }
+
+    fn map_device_page(space: &Self::Space, virt: u64, phys: u64) -> Result<(), MapPageError> {
+        assert!(
+            (user::USER_START..user::USER_TOP).contains(&virt),
+            "{virt:#x} is not in the user half"
+        );
+        space.space().map_uncached(virt, phys)
     }
 
     fn split_pages(space: &Self::Space, at: u64) -> Result<(), MapPageError> {

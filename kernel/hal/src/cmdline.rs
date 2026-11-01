@@ -101,6 +101,13 @@ pub const FLAGS: &[Flag] = &[
         summary: "send IPv4 packets for other networks through this router",
     },
     Flag {
+        name: "e1000",
+        value: Some("driver"),
+        summary: "program leaves the Intel e1000 and e1000e network cards that an IOMMU \
+                  isolates to a driver program, e1000d; kernel, the default, drives them in \
+                  the kernel",
+    },
+    Flag {
         name: "font",
         value: Some("size"),
         summary: "framebuffer console font: 8x16, 12x24 or 16x32",

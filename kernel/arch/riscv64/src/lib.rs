@@ -279,6 +279,10 @@ impl Devices for Arch {
         None
     }
 
+    fn isolate(_source: radix_hal::PciAddress) -> bool {
+        false
+    }
+
     fn map_dma(_source: radix_hal::PciAddress, _frames: &[(u64, u32)]) -> bool {
         true
     }
@@ -426,6 +430,10 @@ impl UserMode for Arch {
     }
 
     fn map_pages(_: &Space, _: u64, _: u64, _: u64, _: UserAccess) -> Result<(), MapPageError> {
+        Err(MapPageError::NoMemory)
+    }
+
+    fn map_device_page(_: &Space, _: u64, _: u64) -> Result<(), MapPageError> {
         Err(MapPageError::NoMemory)
     }
 

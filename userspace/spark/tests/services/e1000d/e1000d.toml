@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The userspace-e1000 boot test's driver: e1000d(8) as the system's own
+# file has it, given every Intel card the kernel left for a program.
+
+service_version = 1
+description = "Intel e1000 and e1000e network cards"
+program = "/system/commands/e1000d"
+order = 15
+restart = "always"
+
+[limits]
+memory = "32M"
+
+[permissions]
+devices.pci = ["8086:*"]

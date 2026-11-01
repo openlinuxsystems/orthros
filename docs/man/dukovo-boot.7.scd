@@ -177,7 +177,7 @@ seconds since the kernel started; messages before timer calibration show
 [    0.254500] Time: TSC at 2807.603 MHz (measured against the HPET); APIC timer input 1004.640 MHz; tick 100 Hz
 [    0.383220] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX, PKRU; 2696-byte areas
 [    0.419834] Lock checker: off (the lockdep flag turns it on)
-[    0.445393] Capabilities: ready; 22 object kinds, 13 rights, spaces of up to 65536 slots, derivations up to 64 deep
+[    0.445393] Capabilities: ready; 23 object kinds, 13 rights, spaces of up to 65536 slots, derivations up to 64 deep
 [    0.469304] User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)
 [    0.494239] Files: the root is a tmpfs; Spark mounts the rest
 [    0.520196] User: the usertests image is 183 KiB
@@ -508,6 +508,15 @@ them to *init*, and the kernel does not read them.
 *gateway*=_address_
 	Send the first network card's IPv4 packets for other networks
 	through this router, such as *10.0.2.2*. See *NETWORK*.
+
+*e1000*=program | kernel
+	With *program*, leave each Intel e1000 and e1000e network card that
+	the IOMMU confines to its own memory, with interrupt remapping on,
+	to a driver program, *e1000d*(8), which Spark starts (ADR 0198); the
+	kernel drives the cards it cannot confine itself, and says why. With
+	*kernel*, the default, the kernel drives them all. The images *ob
+	image* builds boot with *e1000=program* (*features.userspace-e1000*
+	in *dukovo.toml*(5)). See *NETWORK*.
 
 *font*=_size_
 	Draw the framebuffer console with the Spleen font of this size:
@@ -1096,6 +1105,18 @@ behind QEMU's VT-d unit:
 
 	Net: 10.0.2.2 answered ping 1 in 7.792 ms
 	selftest net: passed; the router answered 4 pings, the fastest in 1.390 ms
+
+With *e1000=program*, an e1000 or e1000e card behind the IOMMU gets its
+interface at boot, down, and is left for *e1000d*(8). Its bus mastering
+stays off until e1000d opens it; then e1000d runs the kernel's own
+driver for it, and the card's frames go through a link the two share
+(*radix-device*(2)). If e1000d ends, the kernel stops the card before
+it frees the card's memory, and the interface is down until Spark has
+started e1000d again:
+
+	Net: net1 is an e1000 network card at 0000:00:04.0, left for a driver program (e1000=program)
+	Device: 0000:00:04.0 is open for e1000d
+	Net: net1 is attached to its driver, e1000d, MAC 52:54:00:12:34:57
 
 # REAL HARDWARE
 

@@ -71,9 +71,16 @@ const WINDOW_SLOTS: u32 = 16;
 const SLOT_PLATFORM: u32 = 48;
 /// The slot of the program's clock capability (radix-clock(2)), if it
 /// was given one: what the permission admin.time grants. It stays
-/// through `fork` and `exec`. The slots a program takes for its own use
-/// start after it.
+/// through `fork` and `exec`.
 const SLOT_CLOCK: u32 = 49;
+/// The first of the slots that hold the cards a driver program drives
+/// (radix-device(2)), if it was given any: what the service file's
+/// devices.pci grants, in the order the kernel lists the cards. The slots
+/// a program takes for its own use start after the DEVICE_SLOTS slots
+/// from here.
+const SLOT_DEVICE: u32 = 50;
+/// The number of slots for cards.
+const DEVICE_SLOTS: u32 = 4;
 /// The number of slots of a program's capability space.
 const SLOTS: u32 = 256;
 /// The first slot of a POSIX program's file descriptors: descriptor `n`

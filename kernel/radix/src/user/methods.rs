@@ -65,6 +65,7 @@ fn version(kind: ObjectKind) -> u32 {
         ObjectKind::Network => radix_abi::network::VERSION,
         ObjectKind::Platform => radix_abi::platform::VERSION,
         ObjectKind::Clock => radix_abi::clock::VERSION,
+        ObjectKind::Device => radix_abi::device::VERSION,
         _ => 0,
     }
 }
@@ -72,11 +73,15 @@ fn version(kind: ObjectKind) -> u32 {
 /// Whether the methods of a capability of `kind` take the object it
 /// designates from the lookup that found it ([`objects::find`]),
 /// rather than looking it up themselves: messages to an endpoint, and the
-/// file, directory and process methods.
+/// file, directory, process and device methods.
 pub fn takes_object(kind: ObjectKind) -> bool {
     matches!(
         kind,
-        ObjectKind::Endpoint | ObjectKind::File | ObjectKind::Directory | ObjectKind::Process
+        ObjectKind::Endpoint
+            | ObjectKind::File
+            | ObjectKind::Directory
+            | ObjectKind::Process
+            | ObjectKind::Device
     )
 }
 
@@ -164,6 +169,7 @@ pub fn call(
         (ObjectKind::Network, _) => super::network::method(user, slot, cap, info.label, &args),
         (ObjectKind::Platform, _) => super::platform::method(user, cap, info.label, &args),
         (ObjectKind::Clock, _) => super::clock::method(user, cap, info.label, &args),
+        (ObjectKind::Device, _) => super::device::method(user, found, info.label, &args),
         (ObjectKind::Directory, _) => {
             super::files::directory_method(user, found, info.label, &args)
         }

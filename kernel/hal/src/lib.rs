@@ -482,6 +482,15 @@ pub trait Devices {
     /// dropped (ADR 0164).
     fn alloc_dma(source: PciAddress, pages: usize, below_4g: bool) -> Option<radix_hw::Dma>;
 
+    /// Gives the PCI function `source` a domain of its own behind an
+    /// IOMMU that translates its DMA and remaps its interrupts, which no
+    /// other function shares from then on, so that a program may drive
+    /// it (ADR 0198): it reaches only the memory mapped for it, and raises
+    /// only the interrupts given to it. False, changing nothing, when no
+    /// IOMMU translates it or remaps its interrupts, or another function's
+    /// requests carry the same ID.
+    fn isolate(source: PciAddress) -> bool;
+
     /// Lets the PCI function `source` reach the pages of `frames`
     /// (physical address, length) at their physical addresses, for one
     /// request, until [`Devices::unmap_dma`] takes them back: behind an

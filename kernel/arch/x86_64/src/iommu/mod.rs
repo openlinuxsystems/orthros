@@ -198,6 +198,9 @@ struct Device {
     /// requester ID; then its own is `None`.
     shares: Option<usize>,
     domain: SpinLock<Option<Domain>>,
+    /// A program drives it ([`isolate`]): no function added after it
+    /// shares its domain.
+    alone: AtomicBool,
 }
 
 static UNITS: [Once<Remapper>; MAX_UNITS] = [const { Once::new() }; MAX_UNITS];
@@ -392,8 +395,26 @@ fn device(source: Address) -> Option<&'static Device> {
             }
             _ => None,
         };
+        // A function a program drives shares its domain with none.
+        if let Some(owner) = shares.and_then(|at| DEVICES[at].get())
+            && owner.alone.load(Ordering::Acquire)
+        {
+            radix_klog::warn!(
+                "IOMMU: {source} is given no memory: its requests carry the ID of {}, which a \
+                 program drives",
+                owner.source
+            );
+            return None;
+        }
         let shares = shares.filter(|_| how.is_some());
-        let device = Device { source, remapper, requester, shares, domain: SpinLock::new(domain) };
+        let device = Device {
+            source,
+            remapper,
+            requester,
+            shares,
+            domain: SpinLock::new(domain),
+            alone: AtomicBool::new(false),
+        };
         (slot.set(device).ok()?, how)
     };
     match how {
@@ -407,6 +428,37 @@ fn device(source: Address) -> Option<&'static Device> {
     }
     amd::reserve_for(source);
     Some(device)
+}
+
+/// Gives `source` a domain no other function shares, as
+/// `Devices::isolate` says: only if a unit translates its DMA through a
+/// domain of its own and remaps its interrupts, and no function added so
+/// far carries its requester ID. From then on [`device`] refuses a
+/// function that would share it.
+pub fn isolate(source: Address) -> bool {
+    if !active() {
+        return false;
+    }
+    let Some(device) = device(source) else { return false };
+    let Some(index) = device.remapper else { return false };
+    let Some(remapper) = UNITS[index].get() else { return false };
+    let remaps = match &remapper.engine {
+        Some(Engine::Vtd(unit)) => unit.lock_irq().remapping(),
+        Some(Engine::Amd(unit)) => unit.lock_irq().remapping(),
+        None => false,
+    };
+    if !remaps || device.shares.is_some() || device.domain.lock_irq().is_none() {
+        return false;
+    }
+    let _adding = ADDING.lock_irq();
+    let shared = DEVICES.iter().map_while(Once::get).any(|other| {
+        other.source != source && other.remapper == Some(index) && other.requester == device.requester
+    });
+    if shared {
+        return false;
+    }
+    device.alone.store(true, Ordering::Release);
+    true
 }
 
 /// Tells the log, once, that a unit stopped invalidating.

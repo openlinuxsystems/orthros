@@ -3,7 +3,7 @@
 
 //! What a capability designates: kernel objects and hardware resources.
 //!
-//! Eighteen kinds are kernel objects with an entry in the store's object
+//! Nineteen kinds are kernel objects with an entry in the store's object
 //! table, named by an [`ObjectId`]: memory, frames, DMA buffers, address
 //! spaces, threads, processes, endpoints, notifications, resource domains
 //! (Phase 4: a CPU weight and a memory limit that threads and their memory
@@ -12,7 +12,8 @@
 //! directories, from Phase 9 the machine's power, from Phase 11 its
 //! platform controls (ADR 0208), from Phase 13 the authority to give
 //! names (ADR 0214), and from Phase 12 the clock, the time of day and the
-//! real-time clock (ADR 0194). Four kinds are
+//! real-time clock (ADR 0194), and the cards the kernel leaves for driver
+//! programs (ADR 0198). Four kinds are
 //! ranges, named by the range itself: three of hardware resources,
 //! interrupt lines, I/O ports and device registers (MMIO), and from
 //! Phase 12 the network's ports, which programs connect and listen
@@ -76,10 +77,13 @@ pub enum ObjectKind {
     /// The time of day, to set and slew, and the real-time clock (ADR
     /// 0194).
     Clock = 21,
+    /// A PCI card the kernel left for a driver program, or the root of
+    /// all of them (ADR 0198).
+    Device = 22,
 }
 
 /// How many kinds there are.
-pub const KINDS: usize = 22;
+pub const KINDS: usize = 23;
 
 impl ObjectKind {
     /// Every kind, in the order of their numbers.
@@ -106,6 +110,7 @@ impl ObjectKind {
         ObjectKind::Platform,
         ObjectKind::Names,
         ObjectKind::Clock,
+        ObjectKind::Device,
     ];
 
     /// The kind numbered `n`.
@@ -159,6 +164,9 @@ impl ObjectKind {
             // Reading asks the time and the real-time clock's; control
             // sets, slews and writes them.
             ObjectKind::Clock => Rights::READ.union(Rights::CONTROL),
+            // Reading asks what the cards are; control opens one, maps its
+            // registers and memory and attaches it.
+            ObjectKind::Device => Rights::READ.union(Rights::CONTROL),
         };
         own.union(Rights::COPY).union(Rights::TRANSFER)
     }
@@ -221,6 +229,7 @@ impl ObjectKind {
             ObjectKind::Platform => "platform",
             ObjectKind::Names => "names",
             ObjectKind::Clock => "clock",
+            ObjectKind::Device => "device",
         }
     }
 }

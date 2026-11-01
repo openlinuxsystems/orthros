@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Intel's e1000 and e1000e network cards, driven as a program: e1000d(8)
+# drives each card the kernel left for one (the boot flag e1000=program,
+# dukovo-boot(7), ADR 0198). Without such a card it is not started.
+#
+# service.toml(5) explains each setting. `service check e1000d` checks
+# this file, and `service edit e1000d` checks it as you save.
+
+service_version = 1
+description = "Intel e1000 and e1000e network cards"
+program = "/system/commands/e1000d"
+# After the consoles, before netd sets the cards up.
+order = 15
+# Started again whenever it ends: always, on-failure or never. The kernel
+# stops its cards first, and their interfaces come back up with it.
+restart = "always"
+
+[limits]
+# Each card's frames, its rings and its link to the network stack take
+# about 2.5 MiB, charged here.
+memory = "32M"
+
+# What it holds beyond what every service reads (service.toml(5)): the
+# cards it drives, every Intel card the kernel left for a program, which
+# Spark gives it.
+[permissions]
+devices.pci = ["8086:*"]

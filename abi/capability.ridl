@@ -65,6 +65,9 @@ enum ObjectKind: u8 {
     /// The time of day, to set and slew, and the machine's real-time
     /// clock (radix-clock(2)).
     clock = 21;
+    /// A PCI card the kernel left for a driver program, or the root of
+    /// all of them (radix-device(2)).
+    device = 22;
 }
 
 /// What a capability lets its holder do.

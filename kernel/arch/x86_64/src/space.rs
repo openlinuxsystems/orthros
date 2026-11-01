@@ -66,7 +66,8 @@ const LARGE: u64 = 1 << 7;
 const LARGE_PAGE: u64 = 512 * PAGE;
 /// The frame of a large page's entry. Its bit 12 is the PAT bit, which
 /// user pages leave clear, as they leave the PAT, PCD and PWT bits of every
-/// entry: all user memory is write-back.
+/// entry: all user memory is write-back, but for a card's registers that
+/// its driver program maps (`map_uncached`).
 const LARGE_ADDRESS: u64 = ADDRESS & !(LARGE_PAGE - 1);
 
 /// The most cleared entries [`AddressSpace::edit`] keeps before it flushes
@@ -183,6 +184,25 @@ impl AddressSpace {
         assert!(virt < USER_END && virt.is_multiple_of(PAGE), "{virt:#x} is not a user page");
         let _guard = self.lock.lock();
         self.map_locked(virt, phys, access)
+    }
+
+    /// Maps the page at `virt` (in the lower half) to the device registers
+    /// at `phys`, uncached, for user mode, unless something is mapped there
+    /// already (ADR 0198). Such an entry is only ever cleared: nothing
+    /// edits its access, so its cache bits stay.
+    pub fn map_uncached(&self, virt: u64, phys: u64) -> Result<(), MapPageError> {
+        assert!(virt < USER_END && virt.is_multiple_of(PAGE), "{virt:#x} is not a user page");
+        let _guard = self.lock.lock();
+        let slot = paging::entry(self.pml4, virt, 1, true).map_err(|err| match err {
+            MapError::LargePage => MapPageError::AlreadyMapped,
+            MapError::NoMemory => MapPageError::NoMemory,
+        })?;
+        if slot.load(Ordering::Relaxed) & PRESENT != 0 {
+            return Err(MapPageError::AlreadyMapped);
+        }
+        // Not present before, so no CPU has it cached: no flush.
+        slot.store(phys | paging::user_device_flags(), Ordering::Relaxed);
+        Ok(())
     }
 
     /// [`AddressSpace::map_new`], with the lock held.

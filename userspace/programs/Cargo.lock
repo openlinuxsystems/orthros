@@ -766,10 +766,25 @@ name = "radix-hw"
 version = "0.11.0"
 
 [[package]]
+name = "radix-intel-net"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
+]
+
+[[package]]
 name = "radix-klog"
 version = "0.11.0"
 dependencies = [
  "radix-sync",
+]
+
+[[package]]
+name = "radix-nic"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
 ]
 
 [[package]]
@@ -1182,6 +1197,9 @@ dependencies = [
  "netproto",
  "radix-abi",
  "radix-bitlocker",
+ "radix-hw",
+ "radix-intel-net",
+ "radix-nic",
  "radix-smbios",
  "radix-spd",
  "ring",

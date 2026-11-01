@@ -33,6 +33,20 @@ A card the kernel cannot give an interrupt is polled: every millisecond
 while frames move, every 10 ms when quiet. A card that stops with an
 error is left stopped, and the log says so.
 
+# AS A PROGRAM
+
+With the boot flag *e1000=program* (*dukovo-boot*(7)), which the images
+*ob image* builds have (*features.userspace-e1000* in *dukovo.toml*(5)),
+the kernel leaves each of these cards that the IOMMU confines to its own
+memory, with interrupt remapping on, to *e1000d*(8), which runs the same
+driver as a program (ADR 0198). The card keeps its interface, down until
+e1000d attaches it; a card the IOMMU cannot confine, alone or with
+another function that shares its requests' ID, stays the kernel's:
+
+```
+Net: net0 is an e1000 network card at 0000:00:03.0, left for a driver program (e1000=program)
+```
+
 # SEE ALSO
 
-*igb*(4), *igc*(4), *ixgbe*(4), *ip*(8), *netd*(8)
+*igb*(4), *igc*(4), *ixgbe*(4), *ip*(8), *netd*(8), *e1000d*(8)

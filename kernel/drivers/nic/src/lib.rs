@@ -28,6 +28,8 @@ use core::fmt;
 
 use radix_hw::Dma;
 
+pub mod link;
+
 /// The bytes of a frame's slot: an Ethernet frame of up to 1518 bytes,
 /// with a VLAN tag, and its checksum, with room to spare. Cards that
 /// write received frames in buffers of a fixed size are told this one.

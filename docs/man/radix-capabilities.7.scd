@@ -128,6 +128,14 @@ rights listed, plus *copy* and *transfer*, which every kind has.
 	to set the clock, slew it by up to 128 ms, and write the real-time
 	clock. Every program reads the time without it.
 
+*device*
+	A PCI card the kernel left for a driver program, such as the e1000
+	that *e1000d*(8) drives, or the root of them all, which only Spark
+	holds and which opens the others (see *radix-device*(2), ADR 0198).
+	Rights: *read*, to list and describe them; *control*, to open one,
+	map its registers and the memory it reaches, take its interrupt and
+	attach it to the network.
+
 # RIGHTS
 
 The thirteen rights are *read*, *write*, *execute*, *send*, *receive*,
@@ -271,7 +279,7 @@ Operations on capabilities fail with one of these, and change nothing:
 At boot the kernel reports its store:
 
 ```
-Capabilities: ready; 22 object kinds, 13 rights, spaces of up to 65536 slots, derivations up to 64 deep
+Capabilities: ready; 23 object kinds, 13 rights, spaces of up to 65536 slots, derivations up to 64 deep
 ```
 
 The *kdb* command *caps* counts the spaces, capabilities and objects by

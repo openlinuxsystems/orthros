@@ -237,6 +237,12 @@ pub trait UserMode: crate::Threads {
         access: UserAccess,
     ) -> Result<(), MapPageError>;
 
+    /// Maps the page at `virt` (page-aligned, below [`UserMode::USER_TOP`])
+    /// to the device registers at `phys`, readable and writable, uncached
+    /// and never executable: a card's registers, for its driver program
+    /// (ADR 0198). Nothing is mapped there already.
+    fn map_device_page(space: &Self::Space, virt: u64, phys: u64) -> Result<(), MapPageError>;
+
     /// Makes sure no large page ([`UserMode::map_pages`]) maps pages on
     /// both sides of `at` (page-aligned), so that a range that starts or
     /// ends there can change alone.

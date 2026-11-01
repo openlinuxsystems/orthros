@@ -1,0 +1,177 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Devices a driver program drives (Phase 12, ADR 0198): a PCI card the
+//! kernel left alone for a program, such as the e1000 with the boot flag
+//! `e1000=program`, which e1000d(8) drives.
+//!
+//! The kernel gives Spark the root device capability when it starts:
+//! `list` describes the cards it left, and `open` makes a capability to
+//! one, which only one may hold at a time. Spark gives a service a card
+//! its file names in `devices.pci` (service.toml(5)) in SLOT_DEVICE and
+//! the slots after it. Through a card's capability its driver maps the
+//! card's registers and memory the card can reach, gets the card's
+//! interrupt, and attaches it to the network as an interface; the card
+//! reaches no other memory, since the kernel leaves cards only behind an
+//! IOMMU, and the driver never touches the card's configuration space.
+//! Asking needs the read right, and the rest the control right.
+//!
+//! When the card's capability goes (its driver ended, or let go of it),
+//! the kernel stops the card's bus mastering and its interrupt first,
+//! then takes the registers, the memory and the link out of the driver's
+//! space and frees them, and puts the interface down. The interface keeps
+//! its addresses, and the next driver to attach brings it back up.
+//!
+//! A network card's frames go through a link, LINK_SIZE bytes the kernel
+//! and the driver share, mapped by `attach_network`. Its header page
+//! holds, as 32-bit little-endian words at these byte offsets: 0 the
+//! layout's version (LINK_VERSION), 4 the slots of each direction
+//! (LINK_ENTRIES), 8 a slot's bytes (LINK_SLOT); 64 the card's link,
+//! which the driver writes (bit 31 up, bit 30 full duplex, the speed in
+//! megabits a second below); 128 the received ring's tail, which the
+//! driver moves; 192 its head, which the kernel moves; 256 the sending
+//! ring's tail, which the kernel moves; 320 its head, which the driver
+//! moves; from 1024 a received frame's length for each slot, and from
+//! 2048 a frame to send's. The received frames' slots follow the header,
+//! then the frames to send's. Each index counts the frames ever put in,
+//! wrapping at 2^32, and frame `n` is in slot `n % LINK_ENTRIES`. A side
+//! writes a frame and its length before it moves its tail past them, and
+//! reads them only after the other side moved its tail. The kernel takes
+//! a frame's length only up to a slot, and stops using a link whose
+//! driver moved an index more than LINK_ENTRIES away from the kernel's
+//! own.
+module device;
+
+/// The most cards the kernel leaves for programs.
+const DEVICES_MAX: u32 = 16;
+/// The most pages of memory `map_dma` gives one card, in all: 4 MiB.
+const DMA_PAGES_MAX: u32 = 1024;
+/// `interrupt`'s kind for a card with no interrupt the kernel can give
+/// it: its driver polls it.
+const INTERRUPT_NONE: u32 = 0;
+/// `interrupt`'s kind for an MSI.
+const INTERRUPT_MSI: u32 = 1;
+/// `wait`'s event: the card raised its interrupt.
+const EVENT_INTERRUPT: u32 = 1;
+/// `wait`'s event: the stack put frames on the link to send.
+const EVENT_SEND: u32 = 2;
+/// The version of the link's layout.
+const LINK_VERSION: u32 = 1;
+/// The slots of each direction of a link.
+const LINK_ENTRIES: u32 = 256;
+/// The bytes of a link's slot.
+const LINK_SLOT: u32 = 2048;
+/// The bytes of a link: its header page and both directions' slots.
+const LINK_SIZE: u64 = 1052672;
+/// The value of `DeviceInfo.interface` for a card that is no network
+/// card.
+const NO_INTERFACE: u32 = 0xffffffff;
+
+/// What a card is.
+struct DeviceInfo {
+    /// Its PCI address: segment << 16 | bus << 8 | device << 3 |
+    /// function.
+    address: u32;
+    /// Its vendor's PCI ID.
+    vendor: u16;
+    /// Its device ID.
+    device: u16;
+    /// Its subsystem's vendor ID.
+    subsystem_vendor: u16;
+    /// Its subsystem ID.
+    subsystem: u16;
+    /// Its revision.
+    revision: u8;
+    /// Its class: 2 for a network controller.
+    base_class: u8;
+    /// Its subclass: 0 for Ethernet.
+    subclass: u8;
+    /// Its programming interface.
+    interface_code: u8;
+    /// The interrupt `interrupt` gives it: an INTERRUPT_ kind.
+    interrupts: u8;
+    /// 1 while a capability to it is open.
+    held: u8;
+    /// Must be 0.
+    reserved: u16;
+    /// Its network interface's index (net0 is 0), or NO_INTERFACE.
+    interface: u32;
+    /// The bytes of each of its BARs that `map_registers` maps: 0 for one
+    /// it has not, an I/O BAR, or one smaller than a page.
+    bars: [u64; 6];
+}
+
+/// The root device capability, which Spark holds, and a card's.
+interface device = 0x0031 version 1 {
+    kind = device;
+    /// Writes a DeviceInfo for each card the kernel left for a program
+    /// into `buffer`, as many as fit, and returns how many there are.
+    /// Only the root capability answers; needs the read right.
+    method list = 1 (buffer: out bytes) -> (count: u32)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, bad_address,
+                not_supported];
+    /// Puts a capability to the card at PCI address `address` in slot
+    /// `to`, with every right. Fails with not_found if the kernel left no
+    /// card there, and with busy while another capability to it is open.
+    /// Only the root capability answers; needs the control right.
+    method open = 2 (address: u32, to: slot) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, occupied, busy,
+                not_found, no_memory, not_supported];
+    /// Writes the card's DeviceInfo into `buffer`. Needs the read right.
+    method info = 3 (buffer: out bytes) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, bad_address,
+                not_supported];
+    /// Maps the card's memory BAR `bar`, whole, uncached and readable and
+    /// writable, at `address` (page-aligned, or 0 for where the kernel
+    /// chooses, as it places anonymous memory) in the address space in
+    /// slot `space`, and returns where and its size. A BAR smaller than a
+    /// page is refused (invalid_argument), since its page may hold
+    /// another card's registers. Needs the control right on both.
+    method map_registers = 4 (space: slot, address: addr, bar: u32) -> (at: addr, size: u64)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                already_mapped, no_memory, gone, not_supported];
+    /// Allocates `pages` pages of zeroed memory the card can read and
+    /// write, maps them at `address` (page-aligned, or 0 for where the
+    /// kernel chooses) in the address space in slot `space`, and returns
+    /// where, and the address the card reaches them at, from which they
+    /// follow one another.
+    /// They are charged to the caller's resource domain; a card has at
+    /// most DMA_PAGES_MAX of them (exhausted). Needs the control right on
+    /// both.
+    method map_dma = 5 (space: slot, address: addr, pages: u32)
+        -> (at: addr, device_address: u64)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                already_mapped, no_memory, exhausted, gone, not_supported];
+    /// Gives the card its interrupt, an MSI, and returns its kind:
+    /// INTERRUPT_MSI, or INTERRUPT_NONE for a card without one, which its
+    /// driver polls. From then on `wait` reports EVENT_INTERRUPT each time
+    /// the card raises it. Fails with already once it has one. Needs the
+    /// control right.
+    method interrupt = 6 () -> (kind: u32)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, already, no_memory,
+                not_supported];
+    /// Attaches the card to its network interface, which comes up with
+    /// MAC address `mac` (6 bytes): maps the interface's link, LINK_SIZE
+    /// bytes, at `address` (page-aligned, or 0 for where the kernel
+    /// chooses) in the address space in slot `space`, and returns where,
+    /// and the interface's index. Fails with not_supported
+    /// for a card that is no network card, and with already once it is
+    /// attached. Needs the control right on both.
+    method attach_network = 7 (space: slot, address: addr, mac: in bytes)
+        -> (at: addr, interface: u32)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                already, already_mapped, no_memory, gone, not_supported];
+    /// Waits until the card raises its interrupt or the stack has frames
+    /// for it to send, or `timeout_ns` nanoseconds have passed (0 waits
+    /// for nothing, u64's largest for ever), and returns the events since
+    /// the last wait: EVENT_ bits, 0 when it timed out. Fails with
+    /// interrupted when a signal comes. Needs the control right.
+    method wait = 8 (timeout_ns: u64) -> (events: u32)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, interrupted,
+                not_supported];
+    /// Tells the stack that the driver put received frames on the link
+    /// or changed the card's link, so that it looks. Needs the control
+    /// right.
+    method wake = 9 () -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, not_supported];
+}
