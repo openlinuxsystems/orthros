@@ -124,6 +124,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-random",
     "radix-realtek-net",
     "radix-relocs",
+    "radix-rge-net",
     "radix-sched",
     "radix-scsi",
     "radix-sdhci",

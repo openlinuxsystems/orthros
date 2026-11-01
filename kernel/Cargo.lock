@@ -291,6 +291,7 @@ dependencies = [
  "radix-pstate",
  "radix-random",
  "radix-realtek-net",
+ "radix-rge-net",
  "radix-sched",
  "radix-scsi",
  "radix-sdhci",
@@ -706,6 +707,14 @@ dependencies = [
 [[package]]
 name = "radix-relocs"
 version = "0.11.0"
+
+[[package]]
+name = "radix-rge-net"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
+]
 
 [[package]]
 name = "radix-sched"

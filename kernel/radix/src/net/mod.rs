@@ -851,6 +851,8 @@ pub enum Known {
     Atheros(radix_atheros_net::Model),
     /// One of Broadcom's NetXtreme chips (`radix-broadcom-net`).
     Broadcom(radix_broadcom_net::Model),
+    /// One of Realtek's 2.5 and 5 gigabit chips (`radix-rge-net`).
+    Rge(radix_rge_net::Model),
 }
 
 impl Known {
@@ -861,6 +863,7 @@ impl Known {
             Known::Realtek(model) => model.msi(),
             Known::Atheros(model) => model.msi(),
             Known::Broadcom(model) => model.msi(),
+            Known::Rge(model) => model.msi(),
             Known::Vmxnet3 | Known::Ena | Known::Gve => true,
         }
     }
@@ -874,7 +877,7 @@ impl Known {
     fn article(self) -> &'static str {
         match self {
             Known::Intel(_) | Known::Ena => "an",
-            Known::Vmxnet3 | Known::Gve | Known::Realtek(_) => "a",
+            Known::Vmxnet3 | Known::Gve | Known::Realtek(_) | Known::Rge(_) => "a",
             Known::Atheros(model) => model.article(),
             Known::Broadcom(model) => model.article(),
         }
@@ -892,6 +895,7 @@ impl fmt::Display for Known {
             Known::Realtek(model) => write!(f, "Realtek {}", model.name),
             Known::Atheros(model) => f.write_str(model.name),
             Known::Broadcom(model) => f.write_str(model.name),
+            Known::Rge(model) => f.write_str(model.name.unwrap_or("Realtek RTL8125/RTL8126")),
         }
     }
 }
@@ -917,6 +921,9 @@ pub fn identify(function: &Function) -> Option<Known> {
     }
     if let Some(model) = radix_broadcom_net::identify(vendor, device) {
         return Some(Known::Broadcom(model));
+    }
+    if let Some(model) = radix_rge_net::identify(vendor, device) {
+        return Some(Known::Rge(model));
     }
     radix_intel_net::identify(vendor, device).map(Known::Intel)
 }
@@ -1083,7 +1090,7 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
     // I/O ports: the second on the PCI RTL8169, the third on the PCI
     // Express chips.
     let first = match card {
-        Known::Realtek(_) => (0..6)
+        Known::Realtek(_) | Known::Rge(_) => (0..6)
             .find(|&bar| matches!(function.bar(bar), Some(Bar::Memory { .. })))
             .ok_or("its registers are not in memory")?,
         _ => 0,
@@ -1096,7 +1103,9 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
         Known::Gve => Some(map_registers(function, 2)?),
         Known::Broadcom(model) if model.ape() => Some(map_registers(function, 2)?),
         Known::Broadcom(_) => None,
-        Known::Intel(_) | Known::Ena | Known::Realtek(_) | Known::Atheros(_) => None,
+        Known::Intel(_) | Known::Ena | Known::Realtek(_) | Known::Atheros(_) | Known::Rge(_) => {
+            None
+        }
     };
     let source = function.address();
     // One interrupt, for everything, if the card should have one and it
@@ -1189,6 +1198,17 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
             sched::now_ns,
         )
         .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
+        Known::Rge(model) => radix_rge_net::start(
+            model,
+            regs,
+            function.find_capability(capability::EXPRESS),
+            how,
+            fallback_mac(),
+            &mut alloc,
+            &mut delay,
+            sched::now_ns,
+        )
+        .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
     };
     let nic = started.map_err(|err| {
         if let Some(vector) = interrupt {
@@ -1202,6 +1222,7 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
     // A Realtek card is named by its chip, which only its registers say.
     let _ = match card {
         Known::Realtek(_) => write!(about.what, "a Realtek {} network card", info.model),
+        Known::Rge(_) => write!(about.what, "a {} network card", info.model),
         _ => write!(about.what, "{} {card} network card", card.article()),
     };
     let kind = if card.msix() { "MSI-X" } else { "MSI" };

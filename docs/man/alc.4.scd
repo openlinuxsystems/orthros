@@ -49,4 +49,4 @@ real test.
 
 # SEE ALSO
 
-*bge*(4), *e1000*(4), *re*(4), *ip*(8), *netd*(8)
+*bge*(4), *e1000*(4), *re*(4), *rge*(4), *ip*(8), *netd*(8)

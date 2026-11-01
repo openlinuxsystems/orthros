@@ -32,6 +32,14 @@ IPv6, the firewall and WireGuard. This page grows with each.
   the RTL810x at 100 Mb/s, the onboard Ethernet of most boards that is
   not Intel's (re(4)). No emulator has them: a model of the chips tests
   the driver, and the Dell Inspiron 15 5570 the real thing.
+- **Realtek's 2.5 and 5 gigabit chips**: the RTL8125A, RTL8125B and
+  RTL8125D at 2.5 Gb/s and the RTL8126A at 5 Gb/s, among them Killer's
+  E3000 and E5000 and the Framework Desktop's port (rge(4)). The driver
+  sets them up as OpenBSD's does, translated from its code, without the
+  firmware Realtek ships for the chips, which is closed: they run on
+  the code in their own ROMs. Its tests check its register reads and
+  writes on each chip against OpenBSD's own code, run on a model of the
+  chips; the first boot on a machine with one is its real test.
 - **Atheros' chips**: the AR8131, AR8151, AR8161 and AR8171 at 1 Gb/s,
   the AR8132, AR8152, AR8162 and AR8172 at 100 Mb/s, and the Killer
   E2200, E2400 and E2500 built on them, on many laptops from 2009 to
