@@ -3,7 +3,7 @@
 
 [package]
 name = "manifest"
-description = "Dukovo's files that describe programs: service files (service.toml(5)), and bundle manifests from Phase 13d"
+description = "Dukovo's files that describe programs: service files (service.toml(5)) and bundle manifests (manifest.json(5))"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,6 +17,16 @@ radix-abi = { path = "../../../kernel/abi" }
 # the same types as the service command (ADR 0216).
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+# Bundle manifests (feature `bundle`), which tools read and Spark does not.
+serde_json = { version = "1.0.140", default-features = false, features = ["alloc"], optional = true }
+# Their JSON Schema (feature `schema`), from the same types.
+schemars = { version = "1.2.3", default-features = false, features = ["derive"], optional = true }
+
+[features]
+# manifest::bundle: bundle manifests (manifest.json(5), ADR 0221).
+bundle = ["dep:serde_json"]
+# manifest::bundle::schema: their JSON Schema, for `bundle schema`.
+schema = ["bundle", "dep:schemars"]
 
 [lints]
 workspace = true

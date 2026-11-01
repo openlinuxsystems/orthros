@@ -1,0 +1,14 @@
+{
+  "manifest_version": 1,
+  "id": "org.git-scm.git",
+  "name": "Git",
+  "version": "2.47.1",
+  "summary": "Distributed version control",
+  "publisher": { "name": "Dukovo catalog" },
+  "license": "GPL-2.0-only",
+  "source": "https://catalog.dukovo.org/source/git-2.47.1.tar.xz",
+  "requires_os": "1.0",
+  "architectures": ["x86_64"],
+  "programs": { "git": { "path": { "x86_64": "bin/git" } } },
+  "commands": [ { "name": "git", "program": "git", "runs_with": "your-access" } ]
+}

@@ -62,6 +62,8 @@ error that starts with the tool's name.
 :  keep the accounts and check passwords
 |  *blkid*(8)
 :  what each disk and partition holds: filesystems, labels and UUIDs
+|  *bundle*(1)
+:  make, check, sign and pack bundles
 |  *chgrp*(1), *chmod*(1), *chown*(1)
 :  change a file's group, mode or owner
 |  *column*(1)

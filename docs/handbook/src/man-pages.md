@@ -30,6 +30,7 @@ for section 2, which `ridlc` generates from the interface definitions in
 | `consoled(8)` | The virtual consoles on the screen and keyboard, and their keys |
 | `authd(8)`, `user(8)`, `passwd(1)`, `login(1)` | Accounts: the service that keeps them, checks passwords and starts sessions, making and listing accounts, changing a password, and signing in at a console |
 | `elevate(8)`, `sudo(8)` | Running a command as an administrator, after the password once in each terminal pane every 15 minutes |
+| `bundle(1)`, `manifest.json(5)` | Bundles: making and checking a bundle's manifest, each field and permission it may hold, and signing, packing and unpacking bundles |
 | `nukesh(1)` | Nukesh, the shell: options, start-up files, scripts, the line editor, history, completion, job control, POSIX mode and its limits |
 | `coreutils(1)`, `7zz(1)` | What the ported core utilities and 7-Zip do on Dukovo |
 | `systools(1)`, `ps(1)`, `top(1)`, `free(1)`, `df(1)`, `uptime(1)`, `w(1)`, `who(1)`, `last(1)`, `lastlog(8)`, `pidstat(1)`, `vmstat(8)`, `lsof(8)`, `scrub(8)`, `subvolume(8)`, `mkswap(8)`, `swapon(8)`, `swapoff(8)`, `dmesg(1)`, `kill(1)`, `pgrep(1)`, `renice(1)`, `ionice(1)`, `taskset(1)`, `watch(1)`, `tree(1)`, `hexdump(1)`, `xxd(1)`, `column(1)`, `which(1)`, `script(1)`, `chmod(1)`, `chown(1)`, `getfacl(1)`, `setfacl(1)` | Dukovo's own administration tools, with the Linux tools' names, options and output |

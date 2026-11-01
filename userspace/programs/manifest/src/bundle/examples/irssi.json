@@ -1,0 +1,19 @@
+{
+  "manifest_version": 1,
+  "id": "org.irssi.irssi",
+  "name": "Irssi",
+  "version": "1.4.5",
+  "summary": "Terminal IRC client",
+  "publisher": { "name": "Dukovo catalog" },
+  "license": "GPL-2.0-or-later",
+  "source": "https://catalog.dukovo.org/source/irssi-1.4.5.tar.xz",
+  "requires_os": "1.0",
+  "architectures": ["x86_64"],
+  "programs": { "irssi": { "path": { "x86_64": "bin/irssi" } } },
+  "commands": [ { "name": "irssi", "program": "irssi", "runs_with": "sandbox" } ],
+  "permissions": {
+    "network.outbound": { "need": "required", "why": "Connects to chat servers" },
+    "files.folder": { "folders": { "downloads": "read-write" }, "need": "optional", "why": "Saves files people send you" }
+  },
+  "data": { "settings": true, "data": true }
+}

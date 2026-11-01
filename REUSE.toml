@@ -123,6 +123,14 @@ path = ["kernel/lib/uacpi/src/tests/*.aml", "tools/xtask/src/acpi/*.aml"]
 SPDX-FileCopyrightText = "2026 The Dukovo contributors"
 SPDX-License-Identifier = "Apache-2.0 OR MIT"
 
+# The security design's worked examples of bundle manifests, which the
+# manifest crate's tests read (userspace/programs/manifest/src/bundle/tests.rs).
+# JSON has no comments.
+[[annotations]]
+path = "userspace/programs/manifest/src/bundle/examples/*.json"
+SPDX-FileCopyrightText = "2026 The Dukovo contributors"
+SPDX-License-Identifier = "Apache-2.0 OR MIT"
+
 # The test certificates, keys and signatures OpenSSL made for tls-test
 # (testdata/make.sh), the message it signed, and the sealed messages'
 # hashes (testdata/aead.py), which tls-test reads (ADR 0192).

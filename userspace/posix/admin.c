@@ -7,9 +7,9 @@
 // disks, subvolumes, scrubs and replaced disks, swap areas, priorities, CPU affinity and I/O
 // classes, held files, traces, the kernel log, the dump and layout tools,
 // script, watch and pidstat, shutdown and service through Spark, the
-// hardware tools, and ip and ss. With them, what the kernel tells them: /processes
-// (radix-proc(5)), /devices/kmsg, /kernel (radix-sysfs(5)), getloadavg,
-// and the priorities a child inherits.
+// hardware tools, ip and ss, and bundle. With them, what the kernel tells
+// them: /processes (radix-proc(5)), /devices/kmsg, /kernel
+// (radix-sysfs(5)), getloadavg, and the priorities a child inherits.
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -745,6 +745,64 @@ static void storage(void) {
 	STATUS(0, "/bin/iostat", "-d", "-z");
 }
 
+// bundle(1): a new bundle's manifest, checked in its folder before and
+// after its program is there, one for a later Dukovo, and the schema.
+static void bundles(void) {
+	STATUS(0, "/bin/mkdir", "-p", DIR);
+	// The developer key goes here, made by the first `bundle new`.
+	CHECK(setenv("XDG_DATA_HOME", DIR "/data", 1) == 0);
+	CONTAINS("wrote " DIR "/notes/manifest.json\n", "/bin/bundle", "new", "org.example.notes",
+			DIR "/notes", "--publisher", "Example");
+	STATUS(1, "/bin/bundle", "new", "org.example.notes", DIR "/notes");
+	STATUS(1, "/bin/bundle", "check", DIR "/notes");
+	write_file(DIR "/notes/bin/notes", "#!/bin/sh\necho notes\n");
+	STATUS(0, "/bin/chmod", "755", DIR "/notes/bin/notes");
+	OUTPUT("", DIR "/notes/manifest.json: ok: org.example.notes 0.1.0, manifest version 1\n",
+			"/bin/bundle", "check", DIR "/notes");
+	OUTPUT("", DIR "/notes/manifest.json: manifest version 1, the newest this Dukovo reads: "
+			   "nothing to upgrade\n",
+			"/bin/bundle", "upgrade-manifest", DIR "/notes/manifest.json");
+	write_file(DIR "/later.json", "{\n  \"manifest_version\": 2,\n  \"entries\": {}\n}\n");
+	STATUS(1, "/bin/bundle", "check", DIR "/later.json");
+	CONTAINS("  \"title\": \"Manifest\",\n", "/bin/sh", "-c", "/bin/bundle schema | /bin/head -n 5");
+	// Signed with the developer key, packed, checked and unpacked by the
+	// unpacker's own process, which holds the archive and the new folder
+	// alone (ADR 0222).
+	CHECK(access(DIR "/data/bundle/developer.key", R_OK) == 0);
+	CONTAINS("\nRW", "/bin/sh", "-c", "echo; /bin/bundle key");
+	STATUS(1, "/bin/bundle", "verify", DIR "/notes");
+	CONTAINS(DIR "/notes: signed org.example.notes 0.1.0, 3 files, with your developer key RW",
+			"/bin/bundle", "sign", DIR "/notes");
+	CONTAINS("SPDXVersion: SPDX-2.3\n", "/bin/cat", DIR "/notes/sbom.spdx");
+	CONTAINS(DIR "/notes: ok: org.example.notes 0.1.0, 3 files, signed by your developer key RW",
+			"/bin/bundle", "verify", DIR "/notes");
+	CONTAINS("wrote " DIR "/notes.dkv: org.example.notes 0.1.0, 3 files, ", "/bin/bundle", "pack",
+			DIR "/notes", "-o", DIR "/notes.dkv");
+	CONTAINS(DIR "/notes.dkv: ok: org.example.notes 0.1.0, 3 files, signed by your developer key RW",
+			"/bin/bundle", "verify", DIR "/notes.dkv");
+	CONTAINS(DIR "/out: unpacked org.example.notes 0.1.0, 3 files, signed by your developer key RW",
+			"/bin/bundle", "unpack", DIR "/notes.dkv", DIR "/out");
+	CONTAINS(DIR "/out: ok: org.example.notes 0.1.0, 3 files", "/bin/bundle", "verify", DIR "/out");
+	OUTPUT("", "notes\n", DIR "/out/bin/notes");
+	STATUS(1, "/bin/bundle", "unpack", DIR "/notes.dkv", DIR "/out");
+	// Another key is not the developer key; a changed file, a cut archive
+	// and an unsigned one are refused, and leave no folder behind.
+	STATUS(1, "/bin/bundle", "verify", DIR "/notes.dkv", "--key",
+			"RWSMIt5cXRFBFS8RVW7FVftienboF5JP7k2c+ms0yzLzk/ZH+6UwB5II");
+	write_file(DIR "/notes/bin/notes", "#!/bin/sh\necho changed\n");
+	STATUS(1, "/bin/bundle", "verify", DIR "/notes");
+	STATUS(0, "/bin/sh", "-c", "/bin/head -c 600 " DIR "/notes.dkv > " DIR "/cut.dkv");
+	STATUS(1, "/bin/bundle", "unpack", DIR "/cut.dkv", DIR "/cut");
+	CHECK(access(DIR "/cut", F_OK) != 0);
+	STATUS(0, "/bin/rm", DIR "/notes/signature");
+	STATUS(0, "/bin/sh", "-c", "cd " DIR "/notes && /bin/zip -q -r " DIR "/unsigned.dkv .");
+	STATUS(1, "/bin/bundle", "unpack", DIR "/unsigned.dkv", DIR "/unsigned");
+	CHECK(access(DIR "/unsigned", F_OK) != 0);
+	STATUS(0, "/bin/rm", "-r", DIR "/notes", DIR "/later.json", DIR "/notes.dkv", DIR "/out",
+			DIR "/cut.dkv", DIR "/unsigned.dkv", DIR "/data");
+	CHECK(unsetenv("XDG_DATA_HOME") == 0);
+}
+
 // The program behind the links.
 static void links(void) {
 	CONTAINS("\nxxd\n", "/system/commands/systools", "--list");
@@ -772,6 +830,7 @@ int main(void) {
 	RUN(hardware);
 	RUN(network);
 	RUN(storage);
+	RUN(bundles);
 	RUN(links);
 	return check_end();
 }
