@@ -26,7 +26,9 @@ environment (`GIT_CONFIG_COUNT`) would win over a user's
 from colors.toml when it changed, and **the system's gitconfig
 includes it**, last. An included file is read in the scope of the file
 that includes it, so the user's `~/.gitconfig` and a repository's own
-settings still win; without the file, git ignores the include. It
+settings still win; without the file, git ignores the include, and
+a patch to git ignores it too where `$HOME` is not set, as for
+git-http-backend run as CGI, which git would otherwise stop on. It
 gives:
 
 - git's diffs colors.toml's `[diff]` colours, with two keys more for

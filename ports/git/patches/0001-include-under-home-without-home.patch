@@ -1,0 +1,24 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Skips an include.path under ~/ when $HOME is not set, as for a missing
+file, where git stops with "bad config line". The system gitconfig
+includes the colours each Nukesh shell writes under ~/.local/state
+(ADR 0293), and a program run with no $HOME, such as git-http-backend
+run as CGI, must still read it.
+
+--- a/config.c
++++ b/config.c
+@@ -151,6 +151,12 @@
+ 		return config_error_nonbool("include.path");
+ 
+ 	expanded = interpolate_path(path, 0);
++	/*
++	 * An include under ~/ with no $HOME, as for a service or a CGI
++	 * program, has no file to read: skip it, as for a missing file.
++	 */
++	if (!expanded && path[0] == '~' && path[1] == '/' && !getenv("HOME"))
++		return 0;
+ 	if (!expanded)
+ 		return error(_("could not expand include path '%s'"), path);
+ 	path = expanded;
