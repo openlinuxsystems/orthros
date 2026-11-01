@@ -152,6 +152,73 @@ pub fn before_prompt(shell: &mut Shell) {
     let mut folders = load(shell);
     visit(&mut folders, &here, crate::sys::now().0);
     save(shell, &folders);
+    if shell.settings.resume {
+        remember_where(shell, &here);
+    }
+}
+
+/// Where the last shell on each console was, a line each: `console TAB
+/// folder` (ADR 0276, `[folders] resume`).
+pub const WHERE: &str = ".local/state/nukesh/where";
+
+fn where_path(shell: &Shell) -> Option<String> {
+    let home = shell.get("HOME").filter(|h| h.starts_with('/'))?;
+    Some(format!("{}/{WHERE}", home.trim_end_matches('/')))
+}
+
+/// `text` with `console` now in `folder`.
+pub fn set_where(text: &str, console: &str, folder: &str) -> String {
+    let mut out = String::new();
+    for line in text.lines().filter(|line| line.split('\t').next() != Some(console)) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&format!("{console}\t{folder}\n"));
+    out
+}
+
+/// Where the last shell on `console` was, in `text`.
+pub fn get_where<'a>(text: &'a str, console: &str) -> Option<&'a str> {
+    text.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find(|(c, _)| *c == console)
+        .map(|(_, f)| f)
+}
+
+/// The console the shell is on, from `XDG_VTNR`, which consoled sets;
+/// none in a terminal window or over ssh, where nothing is resumed.
+fn console(shell: &Shell) -> Option<String> {
+    shell
+        .get("XDG_VTNR")
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .map(|n| format!("tty{n}"))
+}
+
+fn remember_where(shell: &Shell, folder: &str) {
+    let (Some(path), Some(console)) = (where_path(shell), console(shell)) else { return };
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let temporary = format!("{path}.{}", std::process::id());
+    if std::fs::write(&temporary, set_where(&text, &console, folder)).is_ok() {
+        let _ = std::fs::rename(&temporary, &path);
+    }
+}
+
+/// At the start of a console's first shell, in the home folder: back to
+/// the folder the last shell on that console was in.
+pub fn resume(shell: &mut Shell) {
+    let top = shell.get("SHLVL").is_some_and(|l| l == "1");
+    let home = shell.get("HOME").unwrap_or_default();
+    let at_home =
+        shell.get("PWD").is_some_and(|p| p.trim_end_matches('/') == home.trim_end_matches('/'));
+    if !shell.settings.resume || shell.private || !top || !at_home || home.is_empty() {
+        return;
+    }
+    let (Some(path), Some(console)) = (where_path(shell), console(shell)) else { return };
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    let Some(folder) = get_where(&text, &console).map(str::to_string) else { return };
+    if folder != home && std::fs::metadata(&folder).is_ok_and(|m| m.is_dir()) {
+        crate::builtins::cd_to(shell, &folder);
+    }
 }
 
 /// Alt+Left (`back`) or Alt+Right: the folder before or after this one.
@@ -255,6 +322,16 @@ mod tests {
         // Not the folder you are in.
         let found = best(&folders, &[], "/", now).unwrap();
         assert_eq!(found.path, "/tmp");
+    }
+
+    #[test]
+    fn each_console_has_its_place() {
+        let text = set_where("", "tty1", "/a");
+        let text = set_where(&text, "tty2", "/b");
+        let text = set_where(&text, "tty1", "/c");
+        assert_eq!(get_where(&text, "tty1"), Some("/c"));
+        assert_eq!(get_where(&text, "tty2"), Some("/b"));
+        assert_eq!(get_where(&text, "tty3"), None);
     }
 
     #[test]

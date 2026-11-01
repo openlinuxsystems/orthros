@@ -44,6 +44,7 @@ mod nebix;
 mod notify;
 mod parse;
 mod pattern;
+mod project;
 mod prompt;
 mod record;
 mod redir;

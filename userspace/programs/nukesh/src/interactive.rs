@@ -110,6 +110,7 @@ fn eof_limit(shell: &Shell) -> u32 {
 pub fn run(shell: Shell) -> i32 {
     let shell = Rc::new(RefCell::new(shell));
     shell.borrow_mut().load_history();
+    crate::folders::resume(&mut shell.borrow_mut());
     let mut editor = Editor::new(shell.clone());
     let mut eofs = 0;
     let mut line_number = 1;
@@ -118,6 +119,7 @@ pub fn run(shell: Shell) -> i32 {
             return exit(&mut shell.borrow_mut(), code);
         }
         crate::folders::before_prompt(&mut shell.borrow_mut());
+        crate::project::before_prompt(&mut shell.borrow_mut());
         let input = editor.read_command();
         let mut shell = shell.borrow_mut();
         match input {

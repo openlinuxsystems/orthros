@@ -245,7 +245,7 @@ pub fn explain(line: &str, sources: &mut dyn Sources) -> Vec<Part> {
         match token {
             Token::Word(w) => commands.last_mut().unwrap_or_else(|| unreachable!()).0.push(w),
             Token::Redirect(op, target) => {
-                commands.last_mut().unwrap_or_else(|| unreachable!()).1.push((op, target))
+                commands.last_mut().unwrap_or_else(|| unreachable!()).1.push((op, target));
             }
             Token::Op(op) => {
                 joints.push(op);

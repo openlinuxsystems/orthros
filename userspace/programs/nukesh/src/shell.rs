@@ -315,6 +315,10 @@ pub struct Shell {
     pub last_millis: u64,
     /// The last command typed, for Alt+E on an empty line.
     pub last_command: String,
+    /// What the folder file in use set (ADR 0276), and the files told
+    /// about this session.
+    pub project: Option<crate::project::Applied>,
+    pub project_warned: std::collections::HashSet<String>,
     /// The folders `cd` left, for Alt+Left, and those Alt+Left left, for
     /// Alt+Right; and the folder at the last prompt (ADR 0262).
     pub dirs_back: Vec<String>,
@@ -429,6 +433,8 @@ impl Shell {
             records: None,
             last_millis: 0,
             last_command: String::new(),
+            project: None,
+            project_warned: std::collections::HashSet::new(),
             dirs_back: Vec::new(),
             dirs_forward: Vec::new(),
             last_dir: String::new(),

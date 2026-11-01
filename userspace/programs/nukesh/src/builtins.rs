@@ -100,6 +100,7 @@ table! {
     "times" => misc::times, "times", "Show the CPU time the shell and its children used.";
     "trap" => misc::trap, "trap [-lp] [[action] signal ...]", "Run commands when signals come.";
     "true" => colon, "true", "Succeed.";
+    "trust" => crate::project::trust, "trust [-r] [file]", "Let a folder's .nukesh.toml apply, or stop it.";
     "type" => misc::type_, "type [-afptP] name ...", "Say what a name runs.";
     "typeset" => declare::declare, "typeset [-aAfFgiIlnrtux] [-p] [name[=value] ...]", "Set variables' values and attributes.";
     "ulimit" => misc::ulimit, "ulimit [-SHabcdefiklmnpqrstuvxPRT] [limit]", "Show or set resource limits.";

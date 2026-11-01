@@ -147,13 +147,13 @@ impl Settings {
                     (section, key) if self.switch(section, key).is_some() => {
                         match value.as_bool() {
                             Some(on) => {
-                                *self.switch(section, key).unwrap_or_else(|| unreachable!()) = on
+                                *self.switch(section, key).unwrap_or_else(|| unreachable!()) = on;
                             }
                             None => problems.push(format!("[{section}] {key}: true or false")),
                         }
                     }
                     (section, _) if SECTIONS.contains(&section) => {
-                        problems.push(format!("[{section}] {key}: no such key"))
+                        problems.push(format!("[{section}] {key}: no such key"));
                     }
                     _ => {
                         problems.push(format!("[{section}]: no such section"));

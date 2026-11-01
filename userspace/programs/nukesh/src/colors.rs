@@ -519,7 +519,8 @@ impl Colors {
                             match value.as_integer().and_then(|n| u64::try_from(n).ok()) {
                                 Some(n) => self.set_number(&format!("{section}.{key}"), n),
                                 None => {
-                                    problems.push(format!("[{section}] {key}: a number of seconds"))
+                                    problems
+                                        .push(format!("[{section}] {key}: a number of seconds"));
                                 }
                             }
                             continue;
