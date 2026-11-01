@@ -62,27 +62,38 @@ fn valid(name: &str) -> bool {
 }
 
 /// Where in `line` the word ending at `end` starts, if it is in a
-/// command's place: the line's start, or after `|`, `;`, `&`, `(`, `!`,
-/// or a reserved word that runs a command next.
+/// command's place ([`command_position`]).
 fn command_word(line: &str, end: usize) -> Option<usize> {
     let before = &line[..end];
     let start =
         before.rfind(|c: char| c.is_whitespace() || "|&;()".contains(c)).map_or(0, |i| i + 1);
-    let mut rest = before[..start].trim_end();
+    command_position(line, start).then_some(start)
+}
+
+/// Whether a word starting at `start` in `line` is in a command's place:
+/// the line's start, or after `|`, `;`, `&`, `(`, `!`, or a reserved word
+/// that runs a command next, or `sudo`, `elevate` or `doas`. Reedline
+/// asks this before it grows a word at Space (editor.rs).
+pub fn command_position(line: &str, start: usize) -> bool {
+    let Some(before) = line.get(..start) else { return false };
+    if before.ends_with(['|', '&', ';', '(']) {
+        return true;
+    }
+    let mut rest = before.trim_end();
     loop {
         if rest.is_empty() || rest.ends_with(['|', '&', ';', '(', '!']) {
-            return Some(start);
+            return true;
         }
         let last = rest.rsplit(|c: char| c.is_whitespace()).next().unwrap_or("");
         if matches!(last, "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "time") {
-            return Some(start);
+            return true;
         }
         // `sudo gs` and `elevate gs` grow too.
         if matches!(last, "sudo" | "elevate" | "doas") {
             rest = rest[..rest.len() - last.len()].trim_end();
             continue;
         }
-        return None;
+        return false;
     }
 }
 

@@ -71,7 +71,8 @@ pub struct Editor {
     line: Option<Reedline>,
     /// Whether `line` has vi keys, and Space for abbreviations.
     vi: bool,
-    abbrs: bool,
+    /// The abbreviations reedline grows at Space (ADR 0262).
+    abbrs: indexmap::IndexMap<String, String>,
     /// Whether `line` wakes each second to look at the clock and at
     /// signals: only for `TMOUT` and traps, so that an idle prompt costs
     /// nothing otherwise.
@@ -94,7 +95,7 @@ impl Editor {
             shell,
             line: None,
             vi: false,
-            abbrs: false,
+            abbrs: indexmap::IndexMap::new(),
             wakes: false,
             wake: Arc::new(AtomicBool::new(false)),
             deadline: Arc::new(AtomicU64::new(0)),
@@ -111,12 +112,14 @@ impl Editor {
     fn build(&mut self) {
         let (vi, abbrs, colors, wakes, palette) = {
             let shell = self.shell.borrow();
-            let abbrs = !shell.abbrs.is_empty();
+            let abbrs = shell.abbrs.clone();
             (shell.opts.vi, abbrs, colors(&shell), needs_wakes(&shell), shell.colors.clone())
         };
         let handle = Handle(self.shell.clone());
         let (editor, file) = buffer_editor(&self.shell.borrow());
-        let mut line = new_reedline(vi, abbrs, colors).with_buffer_editor(editor, file);
+        let grown = abbrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut line =
+            new_reedline(vi, colors).with_buffer_editor(editor, file).with_abbreviations(grown);
         // OSC 133 marks around the prompt and the line typed, so that
         // terminals can jump between commands (ADR 0282); the marks of a
         // command's output are written around it (interactive.rs).
@@ -198,17 +201,6 @@ impl Editor {
         let buffer = line.current_buffer_contents().to_string();
         let cursor = line.current_insertion_point();
         match key {
-            KEY_SPACE => {
-                let grown = crate::abbr::grow(&self.shell.borrow(), &buffer, cursor);
-                if let Some((text, at)) = grown {
-                    line.run_edit_commands(&[
-                        EditCommand::Clear,
-                        EditCommand::InsertString(text),
-                        EditCommand::MoveToPosition { position: at, select: false },
-                    ]);
-                }
-                line.run_edit_commands(&[EditCommand::InsertChar(' ')]);
-            }
             KEY_ELEVATE => {
                 // Alt+S: elevate(1) before the line, or off it again, as
                 // fish's Alt+S does with sudo; the cursor stays on its text.
@@ -280,13 +272,13 @@ impl Editor {
             } else {
                 String::new()
             };
-            (rich.unwrap_or(ps1), right, !shell.abbrs.is_empty())
+            (rich.unwrap_or(ps1), right, shell.abbrs.clone())
         };
         if wakes != self.wakes || abbrs != self.abbrs {
             self.build();
         } else if vi != self.vi {
             self.vi = vi;
-            let line = self.line.take().map(|line| line.with_edit_mode(edit_mode(vi, abbrs)));
+            let line = self.line.take().map(|line| line.with_edit_mode(edit_mode(vi)));
             self.line = line;
         }
         self.sync_history();
@@ -413,7 +405,6 @@ const MENU: &str = "completion_menu";
 const PICKER: &str = "command_picker";
 
 /// The keys the shell handles itself, as reedline hands them back.
-const KEY_SPACE: &str = "nukesh:space";
 const KEY_BACK: &str = "nukesh:back";
 const KEY_FORWARD: &str = "nukesh:forward";
 const KEY_ELEVATE: &str = "nukesh:elevate";
@@ -529,18 +520,18 @@ fn spoken_prompt(shell: &mut Shell) -> String {
 
 /// reedline with the keys for `vi` or Emacs, and no colouring of its own
 /// for the line typed.
-fn new_reedline(vi: bool, abbrs: bool, colors: bool) -> Reedline {
+fn new_reedline(vi: bool, colors: bool) -> Reedline {
     Reedline::create()
-        .with_edit_mode(edit_mode(vi, abbrs))
+        .with_edit_mode(edit_mode(vi))
         .with_highlighter(Box::new(Plain))
         .with_ansi_colors(colors)
         .use_bracketed_paste(true)
 }
 
 /// The keys: Emacs or vi, with Tab for completion, Ctrl+R for the
-/// picker, Alt+Left and Alt+Right for the folders, and Space for
-/// abbreviations when there are any.
-fn edit_mode(vi: bool, abbrs: bool) -> Box<dyn reedline::EditMode> {
+/// picker, Alt+Left and Alt+Right for the folders, Alt+S for elevate and
+/// Alt+E to explain. Reedline grows abbreviations at Space itself.
+fn edit_mode(vi: bool) -> Box<dyn reedline::EditMode> {
     let complete = |keys: &mut Keybindings| {
         keys.add_binding(
             KeyModifiers::CONTROL,
@@ -555,9 +546,6 @@ fn edit_mode(vi: bool, abbrs: bool) -> Box<dyn reedline::EditMode> {
         keys.add_binding(KeyModifiers::ALT, KeyCode::Right, host(KEY_FORWARD));
         keys.add_binding(KeyModifiers::ALT, KeyCode::Char('s'), host(KEY_ELEVATE));
         keys.add_binding(KeyModifiers::ALT, KeyCode::Char('e'), host(KEY_EXPLAIN));
-        if abbrs {
-            keys.add_binding(KeyModifiers::NONE, KeyCode::Char(' '), host(KEY_SPACE));
-        }
         keys.add_binding(
             KeyModifiers::NONE,
             KeyCode::Tab,
@@ -637,6 +625,11 @@ fn buffer_editor(shell: &Shell) -> (std::process::Command, std::path::PathBuf) {
 struct Plain;
 
 impl Highlighter for Plain {
+    // Abbreviations grow only where a command goes (ADR 0262).
+    fn should_expand_abbr(&self, line: &str, start: usize, _: reedline::AbbrExpandContext) -> bool {
+        crate::abbr::command_position(line, start)
+    }
+
     // The style's type is nu-ansi-term's, which reedline does not export.
     #[allow(clippy::default_trait_access)]
     fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
@@ -702,6 +695,10 @@ impl ShellHighlighter {
 unsafe impl Send for ShellHighlighter {}
 
 impl Highlighter for ShellHighlighter {
+    fn should_expand_abbr(&self, line: &str, start: usize, _: reedline::AbbrExpandContext) -> bool {
+        crate::abbr::command_position(line, start)
+    }
+
     fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
         let mut styled = StyledText::default();
         // A mistake the parser finds is shown before Enter (ADR 0284): the
@@ -898,7 +895,7 @@ pub fn read_line(shell: &mut Shell, prompt: &str, initial: &str) -> Option<Strin
             Got::Interrupted | Got::Eof => None,
         };
     }
-    let mut line = new_reedline(shell.opts.vi, false, colors(shell));
+    let mut line = new_reedline(shell.opts.vi, colors(shell));
     if !initial.is_empty() {
         line.run_edit_commands(&[EditCommand::InsertString(initial.to_string())]);
     }
