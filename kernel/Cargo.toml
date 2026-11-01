@@ -25,6 +25,8 @@ members = [
     "drivers/gpio",
     "drivers/i2c",
     "drivers/ide",
+    "drivers/intel",
+    "drivers/nic",
     "drivers/nvme",
     "drivers/scsi",
     "drivers/sdhci",

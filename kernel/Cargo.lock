@@ -270,6 +270,7 @@ dependencies = [
  "radix-i2c",
  "radix-ide",
  "radix-input",
+ "radix-intel-net",
  "radix-ipc",
  "radix-iso9660",
  "radix-kdb",
@@ -279,6 +280,7 @@ dependencies = [
  "radix-mca",
  "radix-mm",
  "radix-net",
+ "radix-nic",
  "radix-ntfs",
  "radix-nvme",
  "radix-posix",
@@ -529,6 +531,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-intel-net"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
+]
+
+[[package]]
 name = "radix-iopt"
 version = "0.11.0"
 dependencies = [
@@ -597,6 +607,13 @@ version = "0.11.0"
 dependencies = [
  "managed",
  "smoltcp",
+]
+
+[[package]]
+name = "radix-nic"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
 ]
 
 [[package]]
