@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "git-https-test"
+description = "Tests git over https:// against a smart HTTP server of its own on lo, with git-http-backend behind it, in the git-https boot test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The server's TLS: rustls on ring, which ob patches in from the
+# rust-crates port (ADR 0192).
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+
+[lints]
+workspace = true

@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 The Dukovo contributors
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
-# git (ADR 0287): the version control system, for repositories on this
-# computer and on others it reaches by a path. It is under version 2 of
+# git (ADRs 0287 and 0292): the version control system, for repositories
+# on this computer and on others it reaches by a path, ssh or https://,
+# the last with libcurl. It is under version 2 of
 # the GPL only; its diff engine (xdiff), the regular expressions it brings
 # and its obstack are under the LGPL 2.1 or later, its bitmaps (ewah)
 # under the GPL 2 or later, the SHA-1 that detects collisions (sha1dc) is
@@ -16,7 +17,7 @@ version = "2.55.0"
 summary = "git, the version control system"
 license = "GPL-2.0-only AND LGPL-2.1-or-later AND GPL-2.0-or-later AND MIT AND BSD-3-Clause"
 homepage = "https://git-scm.com"
-depends = ["mlibc", "zlib"]
+depends = ["mlibc", "zlib", "curl"]
 notices = ["COPYING", "LGPL-2.1", "sha1dc/LICENSE.txt", "reftable/LICENSE"]
 
 [source]
