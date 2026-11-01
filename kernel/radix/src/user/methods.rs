@@ -64,6 +64,7 @@ fn version(kind: ObjectKind) -> u32 {
         ObjectKind::Names => radix_abi::names::VERSION,
         ObjectKind::Network => radix_abi::network::VERSION,
         ObjectKind::Platform => radix_abi::platform::VERSION,
+        ObjectKind::Clock => radix_abi::clock::VERSION,
         _ => 0,
     }
 }
@@ -162,6 +163,7 @@ pub fn call(
         (ObjectKind::Names, _) => super::names::method(user, cap, info.label, &args),
         (ObjectKind::Network, _) => super::network::method(user, slot, cap, info.label, &args),
         (ObjectKind::Platform, _) => super::platform::method(user, cap, info.label, &args),
+        (ObjectKind::Clock, _) => super::clock::method(user, cap, info.label, &args),
         (ObjectKind::Directory, _) => {
             super::files::directory_method(user, found, info.label, &args)
         }

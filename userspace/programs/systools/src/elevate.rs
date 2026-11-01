@@ -9,7 +9,8 @@
 //! their password in the last 15 minutes, their password; then authd
 //! starts the command itself, as its own child, acting for root with the
 //! admin set: authd's root, which passes the owners and modes of files
-//! (the bypass right), and the platform capability. elevate sends authd
+//! (the bypass right), the platform capability and the clock capability
+//! (ADR 0194). elevate sends authd
 //! the three descriptors the command is to have, and a pipe to pass
 //! signals on. A descriptor that is a terminal is not sent as it is: as
 //! sudo's `use_pty` does, elevate makes a new pseudo-terminal for the
@@ -241,7 +242,8 @@ pub fn root_account(users: impl Iterator<Item = User>) -> User {
 
 /// Starts an elevated process for authd: its child, acting for root as
 /// authd does, with authd's root, which has the bypass right, the random
-/// source, the log, the platform capability if authd holds one, authd's
+/// source, the log, the platform and clock capabilities if authd holds
+/// them, authd's
 /// network capabilities, and `fds` as its descriptors 0 to 2. It runs [`HELPER`], which makes the
 /// command's terminal its own and runs `plan`'s program. Returns the
 /// process's number.
@@ -273,6 +275,10 @@ pub fn start(fds: &[OwnedFd], plan: &Plan, env: &[String]) -> Result<u64, String
     let platform = capability::info(&SYS, startup::SLOT_PLATFORM);
     if platform.is_ok_and(|info| info.kind == ObjectKind::Platform) {
         shares.push((startup::SLOT_PLATFORM, startup::SLOT_PLATFORM));
+    }
+    let clock = capability::info(&SYS, startup::SLOT_CLOCK);
+    if clock.is_ok_and(|info| info.kind == ObjectKind::Clock) {
+        shares.push((startup::SLOT_CLOCK, startup::SLOT_CLOCK));
     }
     for (fd, n) in fds.iter().zip(0..3) {
         shares.push((sys::slot_of(fd.as_raw_fd()), startup::SLOT_FD_BASE + n));

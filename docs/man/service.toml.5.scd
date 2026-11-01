@@ -167,6 +167,13 @@ wrong in plain words:
 		*ectool*(8), and *authd*(8)'s, so that an administrator's
 		commands inside *elevate*(8) may.
 
+	*admin.time* = *true* | *false*
+		Whether it may set the time of day, slew it and write the
+		machine's real-time clock, with the clock capability
+		(*radix-clock*(2), ADR 0194); *false* unless set. *timed*(8)'s
+		file sets it, and *authd*(8)'s, so that *date*(1)'s *--set*
+		works inside *elevate*(8).
+
 	Paths are absolute, without *.*, *..* or *//*; none is _/_ itself
 	or within another, none is within a place every service reads
 	(name that whole place instead), and none is or holds

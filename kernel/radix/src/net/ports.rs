@@ -161,11 +161,19 @@ pub fn take_on(protocol: Protocol, port: u16, device: u32) -> Option<Held> {
 }
 
 /// Takes a port of `protocol` that no socket holds, from those the kernel
-/// picks from: the next free one after a place chosen at random the first
-/// time, so that the ports a machine uses are not guessed from its boot.
+/// picks from. For TCP, the next free one after a place chosen at random
+/// the first time, so that the ports a machine uses are not guessed from
+/// its boot, and one just closed is not soon used again for a connection
+/// still closing at the other end. For UDP, the first free one from a
+/// place chosen at random each time (RFC 6056's first algorithm), as
+/// Linux picks them: a DNS answer is taken for a query's by its port and
+/// a 16-bit number, which together an attacker off the path must guess
+/// (ADR 0193).
 pub fn take_any(protocol: Protocol) -> Option<Held> {
     let table = table(protocol);
-    if table.cursor.load(Ordering::Relaxed) == 0 {
+    if protocol == Protocol::Udp {
+        table.cursor.store(radix_random::u64() as usize % EPHEMERAL, Ordering::Relaxed);
+    } else if table.cursor.load(Ordering::Relaxed) == 0 {
         let start = (radix_random::u64() % EPHEMERAL as u64) as usize + 1;
         let _ = table.cursor.compare_exchange(0, start, Ordering::Relaxed, Ordering::Relaxed);
     }

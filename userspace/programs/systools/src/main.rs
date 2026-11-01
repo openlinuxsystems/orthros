@@ -16,6 +16,10 @@
 //! and 0211), and `logger` writes a line to it; `notifyd` passes
 //! notifications from `notify-send` and other programs to the console,
 //! and `notifications` lists them (ADR 0212).
+//! `netd` sets the network cards up (ADR 0191), and `resolved` answers
+//! every program's DNS queries, which `resolvectl` shows (ADR 0193);
+//! `timed` keeps the clock right from the network over NTS, and
+//! `timedatectl` shows it and sets the time zone (ADR 0194).
 //! `authd` keeps the accounts, which `user` and `passwd` change, `login`
 //! signs people in through it, and `elevate`, and `sudo` in front of it,
 //! run a command as an administrator (ADRs 0218, 0250 and 0219); `last`,
@@ -76,6 +80,8 @@ mod ps;
 mod quota;
 mod remount;
 mod replace;
+mod resolvectl;
+mod resolved;
 mod rtrace;
 mod script;
 mod scrub;
@@ -89,6 +95,9 @@ mod subvolume;
 mod swap;
 mod sys;
 mod top;
+mod timed;
+mod timedatectl;
+mod tls;
 mod tree;
 mod unlock;
 mod util;
@@ -172,6 +181,8 @@ const TOOLS: &[(&str, Tool)] = &[
     ("remount", remount::main),
     ("renice", priority::renice),
     ("replace", replace::main),
+    ("resolvectl", resolvectl::main),
+    ("resolved", resolved::main),
     ("rtrace", rtrace::main),
     ("script", script::main),
     ("scrub", scrub::main),
@@ -185,6 +196,8 @@ const TOOLS: &[(&str, Tool)] = &[
     ("swapoff", swap::swapoff),
     ("swapon", swap::swapon),
     ("taskset", priority::taskset),
+    ("timed", timed::main),
+    ("timedatectl", timedatectl::main),
     ("top", top::main),
     ("tree", tree::main),
     ("unlock", unlock::main),

@@ -1,0 +1,68 @@
+// SPDX-FileCopyrightText: 2026 The Dukovo contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! The clock capability (Phase 12, ADR 0194): setting the time of day,
+//! and the machine's real-time clock, which keeps it while the machine
+//! is off.
+//!
+//! The kernel reads the real-time clock once at boot and keeps the time
+//! of day from then on with its own clock, which radix-process(2)'s
+//! `clock` reads as `realtime`. timed(8) corrects it from the network:
+//! it steps it with `set` when it is far out, and otherwise slews it
+//! with `slew`, so that it never jumps or runs backwards; then it writes
+//! it back into the real-time clock with `write_rtc`.
+//!
+//! The kernel gives Spark the one capability to it when it starts. Spark
+//! gives a service a copy in SLOT_CLOCK, with the read and control
+//! rights, when its file asks for admin.time (service.toml(5)), and
+//! elevate(8) passes the one it holds to the command it runs, for
+//! date(1)'s `--set`. Asking needs the read right, and changing anything
+//! the control right.
+//!
+//! The real-time clock is taken to keep UTC, as on Linux machines that do
+//! not start Windows too. It counts whole seconds, so writing it is good
+//! to half a second. A method that needs it fails with not_supported on
+//! a machine whose clock the kernel cannot reach.
+
+module clock;
+
+/// How far a slew moves the time of day each second at most, in
+/// nanoseconds: 500 µs, as adjtime(3) on Linux slews it.
+const SLEW_RATE_NS: u64 = 500000;
+
+/// The largest slew `slew` takes, in nanoseconds either way: 128 ms, the
+/// most NTP slews rather than steps. It takes about four minutes.
+const SLEW_MAX_NS: u64 = 128000000;
+
+/// The time of day and the machine's real-time clock.
+interface clock = 0x0030 version 1 {
+    kind = clock;
+    /// Reads the time of day, in nanoseconds since 1970 (UTC) as `clock`
+    /// reads it, 0 if the kernel knows none; the slew still to come, in
+    /// nanoseconds, negative if the clock is being slowed; and the
+    /// real-time clock's time, in seconds since 1970, read now, or 0 if
+    /// it cannot be read or holds no valid date. Needs the read right.
+    method state = 1 () -> (now_ns: u64, slew_ns: i64, rtc_seconds: u64)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights];
+    /// Sets the time of day to `ns` nanoseconds since 1970 (UTC) at once,
+    /// ending any slew, and writes it into the real-time clock where
+    /// there is one. Fails with invalid_argument for a time before 1980
+    /// or from 2500 on. Needs the control right.
+    method set = 2 (ns: u64) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument];
+    /// Slews the time of day by `delta_ns` nanoseconds: runs it faster
+    /// (or slower, for a negative one) by SLEW_RATE_NS a second until it
+    /// has moved that far, in place of any slew under way. Returns the
+    /// slew that was left of the one it replaced. 0 stops a slew. Fails
+    /// with invalid_argument beyond SLEW_MAX_NS either way, and with
+    /// not_supported while the kernel knows no time of day. Needs the
+    /// control right.
+    method slew = 3 (delta_ns: i64) -> (left_ns: i64)
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                not_supported];
+    /// Writes the time of day into the real-time clock, rounded to the
+    /// nearest second. Fails with not_supported if there is no real-time
+    /// clock or the kernel knows no time of day. Needs the control right.
+    method write_rtc = 4 () -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, not_supported];
+}

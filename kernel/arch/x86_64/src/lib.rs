@@ -389,7 +389,27 @@ impl Timer for Arch {
     }
 
     fn wall_clock_ns() -> Option<u64> {
-        rtc::wall_clock_ns()
+        rtc::WALL_CLOCK.read(time::now_ns())
+    }
+
+    fn set_wall_clock_ns(ns: u64) {
+        rtc::WALL_CLOCK.set(time::now_ns(), ns);
+    }
+
+    fn slew_wall_clock(delta_ns: i64) -> Option<i64> {
+        rtc::WALL_CLOCK.slew(time::now_ns(), delta_ns)
+    }
+
+    fn wall_clock_slew_ns() -> i64 {
+        rtc::WALL_CLOCK.slew_left(time::now_ns())
+    }
+
+    fn rtc_seconds() -> Option<u64> {
+        rtc::seconds()
+    }
+
+    fn write_rtc(seconds: u64) -> bool {
+        rtc::write(seconds)
     }
 }
 

@@ -64,11 +64,15 @@ pub const ARCHIVE_LINKS: &[(&str, &str)] =
 
 /// Symbolic links among the default settings, which Spark copies as
 /// links, each until an administrator makes it a file of their own:
-/// `/etc/resolv.conf` leads to the one netd(8) writes (ADR 0191), as
-/// Linux's leads to systemd-resolved's, and Debian's and Alpine's names
-/// for the root certificates lead to the system's (ADR 0192).
+/// `/etc/resolv.conf` leads to the one resolved(8) writes, which names
+/// it as the server (ADR 0193), as Linux's leads to systemd-resolved's;
+/// `/etc/localtime`, the time zone, to UTC's in the time zone database,
+/// which timedatectl(1) points elsewhere (ADR 0194); and Debian's and
+/// Alpine's names for the root certificates lead to the system's (ADR
+/// 0192).
 pub const DEFAULT_LINKS: &[(&str, &str)] = &[
-    ("system/resources/default-settings/resolv.conf", "/system/live/netd/resolv.conf"),
+    ("system/resources/default-settings/localtime", "/system/resources/zoneinfo/UTC"),
+    ("system/resources/default-settings/resolv.conf", "/system/live/resolved/resolv.conf"),
     ("system/resources/default-settings/ssl/cert.pem", CERTIFICATES),
     ("system/resources/default-settings/ssl/certs/ca-certificates.crt", CERTIFICATES),
 ];
@@ -161,6 +165,8 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/commands/remount", "systools"),
     ("system/commands/renice", "systools"),
     ("system/commands/replace", "systools"),
+    ("system/commands/resolvectl", "systools"),
+    ("system/commands/resolved", "systools"),
     ("system/commands/rtrace", "systools"),
     ("system/commands/script", "systools"),
     ("system/commands/scrub", "systools"),
@@ -174,6 +180,8 @@ pub const STD_LINKS: &[(&str, &str)] = &[
     ("system/commands/swapoff", "systools"),
     ("system/commands/swapon", "systools"),
     ("system/commands/taskset", "systools"),
+    ("system/commands/timed", "systools"),
+    ("system/commands/timedatectl", "systools"),
     ("system/commands/top", "systools"),
     ("system/commands/tree", "systools"),
     ("system/commands/unlock", "systools"),
@@ -263,7 +271,7 @@ pub const STD_MANIFEST: &str = "userspace/programs/Cargo.toml";
 /// The programs on Rust's standard library whose unit tests run on the
 /// host: what they test does not need Radix.
 pub const HOST_TESTED: &[&str] =
-    &["accounts", "consoled", "keymap", "manifest", "nukesh", "systools"];
+    &["accounts", "consoled", "keymap", "manifest", "netproto", "nukesh", "systools"];
 
 /// The Cargo.lock of the host builds of the programs on Rust's standard
 /// library. They take the crates the ports patch for Radix from
@@ -722,8 +730,8 @@ mod tests {
         let bin = archive.find("/system/bin").unwrap();
         assert_eq!((bin.kind, bin.data), (radix_bootfs::Kind::Symlink, &b"commands"[..]));
         let resolv = archive.find("/system/resources/default-settings/resolv.conf").unwrap();
-        let netd = &b"/system/live/netd/resolv.conf"[..];
-        assert_eq!((resolv.kind, resolv.data), (radix_bootfs::Kind::Symlink, netd));
+        let stub = &b"/system/live/resolved/resolv.conf"[..];
+        assert_eq!((resolv.kind, resolv.data), (radix_bootfs::Kind::Symlink, stub));
         for name in ["ssl/cert.pem", "ssl/certs/ca-certificates.crt"] {
             let link = archive.find(&format!("/system/resources/default-settings/{name}")).unwrap();
             let roots = CERTIFICATES.as_bytes();

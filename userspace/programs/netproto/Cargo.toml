@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "netproto"
+description = "DNS and NTP messages, and Network Time Security's, for resolved(8), timed(8) and the network services test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Network Time Security's AEAD_AES_SIV_CMAC_256 (RFC 8915, ADR 0194):
+# RustCrypto's AES-SIV (Apache-2.0 OR MIT), over the AES and CMAC crates.
+aes-siv = { version = "0.7.0", default-features = false, features = ["alloc"] }
+
+[lints]
+workspace = true

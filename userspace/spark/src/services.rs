@@ -23,7 +23,9 @@
 //! names the ports it may listen on. `admin.network = true` lets it set
 //! the interfaces up, their addresses and routers, as ip(8) does (ADR
 //! 0190). `admin.hardware = true` gives it the platform capability, which
-//! sets the fans, the LEDs and the ARGB header (ADR 0208). It reaches the
+//! sets the fans, the LEDs and the ARGB header (ADR 0208), and
+//! `admin.time = true` the clock capability, which sets the time of day
+//! and the real-time clock (ADR 0194). It reaches the
 //! tree only through the view Spark builds of what its file declares
 //! (`views`, ADR 0217).
 
@@ -72,6 +74,8 @@ pub struct Spec {
     pub configure: bool,
     /// Whether it gets the platform capability: admin.hardware.
     pub hardware: bool,
+    /// Whether it gets the clock capability: admin.time.
+    pub time: bool,
     /// The places its view holds beyond what every service's does.
     pub places: Vec<Place>,
     /// The places it mounts filesystems beneath, which it gets as
@@ -123,6 +127,7 @@ pub fn parse(name: &str, text: &str) -> Result<Spec, String> {
         listen: network.listen.iter().map(|p| (u32::from(p.first), p.count())).collect(),
         configure: file.permissions.admin.network,
         hardware: file.permissions.admin.hardware,
+        time: file.permissions.admin.time,
         places: file.permissions.places(),
         mounts: file.permissions.files.mount.clone(),
         whole_tree: file.permissions.runs_with_your_access,

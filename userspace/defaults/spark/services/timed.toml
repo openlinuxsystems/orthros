@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Keeps the clock right from the network: timed(8) asks the time servers
+# /system/settings/timed names (timed(5)), or Cloudflare's, Netnod's and
+# PTB's, over Network Time Security, and slews or steps the clock and
+# writes the real-time clock (ADR 0194). `service stop timed` and
+# `service disable timed` turn it off.
+#
+# service.toml(5) explains each setting. `service check timed` checks
+# this file, and `service edit timed` checks it as you save.
+
+service_version = 1
+description = "Network time"
+program = "/system/commands/timed"
+# After resolved, which finds the servers' addresses.
+order = 22
+# Started again whenever it ends: always, on-failure or never.
+restart = "always"
+
+[limits]
+memory = "16M"
+
+# What it holds beyond what every service reads (service.toml(5)): the
+# clock, to set, slew and write the real-time clock; the servers it asks;
+# the time it last synced, kept from boot to boot, and its status.
+[permissions]
+admin.time = true
+network.outbound = true
+files.read-write = ["/system/state/timed", "/system/live/timed"]
