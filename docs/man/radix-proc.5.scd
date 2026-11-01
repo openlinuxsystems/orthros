@@ -176,7 +176,8 @@ _/processes/mounts_
 	separated by spaces, and a fifth when the filesystem has a label:
 	where it was mounted from (a device name such as _vda1_, or the
 	filesystem's kind), where it is, its kind (*tmpfs*, *fat*, *exfat*,
-	*btrfs*, *ext4*, *ntfs*, *proc*, *sys*, *dev* or *bootfs*), *rw* or
+	*btrfs*, *ext4*, *ntfs*, *udf*, *iso9660*, *proc*, *sys*, *dev* or
+	*bootfs*), *rw* or
 	*ro*, and
 	*label=*_label_. The
 	first four fields are those of Linux's _/proc/mounts_, and as there,

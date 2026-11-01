@@ -302,8 +302,9 @@ emptied and each NVMe controller is shut down. Each
 appears in _/devices_ and _/kernel/block_. As on Linux, an entry that starts past
 the disk's end is skipped, an MBR one that reaches past it is cut to end
 there, and an extended partition shows only its first two sectors. Spark
-mounts the FAT, exFAT, NTFS, Btrfs or ext4 filesystem of each partition,
-or of each disk with no partition table, at _/volumes/_*name*,
+mounts the FAT, exFAT, NTFS, Btrfs, ext4, UDF or ISO 9660 filesystem of
+each partition, or of each disk with no partition table, at
+_/volumes/_*name*,
 read-write, or read-only when the device is, for NTFS when Windows left
 it dirty, hibernated or with changes in its log to replay, or when
 Radix cannot grow its master file table (ADR 0237), for exFAT when it
@@ -312,8 +313,10 @@ or its medium reported a failure, for Btrfs when it uses a feature
 Radix does not write yet (named holes, without *no-holes*, or quotas),
 and for ext4 (and ext2 and ext3) when it does: no extents, quotas,
 inline data, encryption, case folding, MMP, fast commits or a journal on
-another device. A mount replays the journal Linux left on ext4, and the
-log of fsyncs it left on Btrfs. A device with
+another device. UDF and ISO 9660 (with Rock Ridge's POSIX names, modes
+and links, or Joliet's Unicode names) are only read (ADR 0245). A mount
+replays the journal Linux left on ext4, and the log of fsyncs it left on
+Btrfs. A device with
 none of them is left alone, and so is an EFI system partition, which
 boots the machine and is not one of the user's volumes. Spark mounts the
 disks found at boot, USB sticks plugged in then among them. Those
@@ -355,6 +358,7 @@ Disk: vda is a virtio block device of 32 MiB at 0000:00:03.0, 512 bytes a block,
 Disk: vda has no partition table; it is used whole
 Disk: AHCI 1.0 controller at 0000:00:1f.2: 6 ports, 32 command slots, NCQ, MSI vector 0x54
 Disk: sda is a SATA disk of 64 MiB on AHCI port 0: QEMU HARDDISK, 512 bytes a block, NCQ depth 32, write cache, TRIM
+Disk: sdb is an ATA disk of 32 MiB on the IDE primary channel at 0000:00:03.0, master: QEMU HARDDISK, 512 bytes a block, write cache
 Disk: nvme0 is an NVMe 1.4 controller at 0000:00:04.0: QEMU NVMe Ctrl, firmware 8.2.2, 4 I/O queues of 63 commands, an MSI-X vector for each of 4 CPUs, shadow doorbells, scatter gather lists
 Disk: nvme0n1 is an NVMe namespace of 64 MiB: QEMU NVMe Ctrl, 512 bytes a block, write cache, deallocates
 Files: mounted fat from vda on /volumes/vda, labelled RADIX16
@@ -377,6 +381,18 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 *Disk:* _name_*: a request went unanswered for 30 s; the link was reset, and what was in flight goes again*
 	A SATA disk stopped answering, and its link was reset.
 
+*Disk: the SATA controller at* _address_ *is in IDE mode, which runs one command at a time on each channel, with no queuing or hot-plug: setting it to AHCI in the firmware's setup lets its disks run faster*
+	The firmware set a SATA controller to IDE mode, so that it shows
+	itself as an IDE controller, and a disk on it says it is Serial
+	ATA. Its disks work, more slowly than on AHCI: one command at a
+	time on each channel, and none of TRIM, SMART or hot-plug. Setting
+	the controller to AHCI in the firmware's setup needs nothing else
+	of Dukovo, which drives both.
+
+*Disk: a request on the IDE controller's* _channel_ *went unanswered for 30 s; the channel was reset, and what was in flight goes again*
+	An IDE or SATA disk in IDE mode stopped answering, and its channel
+	was reset (a software reset of both its disks).
+
 *Disk:* _name_*: a request went unanswered for 30 s; the controller was reset, and what was in flight goes again*
 	An NVMe controller stopped answering, or said it failed, and was
 	disabled and enabled again, its queues made again. When it does
@@ -394,9 +410,10 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 
 # LIMITS
 
-- virtio block devices, SATA disks on AHCI controllers, NVMe namespaces
-  and USB disks, over the Bulk-Only Transport or USB Attached SCSI
-  (UAS), have drivers. Port multipliers, optical drives, disks with
+- virtio block devices, SATA disks on AHCI controllers, ATA and SATA
+  disks on IDE controllers (and SATA controllers in IDE mode), NVMe
+  namespaces and USB disks, over the Bulk-Only Transport or USB Attached
+  SCSI (UAS), have drivers. Port multipliers, optical drives, disks with
   logical sectors larger than 4096 bytes and NVMe namespaces with
   metadata are not supported.
 - FAT has no journal: a power cut in the middle of a write can leave lost

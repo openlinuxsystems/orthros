@@ -23,8 +23,11 @@ blkid does, with libblkid's tags in its order:
 - *LABEL*, *UUID* and *TYPE* of a filesystem: *vfat* (FAT12, FAT16 and
   FAT32, its UUID the volume serial number), *exfat*, *ntfs* (its UUID
   the volume serial number, 16 hexadecimal digits), *ext2*, *ext3*,
-  *ext4*, *btrfs* (with *UUID_SUB*, the UUID of this disk of it) and
-  *swap*, with the size of its sectors or blocks as *BLOCK_SIZE*;
+  *ext4*, *btrfs* (with *UUID_SUB*, the UUID of this disk of it), *udf*
+  (its LABEL the logical volume's identifier, its UUID the start of the
+  volume set's), *iso9660* (its LABEL the Joliet one if it has one, its
+  UUID the time it was made) and *swap*, with the size of its sectors or
+  blocks as *BLOCK_SIZE*;
 - *PTUUID* and *PTTYPE* (*gpt* or *dos*) of a disk's partition table;
 - *PARTUUID* and *PARTLABEL* of a partition, from its disk's table; an
   MBR partition's PARTUUID is the disk's signature and its number.

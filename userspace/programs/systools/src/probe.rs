@@ -3,7 +3,8 @@
 
 //! What a disk or partition holds, from its first sectors, as libblkid
 //! finds it: a filesystem's kind, label and UUID (FAT, exFAT, NTFS, ext2
-//! to ext4, Btrfs and Linux's swap areas), or a disk's partition table, and
+//! to ext4, Btrfs, UDF, ISO 9660 and Linux's swap areas), or a disk's
+//! partition table, and
 //! a partition's UUID and label in its disk's table. For blkid(8) and
 //! lsblk(8).
 
@@ -18,7 +19,7 @@ pub const BLOCKS: &str = "/kernel/block";
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Filesystem {
     /// libblkid's name for its kind: `vfat`, `exfat`, `ntfs`, `ext4`,
-    /// `btrfs`, `swap`.
+    /// `btrfs`, `udf`, `iso9660`, `swap`.
     pub kind: &'static str,
     /// Its version, as lsblk's FSVER shows it: `FAT32`, `1.0`.
     pub version: String,
@@ -137,6 +138,15 @@ pub fn filesystem(read: &mut Read<'_>) -> Option<Filesystem> {
     if let Some(found) = read(0, 4096).and_then(|s| swap(&s)) {
         return Some(found);
     }
+    // A disc image's first 32 KiB may hold a boot sector of its own, for
+    // the image to boot from a USB stick. A DVD's ISO 9660 is a bridge to
+    // its UDF, which libblkid names.
+    if let Some(found) = udf(read) {
+        return Some(found);
+    }
+    if let Some(found) = iso9660(read) {
+        return Some(found);
+    }
     let boot = read(0, 512)?;
     if boot[510..512] != [0x55, 0xaa] {
         return None;
@@ -148,6 +158,131 @@ pub fn filesystem(read: &mut Read<'_>) -> Option<Filesystem> {
         return Some(ntfs(&boot, read));
     }
     fat(&boot)
+}
+
+/// UDF: its label is the logical volume's identifier, its UUID the start
+/// of the volume set's (when it is hex, as the specification asks), and
+/// its version the revision its domain names, as libblkid has them.
+fn udf(read: &mut Read<'_>) -> Option<Filesystem> {
+    // Its recognition sequence says it is UDF.
+    let nsr = (0..32u64).any(|i| {
+        read(32 * 1024 + i * 2048, 8).is_some_and(|d| matches!(&d[1..6], b"NSR02" | b"NSR03"))
+    });
+    if !nsr {
+        return None;
+    }
+    // Its anchor, at block 256, says where its volume descriptors are.
+    let (block, mut at, count) = [512u64, 1024, 2048, 4096].into_iter().find_map(|block| {
+        let avdp = read(256 * block, 512)?;
+        (u16_at(&avdp, 0) == 2 && u32_at(&avdp, 12) == 256)
+            .then(|| (block, u64::from(u32_at(&avdp, 20)), u64::from(u32_at(&avdp, 16)) / block))
+    })?;
+    let dstring = |field: &[u8]| -> Option<String> {
+        let (&len, bytes) = field.split_last()?;
+        let bytes = bytes.get(..usize::from(len))?;
+        let (&id, rest) = bytes.split_first()?;
+        let text = match id {
+            8 | 254 => rest.iter().map(|&b| char::from(b)).collect(),
+            16 | 255 => {
+                let units: Vec<u16> =
+                    rest.as_chunks::<2>().0.iter().map(|&p| u16::from_be_bytes(p)).collect();
+                String::from_utf16_lossy(&units)
+            }
+            _ => return None,
+        };
+        let text = text.trim_end().to_string();
+        (!text.is_empty()).then_some(text)
+    };
+    let (mut label, mut uuid, mut version) = (None, None, String::new());
+    for _ in 0..count.min(64) {
+        let Some(d) = read(at * block, 512) else { break };
+        match u16_at(&d, 0) {
+            // The primary volume descriptor: the volume set.
+            1 => {
+                let set = dstring(&d[72..200]).unwrap_or_default();
+                let start: String = set.chars().take(16).collect();
+                if start.len() == 16 && start.chars().all(|c| c.is_ascii_hexdigit()) {
+                    uuid = Some(start.to_lowercase());
+                }
+            }
+            // The logical volume descriptor: its name, and its domain's
+            // revision, in BCD.
+            6 => {
+                label = dstring(&d[84..212]);
+                let revision = u16_at(&d, 216 + 24);
+                if revision != 0 {
+                    version = format!("{:x}.{:02x}", revision >> 8, revision & 0xff);
+                }
+            }
+            8 | 0 => break,
+            _ => {}
+        }
+        at += 1;
+    }
+    Some(Filesystem {
+        kind: "udf",
+        version,
+        label,
+        uuid,
+        uuid_sub: None,
+        block_size: Some(block as u32),
+    })
+}
+
+/// ISO 9660, from its volume descriptors at 32 KiB: its label is the
+/// Joliet one if it has one, and its UUID the time it was last changed,
+/// or made, as libblkid has them.
+fn iso9660(read: &mut Read<'_>) -> Option<Filesystem> {
+    let primary = read(32 * 1024, 2048)?;
+    if &primary[1..6] != b"CD001" || primary[0] != 1 {
+        return None;
+    }
+    let mut joliet = None;
+    for n in 17..32 {
+        let Some(d) = read(n * 2048, 2048) else { break };
+        if &d[1..6] != b"CD001" || d[0] == 255 {
+            break;
+        }
+        // A supplementary descriptor with Joliet's escape sequence.
+        if d[0] == 2 && d[88] == b'%' && d[89] == b'/' && matches!(d[90], b'@' | b'C' | b'E') {
+            joliet = Some(d);
+        }
+    }
+    let label = match &joliet {
+        Some(d) => {
+            let units: Vec<u16> =
+                d[40..72].as_chunks::<2>().0.iter().map(|&p| u16::from_be_bytes(p)).collect();
+            let text = String::from_utf16_lossy(&units);
+            let text = text.trim_end_matches([' ', '\0']);
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        None => text(&primary[40..72]),
+    };
+    // Sixteen digits, then the zone: YYYYMMDDHHMMSScc.
+    let date = |at: usize| {
+        let d = &primary[at..at + 16];
+        (d.iter().all(u8::is_ascii_digit) && d.iter().any(|&b| b != b'0')).then(|| {
+            let d = String::from_utf8_lossy(d);
+            format!(
+                "{}-{}-{}-{}-{}-{}-{}",
+                &d[..4],
+                &d[4..6],
+                &d[6..8],
+                &d[8..10],
+                &d[10..12],
+                &d[12..14],
+                &d[14..16]
+            )
+        })
+    };
+    Some(Filesystem {
+        kind: "iso9660",
+        version: if joliet.is_some() { "Joliet Extension".to_string() } else { String::new() },
+        label,
+        uuid: date(830).or_else(|| date(813)),
+        uuid_sub: None,
+        block_size: Some(u32::from(u16_at(&primary, 128))),
+    })
 }
 
 /// Btrfs, from its superblock at 64 KiB.
@@ -422,6 +557,62 @@ mod tests {
         assert_eq!((found.kind, found.uuid.as_str()), ("dos", "deadbeef"));
         let ids = partition_ids(&mut reading(&image), 512, 2);
         assert_eq!(ids.uuid.as_deref(), Some("deadbeef-02"));
+    }
+
+    #[test]
+    fn finds_udf_and_its_label_uuid_and_revision() {
+        let block = 2048;
+        let mut image = vec![0u8; 300 * block];
+        image[32768 + 2048 + 1..32768 + 2048 + 6].copy_from_slice(b"NSR02");
+        let avdp = 256 * block;
+        image[avdp..avdp + 2].copy_from_slice(&2u16.to_le_bytes());
+        image[avdp + 12..avdp + 16].copy_from_slice(&256u32.to_le_bytes());
+        image[avdp + 16..avdp + 20].copy_from_slice(&(16 * 2048u32).to_le_bytes());
+        image[avdp + 20..avdp + 24].copy_from_slice(&32u32.to_le_bytes());
+        let pvd = 32 * block;
+        image[pvd] = 1;
+        let set = b"\x086ae66cea51fa2a06LinuxUDF";
+        image[pvd + 72..pvd + 72 + set.len()].copy_from_slice(set);
+        image[pvd + 199] = set.len() as u8;
+        let lvd = 33 * block;
+        image[lvd] = 6;
+        image[lvd + 84..lvd + 93].copy_from_slice(b"\x08RadixUDF");
+        image[lvd + 211] = 9;
+        image[lvd + 240..lvd + 242].copy_from_slice(&0x0201u16.to_le_bytes());
+        let found = filesystem(&mut reading(&image)).unwrap();
+        assert_eq!((found.kind, found.version.as_str()), ("udf", "2.01"));
+        assert_eq!(found.label.as_deref(), Some("RadixUDF"));
+        assert_eq!(found.uuid.as_deref(), Some("6ae66cea51fa2a06"));
+        assert_eq!(found.block_size, Some(2048));
+    }
+
+    #[test]
+    fn finds_iso9660_and_its_joliet_label() {
+        let mut image = vec![0u8; 40 * 2048];
+        let pvd = 16 * 2048;
+        image[pvd] = 1;
+        image[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+        image[pvd + 40..pvd + 72].copy_from_slice(b"PLAIN_LABEL                     ");
+        image[pvd + 128..pvd + 130].copy_from_slice(&2048u16.to_le_bytes());
+        image[pvd + 813..pvd + 829].copy_from_slice(b"2026103112000000");
+        image[pvd + 830..pvd + 846].copy_from_slice(b"0000000000000000");
+        let found = filesystem(&mut reading(&image)).unwrap();
+        assert_eq!((found.kind, found.version.as_str()), ("iso9660", ""));
+        assert_eq!(found.label.as_deref(), Some("PLAIN_LABEL"));
+        assert_eq!(found.uuid.as_deref(), Some("2026-10-31-12-00-00-00"));
+        assert_eq!(found.block_size, Some(2048));
+        let svd = 17 * 2048;
+        image[svd] = 2;
+        image[svd + 1..svd + 6].copy_from_slice(b"CD001");
+        image[svd + 88..svd + 91].copy_from_slice(b"%/E");
+        let label: Vec<u8> = "Été disc".encode_utf16().flat_map(u16::to_be_bytes).collect();
+        image[svd + 40..svd + 72].fill(0);
+        image[svd + 40..svd + 40 + label.len()].copy_from_slice(&label);
+        image[18 * 2048] = 255;
+        image[18 * 2048 + 1..18 * 2048 + 6].copy_from_slice(b"CD001");
+        let found = filesystem(&mut reading(&image)).unwrap();
+        assert_eq!(found.version, "Joliet Extension");
+        assert_eq!(found.label.as_deref(), Some("Été disc"));
     }
 
     #[test]

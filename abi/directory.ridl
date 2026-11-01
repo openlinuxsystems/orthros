@@ -128,6 +128,11 @@ enum FilesystemKind: u8 {
     ext4 = 9;
     /// NTFS on a disk, read-only for now: `ntfs`.
     ntfs = 10;
+    /// ISO 9660 on a CD, DVD or disc image, with Joliet and Rock Ridge,
+    /// read-only: `iso9660`.
+    iso9660 = 11;
+    /// UDF on a DVD, Blu-ray disc, disc image or disk, read-only: `udf`.
+    udf = 12;
 }
 
 /// How `open` opens.

@@ -176,7 +176,10 @@ are not written yet. An NTFS that Windows hibernated with (Fast
 Startup), left dirty or with changes in its journal to replay is
 mounted read-only, since writing it would lose Windows' changes: shut
 Windows down fully (hold Shift as you choose Shut down) and Dukovo
-writes it. Anything else is left alone.
+writes it. A disc image written to a USB stick or kept on a disk, ISO
+9660 (with Rock Ridge's or Joliet's long names) or UDF (DVDs, Blu-ray
+discs and Windows' installation media), mounts read-only, as a disc is.
+Anything else is left alone.
 
 Changes reach a FAT, exFAT or ext4 disk within five seconds, and a Btrfs
 disk within 30 seconds, as on Linux, or at once when a program asks for

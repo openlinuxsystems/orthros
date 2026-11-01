@@ -65,9 +65,9 @@ The packages `ob` needs on each distribution are:
 
 | Distribution | Install command |
 | --- | --- |
-| Debian, Ubuntu, Linux Mint | `sudo apt install build-essential rustup qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g scdoc mandoc clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake git`, then `cargo install mdbook --version 0.4.52 --locked` |
-| Fedora | `sudo dnf install gcc rustup qemu-system-x86 edk2-ovmf grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfsprogs scdoc mandoc mdbook clang compiler-rt lld llvm meson ninja-build cmake git patch` |
-| Arch Linux | `sudo pacman -S --needed base-devel rustup qemu-system-x86 edk2-ovmf grub libisoburn mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g scdoc mandoc mdbook clang compiler-rt lld llvm meson ninja cmake git` |
+| Debian, Ubuntu, Linux Mint | `sudo apt install build-essential rustup qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g udftools udfclient genisoimage scdoc mandoc clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake git`, then `cargo install mdbook --version 0.4.52 --locked` |
+| Fedora | `sudo dnf install gcc rustup qemu-system-x86 edk2-ovmf grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfsprogs udftools genisoimage scdoc mandoc mdbook clang compiler-rt lld llvm meson ninja-build cmake git patch` |
+| Arch Linux | `sudo pacman -S --needed base-devel rustup qemu-system-x86 edk2-ovmf grub libisoburn mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g udftools scdoc mandoc mdbook clang compiler-rt lld llvm meson ninja cmake git` |
 
 The C compiler (`build-essential`, `gcc` or `base-devel`) is there because
 Rust uses it as the linker for `ob` itself and for mdBook; the kernel links
@@ -82,6 +82,10 @@ and Linux Mint 22 have version 6.6, which lacks options the tests use, so
 `./ob test` fetches Ubuntu 26.04's package (6.17.1), checks its SHA-256 and
 unpacks it into `.cache/btrfs-progs/` without installing it. Fedora and
 Arch Linux have a recent enough version.
+
+udftools, UDFclient and genisoimage make and fill the UDF volumes Radix's
+UDF tests read. Fedora and Arch Linux have no UDFclient package: build it
+from <https://www.13thmonkey.org/udfclient/>, or test in the container.
 
 Debian 12 and Ubuntu 22.04 (Linux Mint 21) have no `rustup` package and
 no Clang 20: install rustup from <https://rustup.rs> and Clang 20 from
