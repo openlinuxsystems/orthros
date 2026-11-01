@@ -400,6 +400,17 @@ fn requirements() -> Vec<Requirement> {
             fallback: None,
         },
         Requirement {
+            name: "OpenSSH's server",
+            purpose: "answers the ssh test's client, through QEMU's network, as the computer it signs in to",
+            found: |_| program_version("/usr/sbin/sshd", "-V"),
+            packages: Packages {
+                apt: Some("openssh-server"),
+                dnf: Some("openssh-server"),
+                pacman: Some("openssh"),
+            },
+            fallback: None,
+        },
+        Requirement {
             name: "libbde",
             purpose: "bdeinfo, which unlocks the BitLocker volumes of radix-bitlocker's tests as Windows' are unlocked",
             found: |_| program_version("bdeinfo", "-V"),
@@ -531,6 +542,13 @@ fn requirements() -> Vec<Requirement> {
                 dnf: Some("pkgconf-pkg-config"),
                 pacman: Some("pkgconf"),
             },
+            fallback: None,
+        },
+        Requirement {
+            name: "Autoconf",
+            purpose: "makes OpenSSH's configure script from the release's commit",
+            found: |_| program_version("autoconf", "--version"),
+            packages: all("autoconf"),
             fallback: None,
         },
         Requirement {
