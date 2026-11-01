@@ -1292,7 +1292,7 @@ pub const CASES: &[Case] = &[
         media: Media::Usb,
         cmdline: "lockdep -- --service-dir /system/tests/services",
         cpus: 2,
-        memory: "256M",
+        memory: "384M",
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
@@ -1303,12 +1303,12 @@ pub const CASES: &[Case] = &[
     },
     Case {
         name: "swap",
-        about: "a swap area Linux's mkswap made on a virtio disk: swapon turns it on, a program fills 384 MiB of a 256 MiB machine and gets it all back, through a fork too, and swapoff turns it off with pages still on it; the area stays as mkswap made it",
+        about: "a swap area Linux's mkswap made on a virtio disk: swapon turns it on, a program fills 512 MiB of a 384 MiB machine and gets it all back, through a fork too, and swapoff turns it off with pages still on it; the area stays as mkswap made it",
         firmware: Firmware::Uefi,
         media: Media::Usb,
-        cmdline: "lockdep -- --posix /system/tests/posix/swaptest /devices/vda 384",
+        cmdline: "lockdep -- --posix /system/tests/posix/swaptest /devices/vda 512",
         cpus: 2,
-        memory: "256M",
+        memory: "384M",
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
@@ -1324,7 +1324,7 @@ pub const CASES: &[Case] = &[
         media: Media::Usb,
         cmdline: "lockdep -- --service-dir /system/tests/services/stop",
         cpus: 2,
-        memory: "256M",
+        memory: "384M",
         reboot: false,
         image: TestImage::Plain,
         cpu_model: None,
@@ -7684,7 +7684,7 @@ fn swap(vm: &mut Vm, case: &Case) -> Result<(), String> {
     let slots = SWAP_KIB / 4 - 1;
     vm.expect(&format!("Swap: vda: {} MiB in {slots} slots, priority -2", slots * 4 / 1024))?;
     vm.expect(&format!("swaptest: swap is on, {} KiB", slots * 4))?;
-    vm.expect("swaptest: filled 384 MiB")?;
+    vm.expect("swaptest: filled 512 MiB")?;
     vm.expect("swaptest: read it back, ")?;
     vm.expect("swaptest: a child changed its copy")?;
     vm.expect("Swap: vda: off")?;

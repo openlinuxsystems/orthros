@@ -639,7 +639,8 @@ foreground. The tests are:
 	archivers, *file*, *jq*, mandoc's tools and ncurses', each given
 	text on its standard input and checked for what it writes and its
 	exit status; the editors and the terminal tools typed at on a
-	pseudo-terminal; *tmux*; the shell by each of its names; and every
+	pseudo-terminal; *tmux*; *git*, in repositories on this computer;
+	the shell by each of its names; and every
 	program's manual page and completion file.
 
 *admin*
