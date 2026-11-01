@@ -208,7 +208,11 @@ boot test; `./ob help test` lists them. Without KVM the boot tests take a
 few minutes.
 
 Before sending a change, also run `./ob lint` and `./ob docs --check`; CI
-runs all three.
+runs all three. `./ob lint` also checks that the kernel builds for RISC-V,
+against placeholders of its hardware layer, and `./ob test riscv` boots a
+small RISC-V program on QEMU's `virt` machine (it needs QEMU's RISC-V
+emulator, the `qemu-system-misc` package), so that nothing x86-only slips
+into the kernel's common code; CI runs that too.
 
 ## Building the boot image
 

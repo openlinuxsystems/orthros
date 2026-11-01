@@ -50,6 +50,15 @@ pub fn lint(ctx: &Ctx) -> Result<()> {
         .args(["--", "-D", "warnings"]);
     process::run(ctx, &mut cmd)?;
 
+    // And for RISC-V, whose stubs sit beside the smoke boot (ADR 0270),
+    // with the smoke boot's program.
+    step("Running Clippy on the kernel (RISC-V, against the HAL stubs) and the smoke boot");
+    let mut cmd = kernel::cargo(ctx, "clippy")?;
+    cmd.args(["-p", "radix", "-p", "radix-arch-riscv64", "--bins", "--lib"])
+        .args(crate::riscv::target_args())
+        .args(["--", "-D", "warnings"]);
+    process::run(ctx, &mut cmd)?;
+
     step("Running Clippy on the kernel libraries and their host tests");
     let mut cmd = kernel::cargo(ctx, "clippy")?;
     for library in test::KERNEL_LIBRARIES {

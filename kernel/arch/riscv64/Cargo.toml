@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-arch-riscv64"
+description = "RISC-V stubs of the Radix hardware abstraction layer, and the smoke boot CI runs under QEMU"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+doctest = false
+bench = false
+
+# The smoke boot: OpenSBI starts it on QEMU's `virt` machine (ADR 0270).
+[[bin]]
+name = "radix-riscv64-smoke"
+path = "src/bin/smoke.rs"
+test = false
+bench = false
+
+[dependencies]
+radix-hal = { path = "../../hal" }
+radix-pstate = { path = "../../lib/pstate" }
+radix-sensors = { path = "../../lib/sensors" }
+
+[lints]
+workspace = true

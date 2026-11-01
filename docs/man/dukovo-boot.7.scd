@@ -712,10 +712,26 @@ the kernel powers it off itself if it is still on 30 seconds later:
 
 The zones are in _/kernel/class/thermal_, as on Linux (*radix-sysfs*(5)).
 
+Then it finds the firmware's USB-C ports, if the namespace has a UCSI
+device (_USBC000_, ADR 0248): it resets the firmware's port manager
+behind it and logs each port, what is plugged into it and the power the
+machine takes or gives by it:
+
+```
+USB-C: the firmware's UCSI 1.2 interface at \_SB_.UBTC: 2 ports, USB Power Delivery
+USB-C: port 1: a charger; the machine takes 20 V at 3 A (60 W) by USB Power Delivery; charging
+USB-C: port 2: nothing is plugged in
+```
+
+From then on the _usb-c_ thread logs a port again each time the firmware
+says it changed. The ports are in _/kernel/class/typec_, and the power
+each takes in _/kernel/class/power_supply_, as on Linux; nothing on them
+is set (*radix-sysfs*(5)).
+
 With *aml=off*, or if uACPI cannot start, which the kernel logs, no AML
 runs; the kernel hears a fixed power button by itself and powers off
 with the sleep types of the DSDT's _\_S5_ (ADR 0142), and no battery,
-adapter, lid or thermal zone is found.
+adapter, lid, thermal zone or USB-C port is found.
 
 # CPU FREQUENCY
 

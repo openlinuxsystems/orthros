@@ -73,7 +73,8 @@ _target/userspace/_).
 	command for Debian, Ubuntu, Fedora or Arch Linux. Also report whether KVM is usable (without it QEMU still works,
 	only slower), whether GDB is installed for *run --gdb*, and whether
 	dash, bash, *unshare*, *prlimit* and *setpriv* are there for *test
-	corpus*. Exits with status 1 when a required tool is missing.
+	corpus*, and *qemu-system-riscv64* for *test riscv*. Exits with
+	status 1 when a required tool is missing.
 
 *build* [*--debug* | *--release*]
 	Build the Radix kernel for its own target,
@@ -232,7 +233,7 @@ _target/userspace/_).
 		Pass everything after *--* to *qemu-system-x86_64*(1) unchanged,
 		for example *-- -d int* to log interrupts.
 
-*test* [*unit* | *boot* | *kani* | *tla* | *corpus*] [*--case* _name_]... [*--shard* _part_/_parts_] [*--timeout* _seconds_] [*--debug* | *--release*] | *--list*
+*test* [*unit* | *boot* | *kani* | *tla* | *corpus* | *riscv*] [*--case* _name_]... [*--shard* _part_/_parts_] [*--timeout* _seconds_] [*--debug* | *--release*] | *--list*
 	Run the unit tests of the build tool and the kernel libraries on this
 	machine, then the boot tests: build a test image and boot it in QEMU
 	once per case below. Each case follows the serial console, types
@@ -302,6 +303,17 @@ _target/userspace/_).
 	kernel.apparmor_restrict_unprivileged_userns=0*. Plain *ob test*
 	leaves it out, and CI runs it in a job of its own; it takes about
 	seven minutes.
+
+	*riscv* builds the RISC-V smoke boot instead (ADR 0270),
+	_kernel/arch/riscv64_'s *radix-riscv64-smoke* for
+	*riscv64gc-unknown-none-elf*, and boots it on QEMU's *virt* machine
+	under the OpenSBI QEMU ships, without KVM. It passes when the boot
+	prints its banner, turns Sv39 paging on, takes an SBI timer interrupt
+	and powers off through SBI, in that order, within a minute; its
+	output goes to _out/test/riscv-smoke.log_. It takes seconds and needs
+	*qemu-system-riscv64* (the *qemu-system-misc* package on Debian,
+	Ubuntu and Linux Mint). Plain *ob test* leaves it out, and CI runs it
+	after *lint* on every push.
 
 	*uefi-usb*, *bios-usb*, *uefi-cdrom*, *bios-cdrom*
 		Boot with 4 CPUs under each firmware and medium, and check the
@@ -1508,8 +1520,9 @@ _target/userspace/_).
 *lint*
 	Check formatting with rustfmt and run Clippy, treating every warning as
 	an error, on the build tool, on the kernel for x86-64, on the
-	architecture-independent kernel against the AArch64 stubs of the
-	hardware abstraction layer, on the kernel libraries with their
+	architecture-independent kernel against the AArch64 and RISC-V stubs
+	of the hardware abstraction layer (with the RISC-V smoke boot), on the
+	kernel libraries with their
 	tests, and on the user programs. CI runs the same command.
 
 *fmt*

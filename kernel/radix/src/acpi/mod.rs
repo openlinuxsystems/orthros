@@ -19,13 +19,16 @@
 //! reach them through the embedded controller, which uACPI's side serves
 //! before the namespace's `_INI` methods run. `thermal` finds its thermal
 //! zones and watches them, slowing the CPUs at their passive trip points
-//! and powering off at their critical ones (ADR 0203).
+//! and powering off at their critical ones (ADR 0203). `ucsi` finds the
+//! firmware's USB-C ports and watches what is plugged into them (ADR
+//! 0248).
 //!
 //! With `aml=off`, or if uACPI cannot start, no AML runs, and the kernel
 //! hears the fixed power button by itself as before (ADR 0142).
 
 pub mod devices;
 pub mod thermal;
+pub mod ucsi;
 
 use core::alloc::Allocator;
 use core::fmt::{self, Write};
@@ -100,6 +103,7 @@ pub fn start(off: bool) {
             info!("ACPI: uACPI {} runs the firmware's AML", radix_uacpi::VERSION);
             devices::find();
             thermal::find();
+            ucsi::find();
         }
         Err(err) => error!("ACPI: uACPI {err}; no AML runs"),
     }

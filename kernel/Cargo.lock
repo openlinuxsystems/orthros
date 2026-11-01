@@ -250,6 +250,7 @@ dependencies = [
  "radix-acpi",
  "radix-ahci",
  "radix-arch-aarch64",
+ "radix-arch-riscv64",
  "radix-arch-x86_64",
  "radix-bitlocker",
  "radix-block",
@@ -292,11 +293,13 @@ dependencies = [
  "radix-sync",
  "radix-tty",
  "radix-uacpi",
+ "radix-ucsi",
  "radix-udf",
  "radix-usb",
  "radix-usbhc",
  "radix-vfs",
  "radix-virtio",
+ "radix-vmd",
  "radix-xhci",
  "zeroize",
 ]
@@ -330,6 +333,15 @@ dependencies = [
 
 [[package]]
 name = "radix-arch-aarch64"
+version = "0.10.4"
+dependencies = [
+ "radix-hal",
+ "radix-pstate",
+ "radix-sensors",
+]
+
+[[package]]
+name = "radix-arch-riscv64"
 version = "0.10.4"
 dependencies = [
  "radix-hal",
@@ -695,6 +707,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-ucsi"
+version = "0.10.4"
+
+[[package]]
 name = "radix-udf"
 version = "0.10.4"
 dependencies = [
@@ -737,6 +753,10 @@ version = "0.10.4"
 dependencies = [
  "radix-hw",
 ]
+
+[[package]]
+name = "radix-vmd"
+version = "0.10.4"
 
 [[package]]
 name = "radix-vtd"

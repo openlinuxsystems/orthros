@@ -279,6 +279,22 @@ _/kernel/class/power_supply/_*name*_/model_name_, _manufacturer_, _serial_number
 	while its bay is empty, fails to read with EIO, as Linux's fail with
 	ENODEV.
 
+_/kernel/class/typec/port_*n*_/data_role_, _power_role_, _port_type_, _power_operation_mode_
+	For each USB-C port the firmware's UCSI device (_USBC000_, through
+	uACPI) runs, from *port0*, as Linux's _/sys/class/typec_ shows them:
+	the data role, *[host] device* or *host [device]*; the power role,
+	*[source] sink* or *source [sink]*; what the port can be, as *[dual]
+	source sink*; and the power agreed on it, *default*, *1.5A*, *3.0A*,
+	*5.0A* or *usb_power_delivery*. They are read again when the firmware
+	says the port changed. Radix sets none of them, so none can be
+	written.
+
+_/kernel/class/power_supply/ucsi-source-psy-USBC000:_*nnn*_/type_, _online_, _voltage_now_, _current_now_, _current_max_
+	For each of those ports, from *001*, as Linux's UCSI driver names
+	them: *USB*; *1* while the machine takes power through it, else *0*;
+	and, while it does, the voltage agreed, in µV, the current agreed and
+	the most the charger offers at that voltage, in µA (else *0*).
+
 _/kernel/class/thermal/thermal_zone_*n*_/type_, _temp_
 	For each thermal zone of the firmware's (*dukovo-boot*(7)'s *ACPI*),
 	in the order the namespace has them, as Linux's ACPI thermal driver

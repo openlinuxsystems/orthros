@@ -295,7 +295,9 @@ GPT) and names the disk and its partitions as Linux does: _vda_, _vdb_ for
 virtio disks, _sda_, _sdb_ for SATA disks and then USB ones (sticks, card
 readers and USB disks, each taking the lowest letter free, at boot in the
 order they were found), _nvme0n1_, _nvme0n2_ for the
-namespaces of the first NVMe controller and _nvme1n1_ for the second's,
+namespaces of the first NVMe controller and _nvme1n1_ for the second's
+(those an Intel VMD keeps, when the firmware's storage is set to RST or
+RAID, named as the others are; ADR 0249),
 _mmcblk0_, _mmcblk1_ for the cards in SD card readers on PCI (ADR 0247),
 _vda1_ for a partition, and _nvme0n1p1_ or _mmcblk0p1_ after a name that
 ends in a digit.
@@ -368,9 +370,13 @@ Disk: sda is a SATA disk of 64 MiB on AHCI port 0: QEMU HARDDISK, 512 bytes a bl
 Disk: sdb is an ATA disk of 32 MiB on the IDE primary channel at 0000:00:03.0, master: QEMU HARDDISK, 512 bytes a block, write cache
 Disk: nvme0 is an NVMe 1.4 controller at 0000:00:04.0: QEMU NVMe Ctrl, firmware 8.2.2, 4 I/O queues of 63 commands, an MSI-X vector for each of 4 CPUs, shadow doorbells, scatter gather lists
 Disk: nvme0n1 is an NVMe namespace of 64 MiB: QEMU NVMe Ctrl, 512 bytes a block, write cache, deallocates
+Disk: the Intel VMD at 0000:00:0e.0 keeps PCI segment 1000, buses 224 to 225: 1 bridge, 1 device, in 1024 KiB of its memory and 0 KiB of its prefetchable memory
 Disk: mmcblk0 is an SD card of 64 MiB in the SD card reader at 0000:00:05.0, slot 1: QEMU!, 13 MHz on a 4-bit bus, a version 2.00 reader
 Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 ```
+
+An NVMe controller behind a VMD is logged at its place in the VMD's
+segment, as _1000:e1:00.0 behind the VMD at 0000:00:0e.0_, and *polled*.
 
 *Disk:* _name_*: a read of* _n_ *sectors from sector* _s_ *failed after* _t_ *tries:* _why_
 	A request failed for good, and the program that made it got *io*
@@ -406,6 +412,14 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 	lines were reset; the card is stopped (CMD12) before the request
 	goes again.
 
+*Disk: could not set up the Intel VMD at* _address_*:* _why_*; the disks behind it are not seen (setting the firmware's storage to AHCI shows them)*
+	The firmware keeps the NVMe disks behind a VMD, and the kernel
+	could not set up its domain: its devices need more memory than
+	the VMD's windows have, more than 32 functions are behind it, or
+	its registers say what the kernel does not know. Setting the
+	firmware's storage to AHCI (not RST, RAID or Intel Optane) puts
+	the disks back on the machine's own PCI buses.
+
 *Disk:* _name_*: a request went unanswered for 30 s; the controller was reset, and what was in flight goes again*
 	An NVMe controller stopped answering, or said it failed, and was
 	disabled and enabled again, its queues made again. When it does
@@ -429,7 +443,10 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
   SCSI (UAS), and SD, SDHC and SDXC cards in SD card readers on PCI that
   were in them at boot, have drivers. Port multipliers, optical drives, disks with
   logical sectors larger than 4096 bytes and NVMe namespaces with
-  metadata are not supported.
+  metadata are not supported. NVMe controllers behind an Intel VMD are
+  polled, as the VMD's interrupts are not routed yet, and the AHCI
+  controllers some VMDs keep are not used: setting the firmware's
+  storage to AHCI has both drive at full speed.
 - FAT has no journal: a power cut in the middle of a write can leave lost
   clusters, which *fsck.fat* finds and frees, as on every system.
 - There is no name cache, disks other than USB ones are not plugged in

@@ -11,6 +11,8 @@
 //! same way), NVMe
 //! controllers ([`nvme`], whose namespaces are named `nvme0n1` and on),
 //! SD card readers ([`sdhci`], whose cards are named `mmcblk0` and on),
+//! Intel VMDs ([`vmd`], the NVMe controllers behind which are walked as
+//! a PCI segment of their own and named as the others are),
 //! and xHCI controllers (`crate::usb`), whose sticks and USB disks
 //! ([`usb`]) are named `sda` and on too: each `sd` disk takes the first
 //! letter free, as on Linux, the SATA disks found at boot first, and a
@@ -48,6 +50,7 @@ mod queue;
 mod sdhci;
 pub mod usb;
 mod virtio;
+mod vmd;
 
 /// A disk's name: `vda`, `vda1`, `nvme0n1p12-unlocked`.
 pub type Name = TextBuf<24>;
@@ -253,6 +256,8 @@ pub fn init() {
                 }
             } else if device_type(&function) == Some(radix_virtio::device_type::NET) {
                 crate::net::bind(&function);
+            } else if vmd::is_vmd(&function) {
+                vmd::bind(&function, &mut controllers, &mut functions);
             } else if function.class() == radix_ahci::PCI_CLASS {
                 if let Err(why) = ahci::bind(&function, &mut sata) {
                     warn!(

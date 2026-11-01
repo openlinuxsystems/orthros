@@ -42,6 +42,11 @@ const ALLOWED: &[(&str, &str)] = &[
         "radix::fs::disk::nvme::bind",
         "sets up a controller and its disks at boot, on the boot CPU's 64 KiB stack",
     ),
+    (
+        "radix::fs::disk::nvme::try_bind",
+        "sets up a controller and its disks at boot, also behind a VMD, on the boot CPU's 64 KiB \
+         stack",
+    ),
     ("__rustc::rust_begin_unwind", "the panic handler: the stack is not used again"),
     ("radix::captest::run", "a boot test, run from the boot CPU's 64 KiB stack"),
     ("radix::schedtest::balance", "a boot test, run from the boot CPU's 64 KiB stack"),

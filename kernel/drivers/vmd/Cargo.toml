@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-vmd"
+description = "Intel Volume Management Device for the Radix kernel: the PCI domain behind it, its buses numbered and its devices' memory assigned"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
