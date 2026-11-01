@@ -13,12 +13,14 @@
 //! nukesh [--posix] [--login] [--norc] [--noprofile] [--rcfile file]
 //!        [-abefhimnprstuvxBCEHPT] [-o option] [-O shopt]
 //!        [-c command [name [argument...]] | -s [argument...] | [script [argument...]]]
+//! nukesh --colors [--check] [file...]
 //! ```
 
 mod arith;
 mod ast;
 mod brace;
 mod builtins;
+mod colors;
 mod complete;
 mod cond;
 mod coproc;
@@ -28,6 +30,7 @@ mod expand;
 #[cfg(test)]
 mod fuzz;
 mod glob;
+mod highlight;
 mod history;
 mod interactive;
 mod jobs;
@@ -38,6 +41,7 @@ mod redir;
 mod script;
 mod shell;
 mod show;
+mod suggest;
 mod sys;
 mod text;
 mod trap;
@@ -73,6 +77,7 @@ struct Invocation {
 const USAGE: &str = "usage: nukesh [--posix] [--login] [--norc] [--noprofile] [--rcfile file]
               [-abefhimnprstuvxBCEHPT] [-o option] [-O shopt]
               [-c command [name [argument...]] | -s [argument...] | [script [argument...]]]
+       nukesh --colors [--check] [file...]
 ";
 
 fn main() {
@@ -177,6 +182,15 @@ fn run(args: &[String]) -> i32 {
         {
             shell.set_var("HISTFILE", &format!("{}/.nukesh_history", home.trim_end_matches('/')));
         }
+        // The colours, and the tools' colours, before the startup files,
+        // which may change them.
+        let (colors, problems) = colors::Colors::load(shell.get("HOME").as_deref());
+        for problem in &problems {
+            shell
+                .error(&format!("{}: {} (nukesh --colors --check)", problem.file, problem.message));
+        }
+        shell.colors = Rc::new(colors);
+        colors::color_the_tools(&mut shell);
     }
     for (option, on) in &invocation.options {
         if builtins::set_option(&mut shell, option, *on).is_err() {
@@ -251,6 +265,8 @@ fn parse_args(args: &[String], invocation: &mut Invocation) -> Result<(), String
                     args.get(i).ok_or_else(|| format!("{arg}: option requires an argument"))?;
                 invocation.rcfile = Some(file.clone());
             }
+            // colors.toml(5): shown, or checked (ADR 0258).
+            "--colors" if i == 1 => sys::exit_now(colors::command(&args[2..])),
             "--version" => {
                 let version = format!("nukesh, version {}\n", env!("CARGO_PKG_VERSION"));
                 let _ = sys::write_all(1, version.as_bytes());

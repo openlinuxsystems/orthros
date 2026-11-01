@@ -58,7 +58,8 @@ const I2C_TABLE: &str = "file=i2c.aml";
 const DDR4_DEVICE: &str = "file=ddr4.smbios";
 /// The release's name, which the kernel's banner gives after its version
 /// (`BANNER` in kernel/radix/src/main.rs) and the console's greeting
-/// begins with (userspace/defaults/issue).
+/// begins with (userspace/defaults/issue), as the welcome banner's version line
+/// does above the sign-in prompt (userspace/defaults/console/welcome.toml).
 const RELEASE: &str = "Dukovo Server";
 /// The first line of the kernel's panic report on the serial port
 /// (kernel/radix/src/panic.rs).
@@ -8093,7 +8094,7 @@ fn owner_signs_in(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_anywhere("consoled: started /system/commands/login on tty1 as process ")?;
     // No account can sign in yet: the owner's comes first.
     vm.expect_screen(&[
-        &format!("{RELEASE} {VERSION} (tty1)"),
+        &format!("{RELEASE} {VERSION}"),
         "This computer has no account yet: make yours, the owner's,",
     ])?;
     answer_prompt(vm, "Name:", "alice")?;
@@ -8116,7 +8117,7 @@ fn startup_trouble(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Boot complete.")?;
     vm.expect_anywhere("authd: 0 accounts; answering at /system/live/authd/socket")?;
     vm.expect_screen(&[
-        &format!("{RELEASE} {VERSION} (tty1)"),
+        &format!("{RELEASE} {VERSION}"),
         "Startup trouble: this computer was started from its boot menu's",
         "1  Reset an administrator's password",
         "4  Power off",
@@ -8172,7 +8173,7 @@ fn bob_signs_in(vm: &mut Vm) -> Result<(), String> {
     vm.expect_anywhere("signintest: bob is made")?;
     vm.press(&["alt-f2"])?;
     vm.expect_anywhere("consoled: started /system/commands/login on tty2 as process ")?;
-    vm.expect_screen(&[&format!("{RELEASE} {VERSION} (tty2)")])?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION}")])?;
     answer_prompt(vm, "Name:", "bob")?;
     answer_prompt(vm, "Password:", "white rabbit")?;
     vm.expect_anywhere("authd: bob signed in on pts/")
@@ -8295,7 +8296,7 @@ fn elevate(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_screen(&["Enter: sign in"])?;
     vm.press(&["ret"])?;
     vm.expect_anywhere("consoled: Ctrl+Alt+Delete menu: sign-in on tty3")?;
-    vm.expect_screen(&["(tty3)", "Name:"])?;
+    vm.expect_screen(&[&format!("{RELEASE} {VERSION}"), "Name:"])?;
     // Disabling bob's account ends his session on tty2 at once, and he
     // cannot sign in again until it is enabled (ADR 0220); alice's own is
     // another administrator's to disable.

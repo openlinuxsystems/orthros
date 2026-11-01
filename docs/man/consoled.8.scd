@@ -59,6 +59,12 @@ no account yet it first makes the owner's (*login*(1), ADR 0250). Each
 console signs in on its own, so two people, or one person twice, can be
 signed in on two consoles at once.
 
+Above the sign-in prompt, in issue's place, each console shows the
+welcome banner: Duke and the name in plain ASCII, the tagline, and the
+system's name and version (ADR 0261). *welcome.toml*(5) says when it
+shows and what is in it; a screen too small for Duke gets less. Consoles
+that start root's shell with no sign-in show issue's text.
+
 When the sign-in ends, because the session it started ended, as with
 *exit*, or because its input did, the console clears and the sign-in
 starts again. One that ends within 2 seconds five times in a row waits
@@ -192,6 +198,9 @@ _/system/settings/issue_
 	What each console shows before its session. Its default is in
 	_/system/resources/default-settings/issue_.
 
+_/system/settings/console/welcome.toml_
+	The welcome banner (*welcome.toml*(5)).
+
 _/system/settings/keyboard_
 	The keyboard layout's setting (*keymap*(1)).
 
@@ -210,6 +219,6 @@ _/system/live/authd/socket_
 # SEE ALSO
 
 *login*(1), *authd*(8), *elevate*(8), *spark*(8), *reboot*(8),
-*keymap*(1), *keymap*(5), *nukesh*(1), *dmesg*(1),
+*keymap*(1), *keymap*(5), *welcome.toml*(5), *nukesh*(1), *dmesg*(1),
 *notifyd*(8), *notify-send*(1), *dukovo-boot*(7),
 *radix-framebuffer*(2), *radix-input*(2), *radix-files*(7)

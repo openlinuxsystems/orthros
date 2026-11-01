@@ -94,6 +94,12 @@ The one-letter options are those of *set*, with these too:
 *--version*, *--help*
 	Say the version, or how to use it, and exit.
 
+*--colors* [*--check*] [_file_...]
+	Shows every key of *colors.toml*(5) in its colour, from the
+	system's file and one's own or from the _files_ named, and says
+	what is wrong in them; with *--check*, only checks them, and fails
+	if anything is wrong. It must be the first argument.
+
 # STARTING
 
 A login shell reads _/etc/profile_, then the first of
@@ -153,7 +159,25 @@ running each line as it comes.
 With *TERM=dumb*, or no terminal, lines are read as they come, with the
 terminal's own editing.
 
-Colors follow *NO_COLOR*: when it is set, the shell writes no color.
+## Colours
+
+The line is coloured as it is typed: commands, reserved words, options,
+quoted text, variables, operators and comments; a command that runs
+nothing is red and underlined before Enter. A command from the history
+that starts with what was typed shows faded after the cursor, and → or
+End takes it. After "command not found" at the prompt, the shell names
+the closest command it knows: "Did you mean service?". While *PS1* is
+left at its default, the prompt is _name_*@*_host_ _folder_ *$*, with a
+*✗* _status_ badge after a command that failed and an *admin* badge,
+and *#*, while the shell is root's. An interactive shell also gives
+*ls*, *grep*, *diff* and *ip* colours on a terminal, through aliases
+and *LS_COLORS*, *GREP_COLORS* and *IP_COLORS*.
+
+*colors.toml*(5) has every colour and switch: the system's file, then
+one's own, _~/.config/nukesh/colors.toml_. Only the terminal's 16
+standard colours are used. With *NO_COLOR* set, a dumb terminal or
+*enabled = false*, the shell writes no colour, and the hint is not
+shown.
 
 ## Prompts
 
@@ -358,6 +382,6 @@ the rest.
 
 # SEE ALSO
 
-*man*(1), *makewhatis*(8), *radix-posix*(7), *spark*(8)
+*man*(1), *makewhatis*(8), *radix-posix*(7), *spark*(8), *colors.toml*(5)
 
 The Bash Reference Manual, for what each bash feature does.

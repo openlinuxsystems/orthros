@@ -133,6 +133,7 @@ dependencies = [
  "radix-fbcon",
  "serde",
  "serde_json",
+ "toml",
  "vte",
 ]
 
@@ -532,7 +533,9 @@ version = "0.10.4"
 dependencies = [
  "indexmap",
  "libc",
+ "nu-ansi-term",
  "reedline",
+ "toml",
 ]
 
 [[package]]

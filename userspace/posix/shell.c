@@ -160,11 +160,46 @@ struct session {
 	size_t len;
 	// Where the next expect looks from.
 	size_t from;
+	// Where in an escape sequence the last read stopped: 0 outside one,
+	// 1 after ESC, 2 inside a CSI sequence, 3 inside an OSC string.
+	int escape;
 };
+
+// Keeps the text the terminal shows and drops its escape sequences, so
+// that the line editor's colours (ADR 0258) do not split what the test
+// looks for.
+static void keep_text(struct session *s, const char *data, size_t n) {
+	for(size_t i = 0; i < n && s->len < sizeof(s->shown) - 1; i++) {
+		unsigned char c = (unsigned char)data[i];
+		switch(s->escape) {
+		case 1:
+			s->escape = c == '[' ? 2 : c == ']' ? 3 : 0;
+			continue;
+		case 2:
+			if(c >= 0x40 && c <= 0x7e)
+				s->escape = 0;
+			continue;
+		case 3:
+			if(c == 7)
+				s->escape = 0;
+			else if(c == 0x1b)
+				s->escape = 1;
+			continue;
+		default:
+			if(c == 0x1b) {
+				s->escape = 1;
+				continue;
+			}
+			s->shown[s->len++] = (char)c;
+		}
+	}
+	s->shown[s->len] = 0;
+}
 
 // Starts the shell interactively on a new pseudo-terminal with `term`.
 static int start(struct session *s, const char *term) {
 	s->len = s->from = 0;
+	s->escape = 0;
 	s->master = posix_openpt(O_RDWR | O_NOCTTY);
 	if(s->master < 0 || grantpt(s->master) < 0 || unlockpt(s->master) < 0)
 		return -1;
@@ -206,13 +241,14 @@ static void pump(struct session *s, int ms) {
 	struct pollfd entry = {.fd = s->master, .events = POLLIN};
 	while(s->len < sizeof(s->shown) - 1 && poll(&entry, 1, ms) == 1 &&
 			(entry.revents & POLLIN)) {
-		ssize_t n = read(s->master, s->shown + s->len, sizeof(s->shown) - 1 - s->len);
+		char data[4096];
+		ssize_t n = read(s->master, data, sizeof(data) - 1);
 		if(n <= 0)
 			break;
-		s->shown[s->len + n] = 0;
-		for(char *q = s->shown + s->len; (q = strstr(q, "\033[6n")); q += 4)
+		data[n] = 0;
+		for(char *q = data; (q = strstr(q, "\033[6n")); q += 4)
 			CHECK(write(s->master, "\033[1;1R", 6) == 6);
-		s->len += (size_t)n;
+		keep_text(s, data, (size_t)n);
 		ms = 50;
 	}
 	s->shown[s->len] = 0;
@@ -220,11 +256,30 @@ static void pump(struct session *s, int ms) {
 
 // Waits up to five seconds for the shell to show `text` after what the
 // last expect found; true if it did.
+// The prompt: "$ " as PS1 is set, or the line editor's own prompt
+// (ADR 0258), which ends in "# " for root, as the tests run.
+#define PROMPT "\001prompt"
+
+// The first of "$ " and "# " after `from`, for PROMPT; else `text`.
+static char *find_text(struct session *s, const char *text, size_t *len) {
+	if(strcmp(text, PROMPT) != 0) {
+		*len = strlen(text);
+		return strstr(s->shown + s->from, text);
+	}
+	*len = 2;
+	char *dollar = strstr(s->shown + s->from, "$ ");
+	char *hash = strstr(s->shown + s->from, "# ");
+	if(!dollar || (hash && hash < dollar))
+		return hash;
+	return dollar;
+}
+
 static int wait_for(struct session *s, const char *text) {
 	for(int i = 0; i < 100; i++) {
-		char *found = strstr(s->shown + s->from, text);
+		size_t len;
+		char *found = find_text(s, text, &len);
 		if(found) {
-			s->from = (size_t)(found - s->shown) + strlen(text);
+			s->from = (size_t)(found - s->shown) + len;
 			return 1;
 		}
 		pump(s, 50);
@@ -242,10 +297,11 @@ static int press_until(struct session *s, const char *key, const char *text) {
 	for(int i = 0; i < 25; i++) {
 		send(s, key);
 		char *found = NULL;
-		for(int j = 0; j < 4 && !(found = strstr(s->shown + s->from, text)); j++)
+		size_t len = 0;
+		for(int j = 0; j < 4 && !(found = find_text(s, text, &len)); j++)
 			pump(s, 50);
 		if(found) {
-			s->from = (size_t)(found - s->shown) + strlen(text);
+			s->from = (size_t)(found - s->shown) + len;
 			return 1;
 		}
 	}
@@ -286,7 +342,7 @@ static void jobs(struct session *s, const char *enter) {
 	snprintf(line, sizeof(line), "kill %%1; wait%s", enter);
 	send(s, line);
 	EXPECT(s, "Terminated");
-	EXPECT(s, "$ ");
+	EXPECT(s, PROMPT);
 	// ^Z stops a foreground job, and fg brings it back for ^C to end.
 	snprintf(line, sizeof(line), "sleep 31%s", enter);
 	send(s, line);
@@ -294,12 +350,12 @@ static void jobs(struct session *s, const char *enter) {
 	pump(s, 300);
 	if(!press_until(s, "\032", "Stopped"))
 		check_failed(__FILE__, __LINE__, "^Z stopped the job", 0);
-	EXPECT(s, "$ ");
+	EXPECT(s, PROMPT);
 	snprintf(line, sizeof(line), "fg%s", enter);
 	send(s, line);
 	EXPECT(s, "sleep 31");
 	pump(s, 300);
-	if(!press_until(s, "\003", "$ "))
+	if(!press_until(s, "\003", PROMPT))
 		check_failed(__FILE__, __LINE__, "^C ended the job", 0);
 	pump(s, 300);
 	snprintf(line, sizeof(line), "echo status-$?%s", enter);
@@ -311,7 +367,7 @@ static void jobs(struct session *s, const char *enter) {
 static void plain(void) {
 	struct session *s = calloc(1, sizeof(*s));
 	CHECK(start(s, "dumb") == 0);
-	EXPECT(s, "$ ");
+	EXPECT(s, PROMPT);
 	send(s, "echo $((6*7))x\n");
 	EXPECT(s, "42x");
 	// A command over two lines, with the second prompt.
@@ -330,7 +386,7 @@ static void plain(void) {
 static void editor(void) {
 	struct session *s = calloc(1, sizeof(*s));
 	CHECK(start(s, "xterm") == 0);
-	EXPECT(s, "$ ");
+	EXPECT(s, PROMPT);
 	send(s, "echo $((2*3))ed\r");
 	EXPECT(s, "6ed");
 	// Tab completes the command name.
@@ -361,7 +417,7 @@ static void editor(void) {
 	send(s, "echo dropped");
 	EXPECT(s, "dropped");
 	send(s, "\003");
-	EXPECT(s, "$ ");
+	EXPECT(s, PROMPT);
 	pump(s, 300);
 	send(s, "echo after-$?\r");
 	EXPECT(s, "after-130");

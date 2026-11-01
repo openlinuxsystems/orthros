@@ -54,6 +54,28 @@ Jobs work as in bash: `command &` runs one in the background, Ctrl+Z
 stops the one in the foreground, and `jobs`, `fg`, `bg` and `kill %1`
 manage them. Ctrl+C drops the line being typed.
 
+## Colours
+
+The line is coloured as you type it: commands green, options cyan,
+quoted text yellow, variables magenta, pipes and `&&` yellow. A command
+that does not exist is red and underlined before you press Enter, and
+if you run it anyway, Nukesh names the closest command it knows: `sevice:
+command not found. Did you mean service?`. A command from your history
+that starts with what you typed shows faded after the cursor; → or End
+takes it.
+
+The prompt is `name@host folder $`. After a command fails it shows a
+`✗ 127` badge with the exit status, and while you are root it shows an
+`admin` badge and `#`. `ls`, `grep`, `diff` and `ip` are in colour too,
+but only on the terminal: piped into another command or a file, their
+output is plain.
+
+Every colour can be changed in `/system/settings/nukesh/colors.toml`, or
+for yourself in `~/.config/nukesh/colors.toml` (colors.toml(5)), and
+`nukesh --colors` shows them all. Only the terminal's 16 standard colours
+are used, so they follow its theme. `NO_COLOR=1`, or `enabled = false`
+in the file, turns colour off.
+
 ## Finding your way
 
 Programs are in `/system/commands`, which `/bin` and `/sbin` lead to; `ls
