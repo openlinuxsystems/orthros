@@ -60,7 +60,10 @@ const FIRMWARE_ALLOW: &[&str] = &["LicenseRef-Intel-Microcode"];
 /// parts under the LGPL and the GPL's later versions, as a program of its
 /// own (ADR 0287). The IANA time zone database is in the public domain,
 /// which SPDX has no identifier for (ADR 0194). curl's license is its own,
-/// the MIT license in other words (ADR 0195).
+/// the MIT license in other words (ADR 0195). OpenSSH is under Tatu
+/// Ylonen's and OpenSSH's notices, David Mazieres' for ssh-keyscan and
+/// Patrick Powell's for snprintf, and its cryptography from SUPERCOP and
+/// Rijndael's is in the public domain (ADR 0289).
 const PORT_EXTRA_ALLOW: &[&str] = &[
     "CC0-1.0",
     "GPL-2.0-only",
@@ -80,6 +83,10 @@ const PORT_EXTRA_ALLOW: &[&str] = &[
     "CDLA-Permissive-2.0",
     "LicenseRef-tz-public-domain",
     "curl",
+    "SSH-OpenSSH",
+    "ssh-keyscan",
+    "snprintf",
+    "LicenseRef-OpenSSH-public-domain",
 ];
 
 /// Crates from crates.io that compile another project's C code into what

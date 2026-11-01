@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# OpenSSH's client (ADR 0289): ssh, scp and sftp, the agent, and the
+# tools that make and check keys, so that git reaches repositories over
+# ssh:// and the person reaches other computers. It is built without
+# OpenSSL, on the cryptography OpenSSH carries: Ed25519 keys, ChaCha20-
+# Poly1305 and AES-GCM, and the post-quantum key exchanges (ML-KEM768
+# and sntrup761 with X25519). OpenSSH is under the BSD-style licenses its
+# LICENCE file lists: Tatu Ylonen's and OpenSSH's notices, BSD, ISC,
+# David Mazieres' for ssh-keyscan, Patrick Powell's for snprintf, the
+# X11 license for UMAC's variant, IBM's for base64, and the public
+# domain for the cryptography from SUPERCOP and Rijndael; its ML-KEM is
+# Cryspen's libcrux, under the MIT license or the Apache License 2.0.
+# The source is the release's commit in OpenSSH's portable repository,
+# from which its configure script is made, as the release archive comes
+# from a host the build machine may not reach.
+name = "openssh"
+version = "10.6p1"
+summary = "OpenSSH's client: ssh, scp, sftp, ssh-agent and ssh-keygen"
+license = "SSH-OpenSSH AND SSH-short AND BSD-2-Clause AND BSD-3-Clause AND ISC AND ssh-keyscan AND snprintf AND X11-distribute-modifications-variant AND LicenseRef-IBM-base64 AND LicenseRef-OpenSSH-public-domain AND (MIT OR Apache-2.0)"
+homepage = "https://www.openssh.com/portable.html"
+depends = ["mlibc", "zlib"]
+notices = ["LICENCE"]
+
+[source]
+git = "https://github.com/openssh/openssh-portable.git"
+commit = "a8c72b842423f0774f542d3c2197247c3dd28d74"
+tag = "V_10_6_P1"

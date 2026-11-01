@@ -1,0 +1,24 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Lets openbsd-compat build where the C library has no crypt(3), as
+mlibc has none: xcrypt() then gives no hash. Only sshd checks a
+password with it, and the client is all that is built (ADR 0289).
+
+diff --git a/openbsd-compat/xcrypt.c b/openbsd-compat/xcrypt.c
+index 9cded66..2760919 100644
+--- a/openbsd-compat/xcrypt.c
++++ b/openbsd-compat/xcrypt.c
+@@ -113,8 +113,11 @@ xcrypt(const char *password, const char *salt)
+ 		crypted = crypt(password, salt);
+ # elif defined(HAVE_SECUREWARE)
+ 	crypted = bigcrypt(password, salt);
+-# else
++# elif defined(HAVE_CRYPT)
+ 	crypted = crypt(password, salt);
++# else
++	/* No crypt(3), as on Radix: only sshd checks passwords. */
++	crypted = NULL;
+ #endif
+ 
+ 	return crypted;
