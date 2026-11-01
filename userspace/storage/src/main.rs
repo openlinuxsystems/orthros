@@ -1365,8 +1365,9 @@ fn check_sys(root: &Dir, volumes: &[String]) {
                 check(read("queue/rotational").is_ok(), || {
                     format!("disk {name} has no queue in /kernel/block")
                 });
-                // A SATA or NVMe disk says what it is; a virtio one cannot.
-                if name.starts_with("sd") || name.starts_with("nvme") {
+                // A SATA, NVMe or USB disk or an SD card says what it is;
+                // a virtio one cannot.
+                if ["sd", "nvme", "mmcblk"].iter().any(|kind| name.starts_with(kind)) {
                     let text = |file: &str| {
                         read(file)
                             .map(|text| String::from(String::from_utf8_lossy(&text).trim_end()))

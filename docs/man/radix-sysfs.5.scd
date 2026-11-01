@@ -61,11 +61,14 @@ _/kernel/block/_*name*_/parttype_
 	partition). Linux has it only through udev; Radix has it here.
 
 _/kernel/block/_*name*_/device/model_, _serial_, _firmware_rev_
-	For a SATA, NVMe or USB disk: its model, serial number and firmware
+	For a SATA, NVMe or USB disk or an SD card: its model, serial number and firmware
 	revision, as it gives them, without the padding. A USB disk's model
 	is its SCSI vendor and product, its firmware its SCSI revision, and
 	its serial number its USB device's, as udev's *ID_SERIAL_SHORT* has
-	it, up to 64 bytes. Linux has these for
+	it, up to 64 bytes. An SD card's model is its product's name, its
+	serial number the CID's in hex (_0xdeadbeef_) and its firmware the
+	CID's revision (_1.0_), which Linux has as _name_, _serial_ and
+	_prv_. Linux has these for
 	an NVMe disk; for a SATA disk it cuts the model to 16 characters and
 	keeps the serial number elsewhere. A tool that must write to one
 	particular disk should find it by its serial number, since disk names
@@ -102,8 +105,9 @@ _/kernel/block/_*name*_/stat_
 
 	Disks and partitions are named as Linux names them: _vda_, _vdb_ for
 	virtio disks, _sda_, _sdb_ for SATA and USB disks, _nvme0n1_ for the first
-	namespace of the first NVMe controller, _vda1_ for the first
-	partition of _vda_ and _nvme0n1p1_ for the first of _nvme0n1_. Linux puts a
+	namespace of the first NVMe controller, _mmcblk0_ for the first SD
+	card, _vda1_ for the first partition of _vda_ and _nvme0n1p1_ for the
+	first of _nvme0n1_. Linux puts a
 	partition's directory inside its disk's (_/sys/block/vda/vda1_) and
 	lists both in _/sys/class/block_; Radix lists both here.
 

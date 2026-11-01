@@ -455,7 +455,7 @@ impl Legacy {
         sched::sleep_ns(ADDRESS_NS);
         let target = Target { address, ..target };
         let result = self.configure(path, target, max, name);
-        let (plan, shown) = match result {
+        let configured = match result {
             Ok(done) => done,
             Err(why) => {
                 name.clear();
@@ -464,6 +464,7 @@ impl Legacy {
                 return Err(why);
             }
         };
+        let (plan, shown) = &*configured;
         let heap = HEAP.with(Flags::MAY_SLEEP);
         let attached = Attached {
             path,
@@ -474,7 +475,7 @@ impl Legacy {
             hids: Vec::new_in(heap),
         };
         let _ = self.devices.push_within_capacity(attached);
-        if !shown::add(&shown) {
+        if !shown::add(shown) {
             warn!("USB: {}: too many devices to show in /kernel/bus/usb", Name(self.bus, path));
         }
         if let Some(status) = plan.hub {
@@ -501,6 +502,14 @@ impl Legacy {
                 ),
             }
         }
+        for port in plan.serials() {
+            warn!(
+                "USB: {}: interface {}: serial ports on {} controllers are not carried yet",
+                Name(self.bus, path),
+                port.data,
+                self.hcd.kind()
+            );
+        }
         if let Some(storage) = plan.storage {
             warn!(
                 "USB: {}: interface {}: disks on {} controllers are not read yet",
@@ -521,7 +530,8 @@ impl Legacy {
         target: Target,
         max: u16,
         name: &mut TextBuf<64>,
-    ) -> Result<(super::controller::Plan, Shown), Why> {
+    ) -> Result<Box<(super::controller::Plan, Shown), Kmalloc>, Why> {
+        let heap = HEAP.with(Flags::MAY_SLEEP);
         let Legacy { hcd, waiter, buffer, bus, .. } = self;
         let mut control =
             |setup, out: &mut [u8]| Ok(hcd.control(target, max, setup, out, CONTROL_MS, waiter)?);
@@ -529,7 +539,7 @@ impl Legacy {
         let plan = read_device(&mut control, buffer, (*bus, path, target.speed), name, &mut shown)?;
         control(Setup::set_configuration(plan.value), &mut [])?;
         let shown = shown.ok_or(Why::Device("it was not read"))?;
-        Ok((plan, shown))
+        Box::try_new_in((plan, shown), heap).map_err(|_| Why::Device("out of memory"))
     }
 
     /// Where the device at `path` is in [`Legacy::devices`].

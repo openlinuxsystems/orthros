@@ -285,6 +285,7 @@ dependencies = [
  "radix-random",
  "radix-sched",
  "radix-scsi",
+ "radix-sdhci",
  "radix-sensors",
  "radix-smbios",
  "radix-spd",
@@ -643,6 +644,13 @@ name = "radix-scsi"
 version = "0.10.4"
 dependencies = [
  "proptest",
+]
+
+[[package]]
+name = "radix-sdhci"
+version = "0.10.4"
+dependencies = [
+ "radix-hw",
 ]
 
 [[package]]

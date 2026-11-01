@@ -19,7 +19,9 @@
 //! on the root ports and behind hubs ([`hub`], ADR 0147), reads the
 //! keyboards, mice and tablets among them ([`hid`], ADR 0148), and
 //! carries the transfers of the sticks and disks among them for their
-//! own threads ([`storage`], ADR 0161). With the
+//! own threads ([`storage`], ADR 0161), and carries the bytes of the
+//! serial ports among them for their terminals ([`serial`], ADR 0246).
+//! With the
 //! `dbc` flag, the first controller with a Debug Capability carries the
 //! console to a second computer ([`dbc`], ADR 0160). Bus numbers
 //! count controllers from 1, and a device is named as Linux names one, by
@@ -49,6 +51,7 @@ pub mod dbc;
 mod hid;
 mod hub;
 mod legacy;
+mod serial;
 pub mod shown;
 pub mod storage;
 
@@ -168,6 +171,12 @@ fn on_interrupt(index: usize) {
     if let Some(thread) = THREADS.get(index).and_then(Once::get) {
         sched::wake(thread);
     }
+}
+
+/// Wakes the thread of the controller with index `index`: the terminal
+/// of one of its serial ports changed (ADR 0246).
+fn wake(index: usize) {
+    on_interrupt(index);
 }
 
 /// Notes the USB controller `function`, found by the PCI scan, for

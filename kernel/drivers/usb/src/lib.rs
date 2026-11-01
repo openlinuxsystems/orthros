@@ -25,6 +25,8 @@
 //! - [`host`]: what the kernel asks of the USB 2 and USB 1.1 host
 //!   controllers (EHCI, OHCI and UHCI), whose devices it addresses itself
 //!   (Phase 11g, ADR 0243).
+//! - [`serial`]: serial ports, of the Abstract Control Model of CDC and
+//!   of FTDI's chips (Phase 11g, ADR 0246).
 //! - [`storage`]: mass storage interfaces, the Bulk-Only Transport that
 //!   carries SCSI commands to USB sticks (Phase 11b, ADR 0161), and USB
 //!   Attached SCSI, which carries many at once to USB 3 disks (ADR 0162).
@@ -40,6 +42,7 @@ use core::fmt;
 pub mod hid;
 pub mod host;
 pub mod hub;
+pub mod serial;
 pub mod storage;
 #[cfg(test)]
 mod tests;
