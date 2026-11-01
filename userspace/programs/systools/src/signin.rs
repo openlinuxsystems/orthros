@@ -232,14 +232,18 @@ pub fn terminal_type(term: &str) -> &str {
 }
 
 /// The environment a session starts with: what login(1) sets on Linux,
-/// over what Spark gives every POSIX program.
+/// over what Spark gives every POSIX program. `PATH` names the system's
+/// commands, then the folders where bundled(8) links the commands of the
+/// bundles for everyone and of the person's own (ADR 0225), so that
+/// installing never edits it.
 pub fn environment(user: &User, term: &str) -> Vec<String> {
+    let home = user.home.trim_end_matches('/');
     vec![
         format!("HOME={}", user.home),
         format!("SHELL={}", user.shell),
         format!("USER={}", user.name),
         format!("LOGNAME={}", user.name),
-        "PATH=/system/commands".into(),
+        format!("PATH=/system/commands:/applications/commands:{home}/applications/commands"),
         format!("TERM={}", terminal_type(term)),
         "LANG=C.UTF-8".into(),
         "EDITOR=nano".into(),
@@ -248,13 +252,17 @@ pub fn environment(user: &User, term: &str) -> Vec<String> {
 
 /// The block `exec` takes (radix-process(2)): `args` with `env`, in `/`.
 pub fn exec_block(path: &[u8], args: &[&[u8]], env: &[String]) -> Vec<u8> {
+    exec_block_in(b"/", path, args, env)
+}
+
+/// The block `exec` takes: `args` with `env`, in the folder `cwd`.
+pub fn exec_block_in(cwd: &[u8], path: &[u8], args: &[&[u8]], env: &[String]) -> Vec<u8> {
     let mut block = Vec::new();
     let header = [process::EXEC_VERSION, args.len() as u32, env.len() as u32, 2];
     for word in header {
         block.extend_from_slice(&word.to_le_bytes());
     }
-    let strings =
-        args.iter().copied().chain(env.iter().map(String::as_bytes)).chain([b"/".as_slice(), path]);
+    let strings = args.iter().copied().chain(env.iter().map(String::as_bytes)).chain([cwd, path]);
     for string in strings {
         block.extend_from_slice(string);
         block.push(0);
@@ -413,7 +421,9 @@ mod tests {
     #[test]
     fn a_session_starts_with_a_login_environment() {
         let env = environment(&alice(), "linux");
-        for set in ["HOME=/users/alice", "USER=alice", "LOGNAME=alice", "TERM=linux"] {
+        let path =
+            "PATH=/system/commands:/applications/commands:/users/alice/applications/commands";
+        for set in ["HOME=/users/alice", "USER=alice", "LOGNAME=alice", "TERM=linux", path] {
             assert!(env.iter().any(|e| e == set), "{set}");
         }
         assert!(environment(&alice(), "x\ny").iter().any(|e| e == "TERM=dumb"));

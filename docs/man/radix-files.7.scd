@@ -254,7 +254,10 @@ on it at every boot. Each folder is named for what it holds:
 :< a tmpfs: the state of running services, such as Spark's control
    socket
 |  _/applications_
-:< applications (bundles come in Phase 13)
+:< the bundles installed for everyone, each in a folder by its ID, and
+   _commands_, a link by each of their commands, which every session's
+   *PATH* names; each person's own are in _applications_ in their home,
+   and each bundle's data in _app-data/ID_ there (*bundled*(8))
 |  _/users_
 :< the users' homes
 |  _/shared_

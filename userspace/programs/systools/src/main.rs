@@ -20,12 +20,17 @@
 //! signs people in through it, and `elevate`, and `sudo` in front of it,
 //! run a command as an administrator (ADRs 0218, 0250 and 0219); `last`,
 //! `lastb` and `lastlog` show the sign-ins it records (ADR 0254).
+//! `bundle` makes, signs, installs and runs bundles, which `bundled`
+//! installs, seals and removes (ADRs 0221 to 0223 and 0225); called by a
+//! name that is no tool's, through a link in a commands folder of
+//! bundled's, it runs the bundle command of that name.
 
 mod account;
 mod args;
 mod authd;
 mod balance;
 mod blkid;
+mod bundled;
 mod bundles;
 mod column;
 mod device;
@@ -110,6 +115,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("balance", balance::main),
     ("blkid", blkid::main),
     ("bundle", bundles::main),
+    ("bundled", bundled::main),
     ("chgrp", modes::chgrp),
     ("chmod", modes::chmod),
     ("chown", modes::chown),
@@ -215,6 +221,12 @@ fn main() -> ExitCode {
     let mut argv: Vec<OsString> = std::env::args_os().collect();
     let called = argv.first().map(Path::new).and_then(Path::file_name);
     let mut name = called.map_or_default(|name| name.to_string_lossy().into_owned());
+    if tool(&name).is_none() && name != "systools" && !name.is_empty() {
+        // A bundle's command, through the link bundled made by its name
+        // (ADR 0225): everything after it is the command's.
+        let code = bundles::run::command(&name, argv.split_off(1));
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     if tool(&name).is_none() {
         // `systools <tool> ...`, or `systools --list`.
         match argv.get(1).map(|arg| arg.to_string_lossy().into_owned()) {

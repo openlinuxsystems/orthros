@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Bundles: bundled(8) installs, seals and removes them for whoever asks
+# with bundle(1), in /applications for everyone and in each person's own
+# applications folder (ADR 0223), links their commands where the shell
+# finds them, and tells bundle(1) which one to run (ADR 0225).
+#
+# service.toml(5) explains each setting. `service check bundled` checks
+# this file, and `service edit bundled` checks it as you save.
+
+service_version = 1
+description = "Bundles"
+program = "/system/commands/bundled"
+# Lower starts first: after authd, whose accounts say where each home is,
+# and before the consoles, where people install.
+order = 9
+# Started again whenever it ends: always, on-failure or never.
+restart = "always"
+
+[limits]
+# Unpacking runs in a process of its own, in this domain.
+memory = "256M"
+
+# What it holds: the whole tree, as Spark does, past the owners and modes
+# of files: it seals each bundle as root's, in /applications and in each
+# person's home, and keeps its records in /system/state/bundled, which
+# no other program's view holds.
+[permissions]
+runs-with-your-access = true
