@@ -24,25 +24,41 @@
 //! commands` and each person's `applications/commands`, both on a
 //! session's PATH. bundled makes it again from what it recorded after
 //! each install and removal, and at its start.
+//!
+//! It keeps what each person said of each app's permissions, the grants
+//! (ADR 0224, `bundles::grants`), in `/system/state/grants`, and asks them
+//! through the trusted prompt: it sends authd(8) the question in the
+//! system's own words, which consoled(8) shows on the console the
+//! program runs on, where no program can draw or answer it. `bundle
+//! grant` goes through the same prompt; taking a permission away needs
+//! none, and reaches each run of the app at once, through the `watch`
+//! connection its runner keeps.
 
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::Shutdown;
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use accounts::request::{Choice, Question};
+use manifest::bundle::permissions::{self, Tier};
+use manifest::bundle::{Manifest, Need, Request as Asked, RunsWith};
+
 use crate::args::Args;
 use crate::bundles::folder::{DEPTH_MAX, Dir, check, fd_stat, same};
+use crate::bundles::grants::{self, Grant, Grants, Said};
+use crate::bundles::minisign::PublicKey;
 use crate::bundles::protocol::{self, Answer, Find, Found, LINE_MAX, Listed, Request};
 use crate::bundles::registry::{self, Installed, Place, Registry};
 use crate::bundles::sheet::{self, Facts};
 use crate::bundles::{MANIFEST, confine, signed, sums};
 use crate::util::{self, Fail};
-use crate::{signin, sys};
+use crate::{proc, signin, sys};
 
 /// Where bundles for everyone are.
 pub const EVERYONE: &str = "/applications";
@@ -62,6 +78,13 @@ const REQUEST_TIME: Duration = Duration::from_secs(10);
 const ANSWER_TIME: Duration = Duration::from_mins(10);
 /// The most connections answered at once.
 const CONNECTIONS_MAX: usize = 16;
+/// How long a permission's question waits for the person: authd's own
+/// wait, and a little more.
+const CHOICE_TIME: Duration = Duration::from_mins(6);
+/// The most runs of apps one person's watching connections follow.
+const WATCHERS_MAX: usize = 64;
+/// The longest app name a question shows.
+const NAME_SHOWN: usize = 40;
 
 /// An audit event (ADR 0211): a security event of the log.
 macro_rules! audit {
@@ -111,12 +134,30 @@ fn seal(dir: &Dir, depth: usize) -> Result<(), String> {
 /// What bundled shares between its threads.
 struct Shared {
     registry: Mutex<Registry>,
+    grants: Mutex<Grants>,
+    /// The runs of apps that follow what is taken away from them.
+    watchers: Mutex<Vec<Watcher>>,
     connections: AtomicUsize,
+}
+
+/// A run of an app, by its runner's `watch` connection.
+struct Watcher {
+    uid: u32,
+    id: String,
+    stream: UnixStream,
 }
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, Registry> {
         self.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn grants(&self) -> MutexGuard<'_, Grants> {
+        self.grants.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn watchers(&self) -> MutexGuard<'_, Vec<Watcher>> {
+        self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -131,25 +172,85 @@ fn read_state(name: &str) -> io::Result<String> {
     }
 }
 
+/// Writes `text` to the file `path`, whole or not at all, with mode
+/// `mode`.
+fn write_whole(path: &str, text: &str, mode: u32) -> Result<(), String> {
+    let new = format!("{path}.new");
+    // One left behind would keep its mode.
+    let _ = fs::remove_file(&new);
+    let file = fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(&new);
+    let written = file.and_then(|mut f| {
+        f.write_all(text.as_bytes())?;
+        f.sync_all()
+    });
+    written.and_then(|()| fs::rename(&new, path)).map_err(|e| format!("{path}: {e}"))
+}
+
 /// Writes the registry's files, each whole or not at all.
 fn save(registry: &Registry) -> Result<(), String> {
     let names = [registry::INSTALLED, registry::BOUND, registry::DEVELOPER_KEYS];
     for (name, text) in names.iter().zip(registry.texts()) {
-        let path = state(name);
-        let new = format!("{path}.new");
-        let written = File::create(&new).and_then(|mut f| {
-            f.write_all(text.as_bytes())?;
-            f.sync_all()
-        });
-        written.and_then(|()| fs::rename(&new, &path)).map_err(|e| format!("{path}: {e}"))?;
+        write_whole(&state(name), &text, 0o644)?;
     }
     Ok(())
+}
+
+/// Writes user `uid`'s grants, whole or not at all.
+fn save_grants(grants: &Grants, uid: u32) -> Result<(), String> {
+    let records = grants.0.get(&uid).map_or(&[][..], Vec::as_slice);
+    write_whole(&format!("{}/{uid}", grants::FOLDER), &Grants::text(records), 0o600)
+}
+
+/// Reads every person's grants. A file bundled cannot read is set aside,
+/// as `UID.bad`, and its person is asked again.
+fn read_grants() -> Result<Grants, Fail> {
+    let folder = grants::FOLDER;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(folder)
+        .and_then(|()| fs::set_permissions(folder, fs::Permissions::from_mode(0o700)))
+        .map_err(|e| util::failed(&folder, e))?;
+    let mut grants = Grants::default();
+    for entry in fs::read_dir(folder).map_err(|e| util::failed(&folder, e))?.flatten() {
+        let name = entry.file_name();
+        let Some(uid) = name.to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let path = format!("{folder}/{uid}");
+        let read = fs::read_to_string(&path).map_err(|e| e.to_string());
+        match read.and_then(|text| Grants::read(&text)) {
+            Ok(records) => {
+                grants.0.insert(uid, records);
+            }
+            Err(why) => {
+                eprintln!("bundled: {path}: {why}; set aside as {uid}.bad, and asked again");
+                let _ = fs::rename(&path, format!("{folder}/{uid}.bad"));
+            }
+        }
+    }
+    Ok(grants)
+}
+
+/// Now, in seconds since 1970.
+fn now() -> u64 {
+    util::now_ns() / 1_000_000_000
 }
 
 /// The user at the other end of `stream`, as the kernel gives it.
 fn asker(stream: &UnixStream) -> Option<u32> {
     let slot = sys::slot_of(stream.as_raw_fd());
     radix_abi::file::socket_state(&sys::SYS, slot).ok().map(|state| state.user)
+}
+
+/// The terminal of the process at the other end of `stream`, as
+/// /processes names it, if it acts for `uid`: where to ask its person.
+fn terminal_of(stream: &UnixStream, uid: u32) -> Option<String> {
+    let slot = sys::slot_of(stream.as_raw_fd());
+    let state = radix_abi::file::socket_state(&sys::SYS, slot).ok()?;
+    let process = proc::process(state.peer).ok()?;
+    if process.user != uid {
+        return None;
+    }
+    process.terminal.filter(|t| t != "none")
 }
 
 /// The account of user `uid`.
@@ -532,7 +633,23 @@ fn find(
         list: installed.list.clone(),
     });
     connection.send(&answer).map_err(|e| format!("{e}"))?;
+    send_grants(shared, connection, asker, &installed.id, &installed.key)?;
     Ok(format!("{} {}", installed.id, installed.version))
+}
+
+/// Sends what `asker` said of app `id`'s permissions, signed by `key`.
+fn send_grants(
+    shared: &Shared,
+    connection: &mut Connection,
+    asker: u32,
+    id: &str,
+    key: &PublicKey,
+) -> Result<(), String> {
+    let said = shared.grants().of(asker, id, key);
+    for grant in said {
+        connection.send(&Answer::Granted(grant)).map_err(|e| format!("{e}"))?;
+    }
+    Ok(())
 }
 
 /// The manifest of the bundle `id` installed in `place`.
@@ -601,6 +718,7 @@ fn info(
         bytes,
     };
     connection.send(&Answer::Sheet(sheet::write(&facts))).map_err(|e| format!("{e}"))?;
+    send_grants(shared, connection, asker, id, &installed.key)?;
     let data = match installed.place {
         Place::Everyone => format!("each person's {APP_DATA}/{id}"),
         Place::User(_) => account(asker)
@@ -655,6 +773,11 @@ fn remove(
             data = format!(", and its data in {folder}/{id}");
             purged = true;
         }
+        // What they said of it goes with its data.
+        let mut grants = shared.grants();
+        if grants.forget(uid, id) {
+            save_grants(&grants, uid)?;
+        }
     }
     audit!(
         "{} removed {id} {} for {}{data}",
@@ -664,6 +787,264 @@ fn remove(
     );
     let and = if purged { ", and its data" } else { "" };
     Ok(format!("removed {id} {}{and}", installed.version))
+}
+
+/// The bundle `id` that `asker` runs: their own before everyone's.
+fn installed_for(shared: &Shared, asker: u32, id: &str) -> Result<Installed, String> {
+    let registry = shared.lock();
+    let own = registry.installed(Place::User(asker), id);
+    own.or_else(|| registry.installed(Place::Everyone, id))
+        .cloned()
+        .ok_or_else(|| format!("{id} is not installed"))
+}
+
+/// What `manifest` asks of `permission`: as it names it; for
+/// runs-with-your-access, also as its commands that run with your access
+/// ask for it.
+fn asked_of(manifest: &Manifest, permission: &str) -> Option<Asked> {
+    let named = manifest.permissions.iter().find(|(name, _)| *name == permission);
+    if let Some((_, request)) = named {
+        return Some(request.clone());
+    }
+    let yours = manifest.commands.iter().any(|c| c.runs_with == RunsWith::YourAccess);
+    (permission == grants::YOUR_ACCESS && yours).then(|| Asked {
+        need: Need::Required,
+        why: None,
+        folders: Vec::new(),
+        ports: Vec::new(),
+        apps: Vec::new(),
+    })
+}
+
+/// Asks `name`, on `terminal`, the question `text`, through authd(8) and
+/// the console's trusted prompt: what they chose ([`Choice::word`]),
+/// [`accounts::request::CANCELLED`] or [`accounts::request::ELSEWHERE`].
+fn ask_person(
+    terminal: &str,
+    name: &str,
+    question: Question,
+    text: &str,
+) -> Result<String, String> {
+    let stream = UnixStream::connect(accounts::SOCKET).map_err(|e| {
+        format!("cannot reach authd at {}: {}", accounts::SOCKET, util::strip_os_error(&e))
+    })?;
+    let request = accounts::request::Request::Choose {
+        terminal: terminal.into(),
+        name: name.into(),
+        question,
+        text: text.into(),
+    };
+    (&stream)
+        .write_all(&request.encode())
+        .and_then(|()| stream.shutdown(Shutdown::Write))
+        .map_err(|e| format!("cannot ask authd: {e}"))?;
+    let mut input = BufReader::new(Timed { stream, deadline: Instant::now() + CHOICE_TIME });
+    let mut line = String::new();
+    input
+        .by_ref()
+        .take(LINE_MAX as u64)
+        .read_line(&mut line)
+        .map_err(|e| format!("authd did not answer: {e}"))?;
+    match accounts::request::Answer::decode(&line) {
+        accounts::request::Answer::Done(word) => Ok(word),
+        accounts::request::Answer::Refused(why) => Err(why),
+    }
+}
+
+/// Keeps what `uid` said of app `id`, signed by `key`, and writes it.
+fn record(shared: &Shared, uid: u32, id: &str, key: PublicKey, grant: Grant) -> Result<(), String> {
+    let mut grants = shared.grants();
+    grants.set(uid, id, key, grant)?;
+    save_grants(&grants, uid)
+}
+
+/// The words of a grant, for the audit log.
+fn shown_words(words: &[String]) -> String {
+    if words.is_empty() { String::new() } else { format!(" ({})", words.join(", ")) }
+}
+
+/// The question an app's permission is asked with: a question's words
+/// begin with the app's name and ID, as the manifest says them.
+fn named(manifest: &Manifest) -> String {
+    format!("{} ({})", sheet::shown(&manifest.name.0, NAME_SHOWN), manifest.id)
+}
+
+/// `ask`: asks the person whether app `id` may have `permission`, as its
+/// manifest asks for it, the first time it runs wanting it (ADR 0224).
+fn ask(
+    shared: &Shared,
+    connection: &Connection,
+    asker: u32,
+    id: &str,
+    permission: &str,
+    list: &str,
+) -> Result<String, String> {
+    let installed = installed_for(shared, asker, id)?;
+    if installed.list != list {
+        return Err(format!("{id} changed as it started: run it again"));
+    }
+    let manifest = installed_manifest(installed.place, id)?;
+    let found = permissions::find(permission).ok_or("no such permission")?;
+    let request = asked_of(&manifest, permission)
+        .ok_or_else(|| format!("{id} does not ask for {permission}"))?;
+    if !matches!(found.tier, Tier::FirstUse | Tier::Warning) {
+        return Err(format!("{permission} is not asked: it is given {}", found.tier.words()));
+    }
+    grants::givable(found).map_err(|why| format!("{permission}, {why}"))?;
+    let asked = grants::words(&request);
+    // Another run may have asked meanwhile: what it was answered holds,
+    // if it was all of this or none of it.
+    let before = shared.grants().of(asker, id, &installed.key);
+    let held =
+        before.iter().find(|g| g.permission == permission && grants::covers(&g.asked, &asked));
+    match held {
+        Some(g) if g.said == Said::Never => return Ok(Choice::Never.word().into()),
+        Some(g) if grants::covers(&g.given, &asked) => return Ok(Choice::Always.word().into()),
+        _ => {}
+    }
+    let Some(terminal) = terminal_of(&connection.stream, asker) else {
+        return Ok(accounts::request::ELSEWHERE.into());
+    };
+    let user = account(asker)?;
+    let question =
+        if found.tier == Tier::Warning { Question::Warning } else { Question::Permission };
+    let text =
+        format!("{} asks to: {}", named(&manifest), grants::phrase(found, Some(&request), &asked));
+    let word = ask_person(&terminal, &user.name, question, &text)?;
+    let Some(choice) = Choice::from_word(&word) else { return Ok(word) };
+    let words = shown_words(&asked);
+    let said = match choice {
+        Choice::Once => {
+            audit!("{} allowed {id} {permission}{words} once, on {terminal}", user.name);
+            return Ok(word);
+        }
+        Choice::Always => Said::Allow,
+        Choice::Never => Said::Never,
+    };
+    let given = if said == Said::Allow { asked.clone() } else { Vec::new() };
+    let grant = Grant { permission: permission.into(), said, since: now(), given, asked };
+    record(shared, asker, id, installed.key, grant)?;
+    let how = if said == Said::Allow { "allowed" } else { "did not allow" };
+    audit!("{} {how} {id} {permission}{words}, from now on, on {terminal}", user.name);
+    Ok(word)
+}
+
+/// `bundle grant`: gives app `id` `permission`, with `words` or as it
+/// asks for it, once the person says yes at the trusted prompt, so that
+/// no program can give itself anything by running bundle.
+fn grant(
+    shared: &Shared,
+    connection: &Connection,
+    asker: u32,
+    id: &str,
+    permission: &str,
+    words: Vec<String>,
+) -> Result<String, String> {
+    let installed = installed_for(shared, asker, id)?;
+    let manifest = installed_manifest(installed.place, id)?;
+    let found = permissions::find(permission).ok_or("no such permission")?;
+    grants::givable(found).map_err(|why| format!("{permission}, {why}"))?;
+    let request = asked_of(&manifest, permission)
+        .ok_or_else(|| format!("{id} does not ask for {permission}: there is nothing to give"))?;
+    let asked = grants::words(&request);
+    if !grants::covers(&asked, &words) {
+        return Err(format!(
+            "{id} asks for no more than {}: give that, or less",
+            if asked.is_empty() { "the permission".into() } else { asked.join(" ") }
+        ));
+    }
+    let mut given = if words.is_empty() { asked.clone() } else { words };
+    given.sort();
+    given.dedup();
+    let folders: Vec<&str> =
+        given.iter().filter_map(|w| w.split_once('=')).map(|(name, _)| name).collect();
+    if let Some(twice) = folders.iter().enumerate().find(|(i, f)| folders[..*i].contains(f)) {
+        return Err(format!("{} is named twice: give it to read, or to read and change", twice.1));
+    }
+    let elsewhere = "bundle grant asks you on a console, where no program can answer for you, \
+                     and this terminal is not one";
+    let terminal = terminal_of(&connection.stream, asker).ok_or(elsewhere)?;
+    let user = account(asker)?;
+    let text =
+        format!("Give {}: {}", named(&manifest), grants::phrase(found, Some(&request), &given));
+    let word = ask_person(&terminal, &user.name, Question::Grant, &text)?;
+    match Choice::from_word(&word) {
+        Some(Choice::Always) => {}
+        Some(_) => return Err("not given: you said no".into()),
+        None if word == accounts::request::CANCELLED => {
+            return Err("not given: you closed the question".into());
+        }
+        None => return Err(elsewhere.into()),
+    }
+    let shown = shown_words(&given);
+    let grant =
+        Grant { permission: permission.into(), said: Said::Allow, since: now(), given, asked };
+    record(shared, asker, id, installed.key, grant)?;
+    audit!("{} gave {id} {permission}{shown}, on {terminal}", user.name);
+    Ok(format!("gave {id} {permission}{shown}"))
+}
+
+/// `bundle revoke`: takes `permission` away from app `id`, now and from
+/// now on: each run of it that watches is told at once. Taking away needs
+/// no prompt.
+fn revoke(shared: &Shared, asker: u32, id: &str, permission: &str) -> Result<String, String> {
+    let installed = installed_for(shared, asker, id)?;
+    let manifest = installed_manifest(installed.place, id)?;
+    let found = permissions::find(permission).ok_or("no such permission")?;
+    let request = asked_of(&manifest, permission)
+        .ok_or_else(|| format!("{id} does not ask for {permission}"))?;
+    if found.tier == Tier::Admin {
+        return Err(format!("{permission} is an administrator's, and no app has it yet"));
+    }
+    let asked = grants::words(&request);
+    let grant = Grant {
+        permission: permission.into(),
+        said: Said::Never,
+        since: now(),
+        given: Vec::new(),
+        asked,
+    };
+    record(shared, asker, id, installed.key, grant)?;
+    let user = account(asker).map_or_else(|_| format!("user {asker}"), |u| u.name);
+    audit!("{user} took {permission} away from {id}");
+    let told = tell_watchers(shared, asker, id, permission);
+    let running = if told > 0 { format!("; {told} running told at once") } else { String::new() };
+    Ok(format!("took {permission} away from {id}{running}"))
+}
+
+/// Tells each run of app `id` of user `uid` that watches that `permission`
+/// was taken away; how many were told.
+fn tell_watchers(shared: &Shared, uid: u32, id: &str, permission: &str) -> usize {
+    let line = Answer::Revoked(permission.into()).bytes();
+    let mut told = 0;
+    shared.watchers().retain(|w| {
+        if w.uid != uid || w.id != id {
+            return true;
+        }
+        let sent = (&w.stream).write_all(&line).is_ok();
+        told += usize::from(sent);
+        sent
+    });
+    told
+}
+
+/// Keeps a run's `watch` connection, after forgetting those whose runs
+/// ended: one that has something to read has ended, as a runner sends
+/// nothing on it. Its writes never wait: a runner that does not read is
+/// forgotten rather than hold up every revoke.
+fn watch(shared: &Shared, uid: u32, id: String, stream: UnixStream) {
+    if stream.set_nonblocking(true).is_err() {
+        return;
+    }
+    let mut watchers = shared.watchers();
+    watchers.retain(|w| readable(&w.stream, Instant::now()).is_err());
+    let theirs = watchers.iter().filter(|w| w.uid == uid).count();
+    if theirs >= WATCHERS_MAX
+        && let Some(oldest) = watchers.iter().position(|w| w.uid == uid)
+    {
+        watchers.remove(oldest);
+    }
+    watchers.push(Watcher { uid, id, stream });
 }
 
 /// Answers one connection.
@@ -708,6 +1089,21 @@ fn serve(shared: &Shared, stream: UnixStream) {
         Ok(Request::Info { id }) => info(shared, &mut connection, asker, &id),
         Ok(Request::Remove { id, everyone, purge }) => remove(shared, asker, &id, everyone, purge),
         Ok(Request::Run { find: what }) => find(shared, &mut connection, asker, &what),
+        Ok(Request::Ask { id, permission, list }) => {
+            ask(shared, &connection, asker, &id, &permission, &list)
+        }
+        Ok(Request::Grant { id, permission, words }) => {
+            grant(shared, &connection, asker, &id, &permission, words)
+        }
+        Ok(Request::Revoke { id, permission }) => revoke(shared, asker, &id, &permission),
+        Ok(Request::Watch { id }) => {
+            if installed_for(shared, asker, &id).is_ok()
+                && connection.send(&Answer::Ok(format!("watching {id}"))).is_ok()
+            {
+                watch(shared, asker, id, connection.stream);
+            }
+            return;
+        }
         Ok(Request::DeveloperKey { key }) => {
             let mut registry = shared.lock();
             registry.set_developer_key(asker, key);
@@ -761,6 +1157,7 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     if notice(&mut registry) {
         save(&registry).map_err(util::fail)?;
     }
+    let grants = read_grants()?;
     if let Ok(dir) = Dir::open(EVERYONE) {
         tidy(&dir);
     }
@@ -788,8 +1185,12 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     fs::set_permissions(socket, fs::Permissions::from_mode(0o666))
         .map_err(|e| util::failed(&socket, e))?;
     eprintln!("bundled: {} bundles installed; answering at {socket}", registry.installed.len());
-    let shared =
-        Arc::new(Shared { registry: Mutex::new(registry), connections: AtomicUsize::new(0) });
+    let shared = Arc::new(Shared {
+        registry: Mutex::new(registry),
+        grants: Mutex::new(grants),
+        watchers: Mutex::new(Vec::new()),
+        connections: AtomicUsize::new(0),
+    });
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         if shared.connections.fetch_add(1, Ordering::SeqCst) >= CONNECTIONS_MAX {

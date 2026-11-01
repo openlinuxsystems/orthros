@@ -116,6 +116,20 @@ back cleared, or shows consoled's menu if there is none. A wrong
 password is asked again by a new prompt, after authd's wait, and
 elevate says *Sorry, try again.* on the terminal.
 
+*bundled*(8)'s questions about apps' permissions come the same way
+(ADR 0224), on the bottom line, in black on cyan, or white on red for
+one with a warning:
+
+```
+ [permission] Notes (org.example.notes) asks to: use your documents folder, to read and change it      O: once    A: always    D: don't allow
+```
+
+*O* allows it this time, *A* from now on, *D* never, and *Esc* or
+*Ctrl+C* close it; *bundle grant*'s question takes *Y* or *N*. No other
+key does anything while it shows, and none reaches the console's
+programs. On a console narrower than the question, its words are cut
+with *...*, never its keys.
+
 consoled logs *asking for passwords on the consoles for authd* when it
 finds authd, and tries again every 5 seconds while it is not running;
 meanwhile, and on any other terminal, as over SSH, elevate asks itself.
