@@ -99,13 +99,21 @@ file = "magenta"
 line = "green"
 separator = "bright-black"
 
-# diff (its --palette).
+# diff (its --palette), and git's diffs: git takes these, and the
+# prompt's git colours for git status and git branch, from a file each
+# shell writes (~/.local/state/nukesh/gitconfig). In git's diffs, a
+# changed line's words that changed are marked (added-word and
+# removed-word), and lines git saw moved get colours of their own.
 [diff]
 enabled = true
 added = "green"
 removed = "red"
 header = "bold"
 hunk = "cyan"
+added-word = "green reverse"
+removed-word = "red reverse"
+moved-added = "bold cyan"
+moved-removed = "bold magenta"
 
 # ip (IP_COLORS).
 [ip]

@@ -100,6 +100,17 @@ The one-letter options are those of *set*, with these too:
 	what is wrong in them; with *--check*, only checks them, and fails
 	if anything is wrong. It must be the first argument.
 
+*--diff-highlight*, *--diff-pager*
+	Read a diff git coloured, and write it again with the words that
+	changed marked: each run of removed lines followed by as many added
+	ones, in a change, gets the words that differ in *colors.toml*(5)'s
+	*added-word* and *removed-word*. Moved lines, merges' combined
+	diffs, lines with most of their text changed and diffs without
+	colour come out as they went in, a line for each line.
+	*--diff-pager* writes into *less*(1). The gitconfig the shell
+	writes makes them git's pager for *git diff*, *show* and *log*, and
+	the filter of *git add -p*. It must be the first argument.
+
 *--private*
 	Keep nothing of this session: no history file, command record,
 	folder ranks, notices or resumed folder (PRIVATE SESSIONS).

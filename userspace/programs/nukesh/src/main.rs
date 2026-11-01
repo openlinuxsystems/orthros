@@ -14,6 +14,7 @@
 //!        [-abefhimnprstuvxBCEHPT] [-o option] [-O shopt]
 //!        [-c command [name [argument...]] | -s [argument...] | [script [argument...]]]
 //! nukesh --colors [--check] [file...]
+//! nukesh --diff-highlight | --diff-pager
 //! ```
 
 mod abbr;
@@ -26,6 +27,7 @@ mod colors;
 mod complete;
 mod cond;
 mod coproc;
+mod diffmark;
 mod editor;
 mod exec;
 mod expand;
@@ -94,6 +96,7 @@ const USAGE: &str =
               [-abefhimnprstuvxBCEHPT] [-o option] [-O shopt]
               [-c command [name [argument...]] | -s [argument...] | [script [argument...]]]
        nukesh --colors [--check] [file...]
+       nukesh --diff-highlight | --diff-pager
 ";
 
 fn main() {
@@ -205,6 +208,9 @@ fn run(args: &[String]) -> i32 {
             shell
                 .error(&format!("{}: {} (nukesh --colors --check)", problem.file, problem.message));
         }
+        if let Some(home) = shell.get("HOME") {
+            colors::write_git_config(&colors, &home);
+        }
         shell.colors = Rc::new(colors);
         colors::color_the_tools(&mut shell);
         let (settings, problems) = settings::Settings::load(shell.get("HOME").as_deref());
@@ -296,6 +302,9 @@ fn parse_args(args: &[String], invocation: &mut Invocation) -> Result<(), String
             }
             // colors.toml(5): shown, or checked (ADR 0258).
             "--colors" if i == 1 => sys::exit_now(colors::command(&args[2..])),
+            // git's diffs with the words that changed marked (ADR 0293).
+            "--diff-highlight" if i == 1 => sys::exit_now(diffmark::command(false)),
+            "--diff-pager" if i == 1 => sys::exit_now(diffmark::command(true)),
             "--version" => {
                 let version = format!("nukesh, version {}\n", env!("CARGO_PKG_VERSION"));
                 let _ = sys::write_all(1, version.as_bytes());
