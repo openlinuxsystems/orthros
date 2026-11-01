@@ -71,11 +71,11 @@ pub const NEGATIVE_TTL_MAX: u32 = 3_600;
 /// A message's header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
-/// The query's number, which its answer repeats.
+    /// The query's number, which its answer repeats.
     pub id: u16,
-/// The flags, opcode and response code.
+    /// The flags, opcode and response code.
     pub flags: u16,
-/// How many questions, answers, authorities and additional records follow.
+    /// How many questions, answers, authorities and additional records follow.
     pub questions: u16,
     /// How many answers.
     pub answers: u16,
@@ -203,7 +203,12 @@ pub fn question(message: &[u8]) -> Option<Question> {
         return None;
     }
     let (name, at) = read_name(message, HEADER)?;
-    Some(Question { name, qtype: u16_at(message, at)?, qclass: u16_at(message, at + 2)?, end: at + 4 })
+    Some(Question {
+        name,
+        qtype: u16_at(message, at)?,
+        qclass: u16_at(message, at + 2)?,
+        end: at + 4,
+    })
 }
 
 /// A record of a message.
@@ -234,9 +239,8 @@ pub fn records(message: &[u8]) -> Option<Vec<Record>> {
         at = skip_name(message, at)? + 4;
     }
     let mut records = Vec::new();
-    for (section, count) in [header.answers, header.authorities, header.additionals]
-        .into_iter()
-        .enumerate()
+    for (section, count) in
+        [header.answers, header.authorities, header.additionals].into_iter().enumerate()
     {
         for _ in 0..count {
             let owner = at;
@@ -488,14 +492,17 @@ pub fn type_by_name(name: &str) -> Option<u16> {
 pub fn data_text(message: &[u8], record: &Record) -> String {
     let (start, end) = record.data;
     let data = &message[start..end];
-    let name = |at| read_name(message, at).map_or_else(|| "?".into(), |(name, _)| format!("{name}."));
+    let name =
+        |at| read_name(message, at).map_or_else(|| "?".into(), |(name, _)| format!("{name}."));
     match record.rtype {
         A if data.len() == 4 => Ipv4Addr::new(data[0], data[1], data[2], data[3]).to_string(),
         AAAA if data.len() == 16 => {
             Ipv6Addr::from(<[u8; 16]>::try_from(data).unwrap_or([0; 16])).to_string()
         }
         CNAME | NS | PTR => name(start),
-        MX if data.len() > 2 => format!("{} {}", u16_at(message, start).unwrap_or(0), name(start + 2)),
+        MX if data.len() > 2 => {
+            format!("{} {}", u16_at(message, start).unwrap_or(0), name(start + 2))
+        }
         TXT => {
             let mut parts = Vec::new();
             let mut at = 0;

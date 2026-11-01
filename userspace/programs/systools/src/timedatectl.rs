@@ -68,7 +68,9 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         }
         Some("set-time") => {
             if rest.is_empty() {
-                return Err(usage("timedatectl: set-time takes a time, as 2026-11-01 12:00:00".into()));
+                return Err(usage(
+                    "timedatectl: set-time takes a time, as 2026-11-01 12:00:00".into(),
+                ));
             }
             set_time(&rest.join(" "))?;
             Ok(0)
@@ -83,7 +85,11 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
 /// The time zone `/etc/localtime` names, by the link's target.
 pub fn timezone() -> String {
     let Ok(target) = fs::read_link(LOCALTIME) else {
-        return if Path::new(LOCALTIME).exists() { "a file of its own".into() } else { "UTC".into() };
+        return if Path::new(LOCALTIME).exists() {
+            "a file of its own".into()
+        } else {
+            "UTC".into()
+        };
     };
     let target = target.to_string_lossy().into_owned();
     for prefix in [ZONEINFO, "/usr/share/zoneinfo"] {
@@ -206,11 +212,13 @@ fn parse_local(text: &str) -> Option<i64> {
 fn set_time(text: &str) -> Result<(), Fail> {
     if timed_runs() {
         return Err(fail(
-            "timedatectl: timed keeps the clock from the network; `service timed stop` first".into(),
+            "timedatectl: timed keeps the clock from the network; `service timed stop` first"
+                .into(),
         ));
     }
-    let seconds = parse_local(text)
-        .ok_or_else(|| usage(format!("timedatectl: '{text}' is not a time, as 2026-11-01 12:00:00")))?;
+    let seconds = parse_local(text).ok_or_else(|| {
+        usage(format!("timedatectl: '{text}' is not a time, as 2026-11-01 12:00:00"))
+    })?;
     let ns = u64::try_from(seconds).unwrap_or(0).saturating_mul(1_000_000_000);
     clock::set(&SYS, SLOT_CLOCK, ns).map_err(|status| {
         if Kernel::from_status(status) == Some(Kernel::InvalidArgument) {

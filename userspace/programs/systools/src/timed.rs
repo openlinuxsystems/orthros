@@ -51,10 +51,10 @@ use rustls::time_provider::TimeProvider;
 use rustls::{CertificateError, ClientConfig, RootCertStore};
 
 use crate::args::Args;
-use netproto::ntp::{self, KEY_LEN};
 use crate::sys::SYS;
 use crate::tls;
 use crate::util::{self, Fail};
+use netproto::ntp::{self, KEY_LEN};
 
 /// Its settings (timed(5)), what it did last, and where it keeps when it
 /// last synced.
@@ -241,9 +241,10 @@ impl Timed {
     /// The settings' TLS client, checking certificates by `time`.
     fn config(&self, time: Option<u64>) -> io::Result<Arc<ClientConfig>> {
         let provider = Arc::new(provider::default_provider());
-        let verifier = WebPkiServerVerifier::builder_with_provider(self.roots.clone(), provider.clone())
-            .build()
-            .map_err(io::Error::other)?;
+        let verifier =
+            WebPkiServerVerifier::builder_with_provider(self.roots.clone(), provider.clone())
+                .build()
+                .map_err(io::Error::other)?;
         let verifier: Arc<dyn ServerCertVerifier> = verifier;
         let mut config = ClientConfig::builder_with_details(provider, Arc::new(Told(time)))
             .with_protocol_versions(&[&rustls::version::TLS13])
@@ -266,14 +267,19 @@ impl Timed {
             .map_err(|e| format!("cannot look {host} up: {}", util::strip_os_error(&e)))?
             .next()
             .ok_or_else(|| format!("{host} has no address"))?;
-        let name = tls::server_name(host.parse::<std::net::IpAddr>().is_err().then_some(host.as_str()), address)
-            .map_err(|e| e.to_string())?;
+        let name = tls::server_name(
+            host.parse::<std::net::IpAddr>().is_err().then_some(host.as_str()),
+            address,
+        )
+        .map_err(|e| e.to_string())?;
         let config = self.config(None).map_err(|e| e.to_string())?;
         let stream = match tls::connect(address, name.clone(), &config, TIMEOUT) {
             Err(err) if certificate_time(&err) && !self.synced => {
                 let ntp = SocketAddr::new(address.ip(), ntp::NTP_PORT);
                 let sample = self.sntp_sample(ntp).map_err(|e| {
-                    format!("its certificate is not valid by the clock, and it gave no plain time: {e}")
+                    format!(
+                        "its certificate is not valid by the clock, and it gave no plain time: {e}"
+                    )
                 })?;
                 let told = (now_ns() + sample.offset) / 1_000_000_000;
                 // An unauthenticated time before the last sync could make
@@ -295,8 +301,12 @@ impl Timed {
             }
             other => other,
         };
-        let mut stream = stream.map_err(|e| format!("NTS key establishment failed: {}", util::strip_os_error(&e)))?;
-        stream.write_all(&ntp::ke_request()).and_then(|()| stream.flush()).map_err(|e| e.to_string())?;
+        let mut stream = stream
+            .map_err(|e| format!("NTS key establishment failed: {}", util::strip_os_error(&e)))?;
+        stream
+            .write_all(&ntp::ke_request())
+            .and_then(|()| stream.flush())
+            .map_err(|e| e.to_string())?;
         let mut data = Vec::new();
         let mut buf = [0; 4096];
         let (records, _) = loop {
@@ -307,7 +317,9 @@ impl Timed {
                 Ok(0) => return Err("the server closed before its answer ended".into()),
                 Ok(n) if data.len() + n <= 65_536 => data.extend_from_slice(&buf[..n]),
                 Ok(_) => return Err("too long an answer".into()),
-                Err(err) => return Err(format!("reading its answer: {}", util::strip_os_error(&err))),
+                Err(err) => {
+                    return Err(format!("reading its answer: {}", util::strip_os_error(&err)));
+                }
             }
         };
         let established = ntp::ke_answer(&records)?;
@@ -315,7 +327,11 @@ impl Timed {
         let mut s2c = [0; KEY_LEN];
         let exported = stream
             .conn
-            .export_keying_material(&mut c2s, ntp::EXPORTER_LABEL, Some(&ntp::exporter_context(false)))
+            .export_keying_material(
+                &mut c2s,
+                ntp::EXPORTER_LABEL,
+                Some(&ntp::exporter_context(false)),
+            )
             .and_then(|_| {
                 stream.conn.export_keying_material(
                     &mut s2c,
@@ -457,7 +473,9 @@ impl Timed {
         if self.rtc_written.is_none_or(|at| at.elapsed() >= RTC_EVERY) {
             match clock::write_rtc(&SYS, SLOT_CLOCK) {
                 Ok(()) => self.rtc_written = Some(Instant::now()),
-                Err(status) => eprintln!("timed: cannot write the real-time clock: {:#x}", status.0),
+                Err(status) => {
+                    eprintln!("timed: cannot write the real-time clock: {:#x}", status.0);
+                }
             }
         }
         let seconds = (now_ns() / 1_000_000_000).to_string();
@@ -517,10 +535,13 @@ impl Timed {
 /// Sends `request` to `address` and waits for its answer, whose origin
 /// timestamp must be `transmit`: the answer, and the local times it went
 /// and came back.
-fn exchange(address: SocketAddr, request: &[u8], transmit: u64) -> Result<(Vec<u8>, i128, i128), String> {
-    let unspecified: SocketAddr = if address.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }
-        .parse()
-        .map_err(|_| "no address")?;
+fn exchange(
+    address: SocketAddr,
+    request: &[u8],
+    transmit: u64,
+) -> Result<(Vec<u8>, i128, i128), String> {
+    let unspecified: SocketAddr =
+        if address.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }.parse().map_err(|_| "no address")?;
     let socket = UdpSocket::bind(unspecified).map_err(|e| util::strip_os_error(&e))?;
     socket.connect(address).map_err(|e| util::strip_os_error(&e))?;
     let deadline = Instant::now() + TIMEOUT;
@@ -535,7 +556,9 @@ fn exchange(address: SocketAddr, request: &[u8], transmit: u64) -> Result<(Vec<u
         let _ = socket.set_read_timeout(Some(left));
         let len = match socket.recv(&mut buf) {
             Ok(len) => len,
-            Err(err) if matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+            Err(err)
+                if matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) =>
+            {
                 return Err("no answer".into());
             }
             Err(err) => return Err(util::strip_os_error(&err)),
@@ -613,7 +636,9 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) };
     }
     if clock::state(&SYS, SLOT_CLOCK).is_err() {
-        return Err(util::fail("timed: no clock capability: its service file needs admin.time".into()));
+        return Err(util::fail(
+            "timed: no clock capability: its service file needs admin.time".into(),
+        ));
     }
     let mut timed = Timed {
         settings: Settings::default(),
@@ -634,7 +659,11 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             timed.read_settings();
             poll = POLL_MIN;
         }
-        let when = util::time_text(i64::try_from(now_ns() / 1_000_000_000).unwrap_or(0), "%F %T UTC", true);
+        let when = util::time_text(
+            i64::try_from(now_ns() / 1_000_000_000).unwrap_or(0),
+            "%F %T UTC",
+            true,
+        );
         let wait = match timed.round() {
             Ok((sample, from)) => match timed.apply(&sample) {
                 Ok(did) => {

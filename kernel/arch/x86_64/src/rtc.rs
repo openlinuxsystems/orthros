@@ -81,7 +81,7 @@ fn bcd(value: u8) -> u8 {
 }
 
 fn to_bcd(value: u8) -> u8 {
-    (value / 10) << 4 | value % 10
+    ((value / 10) << 4) | (value % 10)
 }
 
 /// The clock's date and time, as seconds since 1970, if it holds a valid
@@ -157,13 +157,15 @@ pub fn write(seconds: u64) -> bool {
     let days = i64::try_from(seconds / 86_400).unwrap_or(i64::MAX);
     let (year, month, day) = clock::civil_from_days(days);
     let century = CENTURY.load(Ordering::Relaxed);
-    let fits = if century != 0 { (1970..=9999).contains(&year) } else { (2000..=2099).contains(&year) };
+    let fits =
+        if century != 0 { (1970..=9999).contains(&year) } else { (2000..=2099).contains(&year) };
     if !fits {
         radix_klog::warn!("Time: the real-time clock cannot hold the year {year}");
         return false;
     }
     let of_day = seconds % 86_400;
-    let (hour, minute, second) = ((of_day / 3600) as u8, (of_day / 60 % 60) as u8, (of_day % 60) as u8);
+    let (hour, minute, second) =
+        ((of_day / 3600) as u8, (of_day / 60 % 60) as u8, (of_day % 60) as u8);
     let _cmos = CMOS.lock();
     let status = read(STATUS_B);
     let encode = |v: u8| if status & BINARY != 0 { v } else { to_bcd(v) };

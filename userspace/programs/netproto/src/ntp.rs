@@ -150,7 +150,13 @@ pub fn request(transmit: u64) -> Vec<u8> {
 /// A server's answer to `request`, as the test servers make it: stratum
 /// `stratum`, received at `receive`, sent at `transmit`, all NTP
 /// timestamps; or, for stratum 0, the kiss code `kiss`.
-pub fn server_answer(request: &[u8], stratum: u8, receive: u64, transmit: u64, kiss: [u8; 4]) -> Vec<u8> {
+pub fn server_answer(
+    request: &[u8],
+    stratum: u8,
+    receive: u64,
+    transmit: u64,
+    kiss: [u8; 4],
+) -> Vec<u8> {
     let mut packet = vec![0; HEADER];
     // Version as asked, mode 4 (server).
     let version = request.first().map_or(4, |first| (first >> 3) & 7);
@@ -232,10 +238,15 @@ pub fn ke_answer(records: &[KeRecord]) -> Result<Established, String> {
             SERVER => established.server = Some(String::from_utf8_lossy(body).into_owned()),
             PORT => established.port = u16_at(body, 0),
             ERROR => {
-                return Err(format!("the server refused, with error {}", u16_at(body, 0).unwrap_or(0)));
+                return Err(format!(
+                    "the server refused, with error {}",
+                    u16_at(body, 0).unwrap_or(0)
+                ));
             }
             WARNING => {}
-            other if *critical => return Err(format!("a critical record of type {other} it does not know")),
+            other if *critical => {
+                return Err(format!("a critical record of type {other} it does not know"));
+            }
             _ => {}
         }
     }
@@ -294,7 +305,12 @@ pub fn fields(packet: &[u8]) -> Option<Vec<(u16, usize, usize)>> {
 /// Seals `plaintext` with `key`, the packet so far as associated data,
 /// under `nonce`, into an NTS Authenticator and Encrypted Extension
 /// Fields field.
-pub fn authenticator(key: &[u8; KEY_LEN], nonce: &[u8; 16], packet: &[u8], plaintext: &[u8]) -> Option<Vec<u8>> {
+pub fn authenticator(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8; 16],
+    packet: &[u8],
+    plaintext: &[u8],
+) -> Option<Vec<u8>> {
     let cipher = Aes128SivAead::new(key.into());
     let sealed = cipher.encrypt(nonce.into(), Payload { msg: plaintext, aad: packet }).ok()?;
     let mut body = Vec::with_capacity(4 + 16 + sealed.len() + 3);
@@ -366,7 +382,11 @@ pub fn nts_request(
 
 /// Checks an NTS-protected answer to a request with `unique`, with the
 /// server's key `s2c`: the new cookies it carries, if it is authentic.
-pub fn nts_answer(packet: &[u8], unique: &[u8; 32], s2c: &[u8; KEY_LEN]) -> Result<Vec<Vec<u8>>, &'static str> {
+pub fn nts_answer(
+    packet: &[u8],
+    unique: &[u8; 32],
+    s2c: &[u8; KEY_LEN],
+) -> Result<Vec<Vec<u8>>, &'static str> {
     let fields = fields(packet).ok_or("its extension fields run past it")?;
     let echoed = fields
         .iter()
@@ -424,7 +444,9 @@ mod tests {
         assert_eq!(established.port, Some(0x123));
         assert!(ke_records(&answer[..answer.len() - 1]).is_none());
         let unknown = record(99, true, &[]);
-        assert!(ke_answer(&ke_records(&[unknown, record(0, true, &[])].concat()).unwrap().0).is_err());
+        assert!(
+            ke_answer(&ke_records(&[unknown, record(0, true, &[])].concat()).unwrap().0).is_err()
+        );
     }
 
     #[test]
@@ -434,7 +456,10 @@ mod tests {
         let request = nts_request(42, &unique, b"a cookie", 2, &c2s, &[3; 16]).unwrap();
         let fields = fields(&request).unwrap();
         let kinds: Vec<u16> = fields.iter().map(|f| f.0).collect();
-        assert_eq!(kinds, [UNIQUE_IDENTIFIER, COOKIE, COOKIE_PLACEHOLDER, COOKIE_PLACEHOLDER, AUTHENTICATOR]);
+        assert_eq!(
+            kinds,
+            [UNIQUE_IDENTIFIER, COOKIE, COOKIE_PLACEHOLDER, COOKIE_PLACEHOLDER, AUTHENTICATOR]
+        );
         let &(_, at, end) = fields.last().unwrap();
         assert_eq!(open(&c2s, &request, at, end), Some(Vec::new()));
         assert_eq!(open(&s2c, &request, at, end), None);

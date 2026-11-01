@@ -9,8 +9,7 @@
 //! logs a clock step.
 
 use radix_abi::clock::{
-    self as abi, SLEW_MAX_NS, SetArgs, SlewArgs, SlewResults, StateArgs, StateResults,
-    WriteRtcArgs,
+    self as abi, SLEW_MAX_NS, SetArgs, SlewArgs, SlewResults, StateArgs, StateResults, WriteRtcArgs,
 };
 use radix_abi::errors::Kernel;
 use radix_cap::{Capability, ObjectKind, Rights};
@@ -79,8 +78,8 @@ pub fn method(user: &UserRef, cap: &Capability, label: u32, args: &[u64; 8]) -> 
             if a.delta_ns.unsigned_abs() > SLEW_MAX_NS {
                 return Err(error(Kernel::InvalidArgument));
             }
-            let left = <Arch as Timer>::slew_wall_clock(a.delta_ns)
-                .ok_or(error(Kernel::NotSupported))?;
+            let left =
+                <Arch as Timer>::slew_wall_clock(a.delta_ns).ok_or(error(Kernel::NotSupported))?;
             answer(label, SlewResults::WORDS, SlewResults { left_ns: left }.encode())
         }
         abi::WRITE_RTC => {

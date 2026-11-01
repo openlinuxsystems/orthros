@@ -54,9 +54,9 @@ use ring::rand::{SecureRandom, SystemRandom};
 use rustls::ClientConfig;
 
 use crate::args::Args;
-use netproto::dns::{self, Question};
 use crate::tls;
 use crate::util::{self, Fail};
+use netproto::dns::{self, Question};
 
 /// Where resolved answers.
 pub const LISTEN: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 53), 53);
@@ -213,7 +213,12 @@ pub fn parse_server(text: &str) -> Result<Server, String> {
         }
         None => Kind::Address,
     };
-    Ok(Server { text: text.to_string(), address: SocketAddr::new(ip, port), kind, from_dhcp: false })
+    Ok(Server {
+        text: text.to_string(),
+        address: SocketAddr::new(ip, port),
+        kind,
+        from_dhcp: false,
+    })
 }
 
 /// Splits `host[:port]`, or `[v6]:port`, taking `default` for a port
@@ -357,7 +362,9 @@ enum Transport {
     Udp,
     Tcp,
     /// DNS over TLS, whether the certificate was checked.
-    Tls { checked: bool },
+    Tls {
+        checked: bool,
+    },
     Https,
 }
 
@@ -431,8 +438,11 @@ impl Cache {
             self.entries.retain(|_, entry| entry.expires > now);
             if self.entries.len() >= self.size {
                 // The one closest to going.
-                if let Some(first) =
-                    self.entries.iter().min_by_key(|(_, entry)| entry.expires).map(|(k, _)| k.clone())
+                if let Some(first) = self
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.expires)
+                    .map(|(k, _)| k.clone())
                 {
                     self.entries.remove(&first);
                 }
@@ -547,7 +557,8 @@ impl Shared {
         for index in order {
             let server = &servers[index];
             let plain = health.get(index).and_then(|h| h.plain_until).is_some_and(|t| t > now);
-            let result = self.ask_one(links, index, server, settings.over_tls, plain, query, question);
+            let result =
+                self.ask_one(links, index, server, settings.over_tls, plain, query, question);
             let mut health = self.health.lock().unwrap_or_else(PoisonError::into_inner);
             if self.generation.load(Ordering::Acquire) != generation {
                 return result.ok().map(|(answer, _)| answer);
@@ -604,7 +615,8 @@ impl Shared {
             Kind::Tls(name) => {
                 let config = read(&self.verified);
                 let address = server.address;
-                let answer = links.tls(index, address, Some(name), &config, self, query, question)?;
+                let answer =
+                    links.tls(index, address, Some(name), &config, self, query, question)?;
                 Ok((answer, Transport::Tls { checked: true }))
             }
             Kind::Address => {
@@ -1086,10 +1098,8 @@ impl Watcher {
         }
         let settings_time = modified(SETTINGS);
         let netd_time = modified(NETD_RESOLV);
-        let changed = first
-            || reload
-            || settings_time != self.settings_time
-            || netd_time != self.netd_time;
+        let changed =
+            first || reload || settings_time != self.settings_time || netd_time != self.netd_time;
         if changed {
             self.settings_time = settings_time;
             self.netd_time = netd_time;
@@ -1209,7 +1219,10 @@ mod tests {
     #[test]
     fn servers_read_as_resolved_5_writes_them() {
         let plain = parse_server("192.168.1.1").unwrap();
-        assert_eq!((plain.address, &plain.kind), ("192.168.1.1:53".parse().unwrap(), &Kind::Address));
+        assert_eq!(
+            (plain.address, &plain.kind),
+            ("192.168.1.1:53".parse().unwrap(), &Kind::Address)
+        );
         let tls = parse_server("9.9.9.9#dns.quad9.net").unwrap();
         assert_eq!(tls.address, "9.9.9.9:853".parse().unwrap());
         assert_eq!(tls.kind, Kind::Tls("dns.quad9.net".into()));
@@ -1252,7 +1265,10 @@ mod tests {
         assert_eq!(wrong.len(), 2, "{wrong:?}");
         assert!(wrong[0].ends_with(":6: no setting 'colour'"));
         let (settings, wrong) = parse_settings("");
-        assert_eq!((settings.cache_size, settings.over_tls), (CACHE_DEFAULT, OverTls::Opportunistic));
+        assert_eq!(
+            (settings.cache_size, settings.over_tls),
+            (CACHE_DEFAULT, OverTls::Opportunistic)
+        );
         assert!(wrong.is_empty());
     }
 

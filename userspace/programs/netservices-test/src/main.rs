@@ -144,12 +144,15 @@ impl Seen {
     }
 }
 
+/// An NTS association's keys: client to server, and server to client.
+type Keys = ([u8; KEY_LEN], [u8; KEY_LEN]);
+
 /// What the servers share.
 struct Servers {
     seen: Mutex<Seen>,
     /// The NTS cookies given, with the keys each stands for: client to
     /// server, and server to client.
-    cookies: Mutex<HashMap<Vec<u8>, ([u8; KEY_LEN], [u8; KEY_LEN])>>,
+    cookies: Mutex<HashMap<Vec<u8>, Keys>>,
     random: SystemRandom,
     /// The NTP server's time: the machine's when the test started, and
     /// five seconds, on from then by the monotonic clock.
@@ -188,9 +191,8 @@ fn server_config(
     versions: &[&'static rustls::SupportedProtocolVersion],
     alpn: &[u8],
 ) -> Option<Arc<ServerConfig>> {
-    let chain: Vec<CertificateDer<'static>> = vec![ok!(CertificateDer::from_pem_slice(testdata!(
-        "server.pem"
-    )))?];
+    let chain: Vec<CertificateDer<'static>> =
+        vec![ok!(CertificateDer::from_pem_slice(testdata!("server.pem")))?];
     let key = ok!(PrivateKeyDer::from_pem_slice(testdata!("server.key")))?;
     let builder = ServerConfig::builder_with_provider(Arc::new(provider::default_provider()));
     let mut config = ok!(ok!(builder.with_protocol_versions(versions))?
@@ -205,14 +207,29 @@ fn main() {
         println!("{NAME}: the servers did not start");
         std::process::exit(1);
     };
-    part("plain DNS: names, the cache, NXDOMAIN, answers too long for UDP, localhost and .local, through resolved", || plain_dns(&servers));
-    part("DNS over TLS: names asked over TLS, a certificate for another name refused", || over_tls(&servers));
-    part("DNS over HTTPS: names asked by POST to https://dns.test/dns-query", || over_https(&servers));
-    part("opportunistic DNS over TLS: a server named by address asked on port 853 first", || opportunistic(&servers));
-    part("curl: https://www.test/hello fetched, an untrusted certificate refused", || curl(&servers));
-    part("timed: the clock stepped 5 s by NTS, then left as it was; timedatectl shows it", || time(&servers));
+    part(
+        "plain DNS: names, the cache, NXDOMAIN, answers too long for UDP, localhost and .local, through resolved",
+        || plain_dns(&servers),
+    );
+    part("DNS over TLS: names asked over TLS, a certificate for another name refused", || {
+        over_tls(&servers);
+    });
+    part("DNS over HTTPS: names asked by POST to https://dns.test/dns-query", || {
+        over_https(&servers);
+    });
+    part("opportunistic DNS over TLS: a server named by address asked on port 853 first", || {
+        opportunistic(&servers);
+    });
+    part("curl: https://www.test/hello fetched, an untrusted certificate refused", || {
+        curl(&servers);
+    });
+    part("timed: the clock stepped 5 s by NTS, then left as it was; timedatectl shows it", || {
+        time(&servers);
+    });
     part("time zones: timedatectl set-timezone, list-timezones, and refusals", time_zones);
-    part("netlog: the boot's first records and a new one sent to 127.0.0.1:6666", || netlog(&servers));
+    part("netlog: the boot's first records and a new one sent to 127.0.0.1:6666", || {
+        netlog(&servers);
+    });
     let failures = FAILURES.load(Ordering::Relaxed);
     if failures == 0 {
         println!("{NAME}: every check passed");
@@ -271,11 +288,7 @@ fn start() -> Option<Arc<Servers>> {
 }
 
 /// Serves each connection `listener` takes on a thread of its own.
-fn serve(
-    servers: &Arc<Servers>,
-    listener: TcpListener,
-    each: fn(&Arc<Servers>, TcpStream),
-) {
+fn serve(servers: &Arc<Servers>, listener: TcpListener, each: fn(&Arc<Servers>, TcpStream)) {
     let servers = servers.clone();
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
@@ -296,8 +309,10 @@ fn serve(
 fn zone_answer(servers: &Servers, query: &[u8], transport: &'static str) -> Option<Vec<u8>> {
     let question = dns::question(query)?;
     servers.seen().questions.push((transport, question.name.clone(), question.qtype));
-    let name = question.name.as_str();
-    if !name.ends_with(".test") && name != "test" {
+    // Names are the same whatever their case.
+    let name = question.name.to_ascii_lowercase();
+    let name = name.as_str();
+    if name.rsplit('.').next() != Some("test") {
         return Some(dns::failure(query, &question, dns::REFUSED));
     }
     if name == "missing.test" {
@@ -401,7 +416,8 @@ fn https_stream<S: Read + Write>(servers: &Servers, stream: S) {
             return;
         }
         let mut words = line.split_whitespace();
-        let (method, path) = (words.next().unwrap_or("").to_string(), words.next().unwrap_or("").to_string());
+        let (method, path) =
+            (words.next().unwrap_or("").to_string(), words.next().unwrap_or("").to_string());
         let mut length = 0;
         loop {
             let mut header = String::new();
@@ -472,7 +488,9 @@ fn key_establishment(
     let asks = |kind: u16, value: u16| {
         records.iter().any(|(k, _, body)| *k == kind && body.as_slice() == value.to_be_bytes())
     };
-    if !asks(ntp::NEXT_PROTOCOL, ntp::PROTOCOL_NTPV4) || !asks(ntp::AEAD_ALGORITHM, ntp::AES_SIV_CMAC_256) {
+    if !asks(ntp::NEXT_PROTOCOL, ntp::PROTOCOL_NTPV4)
+        || !asks(ntp::AEAD_ALGORITHM, ntp::AES_SIV_CMAC_256)
+    {
         return Err(io::ErrorKind::InvalidData.into());
     }
     let mut c2s = [0; KEY_LEN];
@@ -506,7 +524,11 @@ fn key_establishment(
 /// keeps them under.
 fn new_cookie(servers: &Servers, c2s: [u8; KEY_LEN], s2c: [u8; KEY_LEN]) -> Vec<u8> {
     let cookie = servers.random::<32>().to_vec();
-    servers.cookies.lock().unwrap_or_else(PoisonError::into_inner).insert(cookie.clone(), (c2s, s2c));
+    servers
+        .cookies
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(cookie.clone(), (c2s, s2c));
     cookie
 }
 
@@ -534,7 +556,8 @@ fn nts_answer(servers: &Servers, request: &[u8], receive: u64) -> Option<Vec<u8>
     let cookie = body(ntp::COOKIE)?;
     let &(_, at, end) = fields.iter().find(|(k, _, _)| *k == ntp::AUTHENTICATOR)?;
     let placeholders = fields.iter().filter(|(k, _, _)| *k == ntp::COOKIE_PLACEHOLDER).count();
-    let (c2s, s2c) = servers.cookies.lock().unwrap_or_else(PoisonError::into_inner).remove(cookie)?;
+    let (c2s, s2c) =
+        servers.cookies.lock().unwrap_or_else(PoisonError::into_inner).remove(cookie)?;
     ntp::open(&c2s, request, at, end)?;
     let header = &request[..ntp::HEADER];
     let transmit = ntp::timestamp(servers.now_ns());
@@ -598,7 +621,10 @@ fn wait_for(mut ready: impl FnMut() -> bool) -> bool {
 fn wait_file(path: &str, text: &str) -> bool {
     let held = wait_for(|| fs::read_to_string(path).is_ok_and(|now| now.contains(text)));
     if !held {
-        println!("{NAME}: {path} never said \"{text}\": {:?}", fs::read_to_string(path).unwrap_or_default());
+        println!(
+            "{NAME}: {path} never said \"{text}\": {:?}",
+            fs::read_to_string(path).unwrap_or_default()
+        );
     }
     held
 }
@@ -629,7 +655,10 @@ fn found(name: &str) -> bool {
 }
 
 fn plain_dns(servers: &Servers) {
-    resolve_with(&format!("servers = 127.0.0.1:{DNS_PORT}\ndns-over-tls = no\n"), &format!("127.0.0.1:{DNS_PORT}"));
+    resolve_with(
+        &format!("servers = 127.0.0.1:{DNS_PORT}\ndns-over-tls = no\n"),
+        &format!("127.0.0.1:{DNS_PORT}"),
+    );
     check!(found("www.test"));
     check!(servers.seen().asked("udp", "www.test") >= 1);
     // Asked again, the answers come from the cache.
@@ -653,7 +682,10 @@ fn plain_dns(servers: &Servers) {
     // localhost and .local never leave the machine.
     check!(found("localhost"));
     check!(lookup("printer.local").is_err());
-    check!(servers.seen().asked("", "localhost") == 0 && servers.seen().asked("", "printer.local") == 0);
+    check!(
+        servers.seen().asked("", "localhost") == 0
+            && servers.seen().asked("", "printer.local") == 0
+    );
     // resolved writes its status every two seconds.
     check!(wait_file(RESOLVED_STATUS, "Listening on: 127.0.0.53:53 (UDP and TCP)"));
     check!(wait_file(RESOLVED_STATUS, "DNS over TLS: no"));
@@ -670,13 +702,22 @@ fn plain_dns(servers: &Servers) {
 }
 
 fn over_tls(servers: &Servers) {
-    resolve_with(&format!("servers = 127.0.0.1#dns.test\ncertificates = {CA}\n"), "127.0.0.1#dns.test");
+    resolve_with(
+        &format!("servers = 127.0.0.1#dns.test\ncertificates = {CA}\n"),
+        "127.0.0.1#dns.test",
+    );
     check!(found("dot.test"));
     check!(servers.seen().asked("tls", "dot.test") >= 1);
-    check!(servers.seen().asked("udp", "dot.test") == 0 && servers.seen().asked("tcp", "dot.test") == 0);
+    check!(
+        servers.seen().asked("udp", "dot.test") == 0
+            && servers.seen().asked("tcp", "dot.test") == 0
+    );
     check!(wait_file(RESOLVED_STATUS, "DNS over TLS, its certificate checked"));
     // The certificate is not for wrong.test: nothing is asked.
-    resolve_with(&format!("servers = 127.0.0.1#wrong.test\ncertificates = {CA}\n"), "127.0.0.1#wrong.test");
+    resolve_with(
+        &format!("servers = 127.0.0.1#wrong.test\ncertificates = {CA}\n"),
+        "127.0.0.1#wrong.test",
+    );
     check!(lookup("refused.test").is_err());
     check!(servers.seen().asked("", "refused.test") == 0);
     // Nor without the test authority.
@@ -690,7 +731,10 @@ fn over_https(servers: &Servers) {
     resolve_with(&format!("servers = {server}\ncertificates = {CA}\n"), server);
     check!(found("doh.test"));
     check!(servers.seen().asked("https", "doh.test") >= 1);
-    check!(wait_file(RESOLVED_STATUS, &format!("Server: {server} (from the settings): DNS over HTTPS")));
+    check!(wait_file(
+        RESOLVED_STATUS,
+        &format!("Server: {server} (from the settings): DNS over HTTPS")
+    ));
 }
 
 fn opportunistic(servers: &Servers) {
@@ -703,23 +747,35 @@ fn opportunistic(servers: &Servers) {
 
 fn curl(servers: &Servers) {
     let version = output("/system/commands/curl", &["-V"]);
-    check!(version.contains("rustls-ffi/") && version.contains("zlib/") && version.contains("zstd/"), "curl -V: {version}");
+    check!(
+        version.contains("rustls-ffi/") && version.contains("zlib/") && version.contains("zstd/"),
+        "curl -V: {version}"
+    );
     let page = output("/system/commands/curl", &["-sS", "--cacert", CA, "https://www.test/hello"]);
     check!(page == "hello from www.test\n", "curl https://www.test/hello: {page:?}");
     check!(servers.seen().pages.iter().any(|p| p == "/hello"));
     // Without the test authority the handshake fails: no page is asked.
     if let Some(out) = run("/system/commands/curl", &["-sS", "https://www.test/untrusted"]) {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        check!(!out.status.success() && stderr.contains("curl: ("), "curl without --cacert: {}: {stderr}", out.status);
+        check!(
+            !out.status.success() && stderr.contains("curl: ("),
+            "curl without --cacert: {}: {stderr}",
+            out.status
+        );
     }
     check!(!servers.seen().pages.iter().any(|p| p == "/untrusted"));
 }
 
 fn time(servers: &Servers) {
     // Names resolve by plain DNS from here on.
-    resolve_with(&format!("servers = 127.0.0.1:{DNS_PORT}\ndns-over-tls = no\n"), &format!("127.0.0.1:{DNS_PORT}"));
+    resolve_with(
+        &format!("servers = 127.0.0.1:{DNS_PORT}\ndns-over-tls = no\n"),
+        &format!("127.0.0.1:{DNS_PORT}"),
+    );
     let (wall, mono) = (wall_ns(), Instant::now());
-    if ok!(fs::write(TIMED, format!("servers = time.test\nfallback =\ncertificates = {CA}\n"))).is_none() {
+    if ok!(fs::write(TIMED, format!("servers = time.test\nfallback =\ncertificates = {CA}\n")))
+        .is_none()
+    {
         return;
     }
     reload("timed");
@@ -733,9 +789,14 @@ fn time(servers: &Servers) {
     let times = servers.seen().times;
     reload("timed");
     check!(wait_for(|| servers.seen().times >= times + 4));
-    check!(wait_file(TIMED_STATUS, "left as it is") || wait_file(TIMED_STATUS, "slewing the clock"));
+    check!(
+        wait_file(TIMED_STATUS, "left as it is") || wait_file(TIMED_STATUS, "slewing the clock")
+    );
     let shown = output("/system/commands/timedatectl", &[]);
-    check!(shown.contains("System clock synchronized: yes") && shown.contains("NTP service: active"), "{shown}");
+    check!(
+        shown.contains("System clock synchronized: yes") && shown.contains("NTP service: active"),
+        "{shown}"
+    );
     let sync = output("/system/commands/timedatectl", &["timesync-status"]);
     check!(sync.contains("from time.test over NTS"), "{sync}");
     // The clock is timed's while it runs.
@@ -751,7 +812,11 @@ fn time_zones() {
     check!(zones.lines().any(|z| z == "Europe/Berlin") && zones.lines().any(|z| z == "UTC"));
     output("/system/commands/timedatectl", &["set-timezone", "Europe/Berlin"]);
     let target = fs::read_link("/etc/localtime").unwrap_or_default();
-    check!(target.to_string_lossy() == "/system/resources/zoneinfo/Europe/Berlin", "{}", target.display());
+    check!(
+        target.to_string_lossy() == "/system/resources/zoneinfo/Europe/Berlin",
+        "{}",
+        target.display()
+    );
     let shown = output("/system/commands/timedatectl", &[]);
     check!(shown.contains("Time zone: Europe/Berlin (CE"), "{shown}");
     let zone = output("/system/commands/date", &["+%Z"]);
@@ -775,7 +840,10 @@ fn netlog(servers: &Servers) {
     let oldest = oldest_record();
     check!(!oldest.is_empty());
     reload("netlog");
-    check!(wait_for(|| servers.seen().log.iter().any(|d| d.contains(oldest.as_str()))), "{oldest:?}");
+    check!(
+        wait_for(|| servers.seen().log.iter().any(|d| d.contains(oldest.as_str()))),
+        "{oldest:?}"
+    );
     let marker = "netservices-test was here";
     output("/system/commands/logger", &[marker]);
     check!(wait_for(|| servers.seen().log.iter().any(|d| d.contains(marker))));
@@ -791,7 +859,8 @@ fn netlog(servers: &Servers) {
 /// The text of the oldest record `/devices/kmsg` gives.
 fn oldest_record() -> String {
     let mut buffer = vec![0u8; 8192];
-    let Some(n) = fs::File::open("/devices/kmsg").and_then(|mut kmsg| kmsg.read(&mut buffer)).ok() else {
+    let Some(n) = fs::File::open("/devices/kmsg").and_then(|mut kmsg| kmsg.read(&mut buffer)).ok()
+    else {
         return String::new();
     };
     let record = String::from_utf8_lossy(&buffer[..n]);

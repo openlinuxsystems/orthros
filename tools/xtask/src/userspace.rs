@@ -708,6 +708,7 @@ mod tests {
                 "system/live",
                 "system/resources",
                 "system/resources/default-settings",
+                "system/resources/default-settings/localtime",
                 "system/resources/default-settings/resolv.conf",
                 "system/resources/default-settings/ssl",
                 "system/resources/default-settings/ssl/cert.pem",
@@ -734,6 +735,9 @@ mod tests {
         let resolv = archive.find("/system/resources/default-settings/resolv.conf").unwrap();
         let stub = &b"/system/live/resolved/resolv.conf"[..];
         assert_eq!((resolv.kind, resolv.data), (radix_bootfs::Kind::Symlink, stub));
+        let localtime = archive.find("/system/resources/default-settings/localtime").unwrap();
+        let utc = &b"/system/resources/zoneinfo/UTC"[..];
+        assert_eq!((localtime.kind, localtime.data), (radix_bootfs::Kind::Symlink, utc));
         for name in ["ssl/cert.pem", "ssl/certs/ca-certificates.crt"] {
             let link = archive.find(&format!("/system/resources/default-settings/{name}")).unwrap();
             let roots = CERTIFICATES.as_bytes();

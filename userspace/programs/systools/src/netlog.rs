@@ -110,11 +110,11 @@ pub fn cmdline_target(cmdline: &str) -> Option<String> {
 
 /// The host and port of `target`, with [`PORT`] for one without.
 pub fn host_port(target: &str) -> (String, u16) {
-    if let Some(rest) = target.strip_prefix('[') {
-        if let Some((host, port)) = rest.split_once(']') {
-            let port = port.strip_prefix(':').and_then(|p| p.parse().ok()).unwrap_or(PORT);
-            return (host.to_string(), port);
-        }
+    if let Some(rest) = target.strip_prefix('[')
+        && let Some((host, port)) = rest.split_once(']')
+    {
+        let port = port.strip_prefix(':').and_then(|p| p.parse().ok()).unwrap_or(PORT);
+        return (host.to_string(), port);
     }
     match target.rsplit_once(':') {
         // One colon: a host and its port; more: an IPv6 address alone.
@@ -176,11 +176,8 @@ fn connect(target: &str) -> Option<UdpSocket> {
             let address: SocketAddr = addresses
                 .next()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no address"))?;
-            let any: SocketAddr = if address.is_ipv4() {
-                ([0u8; 4], 0).into()
-            } else {
-                ([0u16; 8], 0).into()
-            };
+            let any: SocketAddr =
+                if address.is_ipv4() { ([0u8; 4], 0).into() } else { ([0u16; 8], 0).into() };
             let socket = UdpSocket::bind(any)?;
             socket.connect(address)?;
             Ok((socket, address))
@@ -191,7 +188,10 @@ fn connect(target: &str) -> Option<UdpSocket> {
                 return Some(socket);
             }
             Err(e) if !said => {
-                println!("netlog: {target}: {}; trying again each second", util::strip_os_error(&e));
+                println!(
+                    "netlog: {target}: {}; trying again each second",
+                    util::strip_os_error(&e)
+                );
                 said = true;
             }
             Err(_) => {}

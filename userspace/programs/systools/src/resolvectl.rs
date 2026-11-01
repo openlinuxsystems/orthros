@@ -16,9 +16,9 @@ use std::net::{IpAddr, TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
 
 use crate::args::{Arg, Args};
-use netproto::dns;
 use crate::resolved::{LISTEN, PID, STATUS};
 use crate::util::{self, Fail, fail, usage};
+use netproto::dns;
 
 /// How long resolved has to answer.
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -80,9 +80,9 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             }
             Ok(0)
         }
-        Some(other) => Err(usage(format!(
-            "resolvectl: no command '{other}': status, query or flush-caches"
-        ))),
+        Some(other) => {
+            Err(usage(format!("resolvectl: no command '{other}': status, query or flush-caches")))
+        }
     }
 }
 
