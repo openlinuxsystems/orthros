@@ -44,13 +44,15 @@ pub mod memory;
 pub mod ports;
 pub mod proc;
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::{self, Write};
 use core::ptr;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use radix_hal::Devices;
-use radix_hw::pci::{Bar, Function, MsiX};
+use radix_hal::{Devices, Timer};
+use radix_hw::Mmio;
+use radix_hw::pci::{Bar, Function, Msi, MsiX};
 use radix_klog::{TextBuf, error, info, warn};
 use radix_mm::lease::{self, Lease};
 use radix_mm::{Flags, HEAP, Kmalloc};
@@ -59,6 +61,7 @@ use radix_net::smoltcp::socket::{AnySocket, icmp, tcp};
 use radix_net::{
     FRAME, Ipv4Address, Ipv4Cidr, Link, Loopback, Medium, Memory, PingMemory, Pinger, Stack,
 };
+use radix_nic::Nic;
 use radix_sync::{Mutex, Once};
 use radix_virtio::net::{MAX_FRAME, Net};
 use radix_virtio::{NO_VECTOR, Transport};
@@ -79,6 +82,11 @@ const MAX_SOCKETS: usize = 16_384;
 /// How long the thread sleeps when nothing is due: an interrupt wakes
 /// it sooner, and a card without one is polled this often.
 const IDLE_NS: u64 = 10_000_000;
+/// How long the thread of a card without an interrupt sleeps after a
+/// poll that moved frames, when more are likely on their way: a TCP
+/// connection through it waits this long for each window's ACK, not
+/// [`IDLE_NS`].
+const BUSY_NS: u64 = 1_000_000;
 /// The loopback interface's MTU, the longest packet a program's TCP sends
 /// to itself at once: the most IPv4 allows, as on Linux, whose `lo` has
 /// 65,536.
@@ -99,10 +107,12 @@ const LOOPBACK_OWN: [Ipv4Cidr; 2] = [Ipv4Cidr::new(LOOPBACK, 8), Ipv4Cidr::new(R
 pub const ORPHAN_NS: u64 = 60_000_000_000;
 
 /// What an interface's stack sends and receives through: a virtio network
-/// card, or the loopback link.
+/// card, a card of one of the drivers that share `radix-nic` (ADR 0197),
+/// or the loopback link.
 #[expect(clippy::large_enum_variant, reason = "each is made once, in its interface's place")]
 pub enum Card {
     Virtio { net: Net, vector: Option<u32> },
+    Nic { nic: Box<dyn Nic, Kmalloc>, vector: Option<u32> },
     Loopback(Loopback),
 }
 
@@ -111,6 +121,16 @@ impl Card {
     pub fn failed(&self) -> bool {
         match self {
             Card::Virtio { net, .. } => net.failed(),
+            Card::Nic { nic, .. } => nic.failed(),
+            Card::Loopback(_) => false,
+        }
+    }
+
+    /// Whether the card raises an interrupt when it has something for the
+    /// stack; one that does not is polled.
+    fn interrupts(&self) -> bool {
+        match self {
+            Card::Virtio { vector, .. } | Card::Nic { vector, .. } => vector.is_some(),
             Card::Loopback(_) => false,
         }
     }
@@ -119,14 +139,14 @@ impl Card {
 impl Link for Card {
     fn medium(&self) -> Medium {
         match self {
-            Card::Virtio { .. } => Medium::Ethernet,
+            Card::Virtio { .. } | Card::Nic { .. } => Medium::Ethernet,
             Card::Loopback(link) => link.medium(),
         }
     }
 
     fn pending(&self) -> bool {
         match self {
-            Card::Virtio { .. } => false,
+            Card::Virtio { .. } | Card::Nic { .. } => false,
             Card::Loopback(link) => link.pending(),
         }
     }
@@ -134,6 +154,7 @@ impl Link for Card {
     fn mac(&self) -> [u8; 6] {
         match self {
             Card::Virtio { net, .. } => net.info().mac,
+            Card::Nic { nic, .. } => nic.info().mac,
             Card::Loopback(link) => link.mac(),
         }
     }
@@ -141,6 +162,7 @@ impl Link for Card {
     fn receive(&mut self, frame: &mut [u8]) -> Option<usize> {
         match self {
             Card::Virtio { net, .. } => net.receive(frame),
+            Card::Nic { nic, .. } => nic.receive(frame),
             Card::Loopback(link) => link.receive(frame),
         }
     }
@@ -148,6 +170,7 @@ impl Link for Card {
     fn can_send(&mut self) -> bool {
         match self {
             Card::Virtio { net, .. } => net.can_send(),
+            Card::Nic { nic, .. } => nic.can_send(),
             Card::Loopback(link) => link.can_send(),
         }
     }
@@ -155,6 +178,7 @@ impl Link for Card {
     fn send(&mut self, frame: &[u8]) -> bool {
         match self {
             Card::Virtio { net, .. } => frame.len() <= MAX_FRAME && net.send(frame).is_ok(),
+            Card::Nic { nic, .. } => nic.send(frame),
             Card::Loopback(link) => link.send(frame),
         }
     }
@@ -162,20 +186,22 @@ impl Link for Card {
     fn flush(&mut self) {
         match self {
             Card::Virtio { net, .. } => net.notify(),
+            Card::Nic { nic, .. } => nic.flush(),
             Card::Loopback(link) => link.flush(),
         }
     }
 
     fn needs_checksums(&self) -> bool {
         match self {
-            Card::Virtio { .. } => true,
+            // No card's checksum offloads are used.
+            Card::Virtio { .. } | Card::Nic { .. } => true,
             Card::Loopback(link) => link.needs_checksums(),
         }
     }
 
     fn loopback(&mut self) -> Option<&mut Loopback> {
         match self {
-            Card::Virtio { .. } => None,
+            Card::Virtio { .. } | Card::Nic { .. } => None,
             Card::Loopback(link) => link.loopback(),
         }
     }
@@ -185,11 +211,19 @@ impl Link for Card {
 /// interrupt is let go.
 impl Drop for Card {
     fn drop(&mut self) {
-        if let Card::Virtio { net, vector } = self {
-            net.reset();
-            if let Some(vector) = *vector {
-                <Arch as Devices>::free_interrupt(vector);
+        let vector = match self {
+            Card::Virtio { net, vector } => {
+                net.reset();
+                *vector
             }
+            Card::Nic { nic, vector } => {
+                nic.stop();
+                *vector
+            }
+            Card::Loopback(_) => None,
+        };
+        if let Some(vector) = vector {
+            <Arch as Devices>::free_interrupt(vector);
         }
     }
 }
@@ -764,20 +798,102 @@ fn on_interrupt(index: usize) {
 /// (tools/xtask/src/frames.rs allows it).
 #[inline(never)]
 pub fn bind(function: &Function) {
-    let index = COUNT.load(Ordering::Relaxed);
-    if index >= MAX_CARDS {
-        warn!("Net: too many network cards; the one at {} is left alone", function.address());
-        return;
-    }
+    let Some(index) = free_index(function) else { return };
     if let Err(why) = start(function, index) {
         warn!("Net: could not set up the virtio network card at {}: {why}", function.address());
     }
 }
 
+/// A network card one of the drivers that share `radix-nic` knows.
+#[derive(Clone, Copy, Debug)]
+pub enum Known {
+    /// One of Intel's (`radix-intel-net`).
+    Intel(radix_intel_net::Model),
+    /// VMware's paravirtual card (`radix-vmxnet3`).
+    Vmxnet3,
+    /// Amazon's Elastic Network Adapter (`radix-ena`).
+    Ena,
+    /// Google's virtual network card (`radix-gve`).
+    Gve,
+}
+
+impl Known {
+    /// Whether it should have an MSI, if it has one.
+    fn msi(self) -> bool {
+        match self {
+            Known::Intel(model) => model.msi(),
+            Known::Vmxnet3 | Known::Ena | Known::Gve => true,
+        }
+    }
+
+    /// Whether its interrupt is MSI-X's, which it alone has.
+    fn msix(self) -> bool {
+        matches!(self, Known::Ena | Known::Gve)
+    }
+
+    /// The article its name takes.
+    fn article(self) -> &'static str {
+        match self {
+            Known::Intel(_) | Known::Ena => "an",
+            Known::Vmxnet3 | Known::Gve => "a",
+        }
+    }
+}
+
+/// Its maker and model: "Intel 82574L".
+impl fmt::Display for Known {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Known::Intel(model) => write!(f, "Intel {}", model.name),
+            Known::Vmxnet3 => f.write_str("VMware VMXNET3"),
+            Known::Ena => f.write_str("Amazon ENA"),
+            Known::Gve => f.write_str("Google gVNIC"),
+        }
+    }
+}
+
+/// The network card `function` is, if a driver that shares `radix-nic`
+/// knows it.
+pub fn identify(function: &Function) -> Option<Known> {
+    let (vendor, device) = (function.vendor_id(), function.device_id());
+    if (vendor, device) == (radix_vmxnet3::VENDOR, radix_vmxnet3::DEVICE) {
+        return Some(Known::Vmxnet3);
+    }
+    if radix_ena::identify(vendor, device) {
+        return Some(Known::Ena);
+    }
+    if (vendor, device) == (radix_gve::VENDOR, radix_gve::DEVICE) {
+        return Some(Known::Gve);
+    }
+    radix_intel_net::identify(vendor, device).map(Known::Intel)
+}
+
+/// Sets up the network card `function`, which [`identify`] knew as
+/// `card`; kept out of the PCI scan's frame, as [`bind`] is.
+#[inline(never)]
+pub fn bind_card(function: &Function, card: Known) {
+    let Some(index) = free_index(function) else { return };
+    if let Err(why) = start_card(function, card, index) {
+        warn!("Net: could not set up the {card} network card at {}: {why}", function.address());
+    }
+}
+
+/// The number the next card found takes, if there is room for it.
+fn free_index(function: &Function) -> Option<usize> {
+    let index = COUNT.load(Ordering::Relaxed);
+    if index >= MAX_CARDS {
+        warn!("Net: too many network cards; the one at {} is left alone", function.address());
+        return None;
+    }
+    Some(index)
+}
+
 /// Why a card could not be set up.
 enum Failure {
-    /// The card's driver refused it.
+    /// The virtio driver refused it.
     Card(radix_virtio::Error),
+    /// Its driver refused it.
+    Nic(radix_nic::Error),
     Other(&'static str),
 }
 
@@ -791,8 +907,29 @@ impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Failure::Card(err) => write!(f, "{err}"),
+            Failure::Nic(err) => write!(f, "{err}"),
             Failure::Other(why) => f.write_str(why),
         }
+    }
+}
+
+/// A random, locally administered, unicast address, for a card that has
+/// none of its own.
+fn fallback_mac() -> [u8; 6] {
+    let mut mac = [0u8; 6];
+    radix_random::fill(&mut mac);
+    mac[0] = (mac[0] & !0x01) | 0x02;
+    mac
+}
+
+/// Waits `us` microseconds, where a card needs time while it starts:
+/// asleep, for a millisecond or more.
+fn delay(us: u32) {
+    let us = u64::from(us);
+    if us >= 1_000 {
+        sched::sleep_ns(us * 1_000);
+    } else {
+        Arch::delay_us(us);
     }
 }
 
@@ -819,13 +956,8 @@ fn start(function: &Function, index: usize) -> Result<(), Failure> {
         Some(vector)
     });
     let entry = if interrupt.is_some() { 0 } else { NO_VECTOR };
-    // A random, locally administered, unicast address, for a card that
-    // has none of its own.
-    let mut fallback = [0u8; 6];
-    radix_random::fill(&mut fallback);
-    fallback[0] = (fallback[0] & !0x01) | 0x02;
     let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(function.address(), pages, false);
-    let net = Net::new(transport, entry, fallback, &mut alloc).map_err(|err| {
+    let net = Net::new(transport, entry, fallback_mac(), &mut alloc).map_err(|err| {
         if let Some(vector) = interrupt {
             <Arch as Devices>::free_interrupt(vector);
         }
@@ -833,7 +965,147 @@ fn start(function: &Function, index: usize) -> Result<(), Failure> {
     })?;
     // From here a failure drops the card, which stops it.
     let info = net.info();
-    let card = Card::Virtio { net, vector: interrupt };
+    let mut about = About::new(info.mac, info.receive_slots, info.transmit_slots);
+    let _ = about.what.write_str("a virtio network card");
+    let _ = match interrupt {
+        Some(vector) => write!(about.how, "MSI-X vector {vector:#x}"),
+        None => about.how.write_str("polled"),
+    };
+    attach(function, index, Card::Virtio { net, vector: interrupt }, &about)
+}
+
+/// The registers of `function`'s BAR `bar`, mapped.
+fn map_registers(function: &Function, bar: usize) -> Result<Mmio, Failure> {
+    let Some(Bar::Memory { address, size, .. }) = function.bar(bar) else {
+        return Err(Failure::Other("its registers are not in memory"));
+    };
+    let len = usize::try_from(size).map_err(|_| "its registers are too large")?;
+    let regs =
+        <Arch as Devices>::map_device(address, len).ok_or("its registers could not be mapped")?;
+    Ok(regs)
+}
+
+fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Failure> {
+    function.enable_memory_and_dma();
+    let regs = map_registers(function, 0)?;
+    // VMXNET3's commands are in a second BAR, and gVNIC's doorbells in
+    // its third.
+    let more = match card {
+        Known::Vmxnet3 => Some(map_registers(function, 1)?),
+        Known::Gve => Some(map_registers(function, 2)?),
+        Known::Intel(_) | Known::Ena => None,
+    };
+    let source = function.address();
+    // One interrupt, for everything, if the card should have one and it
+    // and the kernel have one; otherwise the card is polled.
+    let interrupt = if card.msix() {
+        msix_all(function, index)
+    } else {
+        card.msi().then(|| Msi::find(function)).flatten().and_then(|msi| {
+            let (vector, message) =
+                <Arch as Devices>::allocate_interrupt(source, on_interrupt, index)?;
+            msi.enable(function, message);
+            Some(vector)
+        })
+    };
+    let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(source, pages, false);
+    let mut delay = delay;
+    let how = match interrupt {
+        Some(_) => radix_nic::Interrupt::Msi,
+        None => radix_nic::Interrupt::Polled,
+    };
+    let started = match card {
+        Known::Intel(model) => {
+            radix_intel_net::start(model, regs, how, fallback_mac(), &mut alloc, &mut delay)
+                .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory))
+        }
+        Known::Vmxnet3 => more
+            .ok_or(radix_nic::Error::Registers)
+            .and_then(|commands| {
+                radix_vmxnet3::start(regs, commands, how, fallback_mac(), &mut alloc)
+            })
+            .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
+        Known::Ena => {
+            radix_ena::start(regs, function.revision(), how, fallback_mac(), &mut alloc, &mut delay)
+                .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory))
+        }
+        Known::Gve => more
+            .ok_or(radix_nic::Error::Registers)
+            .and_then(|doors| {
+                radix_gve::start(
+                    regs,
+                    doors,
+                    function.revision(),
+                    how,
+                    fallback_mac(),
+                    &mut alloc,
+                    &mut delay,
+                )
+            })
+            .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
+    };
+    let nic = started.map_err(|err| {
+        if let Some(vector) = interrupt {
+            <Arch as Devices>::free_interrupt(vector);
+        }
+        Failure::Nic(err)
+    })?;
+    // From here a failure drops the card, which stops it.
+    let info = nic.info();
+    let mut about = About::new(info.mac, info.receive_slots, info.transmit_slots);
+    let _ = write!(about.what, "{} {card} network card", card.article());
+    let kind = if card.msix() { "MSI-X" } else { "MSI" };
+    let _ = match interrupt {
+        Some(vector) => write!(about.how, "{kind} vector {vector:#x}"),
+        None => about.how.write_str("polled"),
+    };
+    attach(function, index, Card::Nic { nic, vector: interrupt }, &about)
+}
+
+/// An MSI-X interrupt for `function`, the card numbered `index`, with
+/// every entry of its table given the same message: whichever vector the
+/// card raises comes to its thread.
+fn msix_all(function: &Function, index: usize) -> Option<u32> {
+    let msix = MsiX::find(function)?;
+    let (bar, offset) = msix.table_location();
+    let Some(Bar::Memory { address, .. }) = function.bar(bar) else { return None };
+    let table = <Arch as Devices>::map_device(address + offset, msix.table_len())?;
+    let (vector, message) =
+        <Arch as Devices>::allocate_interrupt(function.address(), on_interrupt, index)?;
+    msix.enable_masked(function);
+    for entry in 0..msix.entries() {
+        msix.set_entry(&table, entry, message);
+    }
+    msix.unmask_all(function);
+    Some(vector)
+}
+
+/// `nic` on the heap, as a [`Card::Nic`] holds it; dropped, which stops
+/// it, if memory runs out.
+fn boxed(nic: impl Nic + 'static) -> Option<Box<dyn Nic, Kmalloc>> {
+    Box::try_new_in(nic, kmalloc()).ok().map(|nic| nic as Box<dyn Nic, Kmalloc>)
+}
+
+/// What the log says of a card once it is set up.
+struct About {
+    /// What it is: "a virtio network card", "an Intel 82574L network
+    /// card".
+    what: TextBuf<48>,
+    mac: [u8; 6],
+    receive_slots: u16,
+    transmit_slots: u16,
+    /// How it interrupts: "MSI-X vector 0x31", "polled".
+    how: TextBuf<24>,
+}
+
+impl About {
+    fn new(mac: [u8; 6], receive_slots: u16, transmit_slots: u16) -> About {
+        About { what: TextBuf::new(), mac, receive_slots, transmit_slots, how: TextBuf::new() }
+    }
+}
+
+/// Gives the card `card`, numbered `index`, an interface and its thread.
+fn attach(function: &Function, index: usize, card: Card, about: &About) -> Result<(), Failure> {
     let (slots, sockets) = slots(SOCKETS).ok_or("out of memory")?;
     let memory = Memory {
         receive: forever(FRAME).ok_or("out of memory")?,
@@ -858,15 +1130,11 @@ fn start(function: &Function, index: usize) -> Result<(), Failure> {
     let Some(interface) = INTERFACES[index].get() else {
         return Err(Failure::Other("its slot is empty"));
     };
-    let mac = info.mac;
-    let mut how = TextBuf::<24>::new();
-    let _ = match interrupt {
-        Some(vector) => write!(how, "MSI-X vector {vector:#x}"),
-        None => how.write_str("polled"),
-    };
+    let mac = about.mac;
     info!(
-        "Net: {name} is a virtio network card at {}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, \
-         {} receive and {} transmit slots, {how}",
+        "Net: {name} is {} at {}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, \
+         {} receive and {} transmit slots, {}",
+        about.what,
         function.address(),
         mac[0],
         mac[1],
@@ -874,8 +1142,9 @@ fn start(function: &Function, index: usize) -> Result<(), Failure> {
         mac[3],
         mac[4],
         mac[5],
-        info.receive_slots,
-        info.transmit_slots,
+        about.receive_slots,
+        about.transmit_slots,
+        about.how,
     );
     let address = interface.stack.lock().ipv4();
     if let Some(address) = address {
@@ -905,15 +1174,29 @@ fn run(number: usize) {
     // A card is looked at this often even when nothing is due, in case
     // it has no interrupt; the loopback interface is polled by whoever
     // sends on it, and its thread only wakes for its timers.
-    let idle = (!interface.is_loopback()).then_some(IDLE_NS);
+    let mut idle = (!interface.is_loopback()).then_some(IDLE_NS);
+    // A card without an interrupt is looked at sooner while frames move
+    // through it: the packets counted so far.
+    let polled = idle.is_some() && !interface.stack.lock().link().interrupts();
+    let mut moved = 0;
     loop {
         let (wake_at, changed) = {
             let mut stack = interface.stack.lock();
             let now = sched::now_ns();
             let changed = stack.poll(now);
-            if stack.link().failed() {
+            let counted = stack.counters();
+            let packets = counted.received_packets + counted.sent_packets;
+            let quiet = packets == moved;
+            moved = packets;
+            // A card that stopped moves nothing, so it is asked whether
+            // it failed only then: asking can cost a register read, a
+            // trip to the hypervisor in a virtual machine.
+            if quiet && stack.link().failed() {
                 error!("Net: {}: the card stopped with an error", interface.name);
                 return;
+            }
+            if polled {
+                idle = Some(if quiet { IDLE_NS } else { BUSY_NS });
             }
             let orphans = interface.reap(&mut stack, now);
             let now = sched::now_ns();

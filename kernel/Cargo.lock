@@ -259,17 +259,20 @@ dependencies = [
  "radix-cap",
  "radix-crosec",
  "radix-elf",
+ "radix-ena",
  "radix-exfat",
  "radix-ext4",
  "radix-fat",
  "radix-fbcon",
  "radix-gpio",
+ "radix-gve",
  "radix-hal",
  "radix-hid",
  "radix-hw",
  "radix-i2c",
  "radix-ide",
  "radix-input",
+ "radix-intel-net",
  "radix-ipc",
  "radix-iso9660",
  "radix-kdb",
@@ -279,6 +282,7 @@ dependencies = [
  "radix-mca",
  "radix-mm",
  "radix-net",
+ "radix-nic",
  "radix-ntfs",
  "radix-nvme",
  "radix-posix",
@@ -300,6 +304,7 @@ dependencies = [
  "radix-vfs",
  "radix-virtio",
  "radix-vmd",
+ "radix-vmxnet3",
  "radix-xhci",
  "zeroize",
 ]
@@ -437,6 +442,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-ena"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
+]
+
+[[package]]
 name = "radix-exfat"
 version = "0.11.0"
 dependencies = [
@@ -486,6 +499,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-gve"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
+]
+
+[[package]]
 name = "radix-hal"
 version = "0.11.0"
 dependencies = [
@@ -526,6 +547,14 @@ name = "radix-input"
 version = "0.11.0"
 dependencies = [
  "radix-abi",
+]
+
+[[package]]
+name = "radix-intel-net"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
 ]
 
 [[package]]
@@ -597,6 +626,13 @@ version = "0.11.0"
 dependencies = [
  "managed",
  "smoltcp",
+]
+
+[[package]]
+name = "radix-nic"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
 ]
 
 [[package]]
@@ -757,6 +793,14 @@ dependencies = [
 [[package]]
 name = "radix-vmd"
 version = "0.11.0"
+
+[[package]]
+name = "radix-vmxnet3"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
+]
 
 [[package]]
 name = "radix-vtd"
