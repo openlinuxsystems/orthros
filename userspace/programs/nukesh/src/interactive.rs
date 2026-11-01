@@ -117,14 +117,19 @@ pub fn run(shell: Shell) -> i32 {
         if let Some(code) = before_prompt(&mut shell.borrow_mut()) {
             return exit(&mut shell.borrow_mut(), code);
         }
+        crate::folders::before_prompt(&mut shell.borrow_mut());
         let input = editor.read_command();
         let mut shell = shell.borrow_mut();
         match input {
             Input::Command(text) => {
                 eofs = 0;
+                let text = grow_abbreviation(&shell, text);
                 let lines = text.matches('\n').count() as u32 + 1;
+                let folder = shell.get("PWD").unwrap_or_default();
+                let started = std::time::Instant::now();
                 let result = run_line(&mut shell, &text, line_number);
                 line_number += lines;
+                after_command(&mut shell, &text, &folder, started);
                 if let Some(code) = result {
                     if code == EXIT_REFUSED {
                         continue;
@@ -165,6 +170,47 @@ pub fn run(shell: Shell) -> i32 {
             }
         }
     }
+}
+
+/// Enter after an abbreviation typed as the last command word grows it,
+/// as Space does, so that what runs is what the history keeps.
+fn grow_abbreviation(shell: &Shell, text: String) -> String {
+    let end = text.trim_end().len();
+    match crate::abbr::grow(shell, &text, end) {
+        Some((grown, _)) => {
+            if shell.interactive {
+                let _ = sys::write_all(2, &text::encode(&format!("{grown}\n")));
+            }
+            grown
+        }
+        None => text,
+    }
+}
+
+/// After a command read at the prompt: how long it took, for the right
+/// prompt; its record, for the picker and the hints; and a notification
+/// when it was long (ADRs 0262, 0263).
+fn after_command(shell: &mut Shell, text: &str, folder: &str, started: std::time::Instant) {
+    let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    shell.last_millis = millis;
+    let command = text.trim_end_matches('\n');
+    // A command after a space is kept out of the record, as bash's
+    // HISTCONTROL=ignorespace keeps it out of the history.
+    if command.trim().is_empty() || command.starts_with(' ') || !shell.history.on {
+        return;
+    }
+    let status = shell.status;
+    let record = crate::record::Record {
+        time: sys::now().0,
+        status,
+        millis,
+        folder: folder.to_string(),
+        command: command.to_string(),
+    };
+    if let Some(records) = shell.records.as_mut() {
+        records.add(&record);
+    }
+    crate::notify::after_command(shell, command, status, millis);
 }
 
 /// What [`run_line`] gives back when `exit` was refused for stopped jobs.

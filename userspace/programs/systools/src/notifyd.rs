@@ -112,6 +112,11 @@ pub struct Request {
     /// send: how many seconds to show it, 0 for until a key is pressed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds: Option<u32>,
+    /// send: the terminal the sender runs on, as `pts/3`: consoled does
+    /// not show the notification while that terminal's console is the one
+    /// shown (ADR 0263).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
     /// list: the newest this many of those kept; all if not given.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<usize>,
@@ -141,6 +146,9 @@ pub struct Notification {
     pub body: String,
     /// How long to show it in seconds; 0 for until a key is pressed.
     pub seconds: u32,
+    /// The terminal the sender said it runs on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
 }
 
 impl Notification {
@@ -213,6 +221,7 @@ pub fn notification(
         title,
         body: clean(&request.body, BODY_MAX, true),
         seconds,
+        terminal: request.terminal.as_deref().map(|t| clean(t, 32, false)).filter(|t| !t.is_empty()),
     })
 }
 
@@ -778,6 +787,7 @@ mod tests {
             title: "Disk full".into(),
             body: "/volumes/usb\nis full".into(),
             seconds: 0,
+            terminal: None,
         };
         assert_eq!(
             show(&notification),

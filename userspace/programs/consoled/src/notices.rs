@@ -75,6 +75,8 @@ struct Notification {
     body: String,
     #[serde(default)]
     seconds: u32,
+    #[serde(default)]
+    terminal: Option<String>,
 }
 
 /// A notification on the bottom line.
@@ -85,6 +87,9 @@ pub struct Shown {
     pub urgency: Urgency,
     /// When it goes; None for when a key is pressed.
     pub until: Option<Instant>,
+    /// The terminal it is about, as `pts/3`: it is not shown while that
+    /// terminal's console is (ADR 0263), as the person sees it already.
+    pub terminal: Option<String>,
 }
 
 /// How a notification looks.
@@ -115,7 +120,7 @@ impl Shown {
         };
         let until = (urgency != Urgency::Critical && notification.seconds > 0)
             .then(|| now + Duration::from_secs(u64::from(notification.seconds)));
-        Shown { text, urgency, until }
+        Shown { text, urgency, until, terminal: notification.terminal.clone() }
     }
 
     /// The bottom line's `cols` cells: the text after a space, in white on
@@ -309,26 +314,26 @@ mod tests {
 
     #[test]
     fn fits_the_line() {
-        let shown = Shown { text: "a: b".into(), urgency: Urgency::Normal, until: None };
+        let shown = Shown { text: "a: b".into(), urgency: Urgency::Normal, until: None, terminal: None };
         let cells = shown.cells(10);
         assert_eq!(text(&cells), " a: b     ");
         assert_eq!((cells[0].fg, cells[0].bg), (15, 4));
-        let shown = Shown { text: "x: 0123456789".into(), urgency: Urgency::Critical, until: None };
+        let shown = Shown { text: "x: 0123456789".into(), urgency: Urgency::Critical, until: None, terminal: None };
         let cells = shown.cells(10);
         assert_eq!(text(&cells), " x: 012...");
         assert_eq!(cells.len(), 10);
         assert_eq!((cells[1].bg, cells[1].flags), (1, BOLD));
         // Exactly full: no dots.
-        let shown = Shown { text: "x: 012345".into(), urgency: Urgency::Low, until: None };
+        let shown = Shown { text: "x: 012345".into(), urgency: Urgency::Low, until: None, terminal: None };
         assert_eq!(text(&shown.cells(10)), " x: 012345");
         // Wide characters take two cells; control characters show as `?`.
-        let shown = Shown { text: "日本\u{1b}[2J".into(), urgency: Urgency::Normal, until: None };
+        let shown = Shown { text: "日本\u{1b}[2J".into(), urgency: Urgency::Normal, until: None, terminal: None };
         let cells = shown.cells(12);
         assert_eq!(text(&cells), " 日本?[2J   ");
         assert_eq!(cells[2].flags & WIDE_TAIL, WIDE_TAIL);
         // A wide character that would not fit before the dots goes.
         let shown =
-            Shown { text: "ab日本語です".into(), urgency: Urgency::Normal, until: None };
+            Shown { text: "ab日本語です".into(), urgency: Urgency::Normal, until: None, terminal: None };
         let cells = shown.cells(8);
         assert_eq!((cells.len(), text(&cells).as_str()), (8, " ab日..."));
     }

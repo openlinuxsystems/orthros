@@ -243,6 +243,9 @@ const SECTIONS: &[Section] = &[
             key("symbol", "magenta", "the $ at the end"),
             key("error", "bold bright-white on red", "the ✗ badge after a failed command"),
             key("admin", "bold bright-white on yellow", "the admin badge while you are root"),
+            key("took", "yellow", "how long the last command took, on the right"),
+            key("jobs", "cyan", "how many jobs are running or stopped, on the right"),
+            key("branch", "magenta", "the git branch of the folder, on the right"),
         ],
     },
     Section {
@@ -301,12 +304,101 @@ const SECTIONS: &[Section] = &[
             key("mac", "yellow", "hardware addresses"),
         ],
     },
+    // Not colours: whether a long command that ends while you are on
+    // another console tells you, and after how long (ADR 0263).
+    Section { name: "notify", keys: &[] },
 ];
 
 /// The `suggest` section's switches.
 const SUGGEST: &[(&str, &str)] = &[
     ("history", "faded text after the cursor from your history; → takes it"),
     ("did-you-mean", "a command's likely name after \"command not found\""),
+    ("options", "what an option does, after the cursor as you type it"),
+];
+
+/// The numbers: section, key, default and what it is.
+pub const NUMBERS: &[(&str, &str, u64, &str)] = &[
+    ("prompt", "took-after", 3, "seconds a command takes before the right prompt says how long"),
+    ("notify", "after", 30, "seconds a command takes before you are told it ended elsewhere"),
+];
+
+/// The themes, and the keys each changes from the defaults.
+/// A theme: its name, what it is for, and its keys.
+pub type Theme = (&'static str, &'static str, &'static [(&'static str, &'static str)]);
+
+pub const THEMES: &[Theme] = &[
+    ("default", "the colours above", &[]),
+    (
+        "high-contrast",
+        "bright and bold, nothing faded",
+        &[
+            ("prompt.user", "bold bright-green"),
+            ("prompt.at", "white"),
+            ("prompt.host", "bold bright-green"),
+            ("prompt.path", "bold bright-blue"),
+            ("prompt.symbol", "bold bright-magenta"),
+            ("prompt.took", "bold bright-yellow"),
+            ("prompt.jobs", "bold bright-cyan"),
+            ("prompt.branch", "bold bright-magenta"),
+            ("line.command", "bold bright-green"),
+            ("line.unknown", "bold bright-red underline"),
+            ("line.keyword", "bold bright-blue"),
+            ("line.option", "bold bright-cyan"),
+            ("line.string", "bold bright-yellow"),
+            ("line.variable", "bold bright-magenta"),
+            ("line.operator", "bold bright-yellow"),
+            ("line.comment", "white italic"),
+            ("line.hint", "white italic"),
+            ("ls.directory", "bold bright-blue"),
+            ("ls.program", "bold bright-green"),
+            ("ls.link", "bold bright-cyan"),
+            ("grep.match", "bold bright-white on red"),
+            ("grep.separator", "white"),
+            ("diff.added", "bold bright-green"),
+            ("diff.removed", "bold bright-red"),
+            ("diff.hunk", "bold bright-cyan"),
+        ],
+    ),
+    (
+        "light",
+        "for a terminal with a light background: no yellow or white text",
+        &[
+            ("prompt.symbol", "bold magenta"),
+            ("prompt.took", "bold red"),
+            ("prompt.admin", "bold black on bright-yellow"),
+            ("line.string", "red"),
+            ("line.operator", "bold magenta"),
+            ("line.hint", "bright-black italic"),
+            ("ls.pipe", "magenta"),
+            ("ls.device", "bold magenta"),
+            ("grep.line", "blue"),
+            ("ip.mac", "magenta"),
+        ],
+    ),
+    (
+        "colorblind",
+        "blue and yellow for good and bad, for red-green colour blindness",
+        &[
+            ("prompt.user", "blue"),
+            ("prompt.host", "blue"),
+            ("prompt.error", "bold black on bright-yellow"),
+            ("prompt.admin", "bold bright-white on magenta"),
+            ("line.command", "blue"),
+            ("line.unknown", "bold yellow underline"),
+            ("line.keyword", "bold cyan"),
+            ("line.string", "magenta"),
+            ("line.variable", "bright-magenta"),
+            ("ls.program", "bold yellow"),
+            ("ls.broken-link", "yellow reverse"),
+            ("ls.archive", "magenta"),
+            ("grep.match", "bold yellow"),
+            ("grep.line", "blue"),
+            ("diff.added", "blue"),
+            ("diff.removed", "yellow"),
+            ("ip.up", "blue"),
+            ("ip.down", "yellow"),
+        ],
+    ),
 ];
 
 /// colors.toml, read: the styles of every key, and the switches.
@@ -320,6 +412,11 @@ pub struct Colors {
     styles: Vec<(String, Style)>,
     pub history_hints: bool,
     pub did_you_mean: bool,
+    pub option_help: bool,
+    /// The theme the keys started from.
+    pub theme: &'static str,
+    /// The numbers, as `section.key`.
+    numbers: Vec<(String, u64)>,
 }
 
 impl Default for Colors {
@@ -337,6 +434,9 @@ impl Default for Colors {
             styles,
             history_hints: true,
             did_you_mean: true,
+            option_help: true,
+            theme: "default",
+            numbers: NUMBERS.iter().map(|(s, k, n, _)| (format!("{s}.{k}"), *n)).collect(),
         }
     }
 }
@@ -376,8 +476,19 @@ impl Colors {
             Err(err) => return vec![err.to_string().trim().replace('\n', " ")],
         };
         let mut problems = Vec::new();
+        // The theme first, so that the file's own keys change it.
+        if let Some(value) = table.get("theme") {
+            match value.as_str().and_then(|name| THEMES.iter().find(|t| t.0 == name)) {
+                Some(theme) => self.use_theme(theme),
+                None => problems.push(format!(
+                    "theme: one of {}",
+                    THEMES.iter().map(|t| format!("\"{}\"", t.0)).collect::<Vec<_>>().join(", ")
+                )),
+            }
+        }
         for (name, value) in &table {
             match (name.as_str(), value) {
+                ("theme", _) => {}
                 ("enabled", toml::Value::Boolean(on)) => self.enabled = *on,
                 ("enabled", _) => problems.push("enabled: true or false".into()),
                 ("suggest", toml::Value::Table(keys)) => {
@@ -385,7 +496,8 @@ impl Colors {
                         match (key.as_str(), value.as_bool()) {
                             ("history", Some(on)) => self.history_hints = on,
                             ("did-you-mean", Some(on)) => self.did_you_mean = on,
-                            ("history" | "did-you-mean", None) => {
+                            ("options", Some(on)) => self.option_help = on,
+                            ("history" | "did-you-mean" | "options", None) => {
                                 problems.push(format!("[suggest] {key}: true or false"));
                             }
                             _ => problems.push(format!("[suggest] {key}: no such key")),
@@ -404,6 +516,13 @@ impl Colors {
                                 None => {
                                     problems.push(format!("[{section}] enabled: true or false"));
                                 }
+                            }
+                            continue;
+                        }
+                        if NUMBERS.iter().any(|(s, k, _, _)| *s == section && k == key) {
+                            match value.as_integer().and_then(|n| u64::try_from(n).ok()) {
+                                Some(n) => self.set_number(&format!("{section}.{key}"), n),
+                                None => problems.push(format!("[{section}] {key}: a number of seconds")),
                             }
                             continue;
                         }
@@ -433,6 +552,26 @@ impl Colors {
         if let Some(entry) = self.styles.iter_mut().find(|(n, _)| n == name) {
             entry.1 = style;
         }
+    }
+
+    fn use_theme(&mut self, theme: &Theme) {
+        let defaults = Colors::default();
+        self.styles.clone_from(&defaults.styles);
+        for (name, style) in theme.2 {
+            self.set(name, Style::parse(style).unwrap_or_default());
+        }
+        self.theme = theme.0;
+    }
+
+    fn set_number(&mut self, name: &str, number: u64) {
+        if let Some(entry) = self.numbers.iter_mut().find(|(n, _)| n == name) {
+            entry.1 = number;
+        }
+    }
+
+    /// The number `section.key`; 0 for one that is not known.
+    pub fn number(&self, name: &str) -> u64 {
+        self.numbers.iter().find(|(n, _)| n == name).map_or(0, |(_, n)| *n)
     }
 
     fn set_section(&mut self, name: &str, on: bool) {
@@ -609,6 +748,7 @@ pub fn command(args: &[String]) -> i32 {
 pub fn preview(colors: &Colors, paint: bool) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "enabled = {}", colors.enabled);
+    let _ = writeln!(out, "theme = \"{}\"", colors.theme);
     for section in SECTIONS {
         let on = colors.sections_on.iter().any(|(n, on)| *n == section.name && *on);
         let _ = writeln!(out, "\n[{}]{}", section.name, if on { "" } else { "  (off)" });
@@ -618,10 +758,18 @@ pub fn preview(colors: &Colors, paint: bool) -> String {
             let shown = if paint { style.paint(&shown) } else { shown };
             let _ = writeln!(out, "{shown} {:<28} {}", style.describe(), key.about);
         }
+        for (_, key, _, about) in NUMBERS.iter().filter(|n| n.0 == section.name) {
+            let number = colors.number(&format!("{}.{key}", section.name));
+            let _ = writeln!(out, "{key:<12} {number:<28} {about}");
+        }
     }
     let _ = writeln!(out, "\n[suggest]");
     for (name, about) in SUGGEST {
-        let on = if *name == "history" { colors.history_hints } else { colors.did_you_mean };
+        let on = match *name {
+            "history" => colors.history_hints,
+            "did-you-mean" => colors.did_you_mean,
+            _ => colors.option_help,
+        };
         let _ = writeln!(out, "{name:<12} {:<28} {about}", if on { "true" } else { "false" });
     }
     out
@@ -712,6 +860,27 @@ mod tests {
         assert!(!allowed(None, Some("linux"), false));
     }
 
+    #[test]
+    fn themes_start_from_the_defaults_and_the_file_wins() {
+        for (name, _, keys) in THEMES {
+            for (key, style) in *keys {
+                assert!(Style::parse(style).is_ok(), "{name}: {key}");
+                assert!(Colors::default().styles.iter().any(|(n, _)| n == key), "{name}: {key}");
+            }
+        }
+        let mut colors = Colors::default();
+        let problems = colors.apply("theme = \"colorblind\"\n[diff]\nadded = \"cyan\"\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(colors.style("diff.added").sgr(), "36");
+        assert_eq!(colors.style("diff.removed").sgr(), "33");
+        assert_eq!(colors.theme, "colorblind");
+        assert!(!Colors::default().apply("theme = \"neon\"").is_empty());
+        let mut colors = Colors::default();
+        assert_eq!(colors.apply("[prompt]\ntook-after = 10\n[notify]\nafter = -1").len(), 1);
+        assert_eq!(colors.number("prompt.took-after"), 10);
+        assert_eq!(colors.number("notify.after"), 30);
+    }
+
     /// The shipped file sets every key to its default, so that what it
     /// says is what the shell does without it.
     #[test]
@@ -721,7 +890,12 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         let defaults = Colors::default();
         assert_eq!(colors.styles, defaults.styles);
-        assert!(colors.enabled && colors.history_hints && colors.did_you_mean);
+        assert!(colors.enabled && colors.history_hints && colors.did_you_mean && colors.option_help);
+        assert_eq!(colors.numbers, defaults.numbers);
+        assert_eq!(colors.theme, "default");
+        for (section, key, number, _) in NUMBERS {
+            assert!(SHIPPED.contains(&format!("{key} = {number}")), "colors.toml lacks {key} in [{section}]");
+        }
         for section in SECTIONS {
             for key in section.keys {
                 let line = format!("{} = \"{}\"", key.name, key.default);

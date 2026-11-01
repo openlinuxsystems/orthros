@@ -305,6 +305,17 @@ pub struct Shell {
     pub history: crate::history::History,
     /// colors.toml(5), read when the shell is interactive (ADR 0258).
     pub colors: Rc<crate::colors::Colors>,
+    /// The command record every interactive shell shares (ADR 0262).
+    pub records: Option<crate::record::Records>,
+    /// How long the last command line took, for the prompt.
+    pub last_millis: u64,
+    /// The folders `cd` left, for Alt+Left, and those Alt+Left left, for
+    /// Alt+Right; and the folder at the last prompt (ADR 0262).
+    pub dirs_back: Vec<String>,
+    pub dirs_forward: Vec<String>,
+    pub last_dir: String,
+    /// Abbreviations, `abbr` (ADR 0262).
+    pub abbrs: IndexMap<String, String>,
     /// The terminal the shell controls, with job control.
     pub tty: Option<i32>,
     pub shell_pgid: i32,
@@ -404,6 +415,12 @@ impl Shell {
             completions: crate::complete::Specs::default(),
             history: crate::history::History::default(),
             colors: Rc::default(),
+            records: None,
+            last_millis: 0,
+            dirs_back: Vec::new(),
+            dirs_forward: Vec::new(),
+            last_dir: String::new(),
+            abbrs: IndexMap::new(),
             tty: None,
             shell_pgid: 0,
             tty_modes: None,

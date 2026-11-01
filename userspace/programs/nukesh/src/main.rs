@@ -16,7 +16,9 @@
 //! nukesh --colors [--check] [file...]
 //! ```
 
+mod abbr;
 mod arith;
+mod assist;
 mod ast;
 mod brace;
 mod builtins;
@@ -27,6 +29,7 @@ mod coproc;
 mod editor;
 mod exec;
 mod expand;
+mod folders;
 #[cfg(test)]
 mod fuzz;
 mod glob;
@@ -34,9 +37,11 @@ mod highlight;
 mod history;
 mod interactive;
 mod jobs;
+mod notify;
 mod parse;
 mod pattern;
 mod prompt;
+mod record;
 mod redir;
 mod script;
 mod shell;
@@ -191,6 +196,8 @@ fn run(args: &[String]) -> i32 {
         }
         shell.colors = Rc::new(colors);
         colors::color_the_tools(&mut shell);
+        // The command record every shell of the person's shares (ADR 0262).
+        shell.records = Some(record::Records::new(shell.get("HOME").as_deref()));
     }
     for (option, on) in &invocation.options {
         if builtins::set_option(&mut shell, option, *on).is_err() {

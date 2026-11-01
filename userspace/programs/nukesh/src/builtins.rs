@@ -48,6 +48,7 @@ table! {
     "." => source, ". filename [arguments]", "Run the commands of a file in this shell.";
     ":" => colon, ": [arguments]", "Do nothing, successfully.";
     "[" => crate::cond::test_builtin, "[ expression ]", "Evaluate a conditional expression.";
+    "abbr" => crate::abbr::abbr, "abbr [name [expansion ...]] or abbr -r name ...", "Set words that grow as you type.";
     "alias" => misc::alias, "alias [-p] [name[=value] ...]", "Define or show aliases.";
     "bg" => job::bg, "bg [job ...]", "Continue stopped jobs in the background.";
     "break" => break_, "break [n]", "Leave n enclosing loops.";
@@ -105,6 +106,12 @@ table! {
     "unalias" => misc::unalias, "unalias [-a] name ...", "Remove aliases.";
     "unset" => declare::unset, "unset [-f] [-v] [-n] [name ...]", "Remove variables or functions.";
     "wait" => job::wait, "wait [-fn] [-p var] [id ...]", "Wait for jobs to end.";
+    "z" => crate::folders::z, "z [-l] [word ...]", "Go to the most used folder that matches.";
+}
+
+/// `cd -- dir`, for `z` and the folder keys: whether it went.
+pub fn cd_to(shell: &mut Shell, dir: &str) -> bool {
+    matches!(dirs::cd(shell, &["cd".into(), "--".into(), dir.into()]), Ok(0))
 }
 
 /// POSIX's special builtins.
