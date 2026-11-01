@@ -73,6 +73,8 @@ struct Invocation {
     posix: bool,
     norc: bool,
     noprofile: bool,
+    /// `--private`: nothing of the session is kept (ADR 0267).
+    private: bool,
     rcfile: Option<String>,
     /// `set -o` options in the order given, with `-` (true) or `+`.
     options: Vec<(String, bool)>,
@@ -81,7 +83,7 @@ struct Invocation {
     operands: Vec<String>,
 }
 
-const USAGE: &str = "usage: nukesh [--posix] [--login] [--norc] [--noprofile] [--rcfile file]
+const USAGE: &str = "usage: nukesh [--posix] [--login] [--norc] [--noprofile] [--private] [--rcfile file]
               [-abefhimnprstuvxBCEHPT] [-o option] [-O shopt]
               [-c command [name [argument...]] | -s [argument...] | [script [argument...]]]
        nukesh --colors [--check] [file...]
@@ -205,7 +207,11 @@ fn run(args: &[String]) -> i32 {
         shell.settings = Rc::new(settings);
         settings::apply_to(&mut shell);
         // The command record every shell of the person's shares (ADR 0262).
-        shell.records = Some(record::Records::new(shell.get("HOME").as_deref()));
+        // Not in a private session, which keeps nothing.
+        shell.private = invocation.private;
+        if !shell.private {
+            shell.records = Some(record::Records::new(shell.get("HOME").as_deref()));
+        }
     }
     for (option, on) in &invocation.options {
         if builtins::set_option(&mut shell, option, *on).is_err() {
@@ -271,6 +277,7 @@ fn parse_args(args: &[String], invocation: &mut Invocation) -> Result<(), String
             "--login" => invocation.login = true,
             "--norc" => invocation.norc = true,
             "--noprofile" => invocation.noprofile = true,
+            "--private" => invocation.private = true,
             "--restricted" => invocation.restricted = true,
             "--noediting" => {}
             "--verbose" => invocation.options.push(("verbose".into(), true)),

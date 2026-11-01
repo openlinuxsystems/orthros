@@ -115,7 +115,8 @@ impl Editor {
             (shell.opts.vi, abbrs, colors(&shell), needs_wakes(&shell), shell.colors.clone())
         };
         let handle = Handle(self.shell.clone());
-        let mut line = new_reedline(vi, abbrs, colors);
+        let (editor, file) = buffer_editor(&self.shell.borrow());
+        let mut line = new_reedline(vi, abbrs, colors).with_buffer_editor(editor, file);
         if colors && palette.on("line") {
             line = line.with_highlighter(Box::new(ShellHighlighter {
                 shell: handle.clone(),
@@ -201,6 +202,19 @@ impl Editor {
                     ]);
                 }
                 line.run_edit_commands(&[EditCommand::InsertChar(' ')]);
+            }
+            KEY_ELEVATE => {
+                // Alt+S: elevate(1) before the line, or off it again, as
+                // fish's Alt+S does with sudo; the cursor stays on its text.
+                let (text, at) = match buffer.strip_prefix("elevate ") {
+                    Some(rest) => (rest.to_string(), cursor.saturating_sub(8)),
+                    None => (format!("elevate {buffer}"), cursor + 8),
+                };
+                line.run_edit_commands(&[
+                    EditCommand::Clear,
+                    EditCommand::InsertString(text),
+                    EditCommand::MoveToPosition { position: at, select: false },
+                ]);
             }
             KEY_BACK | KEY_FORWARD if !buffer.is_empty() => {
                 let command = if key == KEY_BACK {
@@ -381,6 +395,7 @@ const PICKER: &str = "command_picker";
 const KEY_SPACE: &str = "nukesh:space";
 const KEY_BACK: &str = "nukesh:back";
 const KEY_FORWARD: &str = "nukesh:forward";
+const KEY_ELEVATE: &str = "nukesh:elevate";
 
 /// Whether reedline can run: input and output at a terminal that is not
 /// dumb.
@@ -454,6 +469,10 @@ fn rich_prompt(shell: &mut Shell) -> Option<String> {
         out.push(' ');
         out.push_str(&style("admin", " admin "));
     }
+    if shell.private {
+        out.push(' ');
+        out.push_str(&style("private", " private "));
+    }
     out.push(' ');
     out.push_str(&style("symbol", if root { "#" } else { "$" }));
     out.push(' ');
@@ -486,6 +505,7 @@ fn edit_mode(vi: bool, abbrs: bool) -> Box<dyn reedline::EditMode> {
         let host = |key: &str| ReedlineEvent::ExecuteHostCommand(key.to_string());
         keys.add_binding(KeyModifiers::ALT, KeyCode::Left, host(KEY_BACK));
         keys.add_binding(KeyModifiers::ALT, KeyCode::Right, host(KEY_FORWARD));
+        keys.add_binding(KeyModifiers::ALT, KeyCode::Char('s'), host(KEY_ELEVATE));
         if abbrs {
             keys.add_binding(KeyModifiers::NONE, KeyCode::Char(' '), host(KEY_SPACE));
         }
@@ -506,8 +526,62 @@ fn edit_mode(vi: bool, abbrs: bool) -> Box<dyn reedline::EditMode> {
     } else {
         let mut keys = default_emacs_keybindings();
         complete(&mut keys);
-        Box::new(Emacs::new(keys))
+        // Ctrl-X Ctrl-E with Emacs keys, as bash has it; vi keys switch
+        // modes inside reedline, so they are left as they are.
+        Box::new(Chords { inner: Box::new(Emacs::new(keys)), after_ctrl_x: false })
     }
+}
+
+/// The Emacs keys, with bash's Ctrl-X Ctrl-E, which opens the line in an
+/// editor: reedline binds single keys only.
+struct Chords {
+    inner: Box<Emacs>,
+    after_ctrl_x: bool,
+}
+
+impl reedline::EditMode for Chords {
+    fn parse_event(&mut self, event: reedline::ReedlineRawEvent) -> ReedlineEvent {
+        use crossterm::event::{Event, KeyCode as Code, KeyEvent, KeyModifiers as Mods};
+        let raw: Event = event.into();
+        if let Event::Key(KeyEvent { code: Code::Char(c), modifiers, .. }) = &raw
+            && modifiers.contains(Mods::CONTROL)
+        {
+            let after = std::mem::take(&mut self.after_ctrl_x);
+            match c.to_ascii_lowercase() {
+                'e' if after => return ReedlineEvent::OpenEditor,
+                'x' if !after => {
+                    self.after_ctrl_x = true;
+                    return ReedlineEvent::None;
+                }
+                _ => {}
+            }
+        } else {
+            self.after_ctrl_x = false;
+        }
+        match reedline::ReedlineRawEvent::try_from(raw) {
+            Ok(event) => self.inner.parse_event(event),
+            Err(()) => ReedlineEvent::None,
+        }
+    }
+
+    fn edit_mode(&self) -> PromptEditMode {
+        self.inner.edit_mode()
+    }
+}
+
+/// The editor Ctrl-X Ctrl-E and Ctrl-O open the line in: `VISUAL`, else
+/// `EDITOR`, else nano; its words split as the shell would not need to.
+fn buffer_editor(shell: &Shell) -> (std::process::Command, std::path::PathBuf) {
+    let editor = ["VISUAL", "EDITOR"]
+        .iter()
+        .find_map(|name| shell.get(name).filter(|v| !v.trim().is_empty()))
+        .unwrap_or_else(|| "nano".into());
+    let mut words = editor.split_whitespace();
+    let mut command = std::process::Command::new(words.next().unwrap_or("nano"));
+    command.args(words);
+    let dir = shell.get("TMPDIR").filter(|d| d.starts_with('/')).unwrap_or_else(|| "/tmp".into());
+    let file = std::path::PathBuf::from(format!("{dir}/nukesh-line-{}.sh", std::process::id()));
+    (command, file)
 }
 
 /// The line as typed, without colours.

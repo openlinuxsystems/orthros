@@ -87,7 +87,7 @@ pub fn request(command: &str, status: i32, millis: u64, terminal: Option<&str>) 
 pub fn after_command(shell: &crate::shell::Shell, command: &str, status: i32, millis: u64) {
     let settings = &shell.settings;
     let after = settings.notify_after.saturating_mul(1000);
-    if !settings.notify || after == 0 || millis < after || !worth_telling(command) {
+    if shell.private || !settings.notify || after == 0 || millis < after || !worth_telling(command) {
         return;
     }
     let Ok(mut socket) = std::os::unix::net::UnixStream::connect(SOCKET) else { return };

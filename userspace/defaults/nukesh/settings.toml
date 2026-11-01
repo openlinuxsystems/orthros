@@ -15,6 +15,12 @@
 [files]
 show-hidden = false
 
+# The prompt's right side shows the folder's git branch; with git-dirty,
+# a * after it when there are changes not committed (git status, given
+# 100 ms at most).
+[prompt]
+git-dirty = true
+
 # A command that runs for `after` seconds or more and ends while you are
 # on another console says so in a notice on the console you are on.
 [notify]

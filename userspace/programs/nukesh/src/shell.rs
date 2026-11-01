@@ -305,6 +305,8 @@ pub struct Shell {
     pub history: crate::history::History,
     /// colors.toml(5), read when the shell is interactive (ADR 0258).
     pub colors: Rc<crate::colors::Colors>,
+    /// `--private`: no command record, folder counts or history file.
+    pub private: bool,
     /// settings.toml(5), read when the shell is interactive.
     pub settings: Rc<crate::settings::Settings>,
     /// The command record every interactive shell shares (ADR 0262).
@@ -417,6 +419,7 @@ impl Shell {
             completions: crate::complete::Specs::default(),
             history: crate::history::History::default(),
             colors: Rc::default(),
+            private: false,
             settings: Rc::default(),
             records: None,
             last_millis: 0,

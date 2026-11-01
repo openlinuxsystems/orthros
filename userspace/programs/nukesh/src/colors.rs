@@ -243,6 +243,7 @@ const SECTIONS: &[Section] = &[
             key("symbol", "magenta", "the $ at the end"),
             key("error", "bold bright-white on red", "the ✗ badge after a failed command"),
             key("admin", "bold bright-white on yellow", "the admin badge while you are root"),
+            key("private", "bold bright-white on blue", "the private badge of nukesh --private"),
             key("took", "yellow", "how long the last command took, on the right"),
             key("jobs", "cyan", "how many jobs are running or stopped, on the right"),
             key("branch", "magenta", "the git branch of the folder, on the right"),

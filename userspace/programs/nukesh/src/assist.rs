@@ -203,8 +203,13 @@ pub fn right_prompt(shell: &Shell, paint: bool) -> String {
         let word = if jobs == 1 { "job" } else { "jobs" };
         parts.push(style("jobs", &format!("{jobs} {word}")));
     }
-    if let Some(branch) = shell.get("PWD").as_deref().and_then(git_branch) {
-        parts.push(style("branch", &format!("git {branch}")));
+    let here = shell.get("PWD").unwrap_or_default();
+    if let Some(branch) = git_branch(&here) {
+        let dirty = shell.settings.git_dirty
+            && shell.search_path("git", false).is_some()
+            && git_dirty(&here);
+        let mark = if dirty { "*" } else { "" };
+        parts.push(style("branch", &format!("git {branch}{mark}")));
     }
     parts.join("  ")
 }
@@ -231,6 +236,37 @@ pub fn git_branch(dir: &str) -> Option<String> {
             return None;
         }
     }
+}
+
+/// Whether the work tree at `dir` has changes not committed, by `git
+/// status` with untracked files left out; no answer within 100 ms is
+/// taken as clean, so that a big repository never holds the prompt.
+fn git_dirty(dir: &str) -> bool {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let child = Command::new("git")
+        .args(["--no-optional-locks", "status", "--porcelain", "-uno", "--ignore-submodules"])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else { return false };
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) | Err(_) => return false,
+            Ok(None) if started.elapsed() > std::time::Duration::from_millis(100) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(1)),
+        }
+    }
+    let mut out = [0u8; 1];
+    child.stdout.take().is_some_and(|mut o| o.read(&mut out).is_ok_and(|n| n > 0))
 }
 
 fn branch_of(head: &str) -> Option<String> {

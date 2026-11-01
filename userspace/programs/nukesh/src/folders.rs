@@ -141,6 +141,9 @@ pub fn before_prompt(shell: &mut Shell) {
         }
         shell.dirs_forward.clear();
     }
+    if shell.private {
+        return;
+    }
     let mut folders = load(shell);
     visit(&mut folders, &here, crate::sys::now().0);
     save(shell, &folders);

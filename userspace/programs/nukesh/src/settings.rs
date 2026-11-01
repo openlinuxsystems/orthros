@@ -26,6 +26,8 @@ pub const USER_FILE: &str = ".config/nukesh/settings.toml";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub show_hidden: bool,
+    /// `[prompt] git-dirty`: a `*` after the branch on the right.
+    pub git_dirty: bool,
     pub notify: bool,
     /// Seconds.
     pub notify_after: u64,
@@ -33,7 +35,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Settings {
-        Settings { show_hidden: false, notify: true, notify_after: 30 }
+        Settings { show_hidden: false, git_dirty: true, notify: true, notify_after: 30 }
     }
 }
 
@@ -74,6 +76,10 @@ impl Settings {
                         Some(on) => self.show_hidden = on,
                         None => problems.push(format!("[files] {key}: true or false")),
                     },
+                    ("prompt", "git-dirty") => match value.as_bool() {
+                        Some(on) => self.git_dirty = on,
+                        None => problems.push(format!("[prompt] {key}: true or false")),
+                    },
                     ("notify", "enabled") => match value.as_bool() {
                         Some(on) => self.notify = on,
                         None => problems.push(format!("[notify] {key}: true or false")),
@@ -82,7 +88,7 @@ impl Settings {
                         Some(n) => self.notify_after = n,
                         None => problems.push(format!("[notify] {key}: a number of seconds")),
                     },
-                    ("files" | "notify", _) => problems.push(format!("[{section}] {key}: no such key")),
+                    ("files" | "notify" | "prompt", _) => problems.push(format!("[{section}] {key}: no such key")),
                     _ => {
                         problems.push(format!("[{section}]: no such section"));
                         break;

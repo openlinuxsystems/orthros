@@ -251,7 +251,7 @@ impl Shell {
     /// Writes the new entries to the history file, as an interactive
     /// shell does when it exits.
     pub fn save_history(&mut self) {
-        if self.history.disabled || !self.interactive {
+        if self.history.disabled || !self.interactive || self.private {
             return;
         }
         let Some(path) = self.history_file() else { return };

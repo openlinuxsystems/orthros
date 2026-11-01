@@ -593,6 +593,7 @@ dependencies = [
 name = "nukesh"
 version = "0.10.4"
 dependencies = [
+ "crossterm",
  "indexmap",
  "libc",
  "nu-ansi-term",

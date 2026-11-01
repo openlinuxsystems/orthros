@@ -36,8 +36,7 @@ pub fn enter_prompt(shell: &Shell) {
             jobs.push((target, job.stopped()));
         }
     }
-    let history = shell
-        .interactive
+    let history = (shell.interactive && !shell.private)
         .then(|| shell.history_file())
         .flatten()
         .and_then(|path| {
