@@ -44,6 +44,50 @@ it is when it starts, and the key keeps its default.
 	*ssh* and other programs you work in send none. The defaults are
 	*true* and 30.
 
+*[prompt]* *git-dirty =* *true* | *false*
+	After the folder's git branch at the right of the prompt, a *\**
+	when the work tree has changes not committed (*git status*, given
+	100 ms at most). The default is *true*.
+
+*[nebix]* *offer =* *true* | *false*
+	After a command fails, the empty line offers Alt-E, which says what
+	went wrong (ADR 0268). The default is *true*.
+
+*[suggest]* *next =* *true* | *false*
+	On an empty line, the command you usually run next, faded, from the
+	command record; Nebix ranks it when it runs (ADR 0280). → takes it;
+	nothing runs until Enter. The default is *true*.
+
+*[accessibility]* *screen-reader =* *true* | *false*
+	No colours, faded hints or right prompt, and a prompt of words
+	(*~/src, failed 1, admin #*) for screen readers (ADR 0269). The
+	default is *false*.
+
+*[terminal]* *marks =* *true* | *false*, *links =* *true* | *false*
+	*marks* writes OSC 133 marks around each prompt, the line typed
+	and each command's output, so terminals can jump between commands
+	and select one's output; *links* gives *ls* *--hyperlink=auto*, so
+	the file names it shows are links a terminal can open (ADR 0282).
+	The defaults are *true*.
+
+*[history]* *skip-secrets =* *true* | *false*
+	Commands holding a password, a token or a URL's password are not
+	kept in the history or the command record (ADR 0281). The default
+	is *true*.
+
+*[commands]* *offer-install =* *true* | *false*
+	A command that is not installed but that a bundle in the store's
+	catalogue has is named after "command not found", and the empty
+	line's hint is its *bundle install* command (ADR 0285). The default
+	is *true*.
+
+*[folders]* *project-files =* *true* | *false*, *resume =* *true* | *false*
+	*project-files*: a trusted _.nukesh.toml_ sets variables and
+	abbreviations while you are in its folder (*nukesh*(1), FOLDER
+	FILES). *resume*: a console's first shell, starting at home, goes
+	to the folder the last shell on that console was in (ADR 0286).
+	The defaults are *true*.
+
 # EXAMPLES
 
 Hidden files everywhere, and a notice after ten seconds, in

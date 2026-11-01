@@ -181,7 +181,7 @@ impl Records {
             .map(|r| r.command.as_str())
     }
 
-    /// The command most often run next after `last` (ADR 0270): of the
+    /// The command most often run next after `last` (ADR 0280): of the
     /// records right after one of `last`, within 15 minutes, each counts
     /// once, twice if in `folder`; the most counted wins if it came next
     /// at least twice, the newest of equals first. Nothing if it is `last`

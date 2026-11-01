@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Asking Nebix, the local assistant (ADRs 0268 and 0270). Nebix lands
+//! Asking Nebix, the local assistant (ADRs 0268 and 0280). Nebix lands
 //! in 1.10; until then its socket is not there and every question here
 //! answers nothing at once, so the shell's plain answers stand alone.
 //!

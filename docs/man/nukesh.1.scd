@@ -100,6 +100,10 @@ The one-letter options are those of *set*, with these too:
 	what is wrong in them; with *--check*, only checks them, and fails
 	if anything is wrong. It must be the first argument.
 
+*--private*
+	Keep nothing of this session: no history file, command record,
+	folder ranks, notices or resumed folder (PRIVATE SESSIONS).
+
 # STARTING
 
 A login shell reads _/etc/profile_, then the first of
@@ -157,12 +161,72 @@ to the next line with *PS2*. Pasted text is taken as typed, without
 running each line as it comes: a paste of several lines waits in the
 line for Enter, so it can be read, changed or dropped with Ctrl-C first.
 
+Alt-S puts *elevate* before the line, or takes it off again. Ctrl-X
+Ctrl-E (and Ctrl-O) opens the line in *VISUAL*, *EDITOR* or *nano*, and
+what is saved comes back as the line. Alt-E explains the line (EXPLAIN).
+
 Alt-← and Alt-→ on an empty line go back to the folder this shell was in
 before, and forward again, as a file manager's arrows do; on a line with
 text they move a word.
 
+Tab forgives: when nothing starts with the word, it offers names that
+start with it ignoring case, then those one typo away; and in a path,
+*...* is *../..* and *....* is *../../..* (ADR 0283). A finished line
+the shell cannot read shows the token it is near red and underlined
+before Enter, and why, faded: *← `fi` cannot go there* (ADR 0284).
+
+On an empty line, the hint is what comes next (ADR 0280): after a
+command that failed, the command fixed (a mistyped name, *cd* to a
+folder a typo away, an admin-only command after *elevate*, or
+*bundle install* for a missing command a bundle has), then *Alt+E
+explains what went wrong*; otherwise the command you usually run after
+the last one. → takes it; nothing runs until Enter.
+
 With *TERM=dumb*, or no terminal, lines are read as they come, with the
 terminal's own editing.
+
+## Explain
+
+Alt-E says what the line does, under it, part by part: each program's
+line from its manual page, each option's from its completion file, how
+the parts are joined and where output goes. What cannot be taken back
+comes first, in bold: deleting, overwriting, formatting, changing
+permissions or owners, running as the administrator, running a script
+from the internet, and sending data off the computer. On an empty line
+it says why the last command failed. *explain* _command_ prints the
+same, and *explain* alone explains each line of its input. Nothing is
+run, passwords and tokens are masked, and when Nebix runs it is asked
+too, on this computer only (ADR 0268).
+
+## Private sessions
+
+*nukesh --private* keeps nothing: no history file, command record,
+folder ranks, notices or resumed folder, and the prompt says *private*
+(ADR 0267).
+
+## Folder files
+
+A _.nukesh.toml_ in a folder or above it sets *[env]* variables and
+*[abbr]* abbreviations while the shell is in that folder or under it,
+and they are undone when it leaves. It applies only after *trust*,
+which keeps a copy of it; a changed file must be trusted again, and
+*trust -r* stops it (ADR 0286). It runs nothing.
+
+```
+[env]
+DATABASE_URL = "postgres://localhost/site"
+[abbr]
+t = "make test"
+```
+
+## Terminals and screen readers
+
+The prompt and each command's output are marked for terminals that
+jump between commands (OSC 133), and *ls* names files as links (OSC 8)
+(ADR 0282). With *[accessibility] screen-reader* in *settings.toml*(5)
+the shell draws nothing a reader would trip on (ADR 0269). When the
+terminal hangs up at the prompt, the shell hangs up its jobs, saves its
+history and exits (ADR 0267).
 
 ## Colours
 
@@ -189,8 +253,9 @@ backgrounds and colour blindness change them all at once. With
 *NO_COLOR* set, a dumb terminal or *enabled = false*, the shell writes
 no colour, and the hint is not shown.
 
-*settings.toml*(5) has the rest: hidden files shown everywhere, and the
-notice that a long command ended while you were on another console.
+*settings.toml*(5) has the rest: hidden files shown everywhere, the
+notice that a long command ended while you were on another console,
+and the switches for each feature below.
 
 ## Command record
 
@@ -356,7 +421,8 @@ Each builtin is described by *help* _name_. They are bash's: *.*, *:*,
 *logout*, *mapfile*, *popd*, *printf*, *pushd*, *pwd*, *read*, *readarray*,
 *readonly*, *return*, *set*, *shift*, *shopt*, *source*, *suspend*,
 *test*, *times*, *trap*, *true*, *type*, *typeset*, *ulimit*, *umask*,
-*unalias*, *unset* and *wait*, and Nukesh's own *abbr* and *z*. *shopt* takes each of bash 5.2's options;
+*unalias*, *unset* and *wait*, and Nukesh's own *abbr*, *explain*,
+*trust* and *z*. *shopt* takes each of bash 5.2's options;
 those for what the shell does not do (the *compat* levels, *cdspell*,
 *dirspell*, *direxpand*, *gnu_errfmt*, *hostcomplete*, *mailwarn*,
 *no_empty_cmd_completion*) change nothing, and *restricted_shell* cannot
@@ -422,7 +488,9 @@ _~/.profile_, _~/.nukeshrc_, _~/.nukesh_logout_: the start-up files.
 _~/.nukesh_history_: the history.
 
 _~/.local/state/nukesh/commands_ and _~/.local/state/nukesh/folders_: the
-command record and the folders *z* knows.
+command record and the folders *z* knows; _~/.local/state/nukesh/where_
+and _~/.local/state/nukesh/trusted/_: each console's last folder, and the
+folder files trusted.
 
 _/system/settings/nukesh/colors.toml_, _/system/settings/nukesh/settings.toml_
 and the same under _~/.config/nukesh_: colours and settings.

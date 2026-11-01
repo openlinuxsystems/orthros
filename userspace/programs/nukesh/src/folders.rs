@@ -158,7 +158,7 @@ pub fn before_prompt(shell: &mut Shell) {
 }
 
 /// Where the last shell on each console was, a line each: `console TAB
-/// folder` (ADR 0276, `[folders] resume`).
+/// folder` (ADR 0286, `[folders] resume`).
 pub const WHERE: &str = ".local/state/nukesh/where";
 
 fn where_path(shell: &Shell) -> Option<String> {

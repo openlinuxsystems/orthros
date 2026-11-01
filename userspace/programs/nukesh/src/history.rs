@@ -199,7 +199,7 @@ impl Shell {
         if has("ignorespace") && line.starts_with(' ') {
             return;
         }
-        // settings.toml's [history] skip-secrets (ADR 0271).
+        // settings.toml's [history] skip-secrets (ADR 0281).
         if self.settings.skip_secrets && crate::explain::holds_secret(line) {
             return;
         }

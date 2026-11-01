@@ -118,7 +118,7 @@ impl Editor {
         let (editor, file) = buffer_editor(&self.shell.borrow());
         let mut line = new_reedline(vi, abbrs, colors).with_buffer_editor(editor, file);
         // OSC 133 marks around the prompt and the line typed, so that
-        // terminals can jump between commands (ADR 0272); the marks of a
+        // terminals can jump between commands (ADR 0282); the marks of a
         // command's output are written around it (interactive.rs).
         if self.shell.borrow().settings.marks {
             line = line.with_semantic_markers(Some(reedline::Osc133Markers::boxed()));
@@ -704,7 +704,7 @@ unsafe impl Send for ShellHighlighter {}
 impl Highlighter for ShellHighlighter {
     fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
         let mut styled = StyledText::default();
-        // A mistake the parser finds is shown before Enter (ADR 0274): the
+        // A mistake the parser finds is shown before Enter (ADR 0284): the
         // token it is near, as an unknown command is.
         let options = self.shell.0.try_borrow().map_or_default(|shell| shell.parse_options());
         let wrong = mistake(line, options.clone()).and_then(|(token, _)| token);

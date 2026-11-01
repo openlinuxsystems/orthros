@@ -156,7 +156,7 @@ impl Console {
         let sign_in = shell.sign_in;
         let argv = [argv_strings[1].as_ptr(), std::ptr::null()];
         // XDG_VTNR names the console, as on Linux: nukesh's [folders]
-        // resume keeps a place for each (ADR 0276).
+        // resume keeps a place for each (ADR 0286).
         let vtnr = format!("XDG_VTNR={}", self.number);
         let env_strings: Vec<CString> =
             shell.env.iter().map(|e| c_string(e)).chain(std::iter::once(c_string(&vtnr))).collect();

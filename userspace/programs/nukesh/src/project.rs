@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Folder settings (ADR 0276), as direnv has them: a `.nukesh.toml` in a
+//! Folder settings (ADR 0286), as direnv has them: a `.nukesh.toml` in a
 //! folder sets variables and abbreviations while an interactive shell is
 //! in that folder or under it, and they go when it leaves.
 //!

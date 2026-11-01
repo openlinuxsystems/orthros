@@ -1514,7 +1514,7 @@ impl Shell {
                             .then(|| crate::fix::offer(self, name))
                             .flatten()
                         {
-                            // A bundle has it (ADR 0275): its install
+                            // A bundle has it (ADR 0285): its install
                             // command is the next line's hint.
                             Some((id, about)) => {
                                 let about = if about.is_empty() {

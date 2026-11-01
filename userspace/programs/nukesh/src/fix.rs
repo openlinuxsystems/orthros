@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Fixing the last command (ADR 0275), as thefuck does, but only ever as
+//! Fixing the last command (ADR 0285), as thefuck does, but only ever as
 //! a hint: after a command fails, the empty line shows it corrected,
 //! faded; → takes it, and nothing runs until Enter.
 //!

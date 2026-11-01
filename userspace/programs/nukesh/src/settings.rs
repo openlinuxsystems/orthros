@@ -46,7 +46,7 @@ pub struct Settings {
     /// Alt+E (ADR 0268).
     pub explain_offer: bool,
     /// `[suggest] next`: on an empty line, the command you usually run
-    /// next, faded (ADR 0270).
+    /// next, faded (ADR 0280).
     pub suggest_next: bool,
     /// `[accessibility] screen-reader`: plain output for screen readers
     /// (ADR 0269).
@@ -179,7 +179,7 @@ pub fn apply_to(shell: &mut crate::shell::Shell) {
         }
     }
     // `[terminal] links`: ls names files as links a terminal can open
-    // (OSC 8, ADR 0272); `auto` leaves pipes and files plain.
+    // (OSC 8, ADR 0282); `auto` leaves pipes and files plain.
     if shell.settings.links && !ls.contains("--hyperlink") {
         ls.push_str(" --hyperlink=auto");
     }

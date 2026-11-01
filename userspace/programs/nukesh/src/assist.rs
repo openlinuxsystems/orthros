@@ -92,7 +92,7 @@ impl Hinter for ShellHinter {
             return self.style.paint(&self.shown).to_string();
         }
         if let Some((token, message)) = crate::editor::mistake(line, shell.parse_options()) {
-            // Syntax mistakes, before Enter (ADR 0274); → takes nothing.
+            // Syntax mistakes, before Enter (ADR 0284); → takes nothing.
             self.shown = match token {
                 Some(token) => format!("  ← `{token}` cannot go there"),
                 None => format!(
@@ -141,7 +141,7 @@ impl Hinter for ShellHinter {
     }
 }
 
-/// What an empty line shows (ADRs 0268 and 0270), and what → takes of
+/// What an empty line shows (ADRs 0268 and 0280), and what → takes of
 /// it: after a failure, the offer of Alt+E; otherwise the command most
 /// often run after the last one, from the record, or Nebix's better
 /// guess when it is running.
@@ -151,7 +151,7 @@ fn empty_line_hint(shell: &Shell, last: &str, status: i32, folder: &str) -> (Str
         return (String::new(), String::new());
     }
     if status != 0 && status != 130 {
-        // The command fixed (ADR 0275), and the offer of Alt+E.
+        // The command fixed (ADR 0285), and the offer of Alt+E.
         let offer = if settings.explain_offer { "Alt+E explains what went wrong" } else { "" };
         return match crate::fix::fix(shell, last, status) {
             Some(fixed) if offer.is_empty() => (fixed.clone(), fixed),

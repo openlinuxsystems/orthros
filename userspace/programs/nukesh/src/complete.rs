@@ -629,7 +629,7 @@ pub fn commands(shell: &mut Shell, word: &str) -> Vec<String> {
 }
 
 /// How loosely `name` matches `word` when nothing starts with it (ADR
-/// 0273): 1 if it starts with it ignoring case, 2 if its start is one
+/// 0283): 1 if it starts with it ignoring case, 2 if its start is one
 /// typo away (two for words of seven letters or more); none for words
 /// under three letters, where a typo matches too much.
 pub fn tier(word: &str, name: &str) -> Option<u8> {
@@ -662,7 +662,7 @@ fn best_tier(word: &str, names: Vec<String>) -> Vec<String> {
 }
 
 /// `...` as `../..`, `....` as `../../..`, in each part of a path being
-/// completed (ADR 0273); `None` when there is none.
+/// completed (ADR 0283); `None` when there is none.
 pub fn expand_dots(word: &str) -> Option<String> {
     let mut changed = false;
     let parts: Vec<String> = word
@@ -846,7 +846,7 @@ impl Shell {
     /// starts, and the candidates.
     /// Tab: the completions of the word before `pos`. `...` in it means
     /// `../..`; when nothing starts with it, file and command names that
-    /// match ignoring case or with a typo are offered (ADR 0273).
+    /// match ignoring case or with a typo are offered (ADR 0283).
     pub fn complete_line(&mut self, line: &str, pos: usize) -> (usize, Vec<Candidate>) {
         let pos = pos.min(line.len());
         let (words, in_word) = split_line(&line[..pos]);

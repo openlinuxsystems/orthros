@@ -315,7 +315,7 @@ pub struct Shell {
     pub last_millis: u64,
     /// The last command typed, for Alt+E on an empty line.
     pub last_command: String,
-    /// What the folder file in use set (ADR 0276), and the files told
+    /// What the folder file in use set (ADR 0286), and the files told
     /// about this session.
     pub project: Option<crate::project::Applied>,
     pub project_warned: std::collections::HashSet<String>,
@@ -365,7 +365,7 @@ pub struct Shell {
     /// A completion function asked to be tried again (status 124).
     pub completions_retry: bool,
     /// Tab found nothing that starts with the word: file and command
-    /// names match ignoring case, then with a typo (ADR 0273).
+    /// names match ignoring case, then with a typo (ADR 0283).
     pub completions_loose: bool,
     /// Running a script file, whose functions see `main` at the bottom of
     /// `FUNCNAME`.
