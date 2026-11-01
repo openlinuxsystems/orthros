@@ -252,6 +252,7 @@ dependencies = [
  "radix-arch-aarch64",
  "radix-arch-riscv64",
  "radix-arch-x86_64",
+ "radix-atheros-net",
  "radix-bitlocker",
  "radix-block",
  "radix-bootfs",
@@ -378,6 +379,14 @@ dependencies = [
  "radix-sync",
  "radix-vtd",
  "radix-watchdog",
+]
+
+[[package]]
+name = "radix-atheros-net"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
 ]
 
 [[package]]

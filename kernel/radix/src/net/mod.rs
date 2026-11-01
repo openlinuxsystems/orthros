@@ -53,7 +53,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use radix_hal::{Devices, Timer};
 use radix_hw::Mmio;
-use radix_hw::pci::{Bar, Function, Msi, MsiX};
+use radix_hw::pci::{Bar, Function, Msi, MsiX, capability};
 use radix_klog::{TextBuf, error, info, warn};
 use radix_mm::lease::{self, Lease};
 use radix_mm::{Flags, HEAP, Kmalloc};
@@ -847,6 +847,8 @@ pub enum Known {
     Gve,
     /// One of Realtek's (`radix-realtek-net`).
     Realtek(radix_realtek_net::Model),
+    /// One of Atheros' or a Killer (`radix-atheros-net`).
+    Atheros(radix_atheros_net::Model),
 }
 
 impl Known {
@@ -855,6 +857,7 @@ impl Known {
         match self {
             Known::Intel(model) => model.msi(),
             Known::Realtek(model) => model.msi(),
+            Known::Atheros(model) => model.msi(),
             Known::Vmxnet3 | Known::Ena | Known::Gve => true,
         }
     }
@@ -869,6 +872,7 @@ impl Known {
         match self {
             Known::Intel(_) | Known::Ena => "an",
             Known::Vmxnet3 | Known::Gve | Known::Realtek(_) => "a",
+            Known::Atheros(model) => model.article(),
         }
     }
 }
@@ -882,6 +886,7 @@ impl fmt::Display for Known {
             Known::Ena => f.write_str("Amazon ENA"),
             Known::Gve => f.write_str("Google gVNIC"),
             Known::Realtek(model) => write!(f, "Realtek {}", model.name),
+            Known::Atheros(model) => f.write_str(model.name),
         }
     }
 }
@@ -901,6 +906,9 @@ pub fn identify(function: &Function) -> Option<Known> {
     }
     if let Some(model) = radix_realtek_net::identify(vendor, device, function.subsystem_id()) {
         return Some(Known::Realtek(model));
+    }
+    if let Some(model) = radix_atheros_net::identify(vendor, device) {
+        return Some(Known::Atheros(model));
     }
     radix_intel_net::identify(vendor, device).map(Known::Intel)
 }
@@ -1078,7 +1086,7 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
     let more = match card {
         Known::Vmxnet3 => Some(map_registers(function, 1)?),
         Known::Gve => Some(map_registers(function, 2)?),
-        Known::Intel(_) | Known::Ena | Known::Realtek(_) => None,
+        Known::Intel(_) | Known::Ena | Known::Realtek(_) | Known::Atheros(_) => None,
     };
     let source = function.address();
     // One interrupt, for everything, if the card should have one and it
@@ -1093,8 +1101,9 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
             Some(vector)
         })
     };
-    // The older Realtek chips reach only the first 4 GiB.
-    let below_4g = matches!(card, Known::Realtek(_));
+    // The older Realtek chips reach only the first 4 GiB, and Atheros'
+    // rings share the high half of their addresses.
+    let below_4g = matches!(card, Known::Realtek(_) | Known::Atheros(_));
     let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(source, pages, below_4g);
     let mut delay = delay;
     let how = match interrupt {
@@ -1139,6 +1148,24 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
             &mut delay,
         )
         .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
+        Known::Atheros(model) => {
+            let pci = radix_atheros_net::Pci {
+                revision: function.revision(),
+                subsystem: function.subsystem(),
+                express: function.find_capability(capability::EXPRESS),
+            };
+            radix_atheros_net::start(
+                model,
+                pci,
+                regs,
+                how,
+                fallback_mac(),
+                &mut alloc,
+                &mut delay,
+                sched::now_ns,
+            )
+            .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory))
+        }
     };
     let nic = started.map_err(|err| {
         if let Some(vector) = interrupt {

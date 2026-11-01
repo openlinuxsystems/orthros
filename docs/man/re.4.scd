@@ -47,4 +47,4 @@ a model of them, and on the Dell Inspiron 15 5570's RTL810xE.
 
 # SEE ALSO
 
-*e1000*(4), *ip*(8), *netd*(8)
+*alc*(4), *e1000*(4), *ip*(8), *netd*(8)

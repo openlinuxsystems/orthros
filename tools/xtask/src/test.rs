@@ -81,6 +81,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-acpi",
     "radix-ahci",
     "radix-amdvi",
+    "radix-atheros-net",
     "radix-bitlocker",
     "radix-bootfs",
     "radix-block",

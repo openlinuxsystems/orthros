@@ -21,6 +21,7 @@ members = [
     "cap",
     "drivers/ahci",
     "drivers/amdvi",
+    "drivers/atheros",
     "drivers/crosec",
     "drivers/ena",
     "drivers/gpio",

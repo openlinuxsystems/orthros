@@ -28,3 +28,8 @@ Section: Specifications and papers
   and their quirks, and the start and stop sequences from which
   `radix-realtek-net` drives Realtek's RTL8169, RTL8168 and RTL810x
   chips. No code is taken from it.
+- FreeBSD's `alc(4)` and `atphy(4)` (BSD-2-Clause, Copyright Pyun
+  YongHyeon), the reference for the registers, rings, PHY reset and
+  power-state sequences of the two chip families, and their quirks, from
+  which `radix-atheros-net` drives Atheros' AR813x, AR815x, AR816x and
+  Killer E2x00 chips. No code is taken from them.

@@ -32,6 +32,10 @@ IPv6, the firewall and WireGuard. This page grows with each.
   the RTL810x at 100 Mb/s, the onboard Ethernet of most boards that is
   not Intel's (re(4)). No emulator has them: a model of the chips tests
   the driver, and the Dell Inspiron 15 5570 the real thing.
+- **Atheros' chips**: the AR8131, AR8151, AR8161 and AR8171 at 1 Gb/s,
+  the AR8132, AR8152, AR8162 and AR8172 at 100 Mb/s, and the Killer
+  E2200, E2400 and E2500 built on them, on many laptops from 2009 to
+  2018 (alc(4)). They too are tested against a model of the chips.
 - **A card's driver can run as a program**: with `e1000=program`, which
   the images `ob image` builds have, the kernel leaves the e1000 and
   e1000e cards an IOMMU confines to e1000d(8), which drives them with
