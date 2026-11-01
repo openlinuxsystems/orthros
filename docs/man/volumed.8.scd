@@ -30,7 +30,9 @@ filesystem the
 disk or Radix cannot write (such as an NTFS that Windows hibernated
 with) is mounted read-only. A disk with partitions has each of them
 mounted, and an EFI system partition is left alone, as Windows, macOS
-and udisks leave it.
+and udisks leave it. A volume BitLocker locked is left for *unlock*(8),
+and the volume it unlocks, _/devices/_*name*-unlocked, is mounted as
+one plugged in (ADR 0240).
 
 When a disk is pulled out, volumed unmounts what is mounted at
 _/volumes_ from it and its partitions, including what Spark mounted
@@ -47,6 +49,7 @@ each change, which Spark puts in the kernel log:
 volumed: watching for volumes; 5 disks and partitions now
 volumed: sdb is gone; unmounted /volumes/sdb
 volumed: mounted the FAT filesystem of sdb at /volumes/DUKOVOUSB
+volumed: sdc is a locked BitLocker volume; `unlock sdc` unlocks it
 ```
 
 Its service file gives it _/devices_ and _/volumes_ and nothing else of
@@ -73,5 +76,5 @@ service, volumed does not exit.
 
 # SEE ALSO
 
-*eject*(1), *remount*(8), *spark*(8), *findmnt*(8), *blkid*(8),
+*eject*(1), *remount*(8), *unlock*(8), *spark*(8), *findmnt*(8), *blkid*(8),
 *radix-files*(7), *systools*(1)

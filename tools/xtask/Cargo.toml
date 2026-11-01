@@ -23,6 +23,9 @@ radix-kdb = { path = "../../kernel/lib/kdb" }
 radix-ksyms = { path = "../../kernel/lib/ksyms" }
 radix-microcode = { path = "../../kernel/lib/microcode" }
 radix-relocs = { path = "../../kernel/lib/relocs" }
+# BitLocker volumes encrypted as Windows encrypts them, for the bitlocker
+# boot test (ADR 0240).
+radix-bitlocker = { path = "../../kernel/fs/bitlocker", features = ["make"] }
 # The account files and Argon2id hashes, for `ob image --user` (ADR 0218).
 accounts = { path = "../../userspace/programs/accounts", features = ["hash"] }
 # The settings of service files and the fields and permissions of

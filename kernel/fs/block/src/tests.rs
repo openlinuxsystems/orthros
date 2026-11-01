@@ -310,6 +310,24 @@ fn whole_disk_filesystems_have_no_table() {
     boot[511] = 0xaa;
     disk.load(0, &boot).unwrap();
     assert_eq!(table(&disk).unwrap().0, Scheme::None);
+    // BitLocker To Go's: its metadata's offsets read as entries of a
+    // boot indicator of 0, one of type 0x10 from sector 0.
+    boot[3..11].copy_from_slice(b"MSWIN4.1");
+    boot[424..440].copy_from_slice(&[
+        0x3b, 0xd6, 0x67, 0x49, 0x29, 0x2e, 0xd8, 0x4a, 0x83, 0x99, 0xf6, 0xa3, 0x39, 0xe3, 0xd0,
+        0x01,
+    ]);
+    boot[446..510].fill(0);
+    for (at, offset) in [(440, 0x0010_0000u64), (448, 0x0110_0000), (456, 0x0210_0000)] {
+        boot[at..at + 8].copy_from_slice(&offset.to_le_bytes());
+    }
+    assert!(partition::mbr_entries(&boot).is_some_and(|e| e.iter().any(|e| e.kind != 0)));
+    disk.load(0, &boot).unwrap();
+    assert_eq!(table(&disk).unwrap().0, Scheme::None);
+    // Windows 7's and later's.
+    boot[3..11].copy_from_slice(b"-FVE-FS-");
+    disk.load(0, &boot).unwrap();
+    assert_eq!(table(&disk).unwrap().0, Scheme::None);
 }
 
 #[test]

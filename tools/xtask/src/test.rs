@@ -71,6 +71,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-acpi",
     "radix-ahci",
     "radix-amdvi",
+    "radix-bitlocker",
     "radix-bootfs",
     "radix-block",
     "radix-bootinfo",
@@ -259,6 +260,10 @@ const UDF: u8 = 13;
 /// [`Disk::fat`] for an NTFS disk `mkntfs` makes, holding nothing, as
 /// the power-cut test's (ADR 0238).
 const NTFS_EMPTY: u8 = 14;
+
+/// [`Disk::fat`] for a disk BitLocker encrypted, holding an NTFS, as the
+/// `bitlocker` test makes it (ADR 0240).
+const BITLOCKER: u8 = 15;
 
 /// The partition table of a test disk with a filesystem.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3039,6 +3044,11 @@ fn make_disks(
         }
         if disk.ntfs() {
             make_ntfs(ctx, disk, &image.path)?;
+            made.push(image);
+            continue;
+        }
+        if disk.fat == BITLOCKER {
+            cases::bitlocker::make(disk, &image.path)?;
             made.push(image);
             continue;
         }

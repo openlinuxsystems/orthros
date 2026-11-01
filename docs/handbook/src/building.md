@@ -65,9 +65,13 @@ The packages `ob` needs on each distribution are:
 
 | Distribution | Install command |
 | --- | --- |
-| Debian, Ubuntu, Linux Mint | `sudo apt install build-essential rustup qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g udftools udfclient genisoimage scdoc mandoc clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake git`, then `cargo install mdbook --version 0.4.52 --locked` |
-| Fedora | `sudo dnf install gcc rustup qemu-system-x86 edk2-ovmf grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfsprogs udftools genisoimage scdoc mandoc mdbook clang compiler-rt lld llvm meson ninja-build cmake git patch` |
+| Debian, Ubuntu, Linux Mint | `sudo apt install build-essential rustup qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g dislocker libbde-utils udftools udfclient genisoimage scdoc mandoc clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake git`, then `cargo install mdbook --version 0.4.52 --locked` |
+| Fedora | `sudo dnf install gcc rustup qemu-system-x86 edk2-ovmf grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfsprogs dislocker udftools genisoimage scdoc mandoc mdbook clang compiler-rt lld llvm meson ninja-build cmake git patch` |
 | Arch Linux | `sudo pacman -S --needed base-devel rustup qemu-system-x86 edk2-ovmf grub libisoburn mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g udftools scdoc mandoc mdbook clang compiler-rt lld llvm meson ninja cmake git` |
+
+dislocker and libbde, which only the BitLocker tests use, are in the AUR
+on Arch Linux, and libbde is not packaged for Fedora: build it from
+[its source](https://github.com/libyal/libbde) there.
 
 The C compiler (`build-essential`, `gcc` or `base-devel`) is there because
 Rust uses it as the linker for `ob` itself and for mdBook; the kernel links

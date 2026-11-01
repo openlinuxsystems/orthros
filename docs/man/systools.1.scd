@@ -186,6 +186,8 @@ error that starts with the tool's name.
 :  the processes, refreshed
 |  *tree*(1)
 :  directories as a tree
+|  *unlock*(8)
+:  unlock a BitLocker volume with its password or recovery key
 |  *uptime*(1)
 :  how long the system has been up
 |  *user*(8)

@@ -127,9 +127,15 @@ fn mount_as(at: &str, kind: &[u8], device: &File, flags: MountFlags) -> Result<M
     }
 }
 
-/// Mounts the volume `name`, which just came: a line of what it did.
+/// Mounts the volume `name`, which just came: a line of what it did. A
+/// locked BitLocker volume is left for unlock(8), whose unlocked device
+/// comes next, and is mounted then (ADR 0240).
 fn mount(name: &str) -> String {
-    let label = probe::reader(name).and_then(|mut read| probe::filesystem(&mut read)?.label);
+    let found = probe::reader(name).and_then(|mut read| probe::filesystem(&mut read));
+    if found.as_ref().is_some_and(|found| found.kind == "BitLocker") {
+        return format!("{name} is a locked BitLocker volume; `unlock {name}` unlocks it");
+    }
+    let label = found.and_then(|found| found.label);
     let at = place_for(label.as_deref(), name, |at| Path::new("/volumes").join(at).exists());
     let (device, flags) = match open_device(name) {
         Ok(opened) => opened,

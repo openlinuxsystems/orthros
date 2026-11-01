@@ -30,6 +30,9 @@ sha2 = { version = "0.10.9", default-features = false }
 # The system call interface, generated from abi/*.ridl, for what the C
 # library does not wrap: affinity, I/O priority, tracing.
 radix-abi = { path = "../../../kernel/abi" }
+# BitLocker volumes' metadata, and their keys unwrapped with a password
+# or recovery key, for unlock(8) (ADR 0240).
+radix-bitlocker = { path = "../../../kernel/fs/bitlocker", features = ["keys"] }
 # The firmware's SMBIOS tables, as the kernel reads them, for hwinfo(8)
 # (ADR 0231).
 radix-smbios = { path = "../../../kernel/lib/smbios" }

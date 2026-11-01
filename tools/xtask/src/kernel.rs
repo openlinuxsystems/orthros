@@ -34,11 +34,12 @@ pub fn target_args(ctx: &Ctx) -> Vec<String> {
         // every kernel allocation states its context and handles failure
         // (ADR 0017),
         "--config".into(),
-        // and LLVM records each function's stack frame in `.stack_sizes`,
+        // LLVM records each function's stack frame in `.stack_sizes`,
         // which `ob` holds to the kernel's frame budget after linking
-        // (ADR 0058).
+        // (ADR 0058), and AES is done in software, as the kernel uses no
+        // SSE (ADR 0240).
         format!(
-            r#"target.{TARGET_NAME}.rustflags=["--cfg","no_global_oom_handling","-Zemit-stack-sizes"]"#
+            r#"target.{TARGET_NAME}.rustflags=["--cfg","no_global_oom_handling","-Zemit-stack-sizes","--cfg","aes_force_soft"]"#
         ),
     ]
 }

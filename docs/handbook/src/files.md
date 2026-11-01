@@ -184,7 +184,17 @@ Windows down fully (hold Shift as you choose Shut down) and Dukovo
 writes it. When Windows cannot be started any more, `remount -w
 --discard-hibernation /volumes/`*name* writes a hibernated NTFS anyway,
 after a warning: what Windows left open is lost, and Windows checks the
-disk at its next start. A disc image written to a USB stick or kept on a
+disk at its next start. A disk or stick Windows encrypted with BitLocker
+is unlocked with its password or its recovery key by `unlock` (unlock(8)),
+and then mounted as a stick plugged in:
+
+```
+# unlock sdb
+Password or recovery key for sdb:
+unlock: sdb is unlocked as /devices/sdb-unlocked
+```
+
+A disc image written to a USB stick or kept on a
 disk, ISO 9660 (with Rock Ridge's or Joliet's long names) or UDF (DVDs,
 Blu-ray discs and Windows' installation media), mounts read-only, as a
 disc is. Anything else is left alone.
@@ -421,5 +431,8 @@ sparse files. `ntfs-write` writes two, and checks them on the host with
 ntfs-3g's `ntfsresize --info` and `ntfsfix -n` and reads them back with
 The Sleuth Kit and after a reboot. `ntfs-power-cut` cuts the power while
 the storage test writes one: what was synced before must be there, and
-the disk marked to be checked. In CI, Windows' own `chkdsk` checks every
-volume the NTFS host tests write, those power cuts left included.
+the disk marked to be checked, or, cut just after a sync, clean and
+sound. In CI, Windows' own `chkdsk` checks every volume the NTFS host
+tests write, those power cuts left included. The `bitlocker` boot test
+unlocks a stick BitLocker To Go encrypted at the console, writes it, and
+has dislocker decrypt it on the host.
