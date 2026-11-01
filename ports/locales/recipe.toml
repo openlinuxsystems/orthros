@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: 2026 The Dukovo contributors
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
-# The C.UTF-8 locale (ADR 0073): the C locale with UTF-8 characters,
-# Unicode's character classes and case mappings, compiled from the GNU C
-# Library's locale data into the files the C library reads, in
-# /system/libraries/locale. Named locales come with Phase 12.
+# The C.UTF-8 locale (ADR 0073), and English's in each of its 19
+# countries, as en_US.UTF-8 and en_GB.UTF-8 (ADR 0194): the C locale
+# with UTF-8 characters, Unicode's character classes and case mappings,
+# and for English its dates, numbers, money, paper sizes and sorting
+# order, compiled from the GNU C Library's locale data into the files
+# the C library reads, in /system/libraries/locale. Other languages
+# come with their translations, after 1.0.
 #
 # Only data is taken, no code: the locale sources, of which the Free
 # Software Foundation claims no copyright, and their character tables,
@@ -13,7 +16,7 @@
 # Unicode 16.0's.
 name = "locales"
 version = "2.42"
-summary = "the C.UTF-8 locale, compiled from glibc's locale data"
+summary = "the C.UTF-8 locale and English's, compiled from glibc's locale data"
 license = "Unicode-3.0"
 homepage = "https://www.gnu.org/software/libc/"
 image = ["system/libraries/locale/"]

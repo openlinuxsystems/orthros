@@ -403,7 +403,12 @@ admin.hardware = true
 runs-with-your-access = true
 "
     );
-    assert_eq!(service::from_toml(&converted).unwrap(), service::from_toml(SHIPPED[0].1).unwrap());
+    // The shipped file has since asked for the clock too (ADR 0194),
+    // which no file of before Phase 13 could.
+    let mut shipped = service::from_toml(SHIPPED[0].1).unwrap();
+    assert!(shipped.permissions.admin.time);
+    shipped.permissions.admin.time = false;
+    assert_eq!(service::from_toml(&converted).unwrap(), shipped);
 }
 
 #[test]

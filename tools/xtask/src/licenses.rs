@@ -58,7 +58,9 @@ const FIRMWARE_ALLOW: &[&str] = &["LicenseRef-Intel-Microcode"];
 /// Data License Agreement - Permissive 2.0, which asks only that its text
 /// go with them (ADR 0192). git is under version 2 of the GPL only, with
 /// parts under the LGPL and the GPL's later versions, as a program of its
-/// own (ADR 0287).
+/// own (ADR 0287). The IANA time zone database is in the public domain,
+/// which SPDX has no identifier for (ADR 0194). curl's license is its own,
+/// the MIT license in other words (ADR 0195).
 const PORT_EXTRA_ALLOW: &[&str] = &[
     "CC0-1.0",
     "GPL-2.0-only",
@@ -76,6 +78,8 @@ const PORT_EXTRA_ALLOW: &[&str] = &[
     "SSH-short",
     "LicenseRef-IBM-base64",
     "CDLA-Permissive-2.0",
+    "LicenseRef-tz-public-domain",
+    "curl",
 ];
 
 /// Crates from crates.io that compile another project's C code into what

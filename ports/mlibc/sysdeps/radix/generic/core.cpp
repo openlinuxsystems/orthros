@@ -312,11 +312,30 @@ int Sysdeps<ClockGetres>::operator()(int clock, time_t *secs, long *nanos) {
 	return 0;
 }
 
+// Sets the time of day through the clock capability in SLOT_CLOCK
+// (radix-clock(2)), which only a program given admin.time holds, and one
+// elevate(8) runs: EPERM without it, as Linux without CAP_SYS_TIME. The
+// other clocks cannot be set (EINVAL), as on Linux.
 int Sysdeps<ClockSet>::operator()(int clock, time_t secs, long nanos) {
-	(void)clock;
-	(void)secs;
-	(void)nanos;
-	return EPERM;
+	if(clock != CLOCK_REALTIME)
+		return EINVAL;
+	if(secs < 0 || nanos < 0 || nanos >= 1000000000
+			|| static_cast<uint64_t>(secs) > UINT64_MAX / 1000000000 - 1)
+		return EINVAL;
+	uint64_t ns = static_cast<uint64_t>(secs) * 1000000000 + static_cast<uint64_t>(nanos);
+	uint64_t status = radix_clock_set(RADIX_STARTUP_SLOT_CLOCK, ns);
+	if(!status)
+		return 0;
+	if(RADIX_STATUS_DOMAIN(status) == RADIX_KERNEL_ERROR_DOMAIN) {
+		switch(RADIX_STATUS_CODE(status)) {
+		case RADIX_KERNEL_EMPTY_SLOT:
+		case RADIX_KERNEL_NO_SUCH_SLOT:
+		case RADIX_KERNEL_WRONG_KIND:
+		case RADIX_KERNEL_MISSING_RIGHTS: return EPERM;
+		default: break;
+		}
+	}
+	return radix::to_errno(status);
 }
 
 int Sysdeps<Sleep>::operator()(time_t *secs, long *nanos) {

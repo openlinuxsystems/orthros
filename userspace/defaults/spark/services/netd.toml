@@ -21,7 +21,7 @@ memory = "16M"
 # What it holds beyond what every service reads (service.toml(5)): its
 # DHCP client's port 68 on each card, the servers' port 67 it sends to,
 # setting the cards up, its leases, and the folder of the resolv.conf it
-# writes, which /etc/resolv.conf leads to.
+# writes, with the DNS servers DHCP gave, which resolved(8) asks.
 [permissions]
 network.outbound = true
 network.listen = [68]

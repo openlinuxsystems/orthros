@@ -62,6 +62,9 @@ enum ObjectKind: u8 {
     /// The authority to give processes and directories the names they
     /// act for (radix-names(2)).
     names = 20;
+    /// The time of day, to set and slew, and the machine's real-time
+    /// clock (radix-clock(2)).
+    clock = 21;
 }
 
 /// What a capability lets its holder do.

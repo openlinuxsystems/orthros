@@ -11,7 +11,8 @@
 //! the stack's next timer is due, and otherwise sleeps. Others reach the
 //! stack through its lock, and wake the thread when they gave it work.
 //! The loopback interface, `lo`, is one too, on a link that hands back
-//! what is sent on it, at 127.0.0.1/8 and every card's own address: what
+//! what is sent on it, at 127.0.0.1/8, 127.0.0.53 where resolved(8)
+//! answers (ADR 0193), and every card's own address: what
 //! a program sends to the machine itself goes through it. Its stack is
 //! polled at once by whoever gave it work, as Linux's loopback runs in
 //! the sender's context: a packet a program sends to itself is received
@@ -88,6 +89,12 @@ const LOOPBACK_MTU: usize = 65_535;
 const LOOPBACK_RING: usize = Loopback::ring_for(2, LOOPBACK_MTU);
 /// The loopback interface's own address.
 pub const LOOPBACK: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
+/// The address of the DNS resolver every program asks, resolved(8)
+/// (ADR 0193), on the loopback interface as systemd-resolved's is.
+pub const RESOLVER: Ipv4Address = Ipv4Address::new(127, 0, 0, 53);
+/// The loopback interface's own addresses: 127.0.0.1/8 first, which it
+/// shows, and the resolver's.
+const LOOPBACK_OWN: [Ipv4Cidr; 2] = [Ipv4Cidr::new(LOOPBACK, 8), Ipv4Cidr::new(RESOLVER, 32)];
 /// How long an orphan has to finish closing before it is reset.
 pub const ORPHAN_NS: u64 = 60_000_000_000;
 
@@ -575,7 +582,7 @@ fn start_loopback() -> Result<(), &'static str> {
         sockets,
     };
     let mut stack = Stack::new(card, memory, radix_random::u64(), sched::now_ns());
-    stack.set_ipv4_addresses(&[Ipv4Cidr::new(LOOPBACK, 8)]);
+    stack.set_ipv4_addresses(&LOOPBACK_OWN);
     let mut name = TextBuf::<8>::new();
     let _ = name.write_str("lo");
     let interface = interface(name, 0, stack, slots).ok_or("out of memory")?;
@@ -583,7 +590,9 @@ fn start_loopback() -> Result<(), &'static str> {
         return Err("it was started already");
     }
     let lo = LO.get().ok_or("it is not there")?;
-    info!("Net: lo is the loopback interface, at {LOOPBACK}/8 and every card's address");
+    info!(
+        "Net: lo is the loopback interface, at {LOOPBACK}/8, {RESOLVER} and every card's address"
+    );
     run_thread(lo)
 }
 
@@ -621,15 +630,17 @@ fn run_thread(interface: &'static Interface) -> Result<(), &'static str> {
     }
 }
 
-/// The most addresses `lo` has: its own and the cards', as many as fit.
+/// The most addresses `lo` has: its own two and the cards', as many as
+/// fit.
 const LOOPBACK_ADDRESSES: usize = 8;
 
 /// Gives `lo` the cards' addresses with its own, after a card's changed:
 /// each card's first, then their others, while there is room.
 fn addresses_changed() {
     let Some(lo) = LO.get() else { return };
-    let mut addresses = [Ipv4Cidr::new(LOOPBACK, 8); LOOPBACK_ADDRESSES];
-    let mut count = 1;
+    let mut addresses = [LOOPBACK_OWN[0]; LOOPBACK_ADDRESSES];
+    addresses[..LOOPBACK_OWN.len()].copy_from_slice(&LOOPBACK_OWN);
+    let mut count = LOOPBACK_OWN.len();
     for first in [true, false] {
         for interface in interfaces().filter(|interface| !interface.is_loopback()) {
             let stack = interface.stack.lock();

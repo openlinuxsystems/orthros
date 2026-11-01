@@ -147,7 +147,7 @@ Init: /system/commands/spark is process 1
   into it, with the directories it is in: the
   defaults the system ships, such as nano's _nanorc_ and the service
   files, which an administrator edits in _/system/settings_. A symbolic
-  link stays one, as _resolv.conf_'s to *netd*(8)'s file and
+  link stays one, as _resolv.conf_'s to *resolved*(8)'s file and
   _ssl/certs/ca-certificates.crt_'s to the root certificates
   (*dukovo-certificates*(7)) do. A file
   already there is never replaced, so an update can add settings without

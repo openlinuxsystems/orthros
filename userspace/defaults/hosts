@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Names the C library finds before it asks DNS (hosts(5)): one address,
+# then its names, on each line.
+127.0.0.1	localhost
+::1	localhost ip6-localhost ip6-loopback

@@ -353,9 +353,30 @@ pub trait Timer {
 
     /// The time of day: nanoseconds since 1970-01-01 00:00:00 UTC, read
     /// from the machine's real-time clock at boot (which is taken to keep
-    /// UTC) and advanced with [`Timer::now_ns`]; `None` when the machine
-    /// has no clock the kernel can read.
+    /// UTC) and advanced with [`Timer::now_ns`], as set and slewed since
+    /// ([`clock::WallClock`]); `None` while the kernel knows none: the
+    /// machine has no clock it can read, and nothing has set it.
     fn wall_clock_ns() -> Option<u64>;
+
+    /// Sets the time of day to `ns` since 1970 (UTC) at once, ending any
+    /// slew.
+    fn set_wall_clock_ns(ns: u64);
+
+    /// Slews the time of day by `delta_ns` ([`clock::WallClock::slew`]),
+    /// in place of any slew under way: returns what was left of that one,
+    /// or `None` while the time of day is not known.
+    fn slew_wall_clock(delta_ns: i64) -> Option<i64>;
+
+    /// The slew still to come, in nanoseconds.
+    fn wall_clock_slew_ns() -> i64;
+
+    /// The real-time clock read now: seconds since 1970, if the machine
+    /// has one the kernel reaches and it holds a valid date.
+    fn rtc_seconds() -> Option<u64>;
+
+    /// Writes `seconds` since 1970 into the real-time clock, as UTC;
+    /// false if the machine has none the kernel reaches.
+    fn write_rtc(seconds: u64) -> bool;
 }
 
 /// One PCI segment's configuration space, as the firmware describes it

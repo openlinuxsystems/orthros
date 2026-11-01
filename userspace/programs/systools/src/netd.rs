@@ -11,9 +11,8 @@
 //! added stay. It keeps each lease in `/system/state/netd`, so that a
 //! card asks for the same address after a reboot and netd, started
 //! again, goes on with the lease the card has; and it writes the DNS
-//! servers into `/system/live/netd/resolv.conf`, which
-//! `/etc/resolv.conf` leads to unless an administrator made it a file of
-//! their own.
+//! servers into `/system/live/netd/resolv.conf`, which resolved(8) asks
+//! when its settings name none (ADR 0193).
 //!
 //! A DHCP card has a socket of its own on port 68, bound to it, which the
 //! kernel lets the sockets of other cards share. netd looks at the cards

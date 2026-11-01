@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # Networking
 
-This chapter describes networking in Dukovo as of Phase 12a.4 of the
+This chapter describes networking in Dukovo as of Phase 12a.5 of the
 roadmap. Phase 12 builds it up in steps: sockets for programs, TCP
 that matches Linux, `netd` with DHCP, DNS and `curl`, the time service,
 the Realtek, Intel and USB Ethernet cards, IPv6, the firewall and
@@ -109,6 +109,20 @@ WireGuard. This page grows with each.
   `/etc/ssl/certs/ca-certificates.crt` and `/etc/ssl/cert.pem` lead to
   ([ADR 0192](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0192-tls-is-rustls-on-ring-and-mozillas-roots-are-a-file-of-the-systems.md)).
   dukovo-certificates(7) says how to trust an authority of your own.
+- **`resolved` looks every name up**, at 127.0.0.53, which
+  `/etc/resolv.conf` names: it keeps answers as long as they say, asks
+  DHCP's servers or your own in turn, over DNS over TLS when they
+  answer it, and over DNS over HTTPS when you name an `https://` URL
+  ([ADR 0193](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0193-resolved-caches-every-programs-lookups-and-asks-over-tls-when-it-can.md)).
+- **`timed` keeps the clock right** over Network Time Security, which
+  authenticates every answer, and writes the real-time clock; the IANA
+  time zone database and English's locales come with it
+  ([ADR 0194](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0194-the-clock-is-a-capability-and-timed-sets-it-over-nts.md)).
+- **curl and libcurl**, 8.23, on rustls, with zlib and zstd
+  ([ADR 0195](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0195-curl-and-libcurl-use-rustls-through-rustls-ffi.md)).
+- **`netlog` sends the log to another computer** over UDP as it is
+  written, to debug a machine whose screen shows nothing
+  ([ADR 0196](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0196-netlog-sends-the-kernel-log-over-udp.md)).
 
 Native programs use the sockets through radix-network(2) and
 radix-file(2).
@@ -158,10 +172,10 @@ dns = 192.168.1.1
 
 `dhcp = no` in a card's section, with no address, has netd leave it
 alone. netd changes only the addresses it gave, so one added with ip(8)
-stays. `/etc/resolv.conf` is a link to the file netd writes,
-`/system/live/netd/resolv.conf`; to use DNS servers of your own, give a
-card `dns =` settings, or make `/etc/resolv.conf` a file in place of the
-link.
+stays. netd writes the DNS servers it was given to
+`/system/live/netd/resolv.conf`, which resolved asks (see [DNS](#dns)
+below); to use DNS servers of your own, give a card `dns =` settings, or
+name them in `/system/settings/resolved`.
 
 The `dhcp` boot test has netd set a card up by QEMU's DHCP server,
 restarts netd, and changes the settings to an address of their own and
@@ -226,6 +240,113 @@ server offers, which a socket bound to the bare card asks for:
 
 ```
 ./ob test --case interfaces
+```
+
+## DNS
+
+Every program looks names up through resolved(8): the C library's
+`getaddrinfo` finds a name in `/etc/hosts` first, which names localhost,
+and otherwise reads `/etc/resolv.conf`, which names 127.0.0.53, where
+resolved answers. resolved asks the servers DHCP gave unless
+`/system/settings/resolved` (resolved(5)) names others, and keeps each
+answer as long as it says. `resolvectl` shows what it asks and how, and
+looks names up through it:
+
+```
+$ resolvectl query dukovo.org
+dukovo.org.	300	IN	A	192.0.2.10
+-- 1 record in 31 ms
+$ resolvectl
+Listening on: 127.0.0.53:53 (UDP and TCP)
+DNS over TLS: opportunistic
+Cache: 112 of 4096 answers
+Queries: 431, 302 from the cache, 6 answered here, 0 failed
+Server: 10.0.2.3 (from DHCP): plain DNS over UDP; 123 answered, 0 failed
+```
+
+A server DHCP gave is asked over DNS over TLS first, on port 853, and
+over plain DNS if it does not answer there. To have every name go
+encrypted to servers you trust, name them with the name their
+certificate carries, or by an `https://` URL for DNS over HTTPS, and
+read the file again:
+
+```
+# cat >> /system/settings/resolved
+servers = 9.9.9.9#dns.quad9.net https://cloudflare-dns.com/dns-query#1.1.1.1
+# service resolved reload
+```
+
+`localhost` is answered on the machine, and `.local` names never leave
+it. `resolvectl flush-caches` empties the cache.
+
+## The time and the time zone
+
+timed(8) sets the clock from the network at boot and keeps it right,
+asking Cloudflare's, Netnod's and PTB's servers over Network Time
+Security, so that nobody on the way can change the time; it writes the
+real-time clock too. `timedatectl` shows the time, the zone and what
+timed did, and sets the zone:
+
+```
+$ timedatectl
+               Local time: Sun 2026-11-01 12:00:00 UTC
+           Universal time: Sun 2026-11-01 12:00:00 UTC
+                 RTC time: Sun 2026-11-01 12:00:00
+                Time zone: UTC (UTC, +0000)
+System clock synchronized: yes
+              NTP service: active
+          RTC in local TZ: no
+# timedatectl set-timezone Europe/Berlin
+$ date
+Sun Nov  1 13:00:00 CET 2026
+```
+
+`timedatectl list-timezones` lists the zones, and the `TZ` variable
+sets one for a single program, as `TZ=America/New_York date`. Other time
+servers, or none, go in `/system/settings/timed` (timed(5)). The
+locales are English's in each of its countries, `en_US.UTF-8`,
+`en_GB.UTF-8`, `en_IN.UTF-8` and the others, with their dates,
+numbers and sorting order; `LANG=en_GB.UTF-8` picks one.
+
+## Fetching with curl
+
+curl(1) and libcurl fetch over HTTP and HTTPS with the system's root
+certificates, as on Linux:
+
+```
+$ curl -sI https://dukovo.org
+HTTP/1.1 200 OK
+```
+
+A port links libcurl, a static library, from the sysroot, where
+`libcurl.pc` gives pkg-config(1) its flags. HTTP/2, HTTP/3 and
+international domain names are to come.
+
+## Sending the log to another computer
+
+A machine whose screen shows nothing can still send its log. On
+another computer on the network, listen:
+
+```
+nc -klu 6666
+```
+
+and boot the machine with `netlog=192.168.1.20` on its kernel command
+line (dukovo-boot(7)), or name the target in `/system/settings/netlog`
+(netlog(5)) to keep it. netlog(8) sends every record from the start of
+boot, each as one line with its priority and time, as a syslog server
+takes them. The log goes unencrypted, so send it only across a network
+you trust with it.
+
+## Trying the network services
+
+The `network-services` boot test runs, on `lo`, a DNS server, a DNS
+over TLS and an HTTPS server, a Network Time Security server and a
+log sink, and checks resolved, resolvectl, curl, timed, timedatectl,
+netlog, the time zones and the locales against them:
+
+```
+./ob test --case network-services
 ```
 
 ## Trying TLS

@@ -65,9 +65,9 @@ The packages `ob` needs on each distribution are:
 
 | Distribution | Install command |
 | --- | --- |
-| Debian, Ubuntu, Linux Mint | `sudo apt install build-essential rustup qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g dislocker libbde-utils udftools udfclient genisoimage scdoc mandoc clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake git`, then `cargo install mdbook --version 0.4.52 --locked` |
-| Fedora | `sudo dnf install gcc rustup qemu-system-x86 edk2-ovmf grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfsprogs dislocker udftools genisoimage scdoc mandoc mdbook clang compiler-rt lld llvm meson ninja-build cmake git patch` |
-| Arch Linux | `sudo pacman -S --needed base-devel rustup qemu-system-x86 edk2-ovmf grub libisoburn mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g udftools scdoc mandoc mdbook clang compiler-rt lld llvm meson ninja cmake git` |
+| Debian, Ubuntu, Linux Mint | `sudo apt install build-essential rustup qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g dislocker libbde-utils udftools udfclient genisoimage scdoc mandoc clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake pkgconf git`, then `cargo install mdbook --version 0.4.52 --locked` |
+| Fedora | `sudo dnf install gcc rustup qemu-system-x86 edk2-ovmf grub2-tools-extra grub2-pc-modules grub2-efi-x64-modules xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfsprogs dislocker udftools genisoimage scdoc mandoc mdbook clang compiler-rt lld llvm meson ninja-build cmake pkgconf-pkg-config git patch` |
+| Arch Linux | `sudo pacman -S --needed base-devel rustup qemu-system-x86 edk2-ovmf grub libisoburn mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g udftools scdoc mandoc mdbook clang compiler-rt lld llvm meson ninja cmake pkgconf git` |
 
 dislocker and libbde, which only the BitLocker tests use, are in the AUR
 on Arch Linux, and libbde is not packaged for Fedora: build it from
@@ -124,7 +124,7 @@ found and ends like this:
 [    0.351867]   node 0 DMA32  0x000000100000-0x00003fedbfff  1006 MiB managed,  1006 MiB free,   4 MiB reserve
 [    0.383220] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX, PKRU; 2696-byte areas
 [    0.419834] Lock checker: off (the lockdep flag turns it on)
-[    0.445393] Capabilities: ready; 21 object kinds, 13 rights, spaces of up to 65536 slots, derivations up to 64 deep
+[    0.445393] Capabilities: ready; 22 object kinds, 13 rights, spaces of up to 65536 slots, derivations up to 64 deep
 [    0.469304] User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)
 [    0.494239] Files: the root is a tmpfs; Spark mounts the rest
 ...

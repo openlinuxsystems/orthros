@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The DNS resolver every program asks: resolved(8) answers on 127.0.0.53,
+# which /etc/resolv.conf names, keeps answers for as long as they say,
+# and asks the servers /system/settings/resolved names (resolved(5)), or
+# else DHCP's, over DNS over TLS where they answer it (ADR 0193).
+#
+# service.toml(5) explains each setting. `service check resolved` checks
+# this file, and `service edit resolved` checks it as you save.
+
+service_version = 1
+description = "DNS resolver"
+program = "/system/commands/resolved"
+# Just after netd, before the services that use the network.
+order = 21
+# Started again whenever it ends: always, on-failure or never.
+restart = "always"
+
+[limits]
+memory = "32M"
+
+# What it holds beyond what every service reads (service.toml(5)): port
+# 53 of 127.0.0.53, the servers it asks, the resolv.conf netd writes from
+# DHCP, which names them, and the folder of the resolv.conf it writes,
+# which /etc/resolv.conf leads to.
+[permissions]
+network.outbound = true
+network.listen = [53]
+files.read = ["/system/live/netd"]
+files.read-write = ["/system/live/resolved"]

@@ -73,10 +73,11 @@ pub const ALWAYS: &[(&str, bool)] = &[
     ("/devices/urandom", false),
 ];
 
-/// What a bundle that connects out also gets: netd's folder, which holds
-/// the resolver's settings that `/system/settings/resolv.conf` leads to.
+/// What a bundle that connects out also gets: resolved's folder, which
+/// holds the resolver's settings that `/system/settings/resolv.conf`
+/// leads to (ADR 0193), and netd's, which an older one leads to.
 #[cfg_attr(not(target_os = "radix"), allow(dead_code))]
-pub const NETWORK: &str = "/system/live/netd";
+pub const NETWORK: &[&str] = &["/system/live/resolved", "/system/live/netd"];
 
 /// Where drives you plug in appear: `files.volumes`.
 #[cfg_attr(not(target_os = "radix"), allow(dead_code))]
@@ -755,8 +756,10 @@ mod sandbox {
                 attach(path, write)?;
             }
         }
-        if plan.given.outbound && std::fs::symlink_metadata(NETWORK).is_ok() {
-            attach(NETWORK, false)?;
+        for path in NETWORK.iter().filter(|_| plan.given.outbound) {
+            if std::fs::symlink_metadata(path).is_ok() {
+                attach(path, false)?;
+            }
         }
         // What the person gave it: all of their files, which hold its
         // data, or the folders given and its data; the drives, the

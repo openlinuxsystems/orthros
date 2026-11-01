@@ -27,6 +27,7 @@
 #include <wctype.h>
 #include <mlibc/calendar.hpp>
 #include <mlibc/locale.hpp>
+#include <mlibc/timezone.hpp>
 
 // musl's tests like t[d]-'0'<10U are meant to compare unsigned: a
 // character below '0' wraps around to a large number.
@@ -241,9 +242,9 @@ inline const char *fmt_1(char (*s)[100], size_t *l, int f, const struct tm *tm, 
 			*l = 0;
 			return "";
 		}
-		// The zone's name from the tm itself (musl checks it against
-		// its own time zone data).
-		fmt = tm->tm_zone ? tm->tm_zone : "";
+		// The zone's name, if it is still one of the time zone's
+		// (mlibc/timezone.hpp).
+		fmt = mlibc::musl_tz::tm_to_tzname(tm);
 		goto string;
 	case '%':
 		*l = 1;

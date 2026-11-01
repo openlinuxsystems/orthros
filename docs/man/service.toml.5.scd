@@ -167,6 +167,13 @@ wrong in plain words:
 		*ectool*(8), and *authd*(8)'s, so that an administrator's
 		commands inside *elevate*(8) may.
 
+	*admin.time* = *true* | *false*
+		Whether it may set the time of day, slew it and write the
+		machine's real-time clock, with the clock capability
+		(*radix-clock*(2), ADR 0194); *false* unless set. *timed*(8)'s
+		file sets it, and *authd*(8)'s, so that *date*(1)'s *--set*
+		works inside *elevate*(8).
+
 	Paths are absolute, without *.*, *..* or *//*; none is _/_ itself
 	or within another, none is within a place every service reads
 	(name that whole place instead), and none is or holds
@@ -189,8 +196,10 @@ at its own path, and what every service has without asking:
   _/devices/urandom_ read-only;
 - _/system/live/notify_, read-only, as notifications are always allowed
   (*notifyd*(8));
-- _/system/live/netd_, read-only, whose _resolv.conf_ _/etc/resolv.conf_
-  leads to, so that the C library finds the DNS servers (*netd*(8));
+- _/system/live/resolved_, read-only, whose _resolv.conf_
+  _/etc/resolv.conf_ leads to, so that the C library finds the DNS
+  resolver (*resolved*(8)), and _/system/live/netd_, which an
+  _/etc/resolv.conf_ from before resolved leads to (*netd*(8));
 - its program;
 - a _/tmp_ of its own, which is _/system/live/spark/tmp/name_ in the
   tree and is emptied at each boot;

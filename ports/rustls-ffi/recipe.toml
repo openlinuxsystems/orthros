@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# rustls-ffi (ADR 0195): rustls's C interface, which curl does TLS with,
+# on ring, as every program of Dukovo's that does TLS (ADR 0192): a
+# static library, librustls.a, its header rustls.h and its pkg-config
+# file, installed into the sysroot for the ports built on it. Only what
+# they link of it reaches the image.
+name = "rustls-ffi"
+version = "0.15.7"
+summary = "rustls's C interface, which curl does TLS with"
+license = "Apache-2.0 OR ISC OR MIT"
+homepage = "https://github.com/rustls/rustls-ffi"
+depends = ["rust-crates"]
+
+[source]
+git = "https://github.com/rustls/rustls-ffi.git"
+commit = "8f0eadf96fa21ade96d867c7ea06f8f5fddda856"
+tag = "v0.15.7"

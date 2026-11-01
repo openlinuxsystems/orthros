@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The names of well-known ports, for programs that ask for a service by
+# name (getservbyname(3), getaddrinfo(3)): the name, the port and its
+# protocol, then other names. The ports are IANA's registry's
+# (https://www.iana.org/assignments/service-names-port-numbers); Dukovo
+# lists those programs commonly name.
+echo		7/tcp
+echo		7/udp
+discard		9/tcp		sink null
+discard		9/udp		sink null
+daytime		13/tcp
+daytime		13/udp
+ftp-data	20/tcp
+ftp		21/tcp
+ssh		22/tcp
+telnet		23/tcp
+smtp		25/tcp		mail
+time		37/tcp
+time		37/udp
+whois		43/tcp		nicname
+domain		53/tcp
+domain		53/udp
+bootps		67/udp
+bootpc		68/udp
+tftp		69/udp
+gopher		70/tcp
+finger		79/tcp
+http		80/tcp		www
+kerberos	88/tcp		kerberos5 krb5
+kerberos	88/udp		kerberos5 krb5
+pop3		110/tcp		pop-3
+sunrpc		111/tcp		portmapper
+sunrpc		111/udp		portmapper
+auth		113/tcp		ident
+nntp		119/tcp		readnews
+ntp		123/udp
+netbios-ns	137/udp
+netbios-dgm	138/udp
+netbios-ssn	139/tcp
+imap		143/tcp		imap2
+snmp		161/udp
+snmptrap	162/udp		snmp-trap
+bgp		179/tcp
+irc		194/tcp
+ldap		389/tcp
+ldap		389/udp
+https		443/tcp
+https		443/udp
+microsoft-ds	445/tcp
+isakmp		500/udp
+syslog		514/udp
+printer		515/tcp		spooler
+rtsp		554/tcp
+dhcpv6-client	546/udp
+dhcpv6-server	547/udp
+submission	587/tcp
+ipp		631/tcp
+ldaps		636/tcp
+kerberos-adm	749/tcp
+domain-s	853/tcp
+domain-s	853/udp
+rsync		873/tcp
+ftps-data	989/tcp
+ftps		990/tcp
+telnets		992/tcp
+imaps		993/tcp
+pop3s		995/tcp
+socks		1080/tcp
+openvpn		1194/tcp
+openvpn		1194/udp
+l2tp		1701/udp
+pptp		1723/tcp
+radius		1812/udp
+radius-acct	1813/udp
+mqtt		1883/tcp
+ssdp		1900/udp
+nfs		2049/tcp
+nfs		2049/udp
+mysql		3306/tcp
+ms-wbt-server	3389/tcp
+svn		3690/tcp
+sieve		4190/tcp
+ntske		4460/tcp
+sip		5060/tcp
+sip		5060/udp
+sips		5061/tcp
+xmpp-client	5222/tcp
+xmpp-server	5269/tcp
+mdns		5353/udp
+llmnr		5355/tcp
+llmnr		5355/udp
+postgresql	5432/tcp	postgres
+amqp		5672/tcp
+rfb		5900/tcp	vnc-server
+x11		6000/tcp
+redis		6379/tcp
+sane-port	6566/tcp	sane saned
+http-alt	8080/tcp	webcache
+git		9418/tcp
+hkp		11371/tcp
