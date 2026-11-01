@@ -147,8 +147,8 @@ phase's places, so that two of them do not edit the same lines:
   second takes the next free one.
 - The roadmap: tick a phase's items in one pull request at the phase's
   end (or a sub-phase's), not in each pull request, since neighbouring
-  lines conflict. CREDITS.md: add rows at the end of your phase's section
-  only.
+  lines conflict. Credits: a file each in `credits/` (see its README), not a
+  row in CREDITS.md.
 - `Cargo.lock`: on a conflict, take main's and let Cargo update it, rather
   than merging its lines.
 - Merge main into a pull request only when GitHub says it conflicts, or its
@@ -215,8 +215,9 @@ require. When you add code, data or files from another project:
 - Name the source in the commit message: the project, the exact version or
   commit, and the URL, for example
   `Copied from Spleen 2.1.0, https://github.com/fcambus/spleen`.
-- Add the project to [CREDITS.md](CREDITS.md), with what we use it for and
-  its license. Do the same for a new crate, build tool or CI action, and
+- Credit the project, with what we use it for and its license, in a file
+  of its own in [credits/](credits/README.md), which `ob docs` puts in
+  [CREDITS.md](CREDITS.md)'s section. Do the same for a new crate, build tool or CI action, and
   for a project whose design you follow without using its code; also name
   that project in the design note or ADR that draws on it.
 - Send fixes we make to upstream code back upstream.
