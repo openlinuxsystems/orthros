@@ -511,11 +511,117 @@ static void features(void) {
 	free(s);
 }
 
+// git at the line editor (ADR 0288): the right prompt's account of the
+// repository, Tab's words for git with what each is, a mistyped command
+// fixed on the next line, Alt+E's warnings with this repository's
+// numbers and its account of the repository's state, the commit sheet,
+// the next versions for a tag, cdr, a note before a commit on a detached
+// HEAD, and a merge's conflict counted and its --continue offered.
+static void gitting(void) {
+	// The prompt waits for git status as long as the emulator needs,
+	// so that each prompt counts what is there now.
+	mkdir("/tmp/.config", 0755);
+	mkdir("/tmp/.config/nukesh", 0755);
+	FILE *settings = fopen("/tmp/.config/nukesh/settings.toml", "w");
+	CHECK(settings != NULL);
+	fputs("[git]\nstatus-wait = 60000\n", settings);
+	fclose(settings);
+	struct session *s = calloc(1, sizeof(*s));
+	CHECK(start(s, "xterm") == 0);
+	EXPECT(s, PROMPT);
+	send(s, "export GIT_AUTHOR_NAME=T GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=T "
+			"GIT_COMMITTER_EMAIL=t@t\r");
+	EXPECT(s, PROMPT);
+	send(s, "git init -q /tmp/gr && cd /tmp/gr && echo one >f && git add f && "
+			"git commit -q -m First\r");
+	EXPECT(s, "\xe2\x8e\x87 main \xe2\x9c\x93");
+	send(s, "echo two >f; echo new >g\r");
+	EXPECT(s, "~1 ?1");
+	// Tab: git's commands, then only the files that changed, with how.
+	send(s, "git swi\t");
+	EXPECT(s, "git switch ");
+	send(s, "\003");
+	EXPECT(s, PROMPT);
+	send(s, "git add \t");
+	EXPECT(s, "new file");
+	send(s, "\003");
+	EXPECT(s, PROMPT);
+	// A mistyped command: git asks, and the next line has it fixed.
+	send(s, "git psuh\r");
+	EXPECT(s, "[y/N]");
+	send(s, "n\r");
+	EXPECT(s, "git push");
+	// Alt+E: what a hard reset would throw away, and the repository's state.
+	send(s, "git reset --hard");
+	pump(s, 200);
+	send(s, "\033e");
+	EXPECT(s, "Throws away the changes in 1 file for good: f");
+	EXPECT(s, "Undo:");
+	// The line comes back under the account; Ctrl+C before it would
+	// reach the shell as a signal.
+	EXPECT(s, PROMPT);
+	pump(s, 200);
+	send(s, "\003");
+	EXPECT(s, PROMPT);
+	send(s, "true\r");
+	EXPECT(s, PROMPT);
+	pump(s, 200);
+	send(s, "\033e");
+	EXPECT(s, "You are on main, which is not pushed anywhere yet.");
+	EXPECT(s, "Next: git add <files>, then git commit");
+	// The commit sheet puts the command on the line.
+	send(s, "git add f g\r");
+	EXPECT(s, "git commit -m \"\"");
+	pump(s, 200);
+	send(s, "\033c");
+	EXPECT(s, "Commit to main \xc2\xb7 2 files staged");
+	send(s, "Add g");
+	pump(s, 200);
+	send(s, "\t");
+	EXPECT(s, "[feat]");
+	send(s, "\r");
+	EXPECT(s, "git commit -m 'feat: Add g'");
+	send(s, "\r");
+	EXPECT(s, PROMPT);
+	send(s, "git log -1 --format=subject-%s\r");
+	EXPECT(s, "subject-feat: Add g");
+	// The next versions for a tag; cdr from deep inside.
+	send(s, "git tag \t");
+	EXPECT(s, "a first version");
+	send(s, "\003");
+	EXPECT(s, PROMPT);
+	send(s, "mkdir -p sub/deep && cd sub/deep && cdr && echo at-$PWD\r");
+	EXPECT(s, "at-/tmp/gr\r");
+	// A commit on a detached HEAD is noted before it runs.
+	send(s, "git checkout -q --detach\r");
+	EXPECT(s, "(detached)");
+	send(s, "git commit -q --allow-empty -m Loose\r");
+	EXPECT(s, "HEAD is detached at");
+	EXPECT(s, PROMPT);
+	// A merge stops at a conflict: the prompt counts it, and once it is
+	// resolved and added the next line offers the --continue.
+	send(s, "git switch -q main 2>/dev/null; git switch -q -c side && echo side >f && "
+			"git commit -q -am Side && git switch -q main && echo main >f && "
+			"git commit -q -am Main && git merge -q side\r");
+	// After a failure the hint leaves no room for the right prompt.
+	EXPECT(s, PROMPT);
+	send(s, "true\r");
+	EXPECT(s, "MERGING");
+	EXPECT(s, "!1 conflict");
+	send(s, "echo both >f; git add f\r");
+	EXPECT(s, "git merge --continue");
+	send(s, "exit 4\r");
+	finish(s, 4);
+	free(s);
+	unlink("/tmp/.config/nukesh/settings.toml");
+}
+
 int main(void) {
 	check_start("shell");
 	RUN(scripts);
 	RUN(plain);
 	RUN(editor);
 	RUN(features);
+	RUN(gitting);
 	return check_end();
 }

@@ -30,7 +30,9 @@ theme = "default"
 # The prompt: name@host folder $, with a ✗ badge and the code after a
 # failed command, and an admin badge while you are root. On the right:
 # how long the last command took, once it took took-after seconds or
-# more, how many jobs you have, and the folder's git branch. The prompt
+# more, how many jobs you have, and in a git repository its branch and
+# state: an operation under way, how far ahead and behind, and the files
+# staged, changed, untracked and in conflict. The prompt
 # is drawn this way while PS1 is left at its default.
 [prompt]
 enabled = true
@@ -45,6 +47,14 @@ private = "bold bright-white on blue"
 took = "yellow"
 jobs = "cyan"
 branch = "magenta"
+git-state = "bold yellow"
+git-sync = "cyan"
+git-conflict = "bold red"
+git-staged = "green"
+git-changed = "yellow"
+git-untracked = "red"
+git-stash = "bright-black"
+git-clean = "green"
 took-after = 3
 
 # The command line as you type it. An unknown command is underlined as

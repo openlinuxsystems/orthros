@@ -326,6 +326,8 @@ pub struct Shell {
     pub last_dir: String,
     /// Abbreviations, `abbr` (ADR 0262).
     pub abbrs: IndexMap<String, String>,
+    /// The repositories whose old stashes this session has noted.
+    pub git_told: std::collections::HashSet<std::path::PathBuf>,
     /// The terminal the shell controls, with job control.
     pub tty: Option<i32>,
     pub shell_pgid: i32,
@@ -439,6 +441,7 @@ impl Shell {
             dirs_forward: Vec::new(),
             last_dir: String::new(),
             abbrs: IndexMap::new(),
+            git_told: std::collections::HashSet::new(),
             tty: None,
             shell_pgid: 0,
             tty_modes: None,

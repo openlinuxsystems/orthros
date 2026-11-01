@@ -229,6 +229,17 @@ impl Editor {
                 let shown = format!("\n{}", text).replace('\n', "\r\n");
                 let _ = sys::write_all(1, shown.as_bytes());
             }
+            KEY_COMMIT => {
+                // Alt+C: the commit sheet (ADR 0288), which puts the
+                // command it makes on the line.
+                let made = crate::sheet::run(&self.shell.borrow());
+                if let Some(command) = made {
+                    line.run_edit_commands(&[
+                        EditCommand::Clear,
+                        EditCommand::InsertString(command),
+                    ]);
+                }
+            }
             KEY_BACK | KEY_FORWARD if !buffer.is_empty() => {
                 let command = if key == KEY_BACK {
                     EditCommand::MoveWordLeft { select: false }
@@ -409,6 +420,7 @@ const KEY_BACK: &str = "nukesh:back";
 const KEY_FORWARD: &str = "nukesh:forward";
 const KEY_ELEVATE: &str = "nukesh:elevate";
 const KEY_EXPLAIN: &str = "nukesh:explain";
+const KEY_COMMIT: &str = "nukesh:commit";
 
 /// Whether reedline can run: input and output at a terminal that is not
 /// dumb.
@@ -443,7 +455,7 @@ fn now_millis() -> u64 {
 /// Whether the editor may use colour: not with `NO_COLOR` set, nor with
 /// colors.toml's `enabled = false`. The editor runs only at a terminal
 /// that is not dumb.
-fn colors(shell: &Shell) -> bool {
+pub fn colors(shell: &Shell) -> bool {
     shell.get("NO_COLOR").is_none_or(|v| v.is_empty())
         && shell.colors.enabled
         && !shell.settings.screen_reader
@@ -546,6 +558,7 @@ fn edit_mode(vi: bool) -> Box<dyn reedline::EditMode> {
         keys.add_binding(KeyModifiers::ALT, KeyCode::Right, host(KEY_FORWARD));
         keys.add_binding(KeyModifiers::ALT, KeyCode::Char('s'), host(KEY_ELEVATE));
         keys.add_binding(KeyModifiers::ALT, KeyCode::Char('e'), host(KEY_EXPLAIN));
+        keys.add_binding(KeyModifiers::ALT, KeyCode::Char('c'), host(KEY_COMMIT));
         keys.add_binding(
             KeyModifiers::NONE,
             KeyCode::Tab,

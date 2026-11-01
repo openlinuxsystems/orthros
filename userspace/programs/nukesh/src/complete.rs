@@ -10,6 +10,7 @@
 //! completion file, if it has one (`files`).
 
 mod files;
+mod git;
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write;
@@ -946,6 +947,12 @@ impl Shell {
                 }
                 results = Some((generated, options));
                 break;
+            }
+        }
+        if results.is_none() && !word_is_command && words[0].1.rsplit('/').next() == Some("git") {
+            let all: Vec<String> = words.iter().map(|(_, w)| w.clone()).collect();
+            if let Some(candidates) = self.complete_git(&all, index) {
+                return (start, candidates);
             }
         }
         if results.is_none() && !word_is_command {

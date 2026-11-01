@@ -15,9 +15,11 @@
 [files]
 show-hidden = false
 
-# The prompt's right side shows the folder's git branch; with git-dirty,
-# a * after it when there are changes not committed (git status, given
-# 100 ms at most).
+# In a git repository, the prompt's right side shows the branch (or the
+# tag or commit when HEAD is detached) and an operation under way; with
+# git-dirty, also how far ahead and behind its upstream it is and the
+# files staged, changed, untracked and in conflict, from git status run
+# in the background, which never holds the prompt up.
 [prompt]
 git-dirty = true
 
@@ -66,3 +68,16 @@ offer-install = true
 [folders]
 project-files = true
 resume = true
+
+# git: abbreviations turns on oh-my-zsh's git abbreviations (gst grows
+# into git status, gco into git checkout, and the rest: `abbr` lists
+# them). guardrails notes, before it runs, a commit on a detached HEAD
+# or straight to the main branch. reminders notes stashes a month old
+# when you enter a repository.
+[git]
+abbreviations = false
+guardrails = true
+reminders = true
+# How many milliseconds the prompt waits for git status before it shows
+# the last count it found in this repository.
+status-wait = 500

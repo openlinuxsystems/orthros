@@ -221,12 +221,24 @@ impl Records {
     pub fn search(&self, typed: &str, folder: &str, now: i64, most: usize) -> Vec<&Record> {
         let mut seen = std::collections::HashSet::new();
         let mut found: Vec<(i64, usize, &Record)> = Vec::new();
+        // Commands run anywhere in this folder's git repository come next
+        // after those run in the folder itself (ADR 0288).
+        let repo = crate::git::find(std::path::Path::new(folder)).map(|r| r.work);
         for (age, record) in self.all.iter().rev().enumerate() {
             if !seen.insert(record.command.as_str()) {
                 continue;
             }
             let Some(score) = fuzzy(typed, &record.command) else { continue };
-            let here = if record.folder == folder { 40 } else { 0 };
+            let here = if record.folder == folder {
+                40
+            } else if repo
+                .as_ref()
+                .is_some_and(|r| std::path::Path::new(&record.folder).starts_with(r))
+            {
+                25
+            } else {
+                0
+            };
             let hours = (now - record.time).max(0) / 3600;
             let fresh = 30 - hours.min(24 * 30) / 24;
             found.push((score + here + fresh, age, record));

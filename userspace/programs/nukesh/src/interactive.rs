@@ -120,6 +120,7 @@ pub fn run(shell: Shell) -> i32 {
         }
         crate::folders::before_prompt(&mut shell.borrow_mut());
         crate::project::before_prompt(&mut shell.borrow_mut());
+        git_reminder(&mut shell.borrow_mut());
         let input = editor.read_command();
         let mut shell = shell.borrow_mut();
         match input {
@@ -135,6 +136,11 @@ pub fn run(shell: Shell) -> i32 {
                 let marks = shell.settings.marks && unsafe { libc::isatty(1) } == 1;
                 if marks {
                     let _ = sys::write_all(1, b"\x1b]133;C\x1b\\");
+                }
+                if shell.settings.git_guardrails
+                    && let Some(note) = crate::git::guardrail(std::path::Path::new(&folder), &text)
+                {
+                    note_line(&shell, &note);
                 }
                 let result = run_line(&mut shell, &text, line_number);
                 line_number += lines;
@@ -182,6 +188,32 @@ pub fn run(shell: Shell) -> i32 {
                 return exit(&mut shell, status);
             }
         }
+    }
+}
+
+/// A note of the shell's on standard error, faded where colours are on.
+fn note_line(shell: &Shell, note: &str) {
+    let faded = if crate::editor::colors(shell) {
+        shell.colors.style("line.hint").paint(note)
+    } else {
+        note.to_string()
+    };
+    let _ = sys::write_all(2, &text::encode(&format!("{faded}\n")));
+}
+
+/// On entering a repository with stashes a month old, a note, once a
+/// session (ADR 0288).
+fn git_reminder(shell: &mut Shell) {
+    if !shell.settings.git_reminders || shell.settings.screen_reader {
+        return;
+    }
+    let here = std::path::PathBuf::from(shell.get("PWD").unwrap_or_default());
+    let now = sys::now().0;
+    let mut told = std::mem::take(&mut shell.git_told);
+    let note = crate::git::reminder(&here, now, &mut told);
+    shell.git_told = told;
+    if let Some(note) = note {
+        note_line(shell, &note);
     }
 }
 
