@@ -255,6 +255,10 @@ const ISO9660: u8 = 11;
 /// which is FAT12.
 const UDF: u8 = 13;
 
+/// [`Disk::fat`] for an NTFS disk `mkntfs` makes, holding nothing, as
+/// the power-cut test's (ADR 0238).
+const NTFS_EMPTY: u8 = 14;
+
 /// The partition table of a test disk with a filesystem.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Table {
@@ -318,7 +322,7 @@ impl Disk {
 
     /// Whether it holds NTFS.
     fn ntfs(&self) -> bool {
-        matches!(self.fat, NTFS | NTFS_3G)
+        matches!(self.fat, NTFS | NTFS_3G | NTFS_EMPTY)
     }
 
     /// Whether it is a disc image, ISO 9660 or UDF.
@@ -3379,7 +3383,8 @@ fn make_ntfs(ctx: &Ctx, disk: &Disk, path: &Path) -> Result<(), String> {
         mkntfs.args(["-q", "-F", "-Q", "-L", disk.label, "-s", &disk.sector.to_string()]);
         host_tool(mkntfs.args(["-c", &disk.cluster.to_string()]).arg(path))?;
         let source = path.with_extension("file");
-        for (name, made) in ntfs_files() {
+        let files = if disk.fat == NTFS_EMPTY { Vec::new() } else { ntfs_files() };
+        for (name, made) in files {
             std::fs::write(&source, made_bytes(&made))
                 .map_err(|err| format!("writing {}: {err}", source.display()))?;
             // ntfscp takes names as the locale has them.

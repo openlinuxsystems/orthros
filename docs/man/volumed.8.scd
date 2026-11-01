@@ -73,5 +73,5 @@ service, volumed does not exit.
 
 # SEE ALSO
 
-*eject*(1), *spark*(8), *findmnt*(8), *blkid*(8), *radix-files*(7),
-*systools*(1)
+*eject*(1), *remount*(8), *spark*(8), *findmnt*(8), *blkid*(8),
+*radix-files*(7), *systools*(1)

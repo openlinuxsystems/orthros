@@ -17,10 +17,16 @@
 //! its own volume, so that the links Windows makes on its own drive
 //! (`Documents and Settings` to `C:\Users`) lead where they did; the link
 //! becomes a relative one to the volume's root ([`Target::Absolute`]).
+//!
+//! A link Radix makes is a Windows symbolic link when Windows can follow
+//! it: a relative path of names Windows takes ([`windows_link`]). Any
+//! other is one as WSL makes them, which keeps its POSIX path as it is
+//! ([`wsl_link`]); Windows shows it, but does not follow it.
 
 use radix_vfs::mem::{self, KVec};
 use radix_vfs::{Error, Result};
 
+use crate::edit::{put_u16, put_u32};
 use crate::record::{u16_at, u32_at};
 
 /// The reparse tags Radix knows.
@@ -37,6 +43,56 @@ pub mod tag {
 
 /// A link's flag: its path is relative to the link's directory.
 const RELATIVE: u32 = 1;
+
+/// The most bytes a reparse point's data holds, as Windows allows.
+const MAX_DATA: usize = (16 << 10) - 8;
+
+/// The value of a Windows symbolic link to `target`, relative to the
+/// link's directory, if Windows can follow it: a relative path of `.`,
+/// `..` and names Windows takes. Its substitute and print names are both
+/// the path, with `\` between its names, as `mklink` makes them.
+pub fn windows_link(target: &str) -> Result<Option<KVec<u8>>> {
+    let windows = |part: &str| {
+        matches!(part, "." | "..") || !part.is_empty() && crate::names::check_windows(part).is_ok()
+    };
+    if target.starts_with('/') || !target.split('/').all(windows) {
+        return Ok(None);
+    }
+    let path = 2 * target.encode_utf16().count();
+    let len = 12 + 2 * path;
+    if len > MAX_DATA {
+        return Ok(None);
+    }
+    let mut v = crate::fs::zeroed(8 + len)?;
+    put_u32(&mut v, 0, tag::SYMLINK);
+    put_u16(&mut v, 4, len as u16);
+    put_u16(&mut v, 8, 0);
+    put_u16(&mut v, 10, path as u16);
+    put_u16(&mut v, 12, path as u16);
+    put_u16(&mut v, 14, path as u16);
+    put_u32(&mut v, 16, RELATIVE);
+    for (i, unit) in target.encode_utf16().enumerate() {
+        let unit = if unit == u16::from(b'/') { u16::from(b'\\') } else { unit };
+        put_u16(&mut v, 20 + 2 * i, unit);
+        put_u16(&mut v, 20 + path + 2 * i, unit);
+    }
+    Ok(Some(v))
+}
+
+/// The value of a link to `target` as WSL makes it: a version, 2, and
+/// the path, UTF-8.
+pub fn wsl_link(target: &[u8]) -> Result<KVec<u8>> {
+    let len = 4 + target.len();
+    if len > MAX_DATA {
+        return Err(Error::NameTooLong);
+    }
+    let mut v = crate::fs::zeroed(8 + len)?;
+    put_u32(&mut v, 0, tag::LX_SYMLINK);
+    put_u16(&mut v, 4, len as u16);
+    put_u32(&mut v, 8, 2);
+    v[12..].copy_from_slice(target);
+    Ok(v)
+}
 
 /// The start of an Interix link's data.
 pub const INTERIX_LINK: &[u8; 8] = b"IntxLNK\x01";

@@ -41,6 +41,7 @@
 
 use alloc::sync::Weak;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use radix_block::cache::BlockCache;
 use radix_block::mem::CachePage;
@@ -52,6 +53,7 @@ use radix_vfs::{Error, FileSystem, FsInfo, FsKind, Kind, Node, NodeRef, Result};
 use crate::boot::Geometry;
 use crate::edit::{self, Sizes, fix_down, put_u16};
 use crate::index::{FileName, NAME_MAX, namespace};
+use crate::list::Extent;
 use crate::node::NtfsNode;
 use crate::record::{
     self, Attr, Record, attr_flags, fix_up, kind, list_entries, name_is, record_of, u16_at, u32_at,
@@ -133,6 +135,22 @@ pub(crate) struct Stream {
 }
 
 impl Stream {
+    /// Whether its data is compressed or sparse: its clusters are a unit's
+    /// at a time, and it may have holes.
+    pub(crate) fn packed(&self) -> bool {
+        self.flags & (record::attr_flags::COMPRESSED | record::attr_flags::SPARSE) != 0
+    }
+
+    /// Whether its data is compressed.
+    pub(crate) fn compressed(&self) -> bool {
+        self.flags & record::attr_flags::COMPRESSED != 0
+    }
+
+    /// The clusters of its compression unit; 1 for data that has none.
+    pub(crate) fn grain(&self) -> u64 {
+        if self.packed() { 1 << self.unit } else { 1 }
+    }
+
     /// An empty one.
     pub(crate) fn new() -> Stream {
         Stream { runs: Runs::new(), size: 0, initialized: 0, flags: 0, unit: 0 }
@@ -191,7 +209,8 @@ pub(crate) struct Loaded {
     pub(crate) parent: u64,
     /// Its data: the unnamed `$DATA`.
     pub(crate) data: Option<Value>,
-    /// Its directory index: `$I30`'s root, blocks and bitmap.
+    /// Its directory index: `$I30`'s root, blocks and bitmap; or
+    /// `$Reparse`'s `$R`, a view index.
     pub(crate) root: Option<KVec<u8>>,
     pub(crate) blocks: Option<Value>,
     pub(crate) bitmap: Option<Value>,
@@ -201,9 +220,15 @@ pub(crate) struct Loaded {
     pub(crate) version: Option<(u8, u8, u16)>,
     /// Its unnamed `$BITMAP`: the master file table's, of its records.
     pub(crate) own_bitmap: Option<Value>,
-    /// Whether its attributes are in more than one record, which Radix
-    /// does not change yet.
+    /// Whether its base record has an attribute list.
+    pub(crate) list: bool,
+    /// The pieces of its data in its extension records, in order.
+    pub(crate) extents: Option<KVec<Extent>>,
+    /// Whether attributes other than its data's are in its extension
+    /// records, or it is the system's: Radix does not change it.
     pub(crate) listed: bool,
+    /// Whether its index is `$R`, of reparse points, not of names.
+    pub(crate) view: bool,
 }
 
 /// Adds the attribute `attr` to the value in `slot`: a resident one, or a
@@ -265,14 +290,17 @@ fn take(loaded: &mut Loaded, attr: &Attr<'_>, clusters: u64) -> Result<()> {
             }
         }
         kind::DATA if attr.unnamed() => piece(&mut loaded.data, attr, clusters)?,
-        kind::INDEX_ROOT if named("$I30") => {
+        kind::INDEX_ROOT if named("$I30") || named("$R") => {
             if attr.non_resident() || loaded.root.is_some() {
                 return Err(Error::Corrupt);
             }
+            loaded.view = named("$R");
             loaded.root = Some(mem::copy(attr.value())?);
         }
-        kind::INDEX_ALLOCATION if named("$I30") => piece(&mut loaded.blocks, attr, clusters)?,
-        kind::BITMAP if named("$I30") => piece(&mut loaded.bitmap, attr, clusters)?,
+        kind::INDEX_ALLOCATION if named("$I30") || named("$R") => {
+            piece(&mut loaded.blocks, attr, clusters)?;
+        }
+        kind::BITMAP if named("$I30") || named("$R") => piece(&mut loaded.bitmap, attr, clusters)?,
         kind::BITMAP if attr.unnamed() => piece(&mut loaded.own_bitmap, attr, clusters)?,
         kind::REPARSE_POINT => piece(&mut loaded.reparse, attr, clusters)?,
         kind::VOLUME_NAME => loaded.label = Some(mem::copy(attr.value())?),
@@ -332,20 +360,36 @@ impl Volume {
     /// `$MFTMirr` too if it keeps that one: in the cache, or at once if
     /// `through`.
     pub(crate) fn write_record(&self, number: u64, buf: &[u8], through: bool) -> Result<()> {
+        self.write_record_in(number, buf, through, false)
+    }
+
+    /// As [`Volume::write_record`], `$MFTMirr`'s copy first if
+    /// `mirror_first`: written at once, the copy written last is the one
+    /// a power cut in between leaves as it was.
+    pub(crate) fn write_record_in(
+        &self,
+        number: u64,
+        buf: &[u8],
+        through: bool,
+        mirror_first: bool,
+    ) -> Result<()> {
         let rs = u64::from(self.geo.record_size);
         let mut out = mem::copy(buf)?;
         fix_down(&mut out)?;
-        {
-            let mft = self.mft.lock();
-            if number >= mft.records {
-                return Err(Error::Corrupt);
-            }
-            write_runs(&self.cache, &self.geo, &mft.runs, number * rs, &out, through)?;
+        let records = self.mft.lock().records;
+        if number >= records {
+            return Err(Error::Corrupt);
         }
-        if let Some(mirror) = &self.mirror
-            && number < mirror.records
-        {
-            write_runs(&self.cache, &self.geo, &mirror.runs, number * rs, &out, through)?;
+        let mirrored = self.mirror.as_ref().filter(|mirror| number < mirror.records);
+        for mirror in [mirror_first, !mirror_first] {
+            if mirror {
+                if let Some(copy) = mirrored {
+                    write_runs(&self.cache, &self.geo, &copy.runs, number * rs, &out, through)?;
+                }
+            } else {
+                let mft = self.mft.lock();
+                write_runs(&self.cache, &self.geo, &mft.runs, number * rs, &out, through)?;
+            }
         }
         Ok(())
     }
@@ -379,7 +423,8 @@ impl Volume {
             }
             return Ok(loaded);
         };
-        loaded.listed = true;
+        loaded.list = true;
+        loaded.listed = number < records::FIRST_USER;
         // Every attribute is in the list, the base record's too, in order:
         // a non-resident one's pieces by their first VCN.
         let mut other = zeroed(rs)?;
@@ -390,6 +435,16 @@ impl Volume {
             let bytes: &[u8] = if at == number {
                 &base
             } else {
+                if entry.kind() == kind::DATA && entry.name().is_empty() {
+                    let extent = Extent {
+                        reference: entry.reference(),
+                        lowest: entry.lowest_vcn(),
+                        id: entry.id(),
+                    };
+                    mem::push(loaded.extents.get_or_insert_with(mem::vec), extent)?;
+                } else {
+                    loaded.listed = true;
+                }
                 if other_number != Some(at) {
                     self.read_record(at, &mut other)?;
                     let rec = Record::new(&other)?;
@@ -582,6 +637,9 @@ pub(crate) struct Inner {
     log: Option<Stream>,
     /// The volume's flags as the mount found them.
     flags: u16,
+    /// Whether the volume stays marked dirty, for Windows to check at
+    /// its next start: one written although Windows hibernated with it.
+    keep_dirty: AtomicBool,
 }
 
 impl Inner {
@@ -782,12 +840,20 @@ impl Inner {
                 stream.initialized = bitmap_bytes;
             }
             let clusters = runs.clusters();
-            let sizes =
-                Sizes { allocated: clusters * cs, size: target * rs, initialized: target * rs };
+            let sizes = Sizes {
+                allocated: clusters * cs,
+                size: target * rs,
+                initialized: target * rs,
+                ..Sizes::default()
+            };
             replace_stream(&mut first, kind::DATA, &runs, clusters, sizes)?;
             let bits = stream.runs.clusters();
-            let sizes =
-                Sizes { allocated: bits * cs, size: stream.size, initialized: stream.initialized };
+            let sizes = Sizes {
+                allocated: bits * cs,
+                size: stream.size,
+                initialized: stream.initialized,
+                ..Sizes::default()
+            };
             replace_stream(&mut first, kind::BITMAP, &stream.runs, bits, sizes)?;
             Ok(first)
         })();
@@ -875,7 +941,9 @@ impl Inner {
         Ok(device.flush()?)
     }
 
-    /// Writes the volume flags `flags` to `$Volume`, at once.
+    /// Writes the volume flags `flags` to `$Volume`, at once. Marked
+    /// dirty, `$MFT`'s copy goes first, and marked clean, `$MFTMirr`'s:
+    /// a power cut between the two leaves dirty the copy that is read.
     fn write_flags(&self, flags: u16) -> Result<()> {
         let mut buf = zeroed(self.vol.geo.record_size as usize)?;
         self.vol.read_record(records::VOLUME, &mut buf)?;
@@ -885,7 +953,8 @@ impl Inner {
             return Err(Error::Corrupt);
         }
         put_u16(value, 10, flags);
-        self.vol.write_record(records::VOLUME, &buf, true)
+        let clean = flags & volume_flags::DIRTY == 0;
+        self.vol.write_record_in(records::VOLUME, &buf, true, clean)
     }
 
     /// Writes every change to the disk: the nodes' data and records, then
@@ -916,7 +985,11 @@ impl Inner {
         // a clean cache and no pinned node mean the disk has it all.
         let _ns = self.ns.lock();
         let mut space = self.space.lock();
-        if space.marked && !self.vol.cache.is_dirty() && self.dirty.lock().is_empty() {
+        if space.marked
+            && !self.keep_dirty.load(Ordering::Relaxed)
+            && !self.vol.cache.is_dirty()
+            && self.dirty.lock().is_empty()
+        {
             self.write_flags(self.flags & !volume_flags::DIRTY)?;
             space.marked = false;
         }
@@ -954,6 +1027,8 @@ pub(crate) fn replace_named(
         Some(at) => (u16_at(buf, at + 0x0e), u16_at(buf, at + 0x0c), u32_at(buf, at + 4) as usize),
         None => (u16_at(buf, 0x28), 0, 0),
     };
+    let either = attr_flags::COMPRESSED | attr_flags::SPARSE;
+    let flags = flags & !either | sizes.packed & either;
     let highest = clusters.wrapping_sub(1);
     let attr = edit::non_resident(kind, name, instance, flags, 0, highest, &packed, sizes)?;
     if edit::room(buf) + old_len < attr.len() {
@@ -981,8 +1056,25 @@ pub struct NtfsFs {
     flags: u16,
     /// Whether Windows hibernated with it mounted.
     hibernated: bool,
+    /// Whether the mount threw Windows' hibernation away, to write it.
+    discarded: bool,
     /// Why a writable mount of it would be refused, mounted read-only.
     kept: Option<&'static str>,
+}
+
+/// How an NTFS is mounted ([`NtfsFs::mount_with`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Options {
+    /// Refusing every change.
+    pub read_only: bool,
+    /// Written although Windows hibernated with it, or shut down with
+    /// Fast Startup, as its owner asked, as ntfs-3g's `remove_hiberfile`
+    /// does: the hibernation is thrown away, and with it what Windows
+    /// held in memory, its programs and what it had not written of the
+    /// volume. Windows then starts afresh, and checks the volume, which
+    /// stays marked dirty (ADR 0238). It changes nothing of a volume
+    /// Windows did not hibernate with.
+    pub discard_hibernation: bool,
 }
 
 impl NtfsFs {
@@ -994,24 +1086,40 @@ impl NtfsFs {
     /// write does (ADR 0130), and Radix's mount makes it read-only (ADRs
     /// 0236 and 0237).
     pub fn mount(device: DeviceRef, read_only: bool) -> Result<KArc<NtfsFs>> {
-        let (inner, About { label, version, flags }, kept) = open(device, read_only)?;
+        NtfsFs::mount_with(device, Options { read_only, ..Options::default() })
+    }
+
+    /// [`NtfsFs::mount`], as `options` say.
+    pub fn mount_with(device: DeviceRef, options: Options) -> Result<KArc<NtfsFs>> {
+        let read_only = options.read_only;
+        let forced = options.discard_hibernation && !read_only;
+        let Opened { inner, about, kept, unclean } = open(device, read_only, forced)?;
+        let About { label, version, flags } = about;
         let root = Inner::node_for(&inner, records::ROOT)?;
         if root.kind != Kind::Directory {
             return Err(Error::Corrupt);
         }
         let hibernated = hibernated(&root);
-        if hibernated && !read_only {
+        // Only a hibernation is written past, and what it left.
+        if hibernated && !read_only && !forced || forced && !hibernated && unclean {
             return Err(Error::NotSupported);
+        }
+        let discarded = forced && hibernated;
+        if discarded {
+            inner.keep_dirty.store(true, Ordering::Relaxed);
+            discard_hibernation(&root)?;
+            inner.sync_all()?;
         }
         let kept = if hibernated {
             Some(
                 "Windows hibernated with it, or shut down with Fast Startup; shut Windows down \
-                 fully (Shift with Shut down) to write it",
+                 fully (Shift with Shut down) to write it, or remount it with \
+                 --discard-hibernation to write it anyway, losing what Windows left open",
             )
         } else {
             kept
         };
-        Ok(mem::arc(NtfsFs { inner, root, label, version, flags, hibernated, kept })?)
+        Ok(mem::arc(NtfsFs { inner, root, label, version, flags, hibernated, discarded, kept })?)
     }
 
     /// Where the volume's parts are.
@@ -1035,6 +1143,12 @@ impl NtfsFs {
     /// another system wrote.
     pub fn hibernated(&self) -> bool {
         self.hibernated
+    }
+
+    /// Whether the mount threw Windows' hibernation away, to write it
+    /// ([`Options::discard_hibernation`]).
+    pub fn discarded_hibernation(&self) -> bool {
+        self.discarded
     }
 
     /// Why a writable mount of it would be refused, if it would, for a
@@ -1069,12 +1183,15 @@ struct Writable {
     mirror: Mirror,
     log: Stream,
     records: Stream,
+    /// Whether Windows left it dirty, or changes in its log, which a mount
+    /// that discards its hibernation writes over.
+    unclean: bool,
 }
 
 /// The volume on `device`, but for its root: its geometry, master file
 /// table and up-case table, and what `$Volume` says of it ([`NtfsFs::mount`]).
 #[inline(never)]
-fn open(device: DeviceRef, read_only: bool) -> Result<(KArc<Inner>, About, Option<&'static str>)> {
+fn open(device: DeviceRef, read_only: bool, forced: bool) -> Result<Opened> {
     let info = device.info();
     let cache = BlockCache::new(device);
     let geo = read_geometry(&cache, info.sectors * radix_block::SECTOR)?;
@@ -1088,22 +1205,35 @@ fn open(device: DeviceRef, read_only: bool) -> Result<(KArc<Inner>, About, Optio
     let upcase = load_upcase(&vol)?;
     let about = about(&vol)?;
     let bitmap = load_bitmap(&vol)?;
-    let (writable, kept) = write_state(&vol, &about, growable, read_only)?;
+    let (writable, kept) = write_state(&vol, &about, growable, read_only, forced)?;
+    let unclean = writable.as_ref().is_some_and(|w| w.unclean);
     let inner = assemble(vol, read_only, upcase, bitmap, writable, about.flags)?;
-    Ok((inner, about, kept))
+    Ok(Opened { inner, about, kept, unclean })
 }
 
-/// What a mount of `vol` writes with ([`writable`]), if it is not
-/// `read_only`; mounted read-only, why it could not be written instead.
+/// What [`open`] found.
+struct Opened {
+    inner: KArc<Inner>,
+    about: About,
+    /// Why it could not be written, mounted read-only.
+    kept: Option<&'static str>,
+    /// Whether it was written past a dirty flag or a log to replay.
+    unclean: bool,
+}
+
+/// What a mount of `vol` writes with ([`writable`]; `forced` past a
+/// dirty flag and a log to replay), if it is not `read_only`; mounted
+/// read-only, why it could not be written instead.
 #[inline(never)]
 fn write_state(
     vol: &Volume,
     about: &About,
     growable: bool,
     read_only: bool,
+    forced: bool,
 ) -> Result<(Option<Writable>, Option<&'static str>)> {
     if !read_only {
-        return Ok((Some(writable(vol, about, growable)?), None));
+        return Ok((Some(writable(vol, about, growable, forced)?), None));
     }
     let kept = if about.version.0 != 3 {
         Some("it is of an NTFS before 3.0, which Dukovo only reads")
@@ -1111,7 +1241,7 @@ fn write_state(
         Some("it is marked to be checked; let Windows check it to write it")
     } else if !growable {
         Some("Dukovo cannot grow its file table yet")
-    } else if writable(vol, about, growable).is_err() {
+    } else if writable(vol, about, growable, false).is_err() {
         Some(
             "Windows left changes in its journal to replay; start Windows and shut it down \
              fully to write it",
@@ -1135,7 +1265,7 @@ fn assemble(
 ) -> Result<KArc<Inner>> {
     let geo = vol.geo;
     let (log, records) = match writable {
-        Some(Writable { mirror, log, records }) => {
+        Some(Writable { mirror, log, records, .. }) => {
             vol.mirror = Some(mirror);
             (Some(log), Some(records))
         }
@@ -1155,6 +1285,7 @@ fn assemble(
         dirty: Mutex::new(mem::vec()),
         log,
         flags,
+        keep_dirty: AtomicBool::new(false),
     })?)
 }
 
@@ -1188,8 +1319,9 @@ fn load_bitmap(vol: &Volume) -> Result<Runs> {
 /// What a writable mount of `vol` needs ([`Writable`]); `growable` says
 /// whether Radix can grow its master file table.
 #[inline(never)]
-fn writable(vol: &Volume, about: &About, growable: bool) -> Result<Writable> {
-    if about.version.0 != 3 || about.flags & volume_flags::DIRTY != 0 || !growable {
+fn writable(vol: &Volume, about: &About, growable: bool, forced: bool) -> Result<Writable> {
+    let dirty = about.flags & volume_flags::DIRTY != 0;
+    if about.version.0 != 3 || dirty && !forced || !growable {
         return Err(Error::NotSupported);
     }
     let rs = u64::from(vol.geo.record_size);
@@ -1201,14 +1333,16 @@ fn writable(vol: &Volume, about: &About, growable: bool) -> Result<Writable> {
         return Err(Error::NotSupported);
     }
     let log = plain_stream(vol, records::LOG, false)?;
-    if !log_clean(vol, &log)? {
+    let clean = log_clean(vol, &log)?;
+    if !clean && !forced {
         return Err(Error::NotSupported);
     }
     let records = plain_stream(vol, records::MFT, true)?;
     if records.size * 8 < vol.records() {
         return Err(Error::Corrupt);
     }
-    Ok(Writable { mirror: Mirror { runs: mirror.runs, records: count }, log, records })
+    let unclean = dirty || !clean;
+    Ok(Writable { mirror: Mirror { runs: mirror.runs, records: count }, log, records, unclean })
 }
 
 /// Record `number`'s data, or its own `$BITMAP` if `bitmap`, if it is a
@@ -1294,6 +1428,18 @@ fn load_upcase(vol: &Volume) -> Result<Upcase> {
     let loaded = vol.load(records::UPCASE)?;
     let data = loaded.data.ok_or(Error::Corrupt)?;
     Upcase::load(data.size().min(upcase::BYTES), |at, buf| vol.read_value(&data, at, buf))
+}
+
+/// Throws away the hibernation in the root's `hiberfil.sys`: its first
+/// page becomes zeros, which Windows takes as no hibernation, as it does
+/// once it has resumed.
+#[inline(never)]
+fn discard_hibernation(root: &NtfsNode) -> Result<()> {
+    let file = root.lookup("hiberfil.sys")?;
+    let len = file.stat().size.min(PAGE_SIZE as u64) as usize;
+    let zeros = zeroed(len)?;
+    file.write(0, &radix_vfs::Slice(&zeros))?;
+    Ok(())
 }
 
 /// Whether the root's `hiberfil.sys` starts as a hibernated system's does

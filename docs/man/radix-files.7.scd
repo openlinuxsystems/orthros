@@ -307,7 +307,8 @@ each partition, or of each disk with no partition table, at
 _/volumes/_*name*,
 read-write, or read-only when the device is, for NTFS when Windows left
 it dirty, hibernated or with changes in its log to replay, or when
-Radix cannot grow its master file table (ADR 0237), for exFAT when it
+Radix cannot grow its master file table (ADR 0237; *remount*(8) writes
+a hibernated one anyway, ADR 0238), for exFAT when it
 has two tables (TexFAT)
 or its medium reported a failure, for Btrfs when it uses a feature
 Radix does not write yet (named holes, without *no-holes*, or quotas),

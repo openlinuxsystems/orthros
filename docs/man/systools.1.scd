@@ -154,6 +154,8 @@ error that starts with the tool's name.
 :  the processes
 |  *quota*(8)
 :  turn a Btrfs filesystem's simple quotas on and off, show and limit them
+|  *remount*(8)
+:  mount a volume at /volumes again, to write or only to read
 |  *renice*(1)
 :  a process's nice level
 |  *replace*(8)
