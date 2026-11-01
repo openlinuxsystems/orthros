@@ -26,6 +26,35 @@ use crate::rings::{self, Format, Rings};
 use crate::shared::{self, CAUSES, EECD_AUTO_RD, ctrl, rctl, status, tctl};
 use crate::{Card, Interrupt, Ops};
 
+/// What sets a family that grew out of igb's apart, as igc's I225 and
+/// I226 did ([`crate::igc`]): their registers are igb's but for these.
+pub(crate) struct Family {
+    /// The interrupt cause, mask set and mask clear registers.
+    pub icr: usize,
+    pub ims: usize,
+    pub imc: usize,
+    /// CTRL's bit that resets the MAC.
+    pub reset: u32,
+    /// The internal PHY's address on MDIO.
+    pub phy: u32,
+    /// Whether the card's firmware says when it has configured each
+    /// port, and CTRL_EXT says whether its link is copper: igb's do.
+    pub firmware_ports: bool,
+    /// How the running card is driven.
+    pub ops: &'static Ops,
+}
+
+/// The igb family's.
+static IGB: Family = Family {
+    icr: reg::ICR,
+    ims: reg::IMS,
+    imc: reg::IMC,
+    reset: ctrl::RST,
+    phy: shared::INTERNAL_PHY,
+    firmware_ports: true,
+    ops: &OPS,
+};
+
 /// The registers, from the start of BAR 0.
 mod reg {
     pub use crate::shared::reg::*;
@@ -122,14 +151,33 @@ pub fn start(
     alloc: &mut dyn FnMut(usize) -> Option<Dma>,
     delay: &mut dyn FnMut(u32),
 ) -> Result<Card, Error> {
-    if regs.len() < reg::END {
+    // The I210 and I211 have one port, whose firmware says so as port 0's.
+    let single_port = matches!(mac, Mac::I210 | Mac::I211);
+    start_family(&IGB, model, single_port, regs, interrupt, fallback_mac, alloc, delay)
+}
+
+/// Resets a card of `family`, a `model`, and sets it running: see
+/// [`crate::start`]. `single_port` says whether its firmware calls its
+/// one port port 0, whatever its PCI function.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_family(
+    family: &Family,
+    model: &'static str,
+    single_port: bool,
+    regs: Mmio,
+    interrupt: Interrupt,
+    fallback_mac: [u8; 6],
+    alloc: &mut dyn FnMut(usize) -> Option<Dma>,
+    delay: &mut dyn FnMut(u32),
+) -> Result<Card, Error> {
+    if regs.len() < reg::END.max(family.imc + 4) {
         return Err(Error::Registers);
     }
     if regs.read32(reg::STATUS) == u32::MAX {
         return Err(Error::Device("its registers read as all ones"));
     }
-    reset(&regs, mac, delay);
-    if regs.read32(reg::CTRL_EXT) & LINK_MODE != 0 {
+    reset(&regs, family, single_port, delay);
+    if family.firmware_ports && regs.read32(reg::CTRL_EXT) & LINK_MODE != 0 {
         return Err(Error::Unsupported("links other than copper"));
     }
     // The card's firmware leaves it to the driver from here.
@@ -138,7 +186,7 @@ pub fn start(
     let port = ((regs.read32(reg::STATUS) >> status::FUNC_SHIFT) & 3) as usize;
     let phy = PHY_SEMAPHORES[port];
     if take_semaphore(&regs, phy, delay) {
-        shared::power_up_phy(&regs, delay);
+        shared::power_up_phy(&regs, family.phy, delay);
         give_semaphore(&regs, phy, delay);
     }
     let address = shared::registers_mac(&regs).unwrap_or(fallback_mac);
@@ -153,7 +201,7 @@ pub fn start(
     regs.write32(reg::TXDCTL0, TXDCTL);
     let mut on = |at| wait_for(delay, QUEUE_US, STEP_US, || regs.read32(at) & QUEUE_ENABLE != 0);
     if !on(reg::RXDCTL0) || !on(reg::TXDCTL0) {
-        halt(&regs);
+        (family.ops.halt)(&regs);
         return Err(Error::Timeout("turning its queues on"));
     }
     rings.hand_over();
@@ -164,51 +212,56 @@ pub fn start(
     }
     regs.write32(reg::TCTL, tctl::EN | tctl::PSP | tctl::CT | tctl::COLD | tctl::RTLC);
     regs.write32(reg::RCTL, rctl::EN | rctl::BAM | rctl::MPE | rctl::SECRC);
-    let _ = regs.read32(reg::ICR);
+    let _ = regs.read32(family.icr);
     if interrupt == Interrupt::Msi {
-        regs.write32(reg::IMS, CAUSES);
+        regs.write32(family.ims, CAUSES);
     }
-    Ok(Card::new(model, address, regs, rings, interrupt, &OPS))
+    Ok(Card::new(model, address, regs, rings, interrupt, family.ops))
 }
 
 static OPS: Ops = Ops { icr: reg::ICR, link: shared::link, halt };
 
-/// Stops the card: interrupts and queues off, the card given back to its
-/// firmware, then a reset, which stops its DMA.
 fn halt(regs: &Mmio) {
-    regs.write32(reg::IMC, u32::MAX);
+    halt_family(regs, &IGB);
+}
+
+/// Stops a card of `family`: interrupts and queues off, the card given
+/// back to its firmware, then a reset, which stops its DMA.
+pub(crate) fn halt_family(regs: &Mmio, family: &Family) {
+    regs.write32(family.imc, u32::MAX);
     regs.write32(reg::RCTL, 0);
     regs.write32(reg::TCTL, 0);
     regs.write32(reg::RXDCTL0, 0);
     regs.write32(reg::TXDCTL0, 0);
     shared::update(regs, reg::CTRL_EXT, 0, shared::CTRL_EXT_DRV_LOAD);
-    shared::update(regs, reg::CTRL, ctrl::RST, 0);
+    shared::update(regs, reg::CTRL, family.reset, 0);
 }
 
 /// Resets the card, its interrupts off and its DMA stopped first, and
-/// waits for it to read its NVM and for its firmware to configure it.
-/// None of these is waited for in vain: a card without an NVM, or whose
-/// firmware does not say, goes on, as FreeBSD's and Linux's drivers do.
-fn reset(regs: &Mmio, mac: Mac, delay: &mut dyn FnMut(u32)) {
+/// waits for it to read its NVM and, on igb's, for its firmware to
+/// configure it. None of these is waited for in vain: a card without an
+/// NVM, or whose firmware does not say, goes on, as FreeBSD's and
+/// Linux's drivers do.
+fn reset(regs: &Mmio, family: &Family, single_port: bool, delay: &mut dyn FnMut(u32)) {
     let _ = shared::stop_dma(regs, MASTER_US, delay);
-    regs.write32(reg::IMC, u32::MAX);
+    regs.write32(family.imc, u32::MAX);
     regs.write32(reg::RCTL, 0);
     regs.write32(reg::TCTL, tctl::PSP);
     let _ = regs.read32(reg::STATUS);
     delay(10_000);
-    shared::update(regs, reg::CTRL, ctrl::RST, 0);
+    shared::update(regs, reg::CTRL, family.reset, 0);
     // The reset takes a few microseconds; the card must not be touched
     // meanwhile.
     delay(5_000);
     let _ = wait_for(delay, AUTO_READ_US, STEP_US, || regs.read32(reg::EECD) & EECD_AUTO_RD != 0);
-    let port = match mac {
-        Mac::I210 | Mac::I211 => 0,
-        _ => (regs.read32(reg::STATUS) >> status::FUNC_SHIFT) & 3,
-    };
-    let done = CFG_DONE_PORT_0 << port;
-    let _ = wait_for(delay, CFG_DONE_US, 1_000, || regs.read32(reg::EEMNGCTL) & done != 0);
-    regs.write32(reg::IMC, u32::MAX);
-    let _ = regs.read32(reg::ICR);
+    if family.firmware_ports {
+        let port =
+            if single_port { 0 } else { (regs.read32(reg::STATUS) >> status::FUNC_SHIFT) & 3 };
+        let done = CFG_DONE_PORT_0 << port;
+        let _ = wait_for(delay, CFG_DONE_US, 1_000, || regs.read32(reg::EEMNGCTL) & done != 0);
+    }
+    regs.write32(family.imc, u32::MAX);
+    let _ = regs.read32(family.icr);
 }
 
 /// Takes the hardware semaphore that guards SW_FW_SYNC: software's bit,

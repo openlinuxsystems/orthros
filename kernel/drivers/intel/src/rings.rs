@@ -36,6 +36,10 @@ const LEGACY_RX_ERRORS: u32 = (0x01 | 0x02 | 0x04 | 0x10 | 0x80) << 8;
 /// The same errors of an advanced receive descriptor, in the top bits of
 /// its status word (`E1000_RXDEXT_ERR_FRAME_ERR_MASK`).
 const ADVANCED_RX_ERRORS: u32 = 0x0100_0000 | 0x0200_0000 | 0x0400_0000 | 0x1000_0000 | 0x8000_0000;
+/// ixgbe's, in other bits of the same word: a CRC, length, packet,
+/// oversize or undersize error, the last the 82599's any MAC error
+/// (`IXGBE_RXDADV_ERR_FRAME_ERR_MASK`).
+const IXGBE_RX_ERRORS: u32 = 0x0100_0000 | 0x0200_0000 | 0x0800_0000 | 0x1000_0000 | 0x2000_0000;
 
 /// A transmit descriptor's command: end of packet.
 const TX_EOP: u64 = 0x01;
@@ -63,6 +67,8 @@ pub enum Format {
     /// descriptor's status and errors in the word at byte 8, its length
     /// at 12; a transmit descriptor of type data with its length twice.
     Advanced,
+    /// ixgbe's, igb's but for the bits of a receive descriptor's errors.
+    Ixgbe,
 }
 
 impl Format {
@@ -71,6 +77,7 @@ impl Format {
         match self {
             Format::Legacy => (12, 8, LEGACY_RX_ERRORS),
             Format::Advanced => (8, 12, ADVANCED_RX_ERRORS),
+            Format::Ixgbe => (8, 12, IXGBE_RX_ERRORS),
         }
     }
 
@@ -79,7 +86,7 @@ impl Format {
         let len = len as u64;
         match self {
             Format::Legacy => len | ((TX_EOP | TX_IFCS | TX_RS) << 24),
-            Format::Advanced => {
+            Format::Advanced | Format::Ixgbe => {
                 len | TX_DTYP_DATA
                     | ((TX_EOP | TX_IFCS | TX_RS | TX_DEXT) << 24)
                     | (len << TX_PAYLEN_SHIFT)

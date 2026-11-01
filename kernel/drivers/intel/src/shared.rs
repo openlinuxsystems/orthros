@@ -101,15 +101,16 @@ const PHY_CONTROL: u32 = 0;
 const PHY_RESTART_AUTONEG: u16 = 1 << 9;
 const PHY_POWER_DOWN: u16 = 1 << 11;
 const PHY_AUTONEG: u16 = 1 << 12;
-/// The internal PHY's address on MDIO.
-const PHY_ADDRESS: u32 = 1;
+/// The internal PHY's address on MDIO, on the e1000 and igb families;
+/// igc's is 0.
+pub const INTERNAL_PHY: u32 = 1;
 /// How long an MDIO access may take.
 const MDIC_US: u32 = 10_000;
 
-/// Runs one MDIO access, `command`, and returns MDIC as the card left it,
-/// if it finished without an error.
-fn mdio(regs: &Mmio, command: u32, delay: &mut dyn FnMut(u32)) -> Option<u32> {
-    regs.write32(reg::MDIC, command | (PHY_ADDRESS << mdic::PHY_SHIFT));
+/// Runs one MDIO access, `command`, to the PHY at `phy`, and returns MDIC
+/// as the card left it, if it finished without an error.
+fn mdio(regs: &Mmio, phy: u32, command: u32, delay: &mut dyn FnMut(u32)) -> Option<u32> {
+    regs.write32(reg::MDIC, command | (phy << mdic::PHY_SHIFT));
     let mut value = 0;
     let done = wait_for(delay, MDIC_US, 50, || {
         value = regs.read32(reg::MDIC);
@@ -118,15 +119,17 @@ fn mdio(regs: &Mmio, command: u32, delay: &mut dyn FnMut(u32)) -> Option<u32> {
     (done && value & mdic::ERROR == 0).then_some(value)
 }
 
-/// Reads the PHY's register `register`.
-fn phy_read(regs: &Mmio, register: u32, delay: &mut dyn FnMut(u32)) -> Option<u16> {
-    mdio(regs, (register << mdic::REG_SHIFT) | mdic::OP_READ, delay).map(|value| value as u16)
+/// Reads register `register` of the PHY at `phy`.
+fn phy_read(regs: &Mmio, phy: u32, register: u32, delay: &mut dyn FnMut(u32)) -> Option<u16> {
+    let command = (register << mdic::REG_SHIFT) | mdic::OP_READ;
+    mdio(regs, phy, command, delay).map(|value| value as u16)
 }
 
-/// Writes the PHY's register `register`: whether the card took it.
-fn phy_write(regs: &Mmio, register: u32, data: u16, delay: &mut dyn FnMut(u32)) -> bool {
+/// Writes register `register` of the PHY at `phy`: whether the card took
+/// it.
+fn phy_write(regs: &Mmio, phy: u32, register: u32, data: u16, delay: &mut dyn FnMut(u32)) -> bool {
     let command = u32::from(data) | (register << mdic::REG_SHIFT) | mdic::OP_WRITE;
-    mdio(regs, command, delay).is_some()
+    mdio(regs, phy, command, delay).is_some()
 }
 
 /// Powers the PHY up, if a reset, the firmware or another system left it
@@ -135,14 +138,14 @@ fn phy_write(regs: &Mmio, register: u32, data: u16, delay: &mut dyn FnMut(u32)) 
 /// (QEMU's igb, like a PHY reset, leaves the link down until it is
 /// negotiated again, as Linux's and FreeBSD's drivers always have it be.)
 /// A PHY that does not answer is left as it is: the link may still come
-/// up.
-pub fn power_up_phy(regs: &Mmio, delay: &mut dyn FnMut(u32)) {
+/// up. `phy` is its address on MDIO.
+pub fn power_up_phy(regs: &Mmio, phy: u32, delay: &mut dyn FnMut(u32)) {
     let down = regs.read32(reg::STATUS) & status::LU == 0;
-    if let Some(control) = phy_read(regs, PHY_CONTROL, delay)
+    if let Some(control) = phy_read(regs, phy, PHY_CONTROL, delay)
         && (down || control & PHY_POWER_DOWN != 0 || control & PHY_AUTONEG == 0)
     {
         let control = (control & !PHY_POWER_DOWN) | PHY_AUTONEG | PHY_RESTART_AUTONEG;
-        let _ = phy_write(regs, PHY_CONTROL, control, delay);
+        let _ = phy_write(regs, phy, PHY_CONTROL, control, delay);
     }
 }
 

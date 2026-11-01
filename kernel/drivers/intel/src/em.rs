@@ -325,9 +325,9 @@ fn give_mdio(regs: &Mmio) {
 /// the firmware where the card shares it.
 fn power_up_phy(regs: &Mmio, mac: Mac, delay: &mut dyn FnMut(u32)) {
     if !mac.mdio_semaphore() {
-        shared::power_up_phy(regs, delay);
+        shared::power_up_phy(regs, shared::INTERNAL_PHY, delay);
     } else if take_mdio(regs, delay) {
-        shared::power_up_phy(regs, delay);
+        shared::power_up_phy(regs, shared::INTERNAL_PHY, delay);
         give_mdio(regs);
     }
 }

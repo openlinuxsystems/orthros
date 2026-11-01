@@ -7,6 +7,8 @@
 
 mod em;
 mod igb;
+mod igc;
+mod ixgbe;
 
 use radix_hw::{Dma, fake_memory, fake_memory_write};
 use radix_nic::PAGE;
@@ -41,6 +43,7 @@ fn identifies_intel_copper_cards_only() {
         Some(crate::Model { name: "82540EM", kind: Kind::Em(Mac::I82540) })
     );
     assert_eq!(identify(0x8086, 0x10d3).map(|m| m.name), Some("82574L"));
+    assert_eq!(identify(0x8086, 0x125c).map(|m| m.name), Some("I226-V"));
     // Fiber, an unknown device, another vendor.
     assert_eq!(identify(0x8086, 0x1011), None);
     assert_eq!(identify(0x8086, 0xffff), None);

@@ -12,6 +12,10 @@
 //! - [`igb`]: the 82576 (which QEMU emulates as its `igb`), 82580, I350,
 //!   I210 and I211, on servers' cards and many boards, with advanced
 //!   descriptors.
+//! - [`igc`]: the I225 and I226, at up to 2.5 Gb/s, on igb's code with
+//!   the few registers that moved.
+//! - [`ixgbe`]: the 10 gigabit 82599, X540 and X550, with registers of
+//!   their own and igb's advanced descriptors.
 //!
 //! Each driver is written from Intel's datasheets, with FreeBSD's drivers
 //! (BSD-3-Clause, Intel's shared code) as the reference for the sequences
@@ -29,6 +33,8 @@
 
 pub mod em;
 pub mod igb;
+pub mod igc;
+pub mod ixgbe;
 mod rings;
 mod shared;
 
@@ -57,7 +63,7 @@ impl Model {
     pub fn msi(&self) -> bool {
         match self.kind {
             Kind::Em(mac) => mac.pcie(),
-            Kind::Igb(_) => true,
+            Kind::Igb(_) | Kind::Igc(_) | Kind::Ixgbe(_) => true,
         }
     }
 }
@@ -69,11 +75,17 @@ pub enum Kind {
     Em(em::Mac),
     /// The igb family ([`igb`]).
     Igb(igb::Mac),
+    /// The igc family ([`igc`]).
+    Igc(igc::Mac),
+    /// The ixgbe family ([`ixgbe`]).
+    Ixgbe(ixgbe::Mac),
 }
 
 /// The card with Intel's device ID `device`, if a driver here knows it.
-/// Only copper cards are taken: the fiber and SerDes ones set their links
-/// up differently, which nothing here does yet.
+/// Only copper cards are taken from the gigabit families: their fiber and
+/// SerDes ones set their links up differently, which nothing here does
+/// yet. The 10 gigabit 82599's SFP+ cages are taken, their links as the
+/// NVM has them ([`ixgbe`]).
 pub fn identify(vendor: u16, device: u16) -> Option<Model> {
     if vendor != VENDOR {
         return None;
@@ -81,6 +93,10 @@ pub fn identify(vendor: u16, device: u16) -> Option<Model> {
     em::identify(device)
         .map(|(name, mac)| Model { name, kind: Kind::Em(mac) })
         .or_else(|| igb::identify(device).map(|(name, mac)| Model { name, kind: Kind::Igb(mac) }))
+        .or_else(|| igc::identify(device).map(|(name, mac)| Model { name, kind: Kind::Igc(mac) }))
+        .or_else(|| {
+            ixgbe::identify(device).map(|(name, mac)| Model { name, kind: Kind::Ixgbe(mac) })
+        })
 }
 
 /// Resets the card `model`, whose registers are `regs` (its first BAR),
@@ -99,6 +115,10 @@ pub fn start(
     match model.kind {
         Kind::Em(mac) => em::start(model.name, mac, regs, interrupt, fallback_mac, alloc, delay),
         Kind::Igb(mac) => igb::start(model.name, mac, regs, interrupt, fallback_mac, alloc, delay),
+        Kind::Igc(_) => igc::start(model.name, regs, interrupt, fallback_mac, alloc, delay),
+        Kind::Ixgbe(mac) => {
+            ixgbe::start(model.name, mac, regs, interrupt, fallback_mac, alloc, delay)
+        }
     }
 }
 
