@@ -82,7 +82,13 @@ impl Hinter for ShellHinter {
             }
             return self.style.paint(&self.shown).to_string();
         }
-        if self.options
+        if let Some((token, message)) = crate::editor::mistake(line, shell.parse_options()) {
+            // Syntax mistakes, before Enter (ADR 0274); → takes nothing.
+            self.shown = match token {
+                Some(token) => format!("  ← `{token}` cannot go there"),
+                None => format!("  ← {}", message.trim_start_matches("syntax error").trim_start_matches(": ").trim()),
+            };
+        } else if self.options
             && let Some((rest, about)) = option_help(&mut shell, line)
         {
             self.taken = rest.clone();

@@ -702,12 +702,50 @@ unsafe impl Send for ShellHighlighter {}
 impl Highlighter for ShellHighlighter {
     fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
         let mut styled = StyledText::default();
-        for (role, piece) in highlight::spans(line, &mut |name| self.known(name)) {
+        // A mistake the parser finds is shown before Enter (ADR 0274): the
+        // token it is near, as an unknown command is.
+        let options = self.shell.0.try_borrow().map_or_default(|shell| shell.parse_options());
+        let wrong = mistake(line, options.clone()).and_then(|(token, _)| token);
+        let spans = highlight::spans(line, &mut |name| self.known(name));
+        // The piece to mark: the first of the token's where the line up to
+        // it is already wrong (`ls | | wc`: the second `|`).
+        let mut marked = None;
+        if let Some(token) = &wrong {
+            let mut end = 0;
+            for (index, (_, piece)) in spans.iter().enumerate() {
+                end += piece.len();
+                if piece == token && mistake(&line[..end], options.clone()).is_some() {
+                    marked = Some(index);
+                    break;
+                }
+            }
+        }
+        for (index, (role, piece)) in spans.into_iter().enumerate() {
+            let role = if marked == Some(index) { highlight::Role::Unknown } else { role };
             let style = role.key().map_or_else(Default::default, |key| self.colors.style(key));
             styled.buffer.push((style.to_reedline(), piece));
         }
         styled
     }
+}
+
+/// The syntax mistake in `line`, if it is finished and wrong: the token
+/// it is near, when the message names one, and the message.
+pub fn mistake(line: &str, options: parse::Options) -> Option<(Option<String>, String)> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let mut whole = line.to_string();
+    whole.push('\n');
+    let mut parser = parse::Parser::new("", Rc::from("stdin"), 1, options);
+    parser.push_text(&whole);
+    let Err(parse::Error::Syntax { messages, .. }) = parser.parse() else { return None };
+    let message = messages.into_iter().next()?.1;
+    let token = message
+        .split_once("unexpected token `")
+        .and_then(|(_, rest)| rest.split_once('\'').map(|(t, _)| t.to_string()))
+        .filter(|t| t != "newline");
+    Some((token, message))
 }
 
 /// `PS1`, and `PS2` before each line after the first.

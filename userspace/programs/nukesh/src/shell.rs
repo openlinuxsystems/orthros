@@ -360,6 +360,9 @@ pub struct Shell {
     pub hash_hits: HashMap<String, u32>,
     /// A completion function asked to be tried again (status 124).
     pub completions_retry: bool,
+    /// Tab found nothing that starts with the word: file and command
+    /// names match ignoring case, then with a typo (ADR 0273).
+    pub completions_loose: bool,
     /// Running a script file, whose functions see `main` at the bottom of
     /// `FUNCNAME`.
     pub in_script: bool,
@@ -448,6 +451,7 @@ impl Shell {
             expansion_failed: false,
             hash_hits: HashMap::new(),
             completions_retry: false,
+            completions_loose: false,
             in_script: false,
         };
         shell.import_environment();
