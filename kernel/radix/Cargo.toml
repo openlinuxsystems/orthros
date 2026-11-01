@@ -31,6 +31,7 @@ radix-bootfs = { path = "../lib/bootfs" }
 radix-cap = { path = "../cap" }
 radix-crosec = { path = "../drivers/crosec" }
 radix-elf = { path = "../lib/elf" }
+radix-ena = { path = "../drivers/ena" }
 radix-btrfs = { path = "../fs/btrfs" }
 radix-exfat = { path = "../fs/exfat" }
 radix-ext4 = { path = "../fs/ext4" }
@@ -40,11 +41,13 @@ radix-udf = { path = "../fs/udf" }
 radix-fat = { path = "../fs/fat" }
 radix-fbcon = { path = "../lib/fbcon" }
 radix-gpio = { path = "../drivers/gpio" }
+radix-gve = { path = "../drivers/gve" }
 radix-i2c = { path = "../drivers/i2c" }
 radix-hal = { path = "../hal" }
 radix-hw = { path = "../lib/hw" }
 radix-hid = { path = "../lib/hid" }
 radix-input = { path = "../lib/input" }
+radix-intel-net = { path = "../drivers/intel" }
 radix-ipc = { path = "../ipc" }
 radix-kdb = { path = "../lib/kdb" }
 radix-klog = { path = "../lib/klog" }
@@ -53,6 +56,7 @@ radix-ksyms = { path = "../lib/ksyms" }
 radix-mca = { path = "../lib/mca" }
 radix-mm = { path = "../mm" }
 radix-net = { path = "../net" }
+radix-nic = { path = "../drivers/nic" }
 radix-posix = { path = "../lib/posix" }
 radix-pstate = { path = "../lib/pstate" }
 radix-random = { path = "../lib/random" }
@@ -67,6 +71,7 @@ radix-uacpi = { path = "../lib/uacpi" }
 radix-usb = { path = "../drivers/usb" }
 radix-vfs = { path = "../fs/vfs" }
 radix-virtio = { path = "../drivers/virtio" }
+radix-vmxnet3 = { path = "../drivers/vmxnet3" }
 radix-usbhc = { path = "../drivers/usbhc" }
 radix-xhci = { path = "../drivers/xhci" }
 # The BitLocker keys unlock(8) hands the kernel, wiped once used

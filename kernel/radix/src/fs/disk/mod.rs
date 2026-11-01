@@ -283,6 +283,8 @@ pub fn init() {
                 nvme::bind(&function, &mut controllers);
             } else if crate::i2c::designware::is_lpss(&function) {
                 crate::i2c::designware::bind_lpss(&function);
+            } else if let Some(card) = crate::net::identify(&function) {
+                crate::net::bind_card(&function, card);
             } else {
                 crate::usb::found(&function);
             }
