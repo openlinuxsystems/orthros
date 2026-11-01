@@ -448,16 +448,16 @@ _target/userspace/_).
 		must count 8 KiB of bad memory (ADR 0168).
 
 	*spark-oom*
-		Boot with 256 MiB and point Spark at the test service _hog_,
+		Boot with 384 MiB and point Spark at the test service _hog_,
 		which takes memory until the out-of-memory policy stops its
 		domain; check that Spark says so and starts it again, waiting
 		longer the second time (*spark*(8)).
 
 	*swap*
-		Boot 2 CPUs with 256 MiB and a 1 GiB virtio disk the host's
+		Boot 2 CPUs with 384 MiB and a 1 GiB virtio disk the host's
 		*mkswap* made a swap area of. _/system/tests/posix/swaptest_
 		must turn it on with *swapon*(8), find that it cannot be turned
-		on twice and that the disk refuses writes, fill 384 MiB with a
+		on twice and that the disk refuses writes, fill 512 MiB with a
 		pattern and read it all back, fork a child that checks half of
 		it and changes a quarter while the parent's stays, and turn the
 		area off with *swapoff*(8) while some of what it keeps is still

@@ -76,8 +76,12 @@ are not re-encoded.
   `grep`, `blame`, a clone over `file://`, a push into a bare
   repository, `gc` and `fsck`, `submodule` and `bisect run`, and the
   programs another computer runs by name, through `git-shell` too.
-- The image grows by about 7 MiB, half of it git and half its manual
-  pages, which `git help` and Nukesh's explain read.
+- The boot archive grows by about 12 MiB: git's programs, each linked
+  with git's library, and its manual pages, which `git help` and
+  Nukesh's explain read. The kernel keeps the boot loader's copy of the
+  archive beside Spark's, so three boot tests that ran in 256 MiB
+  (`spark-oom`, `spark-stop` and `swap`) no longer had room to start
+  Spark; they run in 384 MiB, and `swap` fills 512 MiB.
 - Nukesh's git features, the next step of the plan, can call git
   where reading `.git` itself is not enough.
 - git 3.0 will need its Rust part built for Radix, as uutils is.
