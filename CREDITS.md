@@ -12,8 +12,11 @@ is the legal record of what an image contains; this is the human one, and it
 also names the tools we build with and the projects whose ideas we follow.
 
 When a pull request starts using a new project, or draws on another
-project's design, it adds the project here (see
-[CONTRIBUTING.md](CONTRIBUTING.md#third-party-code-and-credits)).
+project's design, it credits the project (see
+[CONTRIBUTING.md](CONTRIBUTING.md#third-party-code-and-credits)): since
+November 2026 in a file of its own in [credits/](credits/), which
+`ob docs` puts in its section here in `out/docs/CREDITS.md`, so that pull
+requests built at once do not add rows at the same place.
 
 ## In the repository
 
