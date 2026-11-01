@@ -205,23 +205,106 @@ pub enum Request {
     /// What the person at the console typed for prompt `id`, from the
     /// program that asked [`Request::Prompts`].
     Prompted {
-        /// The prompt's number, from its [`Prompt::Ask`].
+        /// The prompt's number, from its [`Prompt::Ask`] or
+        /// [`Prompt::Choose`].
         id: u64,
         /// What came of it.
         typed: Prompted,
     },
+    /// Ask the person at the console of `terminal`, `name`, a question of
+    /// bundled(8)'s about an app's permission (ADR 0224), which consoled
+    /// draws where no program can: root's to ask. authd answers with what
+    /// they chose ([`Choice::word`]), `cancelled` when they closed it, or
+    /// `elsewhere` when the terminal is not a console's or nothing asks
+    /// on the consoles.
+    Choose {
+        /// The asker's terminal, as /processes names it.
+        terminal: String,
+        /// Whose question it is.
+        name: String,
+        /// What kind of question, which decides its keys and colours.
+        question: Question,
+        /// The question's words, one line of at most [`PROMPT_SHOWN_MAX`]
+        /// characters, in the system's own words.
+        text: String,
+    },
 }
 
-/// What came of a password prompt on a console.
+/// What came of a prompt on a console.
 #[derive(PartialEq, Eq)]
 pub enum Prompted {
     /// The password typed.
     Password(Vec<u8>),
+    /// What the person chose at a [`Prompt::Choose`].
+    Chose(Choice),
     /// The person closed the prompt, with Esc or Ctrl+C.
     Cancelled,
     /// The terminal is not a console's: the asker asks itself.
     Elsewhere,
 }
+
+/// The kind of a [`Request::Choose`] question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Question {
+    /// An app asks for a permission: once, always, or don't allow.
+    Permission,
+    /// The same, for one that reaches what other apps keep: with a
+    /// warning.
+    Warning,
+    /// Giving an app a permission with `bundle grant`: yes or no.
+    Grant,
+}
+
+impl Question {
+    /// Its word in a request and a prompt line.
+    pub fn word(self) -> &'static str {
+        match self {
+            Question::Permission => "permission",
+            Question::Warning => "warning",
+            Question::Grant => "grant",
+        }
+    }
+
+    /// The question its word names.
+    pub fn from_word(word: &str) -> Option<Question> {
+        [Question::Permission, Question::Warning, Question::Grant]
+            .into_iter()
+            .find(|q| q.word() == word)
+    }
+}
+
+/// What the person chose at a permission prompt: `bundle grant`'s yes is
+/// [`Choice::Always`] and its no [`Choice::Never`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Choice {
+    /// Allow it this time only.
+    Once,
+    /// Allow it from now on.
+    Always,
+    /// Don't allow it.
+    Never,
+}
+
+impl Choice {
+    /// Its word in a request and in authd's answer.
+    pub fn word(self) -> &'static str {
+        match self {
+            Choice::Once => "once",
+            Choice::Always => "always",
+            Choice::Never => "never",
+        }
+    }
+
+    /// The choice its word names.
+    pub fn from_word(word: &str) -> Option<Choice> {
+        [Choice::Once, Choice::Always, Choice::Never].into_iter().find(|c| c.word() == word)
+    }
+}
+
+/// authd's answer to a [`Request::Choose`] the person closed.
+pub const CANCELLED: &str = "cancelled";
+/// authd's answer to a [`Request::Choose`] no console can ask.
+pub const ELSEWHERE: &str = "elsewhere";
 
 /// What an [`Request::Elevate`] runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -339,11 +422,19 @@ impl Request {
                 id_text = id.to_string();
                 let (kind, password): (&[u8], &[u8]) = match typed {
                     Prompted::Password(password) => (b"password", password),
+                    Prompted::Chose(choice) => (choice.word().as_bytes(), b""),
                     Prompted::Cancelled => (b"cancelled", b""),
                     Prompted::Elsewhere => (b"elsewhere", b""),
                 };
                 vec![b"prompted", id_text.as_bytes(), kind, password]
             }
+            Request::Choose { terminal, name, question, text } => vec![
+                b"choose",
+                terminal.as_bytes(),
+                name.as_bytes(),
+                question.word().as_bytes(),
+                text.as_bytes(),
+            ],
         };
         let mut bytes = Vec::new();
         for field in fields {
@@ -450,9 +541,22 @@ impl Request {
                     (b"password", password) => Prompted::Password(password.to_vec()),
                     (b"cancelled", b"") => Prompted::Cancelled,
                     (b"elsewhere", b"") => Prompted::Elsewhere,
+                    (kind, b"") => {
+                        let choice = std::str::from_utf8(kind).ok().and_then(Choice::from_word);
+                        Prompted::Chose(choice.ok_or_else(malformed)?)
+                    }
                     _ => return Err(malformed()),
                 };
                 Ok(Request::Prompted { id, typed })
+            }
+            [b"choose", terminal, name, question, words] => {
+                let question = Question::from_word(&text(question)?).ok_or_else(malformed)?;
+                let (terminal, name, words) = (text(terminal)?, text(name)?, text(words)?);
+                let one_line = |t: &str| !t.is_empty() && !t.chars().any(char::is_control);
+                if !one_line(&terminal) || !one_line(&name) || !one_line(&words) {
+                    return Err(malformed());
+                }
+                Ok(Request::Choose { terminal, name, question, text: words })
             }
             _ => Err(malformed()),
         }
@@ -480,6 +584,7 @@ impl Request {
             | Request::Forget
             | Request::Prompts
             | Request::Prompted { .. }
+            | Request::Choose { .. }
             | Request::Disable { .. }
             | Request::Enable { .. }
             | Request::Remove { .. }
@@ -537,11 +642,17 @@ impl std::fmt::Debug for Request {
             Request::Prompted { id, typed } => {
                 let typed = match typed {
                     Prompted::Password(_) => "Password",
+                    Prompted::Chose(choice) => choice.word(),
                     Prompted::Cancelled => "Cancelled",
                     Prompted::Elsewhere => "Elsewhere",
                 };
                 write!(f, "Prompted {{ id: {id}, typed: {typed} }}")
             }
+            Request::Choose { terminal, name, question, text } => write!(
+                f,
+                "Choose {{ terminal: {terminal:?}, name: {name:?}, question: {question:?}, text: \
+                 {text:?} }}"
+            ),
         }
     }
 }
@@ -650,6 +761,20 @@ pub enum Prompt {
         /// characters; empty for an unlock.
         shown: String,
     },
+    /// Ask `name` the question `text` on the console of `terminal`, as
+    /// `pts/N`, with the keys and colours of `question`.
+    Choose {
+        /// The prompt's number, for the answer.
+        id: u64,
+        /// The terminal, as /processes names it.
+        terminal: String,
+        /// Whose question it is.
+        name: String,
+        /// Its kind.
+        question: Question,
+        /// Its words, one line of at most [`PROMPT_SHOWN_MAX`] characters.
+        text: String,
+    },
     /// Prompt `id` is no longer wanted: its asker went away.
     Done {
         /// The prompt's number.
@@ -676,6 +801,15 @@ impl Prompt {
                     .collect();
                 format!("ask {id} {} {} {shown}\n", word(terminal), word(name))
             }
+            Prompt::Choose { id, terminal, name, question, text } => {
+                let text: String = text
+                    .chars()
+                    .map(|c| if c.is_control() { '?' } else { c })
+                    .take(PROMPT_SHOWN_MAX)
+                    .collect();
+                let (terminal, name, question) = (word(terminal), word(name), question.word());
+                format!("choose {id} {terminal} {name} {question} {text}\n")
+            }
             Prompt::Done { id } => format!("done {id}\n"),
         }
     }
@@ -692,6 +826,15 @@ impl Prompt {
                 let name = fields.next().filter(|n| !n.is_empty())?.to_string();
                 let shown = fields.next()?.to_string();
                 Some(Prompt::Ask { id, terminal, name, shown })
+            }
+            "choose" => {
+                let mut fields = rest.splitn(5, ' ');
+                let id = fields.next()?.parse().ok()?;
+                let terminal = fields.next().filter(|t| !t.is_empty())?.to_string();
+                let name = fields.next().filter(|n| !n.is_empty())?.to_string();
+                let question = Question::from_word(fields.next()?)?;
+                let text = fields.next().filter(|t| !t.is_empty())?.to_string();
+                Some(Prompt::Choose { id, terminal, name, question, text })
             }
             "done" => Some(Prompt::Done { id: rest.parse().ok()? }),
             _ => None,

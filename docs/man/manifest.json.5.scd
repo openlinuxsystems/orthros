@@ -216,7 +216,11 @@ windows (1.1), *runtime*, the Linux layer (1.3), and *plugins* (1.10).
 # PERMISSIONS
 
 Each permission has the words the system shows for it and a way it is
-given. Version 1 defines these:
+given: at install, with the bundle; on first use, asked the first time
+it runs wanting it, on the console's trusted prompt; with a warning, the
+same way, in red; by an administrator; or always, unless the person
+turns it off with *bundle revoke* (*bundle*(1), PERMISSIONS). Version 1
+defines these:
 
 [[ *Permission*
 :- *What the system says*

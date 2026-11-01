@@ -49,7 +49,9 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use accounts::hash::{self, Cost};
-use accounts::request::{self, Answer, Mode, Prompt, Prompted, REQUEST_MAX, Relay, Request};
+use accounts::request::{
+    self, Answer, Mode, Prompt, Prompted, Question, REQUEST_MAX, Relay, Request,
+};
 use accounts::signins::{self, Event, Latest, Place, Record, Seat};
 use accounts::{DISABLED, Group, Password, Table, User};
 use radix_abi::names;
@@ -159,12 +161,12 @@ struct Asked {
     until: Instant,
 }
 
-/// A password to ask on a console, for the request being run: the
-/// terminal, whose it is, and what it runs.
-struct Prompting {
-    terminal: String,
-    name: String,
-    shown: String,
+/// What to ask on a console for the request being run: a password, with
+/// the terminal, whose it is, and what it runs; or one of bundled's
+/// questions about an app's permission (ADR 0224).
+enum Prompting {
+    Password { terminal: String, name: String, shown: String },
+    Choose { terminal: String, name: String, question: Question, text: String },
 }
 
 /// A terminal pane, as elevate unlocks it: a session's terminal, by the
@@ -592,6 +594,9 @@ impl Authd {
                     (Answer::Done(String::new()), now)
                 }
                 Request::Prompts => self.prompts(i, peer, now),
+                Request::Choose { terminal, name, question, text } => {
+                    self.choose(peer, terminal, name, *question, text, now)
+                }
                 Request::Prompted { id, typed } => {
                     let from =
                         self.clients.iter().any(|c| c.prompter && c.peer.process == peer.process);
@@ -633,6 +638,35 @@ impl Authd {
         (Answer::Done(String::new()), now)
     }
 
+    /// A question of bundled's about an app's permission (ADR 0224), for
+    /// `name` on `terminal`: root's to ask, as bundled runs as root. It
+    /// waits for consoled's answer ([`Authd::prompting`]); with nothing to
+    /// ask on the consoles it is answered `elsewhere` at once.
+    fn choose(
+        &mut self,
+        peer: Peer,
+        terminal: &str,
+        name: &str,
+        question: Question,
+        text: &str,
+        now: Instant,
+    ) -> (Answer, Instant) {
+        if !peer.is_root() {
+            let why = "only bundled, which runs as root, asks about apps' permissions";
+            return (Answer::Refused(why.into()), now);
+        }
+        if !self.has_prompter() {
+            return (Answer::Done(request::ELSEWHERE.into()), now);
+        }
+        self.prompting = Some(Prompting::Choose {
+            terminal: terminal.into(),
+            name: name.into(),
+            question,
+            text: text.into(),
+        });
+        (Answer::Done(String::new()), now)
+    }
+
     /// Whether a program asks for passwords on the consoles.
     fn has_prompter(&self) -> bool {
         self.clients.iter().any(|c| c.prompter && !c.done)
@@ -651,8 +685,15 @@ impl Authd {
     fn ask_console(&mut self, i: usize, request: Request, prompting: Prompting, now: Instant) {
         let id = self.next_prompt;
         self.next_prompt += 1;
-        let Prompting { terminal, name, shown } = prompting;
-        self.tell_prompter(&Prompt::Ask { id, terminal, name, shown }, now);
+        let prompt = match prompting {
+            Prompting::Password { terminal, name, shown } => {
+                Prompt::Ask { id, terminal, name, shown }
+            }
+            Prompting::Choose { terminal, name, question, text } => {
+                Prompt::Choose { id, terminal, name, question, text }
+            }
+        };
+        self.tell_prompter(&prompt, now);
         let until = now + PROMPT_TIME;
         let client = &mut self.clients[i];
         client.asked = Some(Asked { id, request, until });
@@ -669,8 +710,9 @@ impl Authd {
         };
         let Some(Asked { mut request, .. }) = self.clients[j].asked.take() else { return };
         let client = &mut self.clients[j];
-        match typed {
-            Prompted::Password(typed) => {
+        let choosing = matches!(request, Request::Choose { .. });
+        let answer = match (typed, choosing) {
+            (Prompted::Password(typed), false) => {
                 if let Request::Elevate { password, ask, .. } | Request::Unlock { password, ask } =
                     &mut request
                 {
@@ -679,14 +721,18 @@ impl Authd {
                 }
                 client.deadline = now + REQUEST_TIME;
                 self.take(j, request, now);
+                return;
             }
-            Prompted::Cancelled => {
-                client.answer(&Answer::Refused("no password was typed".into()), now, now);
+            (Prompted::Cancelled, false) => Answer::Refused("no password was typed".into()),
+            (Prompted::Elsewhere, false) => Answer::Done(request::NEEDS_PASSWORD.into()),
+            (Prompted::Chose(choice), true) => Answer::Done(choice.word().into()),
+            (Prompted::Cancelled, true) => Answer::Done(request::CANCELLED.into()),
+            (Prompted::Elsewhere, true) => Answer::Done(request::ELSEWHERE.into()),
+            (Prompted::Password(_), true) | (Prompted::Chose(_), false) => {
+                Answer::Refused("the console answered another kind of question".into())
             }
-            Prompted::Elsewhere => {
-                client.answer(&Answer::Done(request::NEEDS_PASSWORD.into()), now, now);
-            }
-        }
+        };
+        client.answer(&answer, now, now);
     }
 
     /// Gives up the prompts whose time is up, tells consoled of those
@@ -701,14 +747,21 @@ impl Authd {
                 gone.push(asked.id);
                 client.asked = None;
             } else if !prompter {
+                let choosing = matches!(asked.request, Request::Choose { .. });
                 client.asked = None;
-                client.answer(&Answer::Done(request::NEEDS_PASSWORD.into()), now, now);
+                let then = if choosing { request::ELSEWHERE } else { request::NEEDS_PASSWORD };
+                client.answer(&Answer::Done(then.into()), now, now);
             } else if asked.until <= now {
+                let choosing = matches!(asked.request, Request::Choose { .. });
                 gone.push(asked.id);
                 client.asked = None;
-                let why =
-                    format!("no password was typed in {} minutes", PROMPT_TIME.as_secs() / 60);
-                client.answer(&Answer::Refused(why), now, now);
+                let answer = if choosing {
+                    Answer::Done(request::CANCELLED.into())
+                } else {
+                    let minutes = PROMPT_TIME.as_secs() / 60;
+                    Answer::Refused(format!("no password was typed in {minutes} minutes"))
+                };
+                client.answer(&answer, now, now);
             }
         }
         for id in gone {
@@ -962,7 +1015,7 @@ impl Authd {
                 && let Some(pane) = pane
                 && self.has_prompter()
             {
-                self.prompting = Some(Prompting {
+                self.prompting = Some(Prompting::Password {
                     terminal: pane.terminal.clone(),
                     name: user.name.clone(),
                     shown: String::new(),
@@ -1018,8 +1071,8 @@ impl Authd {
             Err(answer) => {
                 // Asked on a console: the request keeps its descriptors
                 // until the password comes.
-                if let Some(prompting) = &mut self.prompting {
-                    prompting.shown.clone_from(&plan.shown);
+                if let Some(Prompting::Password { shown, .. }) = &mut self.prompting {
+                    shown.clone_from(&plan.shown);
                     self.clients[i].descriptors = descriptors;
                 }
                 return answer;
