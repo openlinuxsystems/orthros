@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# The system's settings for git (git-config(1)), which each user's
+# ~/.gitconfig and each repository's own may change. Spark puts this
+# file in /system/settings at boot, where git reads it (ADR 0287).
+
+[init]
+	# A new repository's first branch, without the hint that asks.
+	defaultBranch = main
+[help]
+	# A mistyped command is shown with the one meant, and runs only
+	# when asked.
+	autocorrect = prompt
+[diff]
+	# Moved lines are shown as moved, and the diff of a change reads
+	# as it was made.
+	colorMoved = default
+	algorithm = histogram
+[merge]
+	# A conflict shows the text both sides started from.
+	conflictStyle = zdiff3
+[rerere]
+	# A conflict resolved once is resolved again the same way.
+	enabled = true
+[fetch]
+	prune = true
+[push]
+	# A new branch's first push sets where it goes.
+	autoSetupRemote = true
+[branch]
+	sort = -committerdate
+[tag]
+	sort = version:refname

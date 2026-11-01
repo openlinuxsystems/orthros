@@ -56,11 +56,14 @@ const FIRMWARE_ALLOW: &[&str] = &["LicenseRef-Intel-Microcode"];
 /// under IBM's notice, which SPDX has no identifier for (ADR 0091).
 /// The root certificates Mozilla trusts come as data under the Community
 /// Data License Agreement - Permissive 2.0, which asks only that its text
-/// go with them (ADR 0192). The IANA time zone database is in the public
-/// domain, which SPDX has no identifier for (ADR 0194). curl's license is
-/// its own, the MIT license in other words (ADR 0195).
+/// go with them (ADR 0192). git is under version 2 of the GPL only, with
+/// parts under the LGPL and the GPL's later versions, as a program of its
+/// own (ADR 0287). The IANA time zone database is in the public domain,
+/// which SPDX has no identifier for (ADR 0194). curl's license is its own,
+/// the MIT license in other words (ADR 0195).
 const PORT_EXTRA_ALLOW: &[&str] = &[
     "CC0-1.0",
+    "GPL-2.0-only",
     "GPL-2.0-or-later",
     "GPL-3.0-or-later",
     "X11-distribute-modifications-variant",

@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# The cost of system calls, IPC round trips, files, POSIX calls, the
+# network and disks on Radix, held to Linux in the same kind of virtual
+# machine (ADR 0039), each operation's fastest of three runs on each side
+# (ADR 0046), measured again while one is over (ADR 0107). The report goes
+# into the job's summary and the numbers into an artifact.
+#
+# CI runs it on every pull request and merge to main. It also runs every
+# night on main (ADR 0290): a merge cancels the run of the merge before
+# it, so without this main's own numbers were seldom recorded, and a row
+# that grew slower over several merges showed up first on someone else's
+# pull request.
+name: Benchmarks
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * *"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: Linux parity
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Allow QEMU to use KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
+            xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g dislocker libbde-utils scdoc mandoc \
+            udftools udfclient genisoimage \
+            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # The ports main built last, as in the build job.
+      - name: Note the port toolchain's version
+        id: ports-key
+        run: echo "clang=$(clang-20 --version | head -n1 | tr -c 'A-Za-z0-9.\n' -)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the built ports
+        if: github.event_name != 'push'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            out/sysroot
+            out/toolchain
+            out/ports
+            target/ports/sources
+          key: ports-host-${{ steps.ports-key.outputs.clang }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
+          restore-keys: ports-host-${{ steps.ports-key.outputs.clang }}-
+
+      # The baseline Radix is held to is Linux in the same kind of virtual
+      # machine (ADR 0039): one release of Ubuntu's kernel, pinned in
+      # tools/xtask/src/baseline.rs (ADR 0290), not the runner's own, so
+      # that an update of the runners' kernel cannot move the bar. Its
+      # packages are kept between runs.
+      - name: Restore the Linux baseline's packages
+        uses: actions/cache@v4
+        with:
+          path: .cache/linux-baseline/*.deb
+          key: linux-baseline-${{ hashFiles('tools/xtask/src/baseline.rs') }}
+
+      - name: ./ob bench
+        run: ./ob bench --gate --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the benchmark numbers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks
+          path: |
+            out/bench/report.md
+            out/bench/results.json
+            out/bench/boot-bench.log
+            out/bench/boot-posix-bench.log
+            out/bench/boot-linux.log
+          if-no-files-found: ignore
+          retention-days: 90

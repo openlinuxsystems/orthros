@@ -448,16 +448,16 @@ _target/userspace/_).
 		must count 8 KiB of bad memory (ADR 0168).
 
 	*spark-oom*
-		Boot with 256 MiB and point Spark at the test service _hog_,
+		Boot with 384 MiB and point Spark at the test service _hog_,
 		which takes memory until the out-of-memory policy stops its
 		domain; check that Spark says so and starts it again, waiting
 		longer the second time (*spark*(8)).
 
 	*swap*
-		Boot 2 CPUs with 256 MiB and a 1 GiB virtio disk the host's
+		Boot 2 CPUs with 384 MiB and a 1 GiB virtio disk the host's
 		*mkswap* made a swap area of. _/system/tests/posix/swaptest_
 		must turn it on with *swapon*(8), find that it cannot be turned
-		on twice and that the disk refuses writes, fill 384 MiB with a
+		on twice and that the disk refuses writes, fill 512 MiB with a
 		pattern and read it all back, fork a child that checks half of
 		it and changes a quarter while the parent's stays, and turn the
 		area off with *swapoff*(8) while some of what it keeps is still
@@ -1418,12 +1418,14 @@ _target/userspace/_).
 		six more times, each operation keeping its fastest run.
 
 	*--linux-kernel* _file_
-		The Linux kernel to boot. Without it, *ob* uses
-		*OB_LINUX_KERNEL*, else this machine's own
-		_/boot/vmlinuz-$(uname -r)_ if it may read it. Debian, Ubuntu
-		and Mint make that file readable only by root; copy it once with
-		*sudo install -m 644 /boot/vmlinuz-$(uname -r) .cache/vmlinuz*
-		and pass *--linux-kernel .cache/vmlinuz*.
+		The Linux kernel to boot instead of the baseline. Without it,
+		*ob* uses *OB_LINUX_KERNEL*, else the pinned baseline: one
+		release of Ubuntu's Azure kernel, the flavour CI's runners boot,
+		named in _tools/xtask/src/baseline.rs_. *ob* fetches its two
+		packages once into _.cache/linux-baseline_, checks their SHA-256
+		and unpacks them there with *dpkg-deb* and *depmod*, without
+		installing them, so that every machine and every run holds Radix
+		to the same Linux (ADR 0290).
 
 	*--runs* _n_
 		Measure Radix and the Linux virtual machine in turn _n_ times

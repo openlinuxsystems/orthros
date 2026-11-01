@@ -15,7 +15,8 @@
 //! program built for Linux last, twice: as the init process of a Linux
 //! virtual machine set up exactly like Radix's (same QEMU machine, CPUs,
 //! memory and KVM), the baseline that counts, and on the host, for
-//! reference.
+//! reference. The virtual machine boots one pinned release of Ubuntu's
+//! kernel ([`baseline`], ADR 0290) unless told to boot another.
 //! Under KVM it measures Radix and the Linux virtual machine in turn
 //! [`RUNS`] times, and each operation counts its fastest run on each side
 //! (ADR 0046). The report goes to `out/bench/` as Markdown and JSON, and
@@ -43,7 +44,7 @@ use crate::config::{Firmware, Media};
 use crate::process::{self, step};
 use crate::qemu::{self, DirectBoot, Machine, Serial};
 use crate::test::{self, Built, TestImage, Vm};
-use crate::{Args, Context, Ctx, Result, VERSION, kernel, userspace};
+use crate::{Args, Context, Ctx, Result, VERSION, baseline, kernel, userspace};
 
 /// The kernel command line of the benchmark boot.
 const CMDLINE: &str = "qemu-exit selftest=bench";
@@ -132,7 +133,7 @@ pub const BUDGETS: &[(&str, u64)] = &[
     ("context_switch", 1_100),                 // 959
     ("fresh_page", 9_900),                     // 8,986
     ("tlb_local", 3_500),                      // 3,106
-    ("file_open_close", 4_100),                // 3,693
+    ("file_open_close", 3_950),                // 3,859
     ("file_stat", 1_900),                      // 1,657
     ("file_read_4k", 5_400),                   // 4,896
     ("file_write_4k", 5_600),                  // 5,061
@@ -475,32 +476,32 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     }
     let runs = if kvm { runs } else { 1 };
     let posix_linux = if linux { Some(posix_for_linux(ctx, &dir)?) } else { None };
-    let vm_kernel = if let Some(posix) = &posix_linux {
-        match linux_kernel(given_kernel)? {
-            Some(kernel) if kvm => {
-                Some((kernel.clone(), linux_init(ctx, &dir, Some(posix), &kernel)?))
-            }
-            Some(_) => {
-                eprintln!(
-                    "    No KVM: the Linux virtual machine would measure the emulator too, so \
-                     it does not run."
-                );
-                None
-            }
-            None => {
-                eprintln!(
-                    "    No Linux kernel to boot: the baseline that counts is missing. Give one \
-                     with --linux-kernel (on Debian, Ubuntu and Mint: `sudo install -m 644 \
-                     /boot/vmlinuz-$(uname -r) .cache/vmlinuz`, then `--linux-kernel \
-                     .cache/vmlinuz`)."
-                );
-                None
-            }
+    let vm_kernel = match &posix_linux {
+        Some(_) if !kvm => {
+            eprintln!(
+                "    No KVM: the Linux virtual machine would measure the emulator too, so it \
+                 does not run."
+            );
+            None
         }
-    } else {
-        None
+        Some(posix) => {
+            let (kernel, modules) = match linux_kernel(given_kernel)? {
+                Some(kernel) => (kernel, None),
+                None => {
+                    let pinned = baseline::fetch(ctx)?;
+                    (pinned.kernel, Some(pinned.modules))
+                }
+            };
+            let initrd = linux_init(ctx, &dir, Some(posix), &kernel, modules.as_deref())?;
+            Some((kernel, initrd))
+        }
+        None => None,
     };
     let mut numbers = Numbers {
+        vm_release: match &vm_kernel {
+            Some((kernel, _)) => Some(release_of(kernel)?),
+            None => None,
+        },
         runs: 0,
         more: 0,
         radix: Vec::new(),
@@ -713,6 +714,8 @@ fn per_switch(radix: &mut [Measurement], counts: &[Counts]) {
 
 /// Everything `ob bench` measured: each operation's fastest run.
 struct Numbers {
+    /// The release of the Linux kernel in the virtual machine.
+    vm_release: Option<String>,
     /// How many times Radix and the Linux virtual machine were measured.
     runs: u32,
     /// How many of those runs were more, for operations over the gate.
@@ -780,16 +783,24 @@ fn check_gate(numbers: &Numbers) -> Result<()> {
     Ok(())
 }
 
-/// The Linux kernel to boot: `--linux-kernel`, `OB_LINUX_KERNEL`, or the
-/// host's own if this user may read it.
+/// The Linux kernel to boot: `--linux-kernel`, or else `OB_LINUX_KERNEL`;
+/// `None` for neither.
 pub(crate) fn linux_kernel(given: Option<String>) -> Result<Option<PathBuf>> {
-    let given = given.or_else(|| std::env::var("OB_LINUX_KERNEL").ok());
-    if let Some(path) = given {
-        let path = PathBuf::from(path);
-        if std::fs::File::open(&path).is_err() {
-            crate::bail!("cannot read the Linux kernel {}", path.display());
-        }
-        return Ok(Some(path));
+    let Some(path) = given.or_else(|| std::env::var("OB_LINUX_KERNEL").ok()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    if std::fs::File::open(&path).is_err() {
+        crate::bail!("cannot read the Linux kernel {}", path.display());
+    }
+    Ok(Some(path))
+}
+
+/// The Linux kernel `ob fixture` boots: [`linux_kernel`]'s, or else the
+/// host's own if this user may read it.
+pub(crate) fn fixture_kernel(given: Option<String>) -> Result<Option<PathBuf>> {
+    if let Some(kernel) = linux_kernel(given)? {
+        return Ok(Some(kernel));
     }
     let own = PathBuf::from(format!("/boot/vmlinuz-{}", host_kernel()));
     Ok(std::fs::File::open(&own).is_ok().then_some(own))
@@ -833,6 +844,7 @@ fn machine_numbers(text: &str) -> (Numbers, Vec<String>) {
     per_switch(&mut radix, &counts);
     counts.extend(parse_counts(&linux));
     let numbers = Numbers {
+        vm_release: None,
         runs: 1,
         more: 0,
         radix,
@@ -945,13 +957,14 @@ pub fn posix_for_linux(ctx: &Ctx, dir: &Path) -> Result<PathBuf> {
 /// Builds `linux-bench` as a static program and writes the initramfs
 /// that makes it the Linux virtual machine's init process, with the
 /// POSIX benchmarks at `posix` beside it (an empty file without them),
-/// and the modules `kernel` needs to mount the Btrfs disk
-/// ([`linux_modules`]).
+/// and the modules `kernel` needs to mount the Btrfs disk, from
+/// `modules_dir` if given ([`linux_modules`]).
 pub(crate) fn linux_init(
     ctx: &Ctx,
     dir: &Path,
     posix: Option<&Path>,
     kernel: &Path,
+    modules_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     step("Building linux-bench as a static program, to run as Linux's init");
     let program = linux_bench_static(ctx)?;
@@ -961,7 +974,7 @@ pub(crate) fn linux_init(
         None => Vec::new(),
     };
     let mut modules = Vec::new();
-    for (i, path) in linux_modules(kernel)?.iter().enumerate() {
+    for (i, path) in linux_modules(kernel, modules_dir)?.iter().enumerate() {
         let file = path.file_name().map_or_default(|name| name.to_string_lossy());
         let bytes = std::fs::read(path).context(|| format!("reading {}", path.display()))?;
         modules.push((format!("{i:02}-{file}"), bytes));
@@ -974,15 +987,19 @@ pub(crate) fn linux_init(
 
 /// The modules the Linux kernel `kernel` loads to mount Btrfs, in the
 /// order they load: none when it has Btrfs built in, else Btrfs's and
-/// those it needs, from the directory of its modules, `/lib/modules/
-/// <release>` or `OB_LINUX_MODULES`, as its `modules.dep` lists them.
-fn linux_modules(kernel: &Path) -> Result<Vec<PathBuf>> {
+/// those it needs, from the directory of its modules (`modules`, else
+/// `OB_LINUX_MODULES`, else `/lib/modules/<release>`), as its
+/// `modules.dep` lists them.
+fn linux_modules(kernel: &Path, modules: Option<&Path>) -> Result<Vec<PathBuf>> {
     let image = std::fs::read(kernel).context(|| format!("reading {}", kernel.display()))?;
     let Some(release) = kernel_release(&image) else {
         crate::bail!("{} holds no Linux kernel version", kernel.display());
     };
-    let dir = std::env::var_os("OB_LINUX_MODULES")
-        .map_or_else(|| Path::new("/lib/modules").join(&release), PathBuf::from);
+    let dir = match modules {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::var_os("OB_LINUX_MODULES")
+            .map_or_else(|| Path::new("/lib/modules").join(&release), PathBuf::from),
+    };
     let builtin = std::fs::read_to_string(dir.join("modules.builtin")).unwrap_or_default();
     if builtin.lines().any(|line| line.ends_with("/btrfs.ko")) {
         return Ok(Vec::new());
@@ -1519,8 +1536,10 @@ fn report(ctx: &Ctx, numbers: &Numbers, kvm: bool) -> String {
         "Linux was not measured in a virtual machine this time, so there is no ratio".to_string()
     } else {
         format!(
-            "Linux (VM) is Linux in a virtual machine set up the same way, the baseline Radix \
-             must match: the gate fails at any ratio over {GATE_RATIO:.2} (lower is better)"
+            "Linux (VM) is Linux {} in a virtual machine set up the same way, the baseline \
+             Radix must match: the gate fails at any ratio over {GATE_RATIO:.2} (lower is \
+             better)",
+            numbers.vm_release.as_deref().unwrap_or("of an unknown release")
         )
     };
     let _ = writeln!(
@@ -1824,6 +1843,7 @@ mod tests {
 
     fn numbers(radix_ns: f64, linux_ns: f64) -> Numbers {
         let mut numbers = Numbers {
+            vm_release: None,
             runs: 1,
             more: 0,
             radix: Vec::new(),
