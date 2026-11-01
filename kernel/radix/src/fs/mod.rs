@@ -315,20 +315,27 @@ impl FileObject {
         // Made where it stays, and its `Opened` worked out there: an object
         // is too big to move for free. Nothing else refers to it yet, so it
         // needs no check that it is the only reference.
-        let mut object = alloc::sync::Arc::try_new_uninit_in(heap).ok()?;
+        let mut object: alloc::sync::Arc<core::mem::MaybeUninit<FileObject>, _> =
+            alloc::sync::Arc::try_new_uninit_in(heap).ok()?;
         // SAFETY: the allocation was just made; no other `Arc` or `Weak`
         // to it exists.
-        let place = unsafe { alloc::sync::Arc::get_mut_unchecked(&mut object) };
-        let made = place.write(FileObject {
-            at,
-            offset: Mutex::new(offset),
-            flags: AtomicU32::new(description.bits()),
-            locked: AtomicBool::new(false),
-            special,
-            next: SpinLock::new(None),
-            opened: Opened::NONE,
-            name,
-        });
+        let place = unsafe { alloc::sync::Arc::get_mut_unchecked(&mut object) }.as_mut_ptr();
+        // Each field written where it stays: written as one value, the
+        // object was put together on the stack and then copied, 104 bytes
+        // in a `rep movsq` whose start costs more than the copy.
+        // SAFETY: `place` is the new allocation's, which nothing else can
+        // reach yet; each field is written once, before anything reads it.
+        let made = unsafe {
+            (&raw mut (*place).at).write(at);
+            (&raw mut (*place).offset).write(Mutex::new(offset));
+            (&raw mut (*place).flags).write(AtomicU32::new(description.bits()));
+            (&raw mut (*place).locked).write(AtomicBool::new(false));
+            (&raw mut (*place).special).write(special);
+            (&raw mut (*place).next).write(SpinLock::new(None));
+            (&raw mut (*place).opened).write(Opened::NONE);
+            (&raw mut (*place).name).write(name);
+            &mut *place
+        };
         made.opened.set(&made.at, from);
         // SAFETY: written just above.
         Some(unsafe { object.assume_init() })
