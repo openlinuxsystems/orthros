@@ -849,6 +849,8 @@ pub enum Known {
     Realtek(radix_realtek_net::Model),
     /// One of Atheros' or a Killer (`radix-atheros-net`).
     Atheros(radix_atheros_net::Model),
+    /// One of Broadcom's NetXtreme chips (`radix-broadcom-net`).
+    Broadcom(radix_broadcom_net::Model),
 }
 
 impl Known {
@@ -858,6 +860,7 @@ impl Known {
             Known::Intel(model) => model.msi(),
             Known::Realtek(model) => model.msi(),
             Known::Atheros(model) => model.msi(),
+            Known::Broadcom(model) => model.msi(),
             Known::Vmxnet3 | Known::Ena | Known::Gve => true,
         }
     }
@@ -873,6 +876,7 @@ impl Known {
             Known::Intel(_) | Known::Ena => "an",
             Known::Vmxnet3 | Known::Gve | Known::Realtek(_) => "a",
             Known::Atheros(model) => model.article(),
+            Known::Broadcom(model) => model.article(),
         }
     }
 }
@@ -887,6 +891,7 @@ impl fmt::Display for Known {
             Known::Gve => f.write_str("Google gVNIC"),
             Known::Realtek(model) => write!(f, "Realtek {}", model.name),
             Known::Atheros(model) => f.write_str(model.name),
+            Known::Broadcom(model) => f.write_str(model.name),
         }
     }
 }
@@ -909,6 +914,9 @@ pub fn identify(function: &Function) -> Option<Known> {
     }
     if let Some(model) = radix_atheros_net::identify(vendor, device) {
         return Some(Known::Atheros(model));
+    }
+    if let Some(model) = radix_broadcom_net::identify(vendor, device) {
+        return Some(Known::Broadcom(model));
     }
     radix_intel_net::identify(vendor, device).map(Known::Intel)
 }
@@ -1081,11 +1089,13 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
         _ => 0,
     };
     let regs = map_registers(function, first)?;
-    // VMXNET3's commands are in a second BAR, and gVNIC's doorbells in
-    // its third.
+    // VMXNET3's commands are in a second BAR, gVNIC's doorbells in its
+    // third, and the APE of Broadcom's chips that have one too.
     let more = match card {
         Known::Vmxnet3 => Some(map_registers(function, 1)?),
         Known::Gve => Some(map_registers(function, 2)?),
+        Known::Broadcom(model) if model.ape() => Some(map_registers(function, 2)?),
+        Known::Broadcom(_) => None,
         Known::Intel(_) | Known::Ena | Known::Realtek(_) | Known::Atheros(_) => None,
     };
     let source = function.address();
@@ -1101,9 +1111,10 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
             Some(vector)
         })
     };
-    // The older Realtek chips reach only the first 4 GiB, and Atheros'
-    // rings share the high half of their addresses.
-    let below_4g = matches!(card, Known::Realtek(_) | Known::Atheros(_));
+    // The older Realtek chips reach only the first 4 GiB, Atheros' rings
+    // share the high half of their addresses, and Broadcom's hang on a
+    // DMA across a 4 GiB line, which memory below 4 GiB cannot cross.
+    let below_4g = matches!(card, Known::Realtek(_) | Known::Atheros(_) | Known::Broadcom(_));
     let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(source, pages, below_4g);
     let mut delay = delay;
     let how = match interrupt {
@@ -1166,6 +1177,18 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
             )
             .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory))
         }
+        Known::Broadcom(model) => radix_broadcom_net::start(
+            model,
+            function,
+            regs,
+            more,
+            how,
+            fallback_mac(),
+            &mut alloc,
+            &mut delay,
+            sched::now_ns,
+        )
+        .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
     };
     let nic = started.map_err(|err| {
         if let Some(vector) = interrupt {

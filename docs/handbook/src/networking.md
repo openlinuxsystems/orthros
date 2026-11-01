@@ -36,6 +36,13 @@ IPv6, the firewall and WireGuard. This page grows with each.
   the AR8132, AR8152, AR8162 and AR8172 at 100 Mb/s, and the Killer
   E2200, E2400 and E2500 built on them, on many laptops from 2009 to
   2018 (alc(4)). They too are tested against a model of the chips.
+- **Broadcom's NetXtreme chips**: the BCM5717, BCM5718, BCM5719 and
+  BCM5720 of many servers, the BCM5761 and BCM5762 of desktop boards,
+  and the BCM57765 family and BCM57780 of laptops and Macs, copper ports
+  only (bge(4)). On the chips with Broadcom's APE, which can share the
+  port with a server's management controller, the driver takes the
+  APE's locks and tells its firmware when it starts and stops. A model
+  of the chips tests them too.
 - **A card's driver can run as a program**: with `e1000=program`, which
   the images `ob image` builds have, the kernel leaves the e1000 and
   e1000e cards an IOMMU confines to e1000d(8), which drives them with

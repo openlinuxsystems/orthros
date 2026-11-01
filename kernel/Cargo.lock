@@ -256,6 +256,7 @@ dependencies = [
  "radix-bitlocker",
  "radix-block",
  "radix-bootfs",
+ "radix-broadcom-net",
  "radix-btrfs",
  "radix-cap",
  "radix-crosec",
@@ -422,6 +423,14 @@ dependencies = [
 [[package]]
 name = "radix-bootinfo"
 version = "0.11.0"
+
+[[package]]
+name = "radix-broadcom-net"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
+]
 
 [[package]]
 name = "radix-btrfs"

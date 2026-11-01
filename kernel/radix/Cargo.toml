@@ -20,6 +20,7 @@ radix-abi = { path = "../abi" }
 radix-acpi = { path = "../lib/acpi" }
 radix-ahci = { path = "../drivers/ahci" }
 radix-atheros-net = { path = "../drivers/atheros" }
+radix-broadcom-net = { path = "../drivers/broadcom" }
 radix-ide = { path = "../drivers/ide" }
 radix-nvme = { path = "../drivers/nvme" }
 radix-sdhci = { path = "../drivers/sdhci" }

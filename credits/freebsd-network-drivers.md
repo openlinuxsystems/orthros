@@ -33,3 +33,10 @@ Section: Specifications and papers
   power-state sequences of the two chip families, and their quirks, from
   which `radix-atheros-net` drives Atheros' AR813x, AR815x, AR816x and
   Killer E2x00 chips. No code is taken from them.
+- FreeBSD's `bge(4)` and `brgphy(4)` (BSD-4-Clause, Copyright Bill Paul
+  and Wind River Systems), the reference for the registers, rings,
+  status block, chip IDs, reset and state machine sequences, the APE's
+  locks and events, the PHY fixes and each chip's quirks, from which
+  `radix-broadcom-net` drives Broadcom's BCM5717 family, BCM5761,
+  BCM5762, BCM57765 family and BCM57780 chips. No code is taken from
+  them.
