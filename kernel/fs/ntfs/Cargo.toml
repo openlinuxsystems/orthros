@@ -29,6 +29,9 @@ radix-vfs = { path = "../vfs", features = ["host"] }
 # That FAT and exFAT take NTFS for none of theirs, and NTFS them.
 radix-exfat = { path = "../exfat", features = ["host"] }
 radix-fat = { path = "../fat", features = ["host"] }
+# SHA-256, for what the volumes kept for Windows' `chkdsk` hold
+# (MIT OR Apache-2.0).
+sha2 = { version = "0.10.9", default-features = false }
 # Host-side property tests (ADR 0019). Without default features it needs
 # neither forking nor timeouts.
 proptest = { version = "1.7", default-features = false, features = ["std"] }

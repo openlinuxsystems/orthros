@@ -131,6 +131,15 @@ pub fn build(ctx: &Ctx, check: bool) -> Result<()> {
         problems.extend(check_coverage(ctx)?);
     }
 
+    let credits = read(ctx, "CREDITS.md")?;
+    let (merged, credit_problems) =
+        merge_credits(&credits, &read_credits(&ctx.root.join("credits"))?);
+    problems.extend(credit_problems);
+    let credits_path = ctx.out.join("docs/CREDITS.md");
+    process::create_dir(&ctx.out.join("docs"))?;
+    std::fs::write(&credits_path, merged)
+        .context(|| format!("writing {}", credits_path.display()))?;
+
     let (index, adr_problems) = adr_index(&read_adrs(&ctx.root.join("docs/adr"))?);
     problems.extend(adr_problems);
     let index_path = ctx.out.join("docs/adr/index.md");
@@ -287,6 +296,72 @@ fn read_adrs(dir: &Path) -> Result<Vec<(String, String)>> {
     Ok(adrs)
 }
 
+/// The credit files in `dir` (credits/), other than its README: each
+/// name and text, in the order of their names.
+fn read_credits(dir: &Path) -> Result<Vec<(String, String)>> {
+    let mut credits = Vec::new();
+    for entry in std::fs::read_dir(dir).context(|| format!("reading {}", dir.display()))? {
+        let path = entry.context(|| format!("reading {}", dir.display()))?.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        if name != "README.md" && path.extension().is_some_and(|ext| ext == "md") {
+            let text = std::fs::read_to_string(&path).context(|| format!("reading {name}"))?;
+            credits.push((name.to_string(), text));
+        }
+    }
+    credits.sort();
+    Ok(credits)
+}
+
+/// CREDITS.md with each credit file's lines at the end of the section its
+/// `Section:` line names (credits/README.md), and the problems: a file
+/// that names no section CREDITS.md has.
+fn merge_credits(credits: &str, files: &[(String, String)]) -> (String, Vec<String>) {
+    let mut problems = Vec::new();
+    let mut additions: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (name, text) in files {
+        let mut lines = text.lines().skip_while(|line| {
+            line.is_empty()
+                || line.starts_with("<!--")
+                || line.starts_with("SPDX-")
+                || line.starts_with("-->")
+        });
+        let section = lines.next().and_then(|line| line.strip_prefix("Section: "));
+        let body: Vec<&str> = lines.filter(|line| !line.is_empty()).collect();
+        match section {
+            Some(section) if credits.lines().any(|l| l.strip_prefix("## ") == Some(section)) => {
+                additions.push((section, body));
+            }
+            _ => problems.push(format!(
+                "credits/{name}: its first line must be `Section: ` and a section of CREDITS.md"
+            )),
+        }
+    }
+    let mut out = String::new();
+    let mut current: Option<&str> = None;
+    let flush = |out: &mut String, current: Option<&str>| {
+        // Before the blank lines that end the section.
+        let trimmed = out.trim_end_matches('\n').len();
+        let tail = out.split_off(trimmed);
+        for (_, body) in additions.iter().filter(|(s, _)| Some(*s) == current) {
+            for line in body {
+                out.push('\n');
+                out.push_str(line);
+            }
+        }
+        out.push_str(&tail);
+    };
+    for line in credits.lines() {
+        if let Some(section) = line.strip_prefix("## ") {
+            flush(&mut out, current);
+            current = Some(section);
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    flush(&mut out, current);
+    (out, problems)
+}
+
 /// The index of the decision records, made from their files so that no
 /// pull request edits a shared table (threads that build phases in
 /// parallel added rows at the same place, and conflicted), and the
@@ -382,6 +457,32 @@ mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/adr");
         let adrs = read_adrs(&dir).unwrap();
         let (_, problems) = adr_index(&adrs);
+        assert!(problems.is_empty(), "{problems:#?}");
+    }
+
+    #[test]
+    fn credit_files_go_at_the_end_of_their_section() {
+        let credits = "# Credits\n\n## A\n\n| x |\n| y |\n\n## B\n\n| z |\n";
+        let files = [
+            ("one.md".to_string(), "<!--\nSPDX-x\n-->\n\nSection: A\n| new |\n".to_string()),
+            ("two.md".to_string(), "Section: B\n| last |\n".to_string()),
+            ("bad.md".to_string(), "Section: C\n| lost |\n".to_string()),
+        ];
+        let (merged, problems) = merge_credits(credits, &files);
+        assert_eq!(
+            merged,
+            "# Credits\n\n## A\n\n| x |\n| y |\n| new |\n\n## B\n\n| z |\n| last |\n"
+        );
+        assert_eq!(problems.len(), 1);
+    }
+
+    /// The credit files in the tree, so that `cargo test` finds one that
+    /// names no section before the docs job does.
+    #[test]
+    fn credit_files_name_sections_of_credits_md() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let credits = std::fs::read_to_string(root.join("CREDITS.md")).unwrap();
+        let (_, problems) = merge_credits(&credits, &read_credits(&root.join("credits")).unwrap());
         assert!(problems.is_empty(), "{problems:#?}");
     }
 }

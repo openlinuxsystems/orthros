@@ -186,6 +186,33 @@ pub fn unmount(path: &Path) -> Result<(), String> {
     std::fs::remove_dir(path).map_err(|err| util::strip_os_error(&err))
 }
 
+/// Mounts the volume `mount` at `/volumes` again, as `flags` ask (ADR
+/// 0238): unmounted, then mounted from its device with its filesystem; one
+/// that refuses writes is mounted read-only, as at its first mount. A
+/// mount that fails is tried again as it was.
+pub fn remount(mount: &Mount, flags: MountFlags) -> Result<MountFlags, String> {
+    let path = df::mount_path(mount);
+    let at = path.file_name().map(|n| n.to_string_lossy().into_owned()).ok_or("not a volume")?;
+    let (device, device_flags) =
+        open_device(&mount.source).map_err(|err| util::strip_os_error(&err))?;
+    let flags = if device_flags.contains(MountFlags::READ_ONLY) {
+        flags.union(MountFlags::READ_ONLY)
+    } else {
+        flags
+    };
+    unmount(&path)?;
+    std::fs::create_dir(&path).map_err(|err| util::strip_os_error(&err))?;
+    let kind = mount.kind.as_bytes();
+    match mount_as(&at, kind, &device, flags) {
+        Ok(flags) => Ok(flags),
+        Err(status) => {
+            let was = if mount.read_only { MountFlags::READ_ONLY } else { MountFlags::NONE };
+            let _ = mount_as(&at, kind, &device, was);
+            Err(util::strip_os_error(&sys::io_error(status)))
+        }
+    }
+}
+
 /// Unmounts what is mounted at `/volumes` from the disks and partitions
 /// in `gone`: lines of what it did.
 fn unmount_gone(gone: &BTreeSet<String>) -> Vec<String> {

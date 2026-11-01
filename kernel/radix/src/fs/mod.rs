@@ -564,6 +564,9 @@ pub struct Flags {
     pub read_only: bool,
     /// Compressing the data written with zstd: Btrfs only (ADR 0134).
     pub compress: bool,
+    /// Writing an NTFS that Windows hibernated with anyway, throwing the
+    /// hibernation away: NTFS only (ADR 0238).
+    pub discard_hibernation: bool,
 }
 
 /// Makes a filesystem of the kind named `kind` for `mount`: `fat`,
@@ -574,7 +577,7 @@ pub struct Flags {
 /// with a log to replay, fails a writable mount with `NotSupported` (ADRs
 /// 0130, 0140, 0141 and 0237), and mounts read-only.
 pub fn make(kind: &str, source: Option<&NodeRef>, flags: Flags) -> radix_vfs::Result<Made> {
-    let Flags { read_only, compress } = flags;
+    let Flags { read_only, compress, discard_hibernation } = flags;
     use core::fmt::Write;
     let mut name = radix_klog::TextBuf::<32>::new();
     let fs: FsRef = match kind {
@@ -597,7 +600,7 @@ pub fn make(kind: &str, source: Option<&NodeRef>, flags: Flags) -> radix_vfs::Re
                 "fat" => mount_fat(device, read_only)?,
                 "exfat" => mount_exfat(device, read_only)?,
                 "ext4" => mount_ext4(device, read_only)?,
-                "ntfs" => mount_ntfs(device, name.as_str(), read_only)?,
+                "ntfs" => mount_ntfs(device, name.as_str(), read_only, discard_hibernation)?,
                 "iso9660" => mount_iso9660(device, read_only)?,
                 "udf" => mount_udf(device, read_only)?,
                 _ => mount_btrfs(device, name.as_str(), read_only, compress)?,
@@ -648,18 +651,27 @@ fn mount_udf(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Resu
     fs_ref(radix_udf::UdfFs::mount(device, read_only)?)
 }
 
-/// Mounts the NTFS filesystem on `device`, the disk `name` ([`mount_fat`]).
+/// Mounts the NTFS filesystem on `device`, the disk `name` ([`mount_fat`]),
+/// throwing away Windows' hibernation on it if `discard_hibernation`.
 /// Mounted read-only, it says why it could not be written, if that is so
-/// (ADR 0237).
+/// (ADR 0237); and it says when it threw a hibernation away (ADR 0238).
 #[inline(never)]
 fn mount_ntfs(
     device: radix_block::DeviceRef,
     name: &str,
     read_only: bool,
+    discard_hibernation: bool,
 ) -> radix_vfs::Result<FsRef> {
-    let fs = radix_ntfs::NtfsFs::mount(device, read_only)?;
+    let options = radix_ntfs::fs::Options { read_only, discard_hibernation };
+    let fs = radix_ntfs::NtfsFs::mount_with(device, options)?;
     if let Some(why) = fs.kept_from_writing() {
         warn!("Files: the NTFS of {name} is only read: {why}");
+    }
+    if fs.discarded_hibernation() {
+        warn!(
+            "Files: the NTFS of {name} is written although Windows hibernated with it, as its \
+             owner asked: Windows starts afresh, without what it left open, and checks the volume"
+        );
     }
     fs_ref(fs)
 }

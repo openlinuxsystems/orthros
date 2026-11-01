@@ -172,6 +172,49 @@ impl Runs {
         Ok(freed)
     }
 
+    /// Replaces clusters `vcn..vcn + len`, which the runs cover, with
+    /// `with`: runs of `(lcn, clusters)` ([`HOLE`] for a hole) that cover
+    /// `len` clusters between them. Returns those of the old runs there
+    /// that were on the disk, whose clusters are free now.
+    pub fn replace(&mut self, vcn: u64, len: u64, with: &[(u64, u64)]) -> Result<KVec<Run>> {
+        let end = vcn.checked_add(len).ok_or(Error::Corrupt)?;
+        if end > self.clusters() || with.iter().map(|&(_, n)| n).sum::<u64>() != len {
+            return Err(Error::Corrupt);
+        }
+        let mut out = Runs { runs: mem::vec_with_capacity(self.runs.len() + with.len() + 1)? };
+        let mut freed = mem::vec();
+        for run in &self.runs {
+            if run.vcn >= vcn {
+                break;
+            }
+            out.push(Run { vcn: run.vcn, len: run.len.min(vcn - run.vcn), lcn: run.lcn })?;
+        }
+        let mut at = vcn;
+        for &(lcn, n) in with {
+            if n != 0 {
+                out.push(Run { vcn: at, len: n, lcn })?;
+                at += n;
+            }
+        }
+        for run in &self.runs {
+            let run_end = run.vcn + run.len;
+            let (from, to) = (run.vcn.max(vcn), run_end.min(end));
+            if from < to && run.lcn != HOLE {
+                mem::push(
+                    &mut freed,
+                    Run { vcn: from, len: to - from, lcn: run.lcn + (from - run.vcn) },
+                )?;
+            }
+            if run_end > end {
+                let skip = end.saturating_sub(run.vcn);
+                let lcn = if run.lcn == HOLE { HOLE } else { run.lcn + skip };
+                out.push(Run { vcn: run.vcn + skip, len: run.len - skip, lcn })?;
+            }
+        }
+        *self = out;
+        Ok(freed)
+    }
+
     /// The packed run list of the runs from VCN `from` to `to` (not
     /// included), which must start and end on runs' edges or within
     /// them, as a record holds it, with its end byte.
@@ -205,6 +248,55 @@ impl Runs {
         }
         mem::push(&mut out, 0)?;
         Ok(out)
+    }
+
+    /// Where to cut the runs from VCN `from` on into pieces, each of
+    /// whose packed run list, with its end byte, takes `budget` bytes at
+    /// most: the end of each piece, the last the runs' end. A piece ends
+    /// on a multiple of `grain` clusters, a compression unit's of
+    /// compressed or sparse data, so that no unit is split between
+    /// records; within a run if need be. Fails with [`Error::NoSpace`] if
+    /// a unit's runs alone take more.
+    pub fn cuts(&self, from: u64, grain: u64, budget: usize) -> Result<KVec<u64>> {
+        let end = self.clusters();
+        let mut cuts = mem::vec();
+        let mut start = from;
+        let mut i = self.runs.partition_point(|run| run.vcn + run.len <= from);
+        while start < end {
+            // Each piece's offsets start from 0 again.
+            let mut last_lcn: i64 = 0;
+            let mut used = 1;
+            let mut best = None;
+            while let Some(run) = self.runs.get(i) {
+                let at = run.vcn.max(start);
+                let run_end = run.vcn + run.len;
+                let lcn = (run.lcn != HOLE).then(|| (run.lcn + (at - run.vcn)) as i64);
+                let off = lcn.map_or(0, |lcn| signed_size(lcn - last_lcn));
+                let whole = 1 + signed_size((run_end - at) as i64) + off;
+                if used + whole <= budget {
+                    used += whole;
+                    if let Some(lcn) = lcn {
+                        last_lcn = lcn;
+                    }
+                    if run_end.is_multiple_of(grain) || run_end == end {
+                        best = Some(run_end);
+                    }
+                    i += 1;
+                    continue;
+                }
+                // The last unit's edge within the run, if its piece fits.
+                let edge = (run_end - 1) / grain * grain;
+                if edge > at && used + 1 + signed_size((edge - at) as i64) + off <= budget {
+                    best = Some(edge);
+                }
+                break;
+            }
+            let cut = best.ok_or(Error::NoSpace)?;
+            mem::push(&mut cuts, cut)?;
+            start = cut;
+            i = self.runs.partition_point(|run| run.vcn + run.len <= start);
+        }
+        Ok(cuts)
     }
 
     /// How many of the clusters from `vcn`, `len` of them at most, are on

@@ -188,7 +188,7 @@ fn main(_: &Startup) -> u64 {
     if volumes.is_empty() && matches!(mode, "write" | "check" | "list" | "replayed") {
         fail("no volumes are mounted under /volumes");
     }
-    if volumes.len() != 1 && matches!(mode, "churn" | "churned") {
+    if volumes.len() != 1 && matches!(mode, "churn" | "churned" | "churned-kept") {
         fail(&format!("`{mode}` takes one volume, not {}", volumes.len()));
     }
     match mode {
@@ -295,9 +295,9 @@ fn main(_: &Startup) -> u64 {
                 churn(&root, name);
             }
         }
-        "churned" => {
+        "churned" | "churned-kept" => {
             for name in &volumes {
-                churned(&root, name);
+                churned(&root, name, mode == "churned");
             }
         }
         "root" | "rooted" => check_root(&root, mode == "rooted"),
@@ -1200,10 +1200,12 @@ fn churn(root: &Dir, name: &str) {
 /// `storage churned`, after the power was cut during [`churn`]: each
 /// `file-N` must be whole and each `temp-N` a start of itself (the boot
 /// test's host checks which must be there); then they are removed, and a
-/// file written, synced and read back.
-fn churned(root: &Dir, name: &str) {
-    let rw = Rights::READ.union(Rights::WRITE);
-    let dir = match root.open_dir(&format!("volumes/{name}"), rw) {
+/// file written, synced and read back. `storage churned-kept` (`writes`
+/// false), for an NTFS, which a power cut leaves for Windows to check
+/// (ADR 0237): the files are read, and the volume must refuse a write.
+fn churned(root: &Dir, name: &str, writes: bool) {
+    let rights = if writes { Rights::READ.union(Rights::WRITE) } else { Rights::READ };
+    let dir = match root.open_dir(&format!("volumes/{name}"), rights) {
         Ok(dir) => dir,
         Err(err) => return fail(&format!("cannot open /volumes/{name}: {err}")),
     };
@@ -1247,7 +1249,7 @@ fn churned(root: &Dir, name: &str) {
         } else {
             whole += 1;
         }
-        if let Err(err) = dir.remove(&entry.name) {
+        if writes && let Err(err) = dir.remove(&entry.name) {
             fail(&format!("/volumes/{name}/{}: removing it: {err}", entry.name));
         }
     }
@@ -1255,6 +1257,20 @@ fn churned(root: &Dir, name: &str) {
         "storage: /volumes/{name}: after the power cut, {whole} files whole and {unfinished} \
          unfinished"
     );
+    if !writes {
+        let rw = Rights::READ.union(Rights::WRITE);
+        let opened = root.open_dir(&format!("volumes/{name}"), rw);
+        match opened.and_then(|dir| dir.write_file("after.txt", HELLO)) {
+            Err(err) if err.is(FileError::ReadOnly) => println!(
+                "storage: /volumes/{name}: only read after the power cut, for Windows to check it"
+            ),
+            Err(err) => {
+                fail(&format!("a write to /volumes/{name} failed with {err}, not read_only"));
+            }
+            Ok(()) => fail(&format!("/volumes/{name} took a write after the power cut")),
+        }
+        return;
+    }
     let again = dir.write_file("after.txt", HELLO).and_then(|()| dir.sync());
     match again.and_then(|()| dir.read_file("after.txt")) {
         Ok(data) if data == HELLO => {

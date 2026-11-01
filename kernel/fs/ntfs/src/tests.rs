@@ -149,7 +149,7 @@ pub(crate) fn read_all(node: &NodeRef) -> Vec<u8> {
     out
 }
 
-fn read_link(node: &NodeRef) -> String {
+pub(crate) fn read_link(node: &NodeRef) -> String {
     let mut out = [0u8; 256];
     let n = node.read_link(&mut SliceMut(&mut out)).unwrap();
     String::from_utf8(out[..n].to_vec()).unwrap()
@@ -406,7 +406,7 @@ pub(crate) fn ntfs_3g() -> Vec<u8> {
 }
 
 /// The text `ob fixture ntfs-3g` writes compressed.
-fn text() -> Vec<u8> {
+pub(crate) fn text() -> Vec<u8> {
     (0..4000)
         .flat_map(|i| {
             format!("line {} of a text that compresses well, again and again\n", i % 50)

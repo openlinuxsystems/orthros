@@ -200,6 +200,12 @@ flags MountFlags: u32 {
     /// Compress the data written with zstd, as Linux's `compress=zstd:1`
     /// does: `btrfs` only.
     compress = 1;
+    /// Write an NTFS that Windows hibernated with, or shut down with Fast
+    /// Startup, anyway, as ntfs-3g's `remove_hiberfile` does: the
+    /// hibernation is thrown away, with what Windows held in memory, and
+    /// the volume stays marked for Windows to check (ADR 0238). `ntfs`
+    /// only.
+    discard_hibernation = 2;
 }
 
 /// Which chunks a balance moves (ADR 0159): those of data, of metadata,

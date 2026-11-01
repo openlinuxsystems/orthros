@@ -184,8 +184,41 @@ jobs:
       - name: ./ob setup
         run: ./ob setup
 
+      # NTFS's host tests keep each volume they write for the Windows job
+      # (kernel/fs/ntfs/src/windows_tests.rs).
       - name: ./ob test unit
         run: ./ob test unit
+        env:
+          NTFS_IMAGES: ${{ github.workspace }}/out/ntfs-volumes
+
+      - name: Upload the NTFS volumes for Windows' chkdsk
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-volumes
+          path: out/ntfs-volumes
+          if-no-files-found: error
+          retention-days: 3
+
+  # Windows' chkdsk on each NTFS volume the unit job's host tests wrote,
+  # and their files read back as Windows reads them (ADR 0238). ./ob does
+  # not run on Windows, so this job runs a script of its own.
+  chkdsk:
+    name: Windows chkdsk
+    needs: unit
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tools/windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ntfs-volumes
+          path: ntfs-volumes
+
+      - name: chkdsk each volume, and read its files back
+        shell: pwsh
+        run: ./tools/windows/chkdsk.ps1 ntfs-volumes
 
   boot:
     name: Boot tests (${{ matrix.shard }}/3)

@@ -35,9 +35,20 @@
 //! clusters until its last reference goes, as on Linux; its names are
 //! gone at once.
 //!
-//! Radix does not write compressed, sparse or encrypted data yet, nor a
-//! file whose attributes are in more than one record, nor make symbolic
-//! links: those fail with [`Error::NotSupported`] (ADR 0237).
+//! Compressed data is written a compression unit (16 clusters) at a
+//! time, each unit compressed into fewer clusters when it saves one, as
+//! Windows does, and left a hole when it is all zeros; a sparse file's
+//! holes are given clusters a unit at a time as data goes into them
+//! (ADR 0238). Symbolic links are made as Windows' links when Windows
+//! can follow them, and as WSL's otherwise, each listed in
+//! `$Extend\$Reparse`.
+//!
+//! A file whose runs outgrow its record has its data cut into pieces in
+//! extension records, which its attribute list names, and back when they
+//! fit again (ADR 0239). Radix does not write encrypted data, nor a file
+//! whose other attributes are in more than one record, nor a directory
+//! whose index has a list or its bitmap in clusters: those fail with
+//! [`Error::NotSupported`].
 
 use alloc::sync::Weak;
 use core::any::Any;
@@ -59,6 +70,7 @@ use crate::fs::{
     Info, Inner, Loaded, Scratch, Stream, Value, records, replace_named, replace_stream, zeroed,
 };
 use crate::index::{self, FileName, NAME_MAX, ROOT_HEADER, attributes, namespace};
+use crate::list::{self, Extent};
 use crate::lznt1;
 use crate::names::{self, Dup};
 use crate::record::{self, Record, attr_flags, fix_up, kind, record_of, u16_at, u32_at, u64_at};
@@ -78,6 +90,14 @@ const MAX_INTERIX: u64 = 4096;
 /// The largest compression unit Radix reads: 16 clusters of 4 KiB, all
 /// Windows makes.
 const MAX_UNIT: u64 = 64 << 10;
+
+/// The largest cluster of a compressed file Radix writes: Windows
+/// compresses only on volumes of clusters of 4 KiB or less.
+const MAX_COMPRESS_CLUSTER: u64 = 4096;
+
+/// The compression unit of the files Radix compresses, as Windows'
+/// are: 16 clusters.
+const UNIT: u8 = 4;
 
 /// The deepest a link's directory may be below the root.
 const MAX_DEPTH: usize = 256;
@@ -120,20 +140,93 @@ struct Mark {
     count: u32,
 }
 
-/// A directory's index.
+/// A directory's index, or `$Reparse`'s.
 struct Dir {
-    /// `$I30`'s root.
+    /// `$I30`'s root, or `$R`'s.
     root: KVec<u8>,
     /// Its blocks, if it has any.
     blocks: Option<Stream>,
     /// Which blocks are in use.
     bitmap: KVec<u8>,
-    /// Whether the bitmap is in clusters, which Radix does not change.
+    /// Whether Radix does not change it: its bitmap is in clusters, or
+    /// its sizes are damaged.
     fixed: bool,
+    /// Whether it is `$R`, of reparse points, not `$I30`.
+    view: bool,
     /// Where listings stopped.
     marks: KVec<Mark>,
     next_mark: u32,
 }
+
+impl Dir {
+    /// The name of its attributes, as UTF-16 bytes.
+    fn name(&self) -> &'static [u8] {
+        if self.view { &edit::R } else { &I30 }
+    }
+
+    /// The index of the directory or view index whose `$INDEX_ROOT` value
+    /// is `root`, with `blocks` and `bitmap` if it has them; and its size
+    /// and the bytes its blocks hold.
+    #[inline(never)]
+    fn load(
+        vol: &crate::fs::Volume,
+        root: KVec<u8>,
+        blocks: Option<Value>,
+        bitmap: Option<&Value>,
+        view: bool,
+    ) -> Result<(Dir, u64, u64)> {
+        // A directory's index is of names, collated as names are; a view
+        // index's keys are numbers.
+        let indexed = if view { 0 } else { record::kind::FILE_NAME };
+        let collation = if view { COLLATION_ULONGS } else { COLLATION_NAMES };
+        if root.len() < ROOT_HEADER + 16
+            || u32_at(&root, 0) != indexed
+            || u32_at(&root, 4) != collation
+        {
+            return Err(Error::Corrupt);
+        }
+        let blocks = match blocks {
+            Some(Value::Clusters(stream)) => Some(stream),
+            Some(Value::Resident(_)) => return Err(Error::Corrupt),
+            None => None,
+        };
+        let (bitmap, in_clusters) = match bitmap {
+            Some(value @ Value::Clusters(_)) => (vol.read_whole(value, MAX_WHOLE_BITMAP)?, true),
+            Some(Value::Resident(bytes)) => (mem::copy(bytes)?, false),
+            None => (mem::vec(), false),
+        };
+        if blocks.is_some() && bitmap.is_empty() {
+            return Err(Error::Corrupt);
+        }
+        let size = blocks.as_ref().map_or(root.len() as u64, |b| b.size);
+        let allocated = blocks.as_ref().map_or(0, |b| b.size);
+        // Blocks its clusters do not hold, or its bitmap has no bits for,
+        // are of a damaged index: it is read as far as it goes, and not
+        // changed.
+        let index_size = u64::from(vol.geo.index_size);
+        let cs = u64::from(vol.geo.cluster_size);
+        let damaged = blocks.as_ref().is_some_and(|b| {
+            !b.size.is_multiple_of(index_size)
+                || b.runs.clusters().checked_mul(cs).is_none_or(|held| b.size > held)
+                || b.size / index_size > bitmap.len() as u64 * 8
+        });
+        let dir = Dir {
+            root,
+            blocks,
+            bitmap,
+            fixed: in_clusters || damaged,
+            view,
+            marks: mem::vec(),
+            next_mark: 1,
+        };
+        Ok((dir, size, allocated))
+    }
+}
+
+/// An index root's collation rules: names through the up-case table, and
+/// 32-bit numbers in turn.
+const COLLATION_NAMES: u32 = 1;
+const COLLATION_ULONGS: u32 = 0x13;
 
 /// What a node knows of itself that changes.
 struct State {
@@ -148,8 +241,13 @@ struct State {
     dir: Option<Dir>,
     /// Why its data cannot be written, if it cannot.
     fixed: Option<Error>,
-    /// Whether its attributes are in more than one record.
+    /// Whether attributes other than its data's are in more than one
+    /// record: Radix does not change it.
     listed: bool,
+    /// Whether its base record has an attribute list, which names the
+    /// pieces of its data in other records, `extents` (ADR 0239).
+    list: bool,
+    extents: KVec<Extent>,
     /// Whether its record on the disk is behind.
     dirty: bool,
     /// How many times it has fallen behind, so that a change made while
@@ -176,9 +274,87 @@ pub struct NtfsNode {
     cache: Option<FileCache>,
     /// A link's target, as the disk has it, and as a path once worked out.
     link: Option<Target>,
+    /// Its reparse point's tag, if it has one.
+    tag: u32,
+    /// Whether its record holds a directory's index: a directory's, or
+    /// a link to a directory's, as Windows makes them.
+    indexed: bool,
     path: Once<KVec<u8>>,
     me: Once<Weak<NtfsNode, Alloc>>,
     pinned: AtomicBool,
+}
+
+/// A file's data as it was read, and its size.
+struct FileData {
+    data: Data,
+    size: u64,
+}
+
+/// The data `data` of a file whose `$STANDARD_INFORMATION` is `info` and
+/// reparse tag `tag`, on a volume of clusters of `cs` bytes: as it is
+/// read, its bytes on the disk, and why it is not written, if it is not.
+/// A function of its own, so that [`NtfsNode::new`]'s frame stays small.
+#[inline(never)]
+fn file_data_of(
+    info: &Info,
+    tag: u32,
+    data: Option<Value>,
+    cs: u64,
+) -> Result<(FileData, u64, Option<Error>)> {
+    let mut allocated = 0;
+    let mut fixed = None;
+    let size = data.as_ref().map_or(0, Value::size);
+    let unreadable = if info.attributes & attributes::ENCRYPTED != 0 {
+        Some(Error::Denied)
+    } else if info.attributes
+        & (attributes::OFFLINE | attributes::RECALL_ON_OPEN | attributes::RECALL_ON_DATA_ACCESS)
+        != 0
+        || tag == reparse::tag::DEDUP
+    {
+        Some(Error::NotSupported)
+    } else {
+        None
+    };
+    let data = match data {
+        None => Data::Resident(mem::vec()),
+        Some(Value::Resident(bytes)) => Data::Resident(bytes),
+        Some(Value::Clusters(stream)) => {
+            if stream.runs.clusters() * cs < stream.size {
+                return Err(Error::Corrupt);
+            }
+            let compressed = stream.flags & attr_flags::COMPRESSED != 0;
+            if compressed && stream.unit == 0 {
+                return Err(Error::Corrupt);
+            }
+            allocated = stream.runs.allocated_in(0, stream.runs.clusters()) * cs;
+            // Compressed and sparse data are written a unit
+            // at a time; encrypted data is not.
+            let known = attr_flags::COMPRESSED | attr_flags::SPARSE;
+            let unit = cs.checked_shl(stream.unit.into());
+            if stream.flags & !known != 0
+                || (compressed && cs > MAX_COMPRESS_CLUSTER)
+                || (stream.packed() && unit.is_none_or(|u| u > MAX_UNIT))
+            {
+                fixed = Some(Error::NotSupported);
+            }
+            if stream.flags & attr_flags::ENCRYPTED != 0 {
+                Data::Unreadable(Error::Denied)
+            } else if compressed && cs.checked_shl(stream.unit.into()).is_none_or(|u| u > MAX_UNIT)
+            {
+                Data::Unreadable(Error::NotSupported)
+            } else {
+                Data::Clusters(stream)
+            }
+        }
+    };
+    let data = match unreadable {
+        Some(err) => Data::Unreadable(err),
+        None => data,
+    };
+    if let Data::Unreadable(err) = data {
+        fixed = Some(err);
+    }
+    Ok((FileData { data, size }, allocated, fixed))
 }
 
 /// The time now, as finely as NTFS keeps it.
@@ -202,9 +378,19 @@ impl NtfsNode {
             blocks,
             bitmap,
             reparse,
+            list,
+            extents,
             listed,
+            view,
             ..
         } = loaded;
+        // A directory's index Radix does not spread over records.
+        let listed = listed || (list && root.is_some());
+        let extents = extents.unwrap_or_else(mem::vec);
+        // A view index is loaded after its file's data.
+        let (root, root_of_view) = if view { (None, root) } else { (root, None) };
+        let (blocks, blocks_of_view) = if view { (None, blocks) } else { (blocks, None) };
+        let (bitmap, bitmap_of_view) = if view { (None, bitmap) } else { (bitmap, None) };
         let vol = &fs.vol;
         let cs = u64::from(vol.geo.cluster_size);
         let reparse = match &reparse {
@@ -243,88 +429,29 @@ impl NtfsNode {
         let mut fixed = listed.then_some(Error::NotSupported);
         match kind {
             Kind::File => {
-                size = data.as_ref().map_or(0, Value::size);
-                let unreadable = if info.attributes & attributes::ENCRYPTED != 0 {
-                    Some(Error::Denied)
-                } else if info.attributes
-                    & (attributes::OFFLINE
-                        | attributes::RECALL_ON_OPEN
-                        | attributes::RECALL_ON_DATA_ACCESS)
-                    != 0
-                    || tag == reparse::tag::DEDUP
-                {
-                    Some(Error::NotSupported)
-                } else {
-                    None
-                };
-                let data = match data {
-                    None => Data::Resident(mem::vec()),
-                    Some(Value::Resident(bytes)) => Data::Resident(bytes),
-                    Some(Value::Clusters(stream)) => {
-                        if stream.runs.clusters() * cs < stream.size {
-                            return Err(Error::Corrupt);
-                        }
-                        let compressed = stream.flags & attr_flags::COMPRESSED != 0;
-                        if compressed && stream.unit == 0 {
-                            return Err(Error::Corrupt);
-                        }
-                        allocated = stream.runs.allocated_in(0, stream.runs.clusters()) * cs;
-                        if stream.flags != 0 {
-                            fixed = Some(Error::NotSupported);
-                        }
-                        if stream.flags & attr_flags::ENCRYPTED != 0 {
-                            Data::Unreadable(Error::Denied)
-                        } else if compressed
-                            && cs.checked_shl(stream.unit.into()).is_none_or(|u| u > MAX_UNIT)
-                        {
-                            Data::Unreadable(Error::NotSupported)
-                        } else {
-                            Data::Clusters(stream)
-                        }
-                    }
-                };
-                let data = match unreadable {
-                    Some(err) => Data::Unreadable(err),
-                    None => data,
-                };
-                if let Data::Unreadable(err) = data {
+                let (loaded, held, unfixed) = file_data_of(&info, tag, data, cs)?;
+                size = loaded.size;
+                allocated = held;
+                if let Some(err) = unfixed {
                     fixed = Some(err);
                 }
-                file_data = Some(data);
+                file_data = Some(loaded.data);
             }
             Kind::Directory => {
                 let root = root.ok_or(Error::Corrupt)?;
-                // A directory's index is of names, collated as names are.
-                if root.len() < ROOT_HEADER + 16 || u32_at(&root, 0) != record::kind::FILE_NAME {
-                    return Err(Error::Corrupt);
-                }
-                let blocks = match blocks {
-                    Some(Value::Clusters(stream)) => Some(stream),
-                    Some(Value::Resident(_)) => return Err(Error::Corrupt),
-                    None => None,
-                };
-                let (bitmap, in_clusters) = match &bitmap {
-                    Some(value @ Value::Clusters(_)) => {
-                        (vol.read_whole(value, MAX_WHOLE_BITMAP)?, true)
-                    }
-                    Some(Value::Resident(bytes)) => (mem::copy(bytes)?, false),
-                    None => (mem::vec(), false),
-                };
-                if blocks.is_some() && bitmap.is_empty() {
-                    return Err(Error::Corrupt);
-                }
-                size = blocks.as_ref().map_or(root.len() as u64, |b| b.size);
-                allocated = blocks.as_ref().map_or(0, |b| b.size);
-                dir = Some(Dir {
-                    root,
-                    blocks,
-                    bitmap,
-                    fixed: in_clusters,
-                    marks: mem::vec(),
-                    next_mark: 1,
-                });
+                let (index, bytes, held) = Dir::load(vol, root, blocks, bitmap.as_ref(), false)?;
+                (size, allocated) = (bytes, held);
+                dir = Some(index);
             }
             _ => {}
+        }
+        // `$Reparse` is a file with a view index, which Radix keeps, but
+        // whose data is none.
+        if view
+            && kind == Kind::File
+            && let Some(root) = root_of_view
+        {
+            dir = Some(Dir::load(vol, root, blocks_of_view, bitmap_of_view.as_ref(), true)?.0);
         }
         if kind == Kind::Symlink {
             fixed = Some(Error::NotSupported);
@@ -340,10 +467,30 @@ impl NtfsNode {
             dir,
             fixed,
             listed,
+            list,
+            extents,
             dirty: false,
             changes: 0,
             removed: false,
         };
+        let indexed = flags & record::flags::DIRECTORY != 0;
+        NtfsNode::assemble(fs, record, kind, state, cache, link, tag, indexed)
+    }
+
+    /// The node of `record`, of its parts: made apart from
+    /// [`NtfsNode::new`], so that its frame stays small.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        fs: KArc<Inner>,
+        record: u64,
+        kind: Kind,
+        state: State,
+        cache: Option<FileCache>,
+        link: Option<Target>,
+        tag: u32,
+        indexed: bool,
+    ) -> Result<KArc<NtfsNode>> {
         let node = mem::arc(NtfsNode {
             fs,
             record,
@@ -351,6 +498,8 @@ impl NtfsNode {
             state: Mutex::new(state),
             cache,
             link,
+            tag,
+            indexed,
             path: Once::new(),
             me: Once::new(),
             pinned: AtomicBool::new(false),
@@ -433,6 +582,38 @@ impl NtfsNode {
         }
     }
 
+    /// Marks this directory compressed, as Windows' Properties do, so
+    /// that what is made in it is compressed.
+    #[cfg(test)]
+    pub(crate) fn mark_compressed(&self) -> Result<()> {
+        self.writable()?;
+        self.fs.changing()?;
+        self.state.lock().info.attributes |= attributes::COMPRESSED;
+        self.changed();
+        Ok(())
+    }
+
+    /// What `$Reparse` lists: each reparse point's tag and the record
+    /// its file is in, in order.
+    #[cfg(test)]
+    pub(crate) fn reparse_points(&self) -> Result<KVec<(u32, u64)>> {
+        let index = {
+            let mut ns = self.fs.ns.lock();
+            self.reparse_index(&mut ns)?
+        };
+        let mut st = index.state.lock();
+        let dir = st.dir.as_mut().ok_or(Error::Corrupt)?;
+        let mut store =
+            DirStore { fs: &self.fs, blocks: &mut dir.blocks, bitmap: &mut dir.bitmap, others: 0 };
+        let mut out = mem::vec();
+        tree::walk(&dir.root, &mut store, tree::Order::Ulongs, None, &mut |e| {
+            let key = &e[0x10..0x1c];
+            mem::push(&mut out, (u32_at(key, 0), record_of(u64_at(key, 4))))?;
+            Ok(true)
+        })?;
+        Ok(out)
+    }
+
     /// Notes that its data changed: Windows' archive bit goes on.
     fn data_changed(&self) {
         {
@@ -475,21 +656,44 @@ impl NtfsNode {
         Ok(buf)
     }
 
-    /// Writes `buf` as its record, in the cache.
-    fn write_rec(&self, buf: &[u8]) -> Result<()> {
+    /// Writes `buf` as its record, in the cache, its attribute list
+    /// rebuilt first if it has one.
+    fn write_rec(&self, buf: &mut [u8]) -> Result<()> {
+        let st = self.state.lock();
+        self.write_base(buf, &st)
+    }
+
+    /// [`Self::write_rec`] with its state `st` held.
+    fn write_base(&self, buf: &mut [u8], st: &State) -> Result<()> {
+        if st.list {
+            let reference = self.record | (u64::from(st.sequence) << 48);
+            let value = list::build(buf, reference, &st.extents)?;
+            list::put(buf, &value)?;
+        }
         self.fs.vol.write_record(self.record, buf, false)
+    }
+
+    /// The bytes an attribute added to its record takes in its attribute
+    /// list, if it has one.
+    fn listing(&self) -> usize {
+        if self.state.lock().list { 0x20 } else { 0 }
     }
 
     /// What its names say of it, its data `size` bytes.
     fn dup(&self, st: &State, size: u64) -> Dup {
         let cs = u64::from(self.fs.vol.geo.cluster_size);
         let (allocated, size) = match (&st.data, &st.fixed) {
+            // Compressed and sparse data: what its clusters on the disk
+            // hold, as ntfs-3g puts it.
+            (Some(Data::Clusters(s)), None) if s.packed() => {
+                (s.runs.allocated_in(0, s.runs.clusters()) * cs, size)
+            }
             (Some(Data::Clusters(s)), None) => (s.runs.clusters() * cs, size),
             (Some(Data::Resident(b)), None) => ((b.len() as u64).next_multiple_of(8), size),
             (Some(_), _) => (st.allocated, size),
             (None, _) => (0, 0),
         };
-        let dir = if self.kind == Kind::Directory { attributes::DIRECTORY } else { 0 };
+        let dir = if self.indexed { attributes::DIRECTORY } else { 0 };
         Dup {
             created: names::to_nt(st.info.created),
             modified: names::to_nt(st.info.modified),
@@ -498,33 +702,162 @@ impl NtfsNode {
             allocated,
             size,
             flags: st.info.attributes | dir,
+            reparse: self.tag,
         }
     }
 
     /// Puts its data's attribute, as memory has it, in its record `buf`,
-    /// for data of `size` bytes.
-    fn put_data(&self, st: &State, buf: &mut [u8], size: u64) -> Result<()> {
+    /// for data of `size` bytes; when the record has no room for where its
+    /// clusters are and `spread` allows, in extension records, which its
+    /// attribute list names (ADR 0239). Returns the extension records it
+    /// no longer takes, to free once `buf` is written. A record it then
+    /// takes is written now; `buf` is the caller's to write.
+    fn put_data(
+        &self,
+        st: &mut State,
+        buf: &mut [u8],
+        size: u64,
+        spread: bool,
+    ) -> Result<KVec<u64>> {
         let cs = u64::from(self.fs.vol.geo.cluster_size);
-        match &st.data {
+        let stream = match &st.data {
             Some(Data::Resident(bytes)) => {
                 let at = edit::find(buf, kind::DATA, &[]).ok_or(Error::Corrupt)?;
                 if buf[at + 8] != 0 {
                     return Err(Error::Corrupt);
                 }
                 let n = bytes.len().min(size as usize);
-                edit::set_value(buf, at, &bytes[..n])
+                edit::set_value(buf, at, &bytes[..n])?;
+                return Ok(mem::vec());
             }
-            Some(Data::Clusters(stream)) => {
-                let clusters = stream.runs.clusters();
-                let sizes = edit::Sizes {
-                    allocated: clusters * cs,
-                    size,
-                    initialized: stream.initialized.min(size),
-                };
-                replace_stream(buf, kind::DATA, &stream.runs, clusters, sizes)
+            Some(Data::Clusters(stream)) => stream,
+            _ => return Ok(mem::vec()),
+        };
+        let clusters = stream.runs.clusters();
+        let sizes = edit::Sizes {
+            allocated: clusters * cs,
+            size,
+            initialized: stream.initialized.min(size),
+            compressed: stream.runs.allocated_in(0, clusters) * cs,
+            unit: stream.unit,
+            packed: stream.flags,
+        };
+        if !st.list {
+            match replace_stream(buf, kind::DATA, &stream.runs, clusters, sizes) {
+                Err(Error::NoSpace) if spread => {}
+                done => return done.map(|()| mem::vec()),
             }
-            _ => Ok(()),
+        } else {
+            // All of it back in the record, its list gone, if it fits.
+            let mut whole = mem::copy(buf)?;
+            list::remove(&mut whole);
+            list::remove_data(&mut whole);
+            match replace_stream(&mut whole, kind::DATA, &stream.runs, clusters, sizes) {
+                Ok(()) => {
+                    buf.copy_from_slice(&whole);
+                    st.list = false;
+                    let freed = collect(st.extents.iter().map(|e| record_of(e.reference)))?;
+                    st.extents.clear();
+                    return Ok(freed);
+                }
+                Err(Error::NoSpace) if spread => {}
+                Err(err) => return Err(err),
+            }
         }
+        self.spread(st, buf, sizes)
+    }
+
+    /// The run lists' budget of an extension record of `stream`'s piece:
+    /// its record but for its header, the piece's attribute's and the end
+    /// marker.
+    fn piece_budget(&self, stream: &Stream) -> usize {
+        let rs = self.fs.vol.geo.record_size as usize;
+        let header = if stream.packed() { 0x48 } else { 0x40 };
+        (rs - edit::first_attr(rs) - 8 - header) / 8 * 8
+    }
+
+    /// The base record `buf` with its data out and an attribute list
+    /// naming `extents` in, as [`list::build`] makes it.
+    fn listed_base(buf: &[u8], reference: u64, extents: &[Extent]) -> Result<KVec<u8>> {
+        let mut base = mem::copy(buf)?;
+        list::remove_data(&mut base);
+        let value = list::build(&base, reference, extents)?;
+        list::put(&mut base, &value)?;
+        Ok(base)
+    }
+
+    /// [`Self::put_data`]: its data's runs cut into pieces, each in an
+    /// extension record of its own, the ones it has first, its base
+    /// record `buf` naming them in its list. Nothing is written if the
+    /// list has no room in it.
+    #[inline(never)]
+    fn spread(&self, st: &mut State, buf: &mut [u8], sizes: edit::Sizes) -> Result<KVec<u64>> {
+        let fs = &self.fs;
+        let Some(Data::Clusters(stream)) = &st.data else { return Err(Error::Corrupt) };
+        let cuts = stream.runs.cuts(0, stream.grain(), self.piece_budget(stream))?;
+        let reference = self.record | (u64::from(st.sequence) << 48);
+        let mut extents = mem::vec_with_capacity(cuts.len())?;
+        let mut from = 0;
+        for (i, &cut) in cuts.iter().enumerate() {
+            let at = st.extents.get(i).map_or(0, |e| e.reference);
+            let _ = extents.push_within_capacity(Extent { reference: at, lowest: from, id: 0 });
+            from = cut;
+        }
+        // The list must fit, whatever the records it names.
+        Self::listed_base(buf, reference, &extents)?;
+        let flags = stream.flags & (attr_flags::COMPRESSED | attr_flags::SPARSE);
+        let rs = fs.vol.geo.record_size as usize;
+        let mut rec = zeroed(rs)?;
+        let mut from = 0;
+        for (i, &cut) in cuts.iter().enumerate() {
+            let (number, fresh) = match st.extents.get(i) {
+                Some(e) => (record_of(e.reference), false),
+                None => (fs.take_record()?, true),
+            };
+            let made = (|| {
+                let usn = match fs.vol.read_record(number, &mut rec) {
+                    Ok(()) => {
+                        let used = Record::new(&rec).is_ok_and(|r| r.in_use());
+                        if used == fresh || (!fresh && record_of(u64_at(&rec, 0x20)) != self.record)
+                        {
+                            return Err(Error::Corrupt);
+                        }
+                        Some((u16_at(&rec, 0x10).max(1), u16_at(&rec, edit::RECORD_USA)))
+                    }
+                    Err(_) if fresh => None,
+                    Err(err) => return Err(err),
+                };
+                let (sequence, usn) = usn.unwrap_or((1, 0));
+                edit::format_record(&mut rec, number, sequence, record::flags::IN_USE);
+                put_u16(&mut rec, edit::RECORD_USA, usn);
+                edit::put_u64(&mut rec, 0x20, reference);
+                let id = edit::next_instance(&mut rec);
+                let packed = stream.runs.pack(from, cut)?;
+                let attr =
+                    edit::non_resident(kind::DATA, &[], id, flags, from, cut - 1, &packed, sizes)?;
+                edit::insert(&mut rec, &attr)?;
+                fs.vol.write_record(number, &rec, false)?;
+                Ok(Extent { reference: number | (u64::from(sequence) << 48), lowest: from, id })
+            })();
+            match made {
+                Ok(extent) => extents[i] = extent,
+                Err(err) => {
+                    if fresh {
+                        let _ = fs.give_record(number);
+                    }
+                    // Those taken so far stay in use, named by no list,
+                    // until `chkdsk` frees them.
+                    return Err(err);
+                }
+            }
+            from = cut;
+        }
+        let base = Self::listed_base(buf, reference, &extents)?;
+        buf.copy_from_slice(&base);
+        let freed = collect(st.extents.iter().skip(cuts.len()).map(|e| record_of(e.reference)))?;
+        st.extents = extents;
+        st.list = true;
+        Ok(freed)
     }
 
     /// Writes its size, times, attributes and where its clusters are to
@@ -556,9 +889,11 @@ impl NtfsNode {
         let mut buf = self.read_rec()?;
         let si = edit::find(&buf, kind::STANDARD_INFORMATION, &[]).ok_or(Error::Corrupt)?;
         names::put_standard(edit::value_mut(&mut buf, si), &dup, st.info.attributes);
-        if self.kind == Kind::File && st.fixed.is_none() {
-            self.put_data(&st, &mut buf, size)?;
-        }
+        let freed = if self.kind == Kind::File && st.fixed.is_none() {
+            self.put_data(&mut st, &mut buf, size, true)?
+        } else {
+            mem::vec()
+        };
         let mut names = mem::vec();
         let at: KVec<usize> = collect(edit::find_all(&buf, kind::FILE_NAME))?;
         for &at in &at {
@@ -571,7 +906,11 @@ impl NtfsNode {
             mem::push(&mut names, (name.parent(), collect(name.units())?))?;
         }
         self.fs.changing()?;
-        self.write_rec(&buf)?;
+        self.write_base(&mut buf, &st)?;
+        // The records its data left, once its list no longer names them.
+        for &number in &freed {
+            NtfsNode::free_record(&self.fs, number)?;
+        }
         st.dirty = st.changes != seen;
         let reference = self.record | (u64::from(st.sequence) << 48);
         drop(st);
@@ -602,6 +941,9 @@ impl NtfsNode {
         let geo = &self.fs.vol.geo;
         let cs = u64::from(geo.cluster_size);
         let Some(Data::Resident(bytes)) = &st.data else { return Err(Error::Corrupt) };
+        if st.info.attributes & attributes::COMPRESSED != 0 && cs <= MAX_COMPRESS_CLUSTER {
+            return self.to_units(st, size);
+        }
         let need = size.max(bytes.len() as u64).div_ceil(cs);
         let got = self.fs.take_clusters(need, None)?;
         let mut runs = Runs::new();
@@ -632,6 +974,102 @@ impl NtfsNode {
         }
     }
 
+    /// Fails with [`Error::NoSpace`] if its records have no room for
+    /// where the clusters of its data `stream` are: its base record, or
+    /// extension records its base record's attribute list has room to
+    /// name (ADR 0239).
+    fn runs_fit(&self, stream: &Stream) -> Result<()> {
+        let buf = self.read_rec()?;
+        let packed = stream.runs.pack(0, stream.runs.clusters())?;
+        let header = if stream.packed() { 0x48 } else { 0x40 };
+        let len = (header + packed.len()).next_multiple_of(8);
+        let mut others = mem::copy(&buf)?;
+        list::remove(&mut others);
+        list::remove_data(&mut others);
+        if edit::used(&others) + len <= buf.len() {
+            return Ok(());
+        }
+        let cuts = stream.runs.cuts(0, stream.grain(), self.piece_budget(stream))?;
+        let mut from = 0;
+        let mut extents = mem::vec_with_capacity(cuts.len())?;
+        for &cut in &cuts {
+            let _ = extents.push_within_capacity(Extent { reference: 0, lowest: from, id: 0 });
+            from = cut;
+        }
+        Self::listed_base(&buf, 0, &extents).map(|_| ())
+    }
+
+    /// Gives the holes of the sparse `stream` that bytes `from..to` fall
+    /// in clusters, of zeros, a compression unit's at a time as Windows
+    /// fills them.
+    fn fill_holes(&self, stream: &mut Stream, from: u64, to: u64) -> Result<()> {
+        let cs = u64::from(self.fs.vol.geo.cluster_size);
+        let grain = stream.grain();
+        let end = to.div_ceil(cs).next_multiple_of(grain).min(stream.runs.clusters());
+        let mut vcn = from / cs / grain * grain;
+        while vcn < end {
+            let (lcn, n) = stream.runs.map(vcn).ok_or(Error::Corrupt)?;
+            let n = n.min(end - vcn);
+            if lcn != HOLE {
+                vcn += n;
+                continue;
+            }
+            let near = vcn.checked_sub(1).and_then(|v| stream.runs.map(v));
+            let near = near.and_then(|(l, _)| (l != HOLE).then(|| l + 1));
+            let got = self.fs.take_clusters(n, near)?;
+            let give_back = |got: &[(u64, u64)]| {
+                for &(lcn, n) in got {
+                    let _ = self.fs.give_clusters(lcn, n, false);
+                }
+            };
+            let filled = (|| {
+                write_clusters(&self.fs, &got, &zeroed((n * cs) as usize)?)?;
+                stream.runs.replace(vcn, n, &got)?;
+                Ok(())
+            })();
+            if let Err(err) = filled {
+                give_back(&got);
+                return Err(err);
+            }
+            if let Err(err) = self.runs_fit(stream) {
+                let _ = stream.runs.replace(vcn, n, &[(HOLE, n)]);
+                give_back(&got);
+                return Err(err);
+            }
+            vcn += n;
+        }
+        Ok(())
+    }
+
+    /// [`Self::to_clusters`] for a file marked compressed: its data becomes
+    /// compressed, a unit of holes at a time, and its bytes are written to
+    /// the first.
+    fn to_units(&self, st: &mut State, size: u64) -> Result<()> {
+        let cs = u64::from(self.fs.vol.geo.cluster_size);
+        let Some(Data::Resident(bytes)) = &st.data else { return Err(Error::Corrupt) };
+        let per_unit = 1u64 << UNIT;
+        let clusters = size.max(bytes.len() as u64).div_ceil(cs).next_multiple_of(per_unit);
+        let mut stream = Stream {
+            runs: Runs::new(),
+            size: bytes.len() as u64,
+            initialized: 0,
+            flags: attr_flags::COMPRESSED,
+            unit: UNIT,
+        };
+        stream.runs.append(HOLE, clusters)?;
+        if !bytes.is_empty() {
+            let mut plain = zeroed((per_unit * cs) as usize)?;
+            plain[..bytes.len()].copy_from_slice(bytes);
+            let mut packed = zeroed((per_unit * cs) as usize)?;
+            let mut matcher = lznt1::Matcher::new()?;
+            FileBacking(self).store_unit(&mut stream, 0, &plain, &mut packed, &mut matcher)?;
+        }
+        stream.initialized = stream.size;
+        st.data = Some(Data::Clusters(stream));
+        st.behind();
+        Ok(())
+    }
+
     /// Makes room for `need` more bytes in its record `buf`, for a name:
     /// a file's resident data moves to clusters. `size` is the file's.
     fn make_room(&self, buf: &mut [u8], need: usize, size: u64) -> Result<()> {
@@ -643,7 +1081,8 @@ impl NtfsNode {
         }
         self.fs.changing()?;
         self.to_clusters(&mut st, size)?;
-        self.put_data(&st, buf, size)?;
+        // Data that was in the record has no extension records to free.
+        self.put_data(&mut st, buf, size, false)?;
         if edit::room(buf) < need {
             return Err(Error::NoSpace);
         }
@@ -695,6 +1134,26 @@ fn write_bytes(fs: &Inner, stream: &Stream, bytes: &[u8]) -> Result<()> {
         at += n;
     }
     Ok(())
+}
+
+/// Writes `bytes` to the clusters `got` (runs of `(lcn, clusters)`), in
+/// order, straight to the disk.
+fn write_clusters(fs: &Inner, got: &[(u64, u64)], bytes: &[u8]) -> Result<()> {
+    let mut runs = Runs::new();
+    for &(lcn, n) in got {
+        runs.append(lcn, n)?;
+    }
+    write_bytes(fs, &Stream { runs, ..Stream::new() }, bytes)
+}
+
+/// Reads `buf.len()` bytes of a file's data from cluster `lcn` on, through
+/// the block cache, which keeps none of it: data is written straight to
+/// the disk, past the cache.
+fn read_data(vol: &crate::fs::Volume, lcn: u64, buf: &mut [u8]) -> Result<()> {
+    let at = vol.geo.cluster_offset(lcn);
+    let read = vol.cache.read(at, buf);
+    vol.cache.discard(at, buf.len());
+    Ok(read?)
 }
 
 /// The most pieces a page is in: one per cluster, at 512 bytes.
@@ -780,10 +1239,12 @@ struct DirStore<'a> {
 }
 
 impl DirStore<'_> {
-    /// How many blocks it has.
+    /// How many blocks it has: as many as its allocation holds and its
+    /// bitmap has bits for, whatever a damaged size says.
     fn count(&self) -> u64 {
         let size = u64::from(self.fs.vol.geo.index_size);
-        self.blocks.as_ref().map_or(0, |b| b.size / size)
+        let blocks = self.blocks.as_ref().map_or(0, |b| b.size / size);
+        blocks.min(self.bitmap.len() as u64 * 8)
     }
 
     fn in_use(&self, block: u64) -> bool {
@@ -844,11 +1305,12 @@ impl Store for DirStore<'_> {
 /// A directory's fresh index root: of names, blocks as `fields` (bytes 8
 /// to 16 of its parent's root: their size and clusters) say, no entries
 /// but the last.
-fn fresh_root(fields: &[u8]) -> Result<KVec<u8>> {
+fn fresh_root(fields: &[u8], view: bool) -> Result<KVec<u8>> {
     let mut r = zeroed(0x30)?;
-    put_u32(&mut r, 0, kind::FILE_NAME);
-    // Collated as file names.
-    put_u32(&mut r, 4, 1);
+    // Of file names, collated as names are; or a view index's, collated
+    // as numbers.
+    put_u32(&mut r, 0, if view { 0 } else { kind::FILE_NAME });
+    put_u32(&mut r, 4, if view { COLLATION_ULONGS } else { COLLATION_NAMES });
     r[8..16].copy_from_slice(fields);
     let h = ROOT_HEADER;
     put_u32(&mut r, h, 0x10);
@@ -862,10 +1324,10 @@ fn fresh_root(fields: &[u8]) -> Result<KVec<u8>> {
 /// Puts `dir`'s root, and its bitmap if it has blocks, in its record
 /// `buf`.
 fn put_root(buf: &mut [u8], dir: &Dir) -> Result<()> {
-    let at = edit::find(buf, kind::INDEX_ROOT, &I30).ok_or(Error::Corrupt)?;
+    let at = edit::find(buf, kind::INDEX_ROOT, dir.name()).ok_or(Error::Corrupt)?;
     edit::set_value(buf, at, &dir.root)?;
     if dir.blocks.is_some() {
-        let at = edit::find(buf, kind::BITMAP, &I30).ok_or(Error::Corrupt)?;
+        let at = edit::find(buf, kind::BITMAP, dir.name()).ok_or(Error::Corrupt)?;
         edit::set_value(buf, at, &dir.bitmap)?;
     }
     Ok(())
@@ -932,7 +1394,7 @@ impl NtfsNode {
             Some(adds) => self.prepare(dir, &mut buf, adds)?,
             None => false,
         };
-        let root_at = edit::find(&buf, kind::INDEX_ROOT, &I30).ok_or(Error::Corrupt)?;
+        let root_at = edit::find(&buf, kind::INDEX_ROOT, dir.name()).ok_or(Error::Corrupt)?;
         let others = edit::used(&buf) - u32_at(&buf, root_at + 4) as usize;
         if others > rs {
             return Err(Error::Corrupt);
@@ -947,7 +1409,7 @@ impl NtfsNode {
             Ok(()) => {
                 dir.root = root;
                 put_root(&mut buf, dir)?;
-                self.write_rec(&buf)
+                self.write_base(&mut buf, &st)
             }
             // Blocks first given to a root that then failed to go down
             // to them go back: its record never says it had them.
@@ -963,7 +1425,7 @@ impl NtfsNode {
             Err(err) => {
                 if grew {
                     put_root(&mut buf, dir)?;
-                    self.write_rec(&buf)?;
+                    self.write_base(&mut buf, &st)?;
                 }
                 Err(err)
             }
@@ -974,6 +1436,7 @@ impl NtfsNode {
     /// bytes may need ([`NtfsNode::change_index`]), with the record `buf`
     /// saying where they are; whether it took any.
     fn prepare(&self, dir: &mut Dir, buf: &mut [u8], adds: usize) -> Result<bool> {
+        let name = dir.name();
         let geo = &self.fs.vol.geo;
         let rs = geo.record_size as usize;
         let cs = u64::from(geo.cluster_size);
@@ -986,7 +1449,7 @@ impl NtfsNode {
                 others: 0,
             };
             if store.blocks.is_none() {
-                let root_at = edit::find(buf, kind::INDEX_ROOT, &I30).ok_or(Error::Corrupt)?;
+                let root_at = edit::find(buf, kind::INDEX_ROOT, name).ok_or(Error::Corrupt)?;
                 let others = edit::used(buf) - u32_at(buf, root_at + 4) as usize;
                 // The entry, and a block's number in each entry if the
                 // root goes down.
@@ -1007,8 +1470,8 @@ impl NtfsNode {
             // root it keeps meanwhile is an empty one.
             let mut fields = [0u8; 8];
             fields.copy_from_slice(dir.root.get(8..16).ok_or(Error::Corrupt)?);
-            let at = edit::find(buf, kind::INDEX_ROOT, &I30).ok_or(Error::Corrupt)?;
-            edit::set_value(buf, at, &fresh_root(&fields)?)?;
+            let at = edit::find(buf, kind::INDEX_ROOT, name).ok_or(Error::Corrupt)?;
+            edit::set_value(buf, at, &fresh_root(&fields, dir.view)?)?;
         }
         let blocks = dir.blocks.get_or_insert_with(Stream::new);
         let count = blocks.size / index_size;
@@ -1030,13 +1493,18 @@ impl NtfsNode {
                 mem::push(&mut dir.bitmap, 0)?;
             }
             let clusters = blocks.runs.clusters();
-            let sizes = edit::Sizes { allocated: clusters * cs, size, initialized: size };
-            replace_named(buf, kind::INDEX_ALLOCATION, &I30, &blocks.runs, clusters, sizes)?;
-            match edit::find(buf, kind::BITMAP, &I30) {
+            let sizes = edit::Sizes {
+                allocated: clusters * cs,
+                size,
+                initialized: size,
+                ..edit::Sizes::default()
+            };
+            replace_named(buf, kind::INDEX_ALLOCATION, name, &blocks.runs, clusters, sizes)?;
+            match edit::find(buf, kind::BITMAP, name) {
                 Some(at) => edit::set_value(buf, at, &dir.bitmap)?,
                 None => {
                     let i = u16_at(buf, 0x28);
-                    let attr = edit::resident(kind::BITMAP, &I30, i, &dir.bitmap, false)?;
+                    let attr = edit::resident(kind::BITMAP, name, i, &dir.bitmap, false)?;
                     edit::insert(buf, &attr)?;
                     edit::next_instance(buf);
                 }
@@ -1065,7 +1533,9 @@ impl NtfsNode {
     fn update_entry(&self, name: &[u16], reference: u64, dup: &Dup) -> Result<()> {
         let upcase = &self.fs.upcase;
         self.change_index(None, &mut |root, store| {
-            tree::update(root, store, upcase, name, reference, &mut |key| dup.put(key))
+            tree::update(root, store, tree::Order::Names(upcase), name, reference, &mut |key| {
+                dup.put(key);
+            })
         })
     }
 
@@ -1089,8 +1559,8 @@ impl NtfsNode {
 
     /// Takes the name `units` of `node` (of that case, or the same but for
     /// case) out of this directory, with its short name or the long one it
-    /// is short for. The caller holds `ns`.
-    fn remove_name(&self, node: &NtfsNode, units: &[u16]) -> Result<()> {
+    /// is short for. The caller holds `ns`, whose scratch is `scratch`.
+    fn remove_name(&self, scratch: &mut Scratch, node: &NtfsNode, units: &[u16]) -> Result<()> {
         node.editable()?;
         let reference = node.reference();
         let mut buf = node.read_rec()?;
@@ -1115,10 +1585,20 @@ impl NtfsNode {
         if let Some(twin) = twin {
             mem::push(&mut gone, twin)?;
         }
+        // A reparse point's last name going takes it out of `$Reparse`
+        // first; one `$Reparse` did not list goes all the same.
+        let lost = gone.iter().filter(|&&i| names[i].ns != namespace::DOS).count() as u32;
+        if node.tag != 0 && node.state.lock().links <= lost {
+            let index = self.reparse_index(scratch);
+            match index.and_then(|r| r.note_reparse(node.tag, reference, false)) {
+                Ok(()) | Err(Error::NotFound | Error::NotSupported) => {}
+                Err(err) => return Err(err),
+            }
+        }
         for &i in &gone {
             let name = &names[i].units;
             self.change_index(Some(0), &mut |root, store| {
-                tree::remove(root, store, upcase, name, reference)
+                tree::remove(root, store, tree::Order::Names(upcase), name, reference)
             })?;
         }
         // The later attribute first, so that the other stays where it is.
@@ -1126,8 +1606,7 @@ impl NtfsNode {
         for &i in &gone {
             edit::remove(&mut buf, names[i].at);
         }
-        node.write_rec(&buf)?;
-        let lost = gone.iter().filter(|&&i| names[i].ns != namespace::DOS).count() as u32;
+        node.write_rec(&mut buf)?;
         let left = first_parent(&buf)?;
         let mut st = node.state.lock();
         st.links = st.links.saturating_sub(lost);
@@ -1156,7 +1635,7 @@ impl NtfsNode {
         let dup = node.dup(&node.state.lock(), size);
         let key = names::file_name(self.reference(), &dup, units, ns)?;
         let mut buf = node.read_rec()?;
-        let need = (0x18 + key.len()).next_multiple_of(8);
+        let need = (0x18 + key.len()).next_multiple_of(8) + node.listing();
         if edit::room(&buf) < need {
             node.make_room(&mut buf, need, size)?;
         }
@@ -1167,9 +1646,9 @@ impl NtfsNode {
         let entry = tree::make_entry(reference, &key, None)?;
         let upcase = &self.fs.upcase;
         self.change_index(Some(entry.len()), &mut |root, store| {
-            tree::insert(root, store, upcase, &entry)
+            tree::insert(root, store, tree::Order::Names(upcase), &entry)
         })?;
-        node.write_rec(&buf)?;
+        node.write_rec(&mut buf)?;
         if ns != namespace::DOS {
             node.state.lock().links += 1;
         }
@@ -1178,15 +1657,28 @@ impl NtfsNode {
 
     /// Makes a record for a new file or directory (`kind`) named `units`
     /// (in namespace `ns`) in this directory; returns its reference and
-    /// its `$FILE_NAME`. The caller holds `ns`.
+    /// its `$FILE_NAME`. A link's record has the reparse point `link`
+    /// holds, with whether it leads to a directory: then, as Windows makes
+    /// such links, its record has an empty index of names too. The caller
+    /// holds `ns`.
     #[inline(never)]
-    fn new_record(&self, kind: Kind, units: &[u16], ns: u8) -> Result<(u64, KVec<u8>)> {
-        let (parent, security, mut fields) = {
+    fn new_record(
+        &self,
+        kind: Kind,
+        units: &[u16],
+        ns: u8,
+        link: Option<(&[u8], bool)>,
+    ) -> Result<(u64, KVec<u8>)> {
+        let (parent, security, mut fields, compress) = {
             let st = self.state.lock();
             let dir = st.dir.as_ref().ok_or(Error::NotDirectory)?;
             let mut fields = [0u8; 8];
             fields.copy_from_slice(dir.root.get(8..16).ok_or(Error::Corrupt)?);
-            (self.record | (u64::from(st.sequence) << 48), st.info.security, fields)
+            // What is made in a directory marked compressed is, as in
+            // Windows, on volumes whose clusters Windows compresses.
+            let compress = st.info.attributes & attributes::COMPRESSED != 0
+                && u64::from(self.fs.vol.geo.cluster_size) <= MAX_COMPRESS_CLUSTER;
+            (self.record | (u64::from(st.sequence) << 48), st.info.security, fields, compress)
         };
         let fs = &self.fs;
         let number = fs.take_record()?;
@@ -1201,9 +1693,14 @@ impl NtfsNode {
                 }
                 Err(_) => 1,
             };
-            let is_dir = kind == Kind::Directory;
+            let is_dir = kind == Kind::Directory || link.is_some_and(|(_, to_dir)| to_dir);
             let t = names::to_nt(now());
-            let file_attributes = if is_dir { 0 } else { attributes::ARCHIVE };
+            let file_attributes =
+                match link {
+                    Some(_) => attributes::ARCHIVE | attributes::REPARSE_POINT,
+                    None if kind == Kind::Directory => 0,
+                    None => attributes::ARCHIVE,
+                } | if compress && link.is_none() { attributes::COMPRESSED } else { 0 };
             let dup = Dup {
                 created: t,
                 modified: t,
@@ -1212,6 +1709,7 @@ impl NtfsNode {
                 allocated: 0,
                 size: 0,
                 flags: file_attributes | if is_dir { attributes::DIRECTORY } else { 0 },
+                reparse: link.map_or(0, |(value, _)| u32_at(value, 0)),
             };
             let flags = record::flags::IN_USE | if is_dir { record::flags::DIRECTORY } else { 0 };
             edit::format_record(&mut buf, number, sequence, flags);
@@ -1227,9 +1725,17 @@ impl NtfsNode {
                 if fields[0..4] == [0; 4] {
                     fields[0..4].copy_from_slice(&fs.vol.geo.index_size.to_le_bytes());
                 }
-                put(&mut buf, kind::INDEX_ROOT, &I30, &fresh_root(&fields)?, false)?;
+                put(&mut buf, kind::INDEX_ROOT, &I30, &fresh_root(&fields, false)?, false)?;
             } else {
                 put(&mut buf, kind::DATA, &[], &[], false)?;
+            }
+            if let Some((value, _)) = link {
+                // A target too long for the record fails as one too long
+                // for the filesystem.
+                put(&mut buf, kind::REPARSE_POINT, &[], value, false).map_err(|err| match err {
+                    Error::NoSpace => Error::NameTooLong,
+                    err => err,
+                })?;
             }
             fs.vol.write_record(number, &buf, false)?;
             Ok((number | (u64::from(sequence) << 48), key))
@@ -1240,6 +1746,66 @@ impl NtfsNode {
         made
     }
 
+    /// `$Extend\$Reparse`, whose index lists the volume's reparse
+    /// points: a volume without it gets no links. The caller holds `ns`.
+    fn reparse_index(&self, scratch: &mut Scratch) -> Result<KArc<NtfsNode>> {
+        let mut node = Inner::node_for(&self.fs, records::ROOT)?;
+        for name in ["$Extend", "$Reparse"] {
+            let found = node.find(scratch, &units_vec(name)?)?.ok_or(Error::NotSupported)?;
+            node = Inner::node_for(&self.fs, found.reference)?;
+        }
+        if node.state.lock().dir.as_ref().is_none_or(|d| !d.view) {
+            return Err(Error::NotSupported);
+        }
+        Ok(node)
+    }
+
+    /// Puts the entry for the reparse point of tag `tag` of the file
+    /// `reference` in this index, `$Reparse`'s, or takes it out (`add`
+    /// false). The caller holds `ns`.
+    fn note_reparse(&self, tag: u32, reference: u64, add: bool) -> Result<()> {
+        let mut key = [0u8; 12];
+        key[..4].copy_from_slice(&tag.to_le_bytes());
+        key[4..].copy_from_slice(&reference.to_le_bytes());
+        if add {
+            // A view index's entry starts with where its data is, after
+            // its key, and its length, none.
+            let entry = tree::make_entry(0x10 + key.len() as u64, &key, None)?;
+            self.change_index(Some(entry.len()), &mut |root, store| {
+                tree::insert(root, store, tree::Order::Ulongs, &entry)
+            })
+        } else {
+            let units = tree::ulongs(&key)?;
+            self.change_index(Some(0), &mut |root, store| {
+                tree::remove(root, store, tree::Order::Ulongs, &units, reference)
+            })
+        }
+    }
+
+    /// Whether the relative path `target` leads from this directory to a
+    /// directory on the volume: a link to it is made as Windows makes
+    /// links to directories. One through a link, out of the volume or to
+    /// nothing does not. The caller holds `ns`.
+    fn leads_to_dir(&self, scratch: &mut Scratch, target: &str) -> bool {
+        let Some(mut at) = self.me.get().and_then(Weak::upgrade) else { return false };
+        for part in target.split('/') {
+            let next = match part {
+                "." => continue,
+                ".." if at.record == records::ROOT => return false,
+                ".." => Inner::node_for(&self.fs, at.state.lock().parent),
+                name => match units_vec(name).and_then(|units| at.find(scratch, &units)) {
+                    Ok(Some(found)) => Inner::node_for(&self.fs, found.reference),
+                    _ => return false,
+                },
+            };
+            match next {
+                Ok(node) if node.kind == Kind::Directory => at = node,
+                _ => return false,
+            }
+        }
+        true
+    }
+
     /// Whether this directory has no entries.
     fn is_empty_dir(&self) -> Result<bool> {
         let mut st = self.state.lock();
@@ -1247,7 +1813,7 @@ impl NtfsNode {
         let mut store =
             DirStore { fs: &self.fs, blocks: &mut dir.blocks, bitmap: &mut dir.bitmap, others: 0 };
         let mut empty = true;
-        tree::walk(&dir.root, &mut store, &self.fs.upcase, None, &mut |_| {
+        tree::walk(&dir.root, &mut store, tree::Order::Names(&self.fs.upcase), None, &mut |_| {
             empty = false;
             Ok(false)
         })?;
@@ -1468,6 +2034,57 @@ impl Node for NtfsNode {
         Ok(())
     }
 
+    // A link Windows can follow is a Windows symbolic link, relative, to
+    // a directory if its target is one when it is made; any other is
+    // WSL's (`reparse`). `$Reparse` lists it.
+    fn make_link(&self, name: &str, target: &str, _access: Access) -> Result<NodeRef> {
+        self.writable()?;
+        check_name(name)?;
+        self.is_dir()?;
+        names::check_windows(name)?;
+        let units = units_vec(name)?;
+        let windows = reparse::windows_link(target)?;
+        let mut ns = self.fs.ns.lock();
+        if self.removed() {
+            return Err(Error::NotFound);
+        }
+        self.editable()?;
+        if self.find(&mut ns, &units)?.is_some() {
+            return Err(Error::Exists);
+        }
+        let index = self.reparse_index(&mut ns)?;
+        let (value, to_dir) = match windows {
+            Some(value) => {
+                let to_dir = self.leads_to_dir(&mut ns, target);
+                (value, to_dir)
+            }
+            None => (reparse::wsl_link(target.as_bytes())?, false),
+        };
+        let tag = u32_at(&value, 0);
+        self.fs.changing()?;
+        let made = Some((&value[..], to_dir));
+        let (reference, key) =
+            self.new_record(Kind::Symlink, &units, names::namespace_of(name), made)?;
+        if let Err(err) = index.note_reparse(tag, reference, true) {
+            let _ = NtfsNode::free_record(&self.fs, record_of(reference));
+            return Err(err);
+        }
+        let entry = tree::make_entry(reference, &key, None)?;
+        let upcase = &self.fs.upcase;
+        let put = self.change_index(Some(entry.len()), &mut |root, store| {
+            tree::insert(root, store, tree::Order::Names(upcase), &entry)
+        });
+        if let Err(err) = put {
+            let _ = index.note_reparse(tag, reference, false);
+            let _ = NtfsNode::free_record(&self.fs, record_of(reference));
+            return Err(err);
+        }
+        self.touch();
+        let node = Inner::node_for(&self.fs, reference)?;
+        drop(ns);
+        Ok(node)
+    }
+
     fn create(&self, name: &str, kind: Kind, _access: Access) -> Result<NodeRef> {
         self.writable()?;
         check_name(name)?;
@@ -1486,11 +2103,11 @@ impl Node for NtfsNode {
             return Err(Error::Exists);
         }
         self.fs.changing()?;
-        let (reference, key) = self.new_record(kind, &units, names::namespace_of(name))?;
+        let (reference, key) = self.new_record(kind, &units, names::namespace_of(name), None)?;
         let entry = tree::make_entry(reference, &key, None)?;
         let upcase = &self.fs.upcase;
         let put = self.change_index(Some(entry.len()), &mut |root, store| {
-            tree::insert(root, store, upcase, &entry)
+            tree::insert(root, store, tree::Order::Names(upcase), &entry)
         });
         if let Err(err) = put {
             let _ = NtfsNode::free_record(&self.fs, record_of(reference));
@@ -1561,7 +2178,7 @@ impl Node for NtfsNode {
         }
         self.editable()?;
         self.fs.changing()?;
-        self.remove_name(&node, &units)?;
+        self.remove_name(&mut ns, &node, &units)?;
         self.touch();
         // Its record and clusters go when the last reference to it does:
         // now, unless a handle has it.
@@ -1620,14 +2237,16 @@ impl Node for NtfsNode {
         target.editable()?;
         self.fs.changing()?;
         if let Some(old) = &replaced {
-            target.remove_name(old, &to_units)?;
+            target.remove_name(&mut ns, old, &to_units)?;
         }
         target.add_name(&moving, &to_units, names::namespace_of(to))?;
-        self.remove_name(&moving, &stored)?;
+        self.remove_name(&mut ns, &moving, &stored)?;
         {
+            // One node's state at a time.
+            let to = target.reference();
             let mut st = moving.state.lock();
             if record_of(st.parent) == self.record {
-                st.parent = target.reference();
+                st.parent = to;
             }
         }
         self.touch();
@@ -1676,35 +2295,42 @@ impl Node for NtfsNode {
         {
             let mut store =
                 DirStore { fs, blocks: &mut dir.blocks, bitmap: &mut dir.bitmap, others: 0 };
-            tree::walk(&dir.root, &mut store, &fs.upcase, start.as_deref(), &mut |e| {
-                let reference = u64_at(e, 0);
-                let key_len = usize::from(u16_at(e, 0x0a));
-                let name = FileName::new(e.get(0x10..0x10 + key_len).ok_or(Error::Corrupt)?)?;
-                // A short name repeats a long one; the system's files, and
-                // the root's entry for itself, are left out, as Linux's
-                // drivers leave them.
-                if name.namespace() == namespace::DOS || record_of(reference) < records::FIRST_USER
-                {
-                    return Ok(true);
-                }
-                if skipped < skip {
-                    skipped += 1;
-                    return Ok(true);
-                }
-                count += 1;
-                let kind = self.kind_of(reference, &name);
-                let len = utf8(name.units(), text);
-                let next = (u64::from(new_id) << 32) | u64::from(count);
-                if !f(next, core::str::from_utf8(&text[..len]).unwrap_or(""), kind) {
-                    return Ok(false);
-                }
-                for (slot, unit) in last.iter_mut().zip(name.units()) {
-                    *slot = unit;
-                }
-                last_len = Some(name.len());
-                last_count = count;
-                Ok(true)
-            })?;
+            tree::walk(
+                &dir.root,
+                &mut store,
+                tree::Order::Names(&fs.upcase),
+                start.as_deref(),
+                &mut |e| {
+                    let reference = u64_at(e, 0);
+                    let key_len = usize::from(u16_at(e, 0x0a));
+                    let name = FileName::new(e.get(0x10..0x10 + key_len).ok_or(Error::Corrupt)?)?;
+                    // A short name repeats a long one; the system's files, and
+                    // the root's entry for itself, are left out, as Linux's
+                    // drivers leave them.
+                    if name.namespace() == namespace::DOS
+                        || record_of(reference) < records::FIRST_USER
+                    {
+                        return Ok(true);
+                    }
+                    if skipped < skip {
+                        skipped += 1;
+                        return Ok(true);
+                    }
+                    count += 1;
+                    let kind = self.kind_of(reference, &name);
+                    let len = utf8(name.units(), text);
+                    let next = (u64::from(new_id) << 32) | u64::from(count);
+                    if !f(next, core::str::from_utf8(&text[..len]).unwrap_or(""), kind) {
+                        return Ok(false);
+                    }
+                    for (slot, unit) in last.iter_mut().zip(name.units()) {
+                        *slot = unit;
+                    }
+                    last_len = Some(name.len());
+                    last_count = count;
+                    Ok(true)
+                },
+            )?;
         }
         let mark = Mark {
             id: new_id,
@@ -1791,6 +2417,9 @@ impl Drop for NtfsNode {
         let st = self.state.get_mut();
         if self.fs.read_only || !st.removed || st.listed {
             return;
+        }
+        for extent in &st.extents {
+            let _ = NtfsNode::free_record(&self.fs, record_of(extent.reference));
         }
         if let Some(Data::Clusters(stream)) = &st.data
             && st.fixed.is_none()
@@ -1886,7 +2515,7 @@ impl FileBacking<'_> {
             }
             let n = n.min(first + stored - vcn);
             let at = ((vcn - first) * cs) as usize;
-            vol.cache.read(vol.geo.cluster_offset(lcn), &mut packed[at..at + (n * cs) as usize])?;
+            read_data(vol, lcn, &mut packed[at..at + (n * cs) as usize])?;
             vcn += n;
         }
         let mut plain = zeroed(unit_bytes as usize)?;
@@ -1912,6 +2541,229 @@ impl FileBacking<'_> {
         Ok(())
     }
 
+    /// Reads compression unit `unit` of the compressed `stream` into
+    /// `plain`, uncompressed, with `packed` to read it in: what lies past
+    /// the data written is zeros.
+    fn unit_plain(
+        &self,
+        stream: &Stream,
+        unit: u64,
+        plain: &mut [u8],
+        packed: &mut [u8],
+    ) -> Result<()> {
+        let vol = &self.0.fs.vol;
+        let cs = u64::from(vol.geo.cluster_size);
+        let per_unit = stream.grain();
+        let first = unit * per_unit;
+        let stored = stream.runs.allocated_in(first, per_unit);
+        if stored == 0 {
+            plain.fill(0);
+            return Ok(());
+        }
+        // A unit all on the disk is not compressed; one in fewer clusters
+        // is, in its first ones.
+        let into: &mut [u8] = if stored == per_unit { plain } else { &mut *packed };
+        let mut vcn = first;
+        while vcn < first + stored {
+            let (lcn, n) = stream.runs.map(vcn).ok_or(Error::Corrupt)?;
+            if lcn == HOLE {
+                return Err(Error::Corrupt);
+            }
+            let n = n.min(first + stored - vcn);
+            let at = ((vcn - first) * cs) as usize;
+            read_data(vol, lcn, &mut into[at..at + (n * cs) as usize])?;
+            vcn += n;
+        }
+        if stored < per_unit {
+            packed[(stored * cs) as usize..].fill(0);
+            lznt1::decompress(&packed[..(stored * cs) as usize], plain)?;
+        }
+        let start = unit * cs * per_unit;
+        let keep = stream.initialized.saturating_sub(start).min(plain.len() as u64);
+        plain[keep as usize..].fill(0);
+        Ok(())
+    }
+
+    /// Writes compression unit `unit` of the compressed `stream` as
+    /// `plain` holds it: holes if it is all zeros, compressed in fewer
+    /// clusters if it compresses into them with a zero header after it and
+    /// the record has room for where they are, else as it is. It goes to
+    /// clusters taken for it, before those it had are given back.
+    fn store_unit(
+        &self,
+        stream: &mut Stream,
+        unit: u64,
+        plain: &[u8],
+        packed: &mut [u8],
+        matcher: &mut lznt1::Matcher,
+    ) -> Result<()> {
+        let node = self.0;
+        let cs = u64::from(node.fs.vol.geo.cluster_size);
+        let per_unit = stream.grain();
+        let first = unit * per_unit;
+        // Where the unit is now, to put back if the new one does not fit.
+        let mut old: KVec<(u64, u64)> = mem::vec();
+        let mut vcn = first;
+        while vcn < first + per_unit {
+            let (lcn, n) = stream.runs.map(vcn).ok_or(Error::Corrupt)?;
+            let n = n.min(first + per_unit - vcn);
+            mem::push(&mut old, (lcn, n))?;
+            vcn += n;
+        }
+        let near = old.iter().find(|(l, _)| *l != HOLE).map(|&(l, _)| l).or_else(|| {
+            first
+                .checked_sub(1)
+                .and_then(|v| stream.runs.map(v))
+                .and_then(|(l, _)| (l != HOLE).then(|| l + 1))
+        });
+        let room = ((per_unit - 1) * cs) as usize;
+        let zeros = plain.iter().all(|&b| b == 0);
+        let compressed =
+            if zeros { Some(0) } else { lznt1::compress(plain, &mut packed[..room], matcher) };
+        for try_packed in [true, false] {
+            let (bytes, k): (&[u8], u64) = match compressed {
+                Some(n) if try_packed => {
+                    // With room for the zero header that ends the data:
+                    // The Sleuth Kit reads a unit only to one, or to the
+                    // unit's end.
+                    let k = if n == 0 { 0 } else { (n as u64 + 2).div_ceil(cs) };
+                    if k >= per_unit {
+                        continue;
+                    }
+                    packed[n..(k * cs) as usize].fill(0);
+                    (&packed[..(k * cs) as usize], k)
+                }
+                None if try_packed => continue,
+                _ => (plain, per_unit),
+            };
+            let got = if k == 0 { mem::vec() } else { node.fs.take_clusters(k, near)? };
+            let mut with = mem::vec_with_capacity(got.len() + 1)?;
+            for &run in &got {
+                let _ = with.push_within_capacity(run);
+            }
+            if k < per_unit {
+                let _ = with.push_within_capacity((HOLE, per_unit - k));
+            }
+            let give_back = |got: &[(u64, u64)]| {
+                for &(lcn, n) in got {
+                    let _ = node.fs.give_clusters(lcn, n, false);
+                }
+            };
+            if let Err(err) = write_clusters(&node.fs, &got, bytes) {
+                give_back(&got);
+                return Err(err);
+            }
+            let freed = match stream.runs.replace(first, per_unit, &with) {
+                Ok(freed) => freed,
+                Err(err) => {
+                    give_back(&got);
+                    return Err(err);
+                }
+            };
+            match node.runs_fit(stream) {
+                Ok(()) => {
+                    for run in &freed {
+                        let _ = node.fs.give_clusters(run.lcn, run.len, false);
+                    }
+                    return Ok(());
+                }
+                Err(err) => {
+                    // Put the unit back as it was; stored as it is, it may
+                    // join its neighbours' runs.
+                    stream.runs.replace(first, per_unit, &old)?;
+                    give_back(&got);
+                    if !try_packed {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+        Err(Error::NoSpace)
+    }
+
+    /// Rewrites the compression units of the compressed `stream` that
+    /// bytes `from..to` fall in, each read, changed by `change` (given the
+    /// unit's first byte and its bytes) and stored again; one the change
+    /// covers whole is not read.
+    fn rewrite_units(
+        &self,
+        stream: &mut Stream,
+        from: u64,
+        to: u64,
+        change: &mut dyn FnMut(u64, &mut [u8]),
+    ) -> Result<()> {
+        let cs = u64::from(self.0.fs.vol.geo.cluster_size);
+        let unit_bytes = cs * stream.grain();
+        let mut plain = zeroed(unit_bytes as usize)?;
+        let mut packed = zeroed(unit_bytes as usize)?;
+        let mut matcher = lznt1::Matcher::new()?;
+        let mut unit = from / unit_bytes;
+        while unit * unit_bytes < to {
+            let start = unit * unit_bytes;
+            if from <= start && to >= start + unit_bytes {
+                plain.fill(0);
+            } else {
+                self.unit_plain(stream, unit, &mut plain, &mut packed)?;
+            }
+            change(start, &mut plain);
+            self.store_unit(stream, unit, &plain, &mut packed, &mut matcher)?;
+            unit += 1;
+        }
+        Ok(())
+    }
+
+    /// Writes pages from byte `pos` on of the compressed `stream`, the
+    /// last `len` bytes long, a compression unit at a time.
+    fn write_units(
+        &self,
+        stream: &mut Stream,
+        pos: u64,
+        pages: &[&Page],
+        len: usize,
+    ) -> Result<()> {
+        let cs = u64::from(self.0.fs.vol.geo.cluster_size);
+        let unit_bytes = cs * stream.grain();
+        let last = pages.len() - 1;
+        let end = pos + last as u64 * PAGE + len as u64;
+        // What lies between the data written and these pages reads as
+        // zeros: the units it is in must hold zeros there, or none.
+        if pos > stream.initialized {
+            let from = stream.initialized;
+            let gap_end = (pos / unit_bytes * unit_bytes).max(from);
+            let whole_from = from.next_multiple_of(unit_bytes);
+            if from < gap_end && !from.is_multiple_of(unit_bytes) {
+                let unit_end = whole_from.min(gap_end);
+                self.rewrite_units(stream, from, unit_end, &mut |_, _| {})?;
+            }
+            // The units past it, before these pages', are holes.
+            let mut unit = whole_from / unit_bytes;
+            while (unit + 1) * unit_bytes <= gap_end {
+                if stream.runs.allocated_in(unit * stream.grain(), stream.grain()) != 0 {
+                    let mut packed = zeroed(unit_bytes as usize)?;
+                    let mut matcher = lznt1::Matcher::new()?;
+                    let plain = zeroed(unit_bytes as usize)?;
+                    self.store_unit(stream, unit, &plain, &mut packed, &mut matcher)?;
+                }
+                unit += 1;
+            }
+        }
+        self.rewrite_units(stream, pos, end, &mut |start, plain| {
+            for (i, page) in pages.iter().enumerate() {
+                let at = pos + i as u64 * PAGE;
+                let n = if i == last { len } else { PAGE_SIZE } as u64;
+                let (a, b) = (at.max(start), (at + n).min(start + plain.len() as u64));
+                if a < b {
+                    plain[(a - start) as usize..(b - start) as usize]
+                        .copy_from_slice(&page.bytes()[(a - at) as usize..(b - at) as usize]);
+                }
+            }
+        })?;
+        if end > stream.initialized {
+            stream.initialized = end;
+        }
+        Ok(())
+    }
+
     /// Writes the first `len` bytes of page `index` alone, through its
     /// pieces.
     fn write_one(&self, stream: &Stream, index: u64, page: &Page, len: usize) -> Result<()> {
@@ -1933,7 +2785,13 @@ impl FileBacking<'_> {
         let ss = u64::from(geo.sector_size);
         let mut page = CachePage::new()?;
         let mut at = from - from % ss;
-        if at != from {
+        let in_hole = |at: u64| {
+            let cs = u64::from(geo.cluster_size);
+            stream.runs.map(at / cs).is_some_and(|(lcn, _)| lcn == HOLE)
+        };
+        if at != from && in_hole(at) {
+            at += ss;
+        } else if at != from {
             // The sector the data ends in keeps the data.
             let within = (from - at) as usize;
             let pieces = pieces(geo, stream, at, ss as usize)?;
@@ -1948,8 +2806,16 @@ impl FileBacking<'_> {
             page.bytes_mut().fill(0);
             at += ss;
         }
+        let cs = u64::from(geo.cluster_size);
         while at < to {
-            let n = (to - at).min(PAGE - at % PAGE) as usize;
+            // A sparse file's holes read as zeros already.
+            let (lcn, run) = stream.runs.map(at / cs).ok_or(Error::Corrupt)?;
+            let run_end = (at / cs + run) * cs;
+            if lcn == HOLE {
+                at = run_end.min(to);
+                continue;
+            }
+            let n = (to - at).min(PAGE - at % PAGE).min(run_end - at) as usize;
             for (sector, offset, len) in pieces(geo, stream, at, n)?.iter() {
                 device.write(sector, &[Segment { page: &page, offset, len }])?;
             }
@@ -2079,11 +2945,20 @@ impl Backing for FileBacking<'_> {
             Some(Data::Clusters(stream)) => stream,
             _ => return Err(Error::Corrupt),
         };
+        if stream.compressed() {
+            self.write_units(stream, pos, pages, len)?;
+            st.behind();
+            return Ok(());
+        }
         // What lies between the data written and these pages reads as
         // zeros: it must be zeros on the disk before the data written
         // reaches past it.
         if pos > stream.initialized {
             self.zero_disk(stream, stream.initialized, pos)?;
+        }
+        // A sparse file's holes the pages fall in get clusters first.
+        if stream.packed() {
+            node.fill_holes(stream, pos, end)?;
         }
         let geo = &node.fs.vol.geo;
         let cs = u64::from(geo.cluster_size);
@@ -2154,8 +3029,21 @@ impl Backing for FileBacking<'_> {
         }
         let Some(Data::Clusters(stream)) = &mut st.data else { return Err(Error::Corrupt) };
         let have = stream.runs.clusters();
-        let need = size.div_ceil(cs);
+        let need = size.div_ceil(cs).next_multiple_of(stream.grain());
         if need <= have {
+            stream.size = stream.size.max(size);
+            return Ok(());
+        }
+        // Compressed and sparse data grows by a hole, which takes clusters
+        // as it is written.
+        if stream.packed() {
+            stream.runs.append(HOLE, need - have)?;
+            if let Err(err) = node.runs_fit(stream) {
+                let _ = stream.runs.truncate(have);
+                return Err(err);
+            }
+            stream.size = stream.size.max(size);
+            st.behind();
             return Ok(());
         }
         let near = stream.runs.as_slice().last().map(|r| r.lcn + r.len);
@@ -2165,12 +3053,7 @@ impl Backing for FileBacking<'_> {
                 stream.runs.append(lcn, n)?;
             }
             // Its record must have room for where they are.
-            let buf = node.read_rec()?;
-            let at = edit::find(&buf, kind::DATA, &[]).ok_or(Error::Corrupt)?;
-            let packed = stream.runs.pack(0, stream.runs.clusters())?;
-            let len = (0x40 + packed.len()).next_multiple_of(8);
-            let old = u32_at(&buf, at + 4) as usize;
-            if edit::used(&buf) - old + len > buf.len() { Err(Error::NoSpace) } else { Ok(()) }
+            node.runs_fit(stream)
         })();
         if let Err(err) = fits {
             let _ = stream.runs.truncate(have);
@@ -2179,6 +3062,7 @@ impl Backing for FileBacking<'_> {
             }
             return Err(err);
         }
+        stream.size = stream.size.max(size);
         st.behind();
         Ok(())
     }
@@ -2192,6 +3076,14 @@ impl Backing for FileBacking<'_> {
                 Ok(())
             }
             // What lies past the data written reads as zeros already.
+            Some(Data::Clusters(stream)) if from < stream.initialized && stream.compressed() => {
+                let to = to.min(stream.initialized);
+                self.rewrite_units(stream, from, to, &mut |start, plain| {
+                    let a = from.saturating_sub(start).min(plain.len() as u64) as usize;
+                    let b = to.saturating_sub(start).min(plain.len() as u64) as usize;
+                    plain[a..b].fill(0);
+                })
+            }
             Some(Data::Clusters(stream)) if from < stream.initialized => {
                 let to = to.min(stream.initialized.next_multiple_of(PAGE));
                 self.zero_disk(stream, from, to)
@@ -2214,11 +3106,14 @@ impl Backing for FileBacking<'_> {
         match &mut st.data {
             Some(Data::Resident(bytes)) => bytes.truncate(size as usize),
             Some(Data::Clusters(stream)) => {
-                let freed = stream.runs.truncate(size.div_ceil(cs))?;
+                // Compressed data keeps the unit its end is in whole.
+                let keep = size.div_ceil(cs).next_multiple_of(stream.grain());
+                let freed = stream.runs.truncate(keep)?;
                 for run in &freed {
                     let _ = node.fs.give_clusters(run.lcn, run.len, false);
                 }
                 stream.initialized = stream.initialized.min(size);
+                stream.size = size;
             }
             _ => return Err(Error::Corrupt),
         }
@@ -2226,8 +3121,10 @@ impl Backing for FileBacking<'_> {
         Ok(())
     }
 
+    /// As on Windows, a file has fewer than 2^32 clusters: a sparse or
+    /// compressed one may be larger than its volume, and a plain one
+    /// runs out of room first.
     fn max_size(&self) -> u64 {
-        let geo = &self.0.fs.vol.geo;
-        geo.clusters * u64::from(geo.cluster_size)
+        u64::from(u32::MAX) * u64::from(self.0.fs.vol.geo.cluster_size)
     }
 }

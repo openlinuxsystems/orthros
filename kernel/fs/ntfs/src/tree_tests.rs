@@ -13,7 +13,7 @@ use radix_vfs::{Error, Result};
 use crate::edit;
 use crate::index::{self, ROOT_HEADER};
 use crate::record::{self, STRIDE, u16_at, u32_at, u64_at};
-use crate::tree::{self, Store};
+use crate::tree::{self, Order, Store};
 use crate::upcase::Upcase;
 
 /// ASCII's up-case table, as `mkntfs` writes its first 128 units.
@@ -189,7 +189,7 @@ fn run(names: &[String], out: &[bool], size: usize, root_max: usize) {
         // the same but for case before it gets here.
         let upper = name.clone();
         let e = tree::make_entry(reference(i as u64), &key(name), None).unwrap();
-        let result = tree::insert(&mut root, &mut store, &upcase, &e);
+        let result = tree::insert(&mut root, &mut store, Order::Names(&upcase), &e);
         if have.contains_key(&upper) {
             assert_eq!(result.unwrap_err(), Error::Exists);
             continue;
@@ -212,7 +212,7 @@ fn run(names: &[String], out: &[bool], size: usize, root_max: usize) {
             continue;
         }
         let units: Vec<u16> = name.encode_utf16().collect();
-        tree::remove(&mut root, &mut store, &upcase, &units, reference(*i)).unwrap();
+        tree::remove(&mut root, &mut store, Order::Names(&upcase), &units, reference(*i)).unwrap();
         left.remove(upper);
         let listed = walk(&root, &mut store, &upcase);
         let want: Vec<String> = left.values().map(|(n, _)| n.clone()).collect();
@@ -232,7 +232,7 @@ fn walked(
     max: usize,
 ) -> Vec<String> {
     let mut names = Vec::new();
-    tree::walk(root, store, upcase, after, &mut |e| {
+    tree::walk(root, store, Order::Names(upcase), after, &mut |e| {
         let len = usize::from(u16_at(e, 0x0a));
         let name = index::FileName::new(&e[0x10..0x10 + len]).unwrap();
         names.push(String::from_utf16(&name.units().collect::<Vec<u16>>()).unwrap());
@@ -252,7 +252,7 @@ fn listings_go_on_after_names_taken_out() {
     let names: Vec<String> = (0..700).map(|i| format!("entry-{:05}", (i * 389) % 700)).collect();
     for (i, name) in names.iter().enumerate() {
         let e = tree::make_entry(reference(i as u64), &key(name), None).unwrap();
-        tree::insert(&mut root, &mut store, &upcase, &e).unwrap();
+        tree::insert(&mut root, &mut store, Order::Names(&upcase), &e).unwrap();
     }
     let number: BTreeMap<&String, u64> = names.iter().zip(0..).collect();
     let mut seen = Vec::new();
@@ -264,7 +264,14 @@ fn listings_go_on_after_names_taken_out() {
         }
         for name in &batch {
             let units: Vec<u16> = name.encode_utf16().collect();
-            tree::remove(&mut root, &mut store, &upcase, &units, reference(number[name])).unwrap();
+            tree::remove(
+                &mut root,
+                &mut store,
+                Order::Names(&upcase),
+                &units,
+                reference(number[name]),
+            )
+            .unwrap();
         }
         last = Some(batch.last().unwrap().encode_utf16().collect());
         seen.extend(batch);
@@ -284,27 +291,48 @@ fn keys_change_in_place() {
     let names: Vec<String> = (0..200).map(|i| format!("k{i:03}")).collect();
     for (i, name) in names.iter().enumerate() {
         let e = tree::make_entry(reference(i as u64), &key(name), None).unwrap();
-        tree::insert(&mut root, &mut store, &upcase, &e).unwrap();
+        tree::insert(&mut root, &mut store, Order::Names(&upcase), &e).unwrap();
     }
     for (i, name) in names.iter().enumerate() {
         let units: Vec<u16> = name.encode_utf16().collect();
-        tree::update(&mut root, &mut store, &upcase, &units, reference(i as u64), &mut |k| {
-            k[0x30..0x38].copy_from_slice(&(i as u64 * 10).to_le_bytes());
-        })
+        tree::update(
+            &mut root,
+            &mut store,
+            Order::Names(&upcase),
+            &units,
+            reference(i as u64),
+            &mut |k| {
+                k[0x30..0x38].copy_from_slice(&(i as u64 * 10).to_le_bytes());
+            },
+        )
         .unwrap();
     }
     let mut sizes = Vec::new();
-    tree::walk(&root, &mut store, &upcase, None, &mut |e| {
+    tree::walk(&root, &mut store, Order::Names(&upcase), None, &mut |e| {
         sizes.push(u64_at(e, 0x10 + 0x30));
         Ok(true)
     })
     .unwrap();
     assert_eq!(sizes, (0..200).map(|i| i * 10).collect::<Vec<u64>>());
     let units: Vec<u16> = "k001".encode_utf16().collect();
-    let wrong = tree::update(&mut root, &mut store, &upcase, &units, reference(7), &mut |_| {});
+    let wrong = tree::update(
+        &mut root,
+        &mut store,
+        Order::Names(&upcase),
+        &units,
+        reference(7),
+        &mut |_| {},
+    );
     assert_eq!(wrong.unwrap_err(), Error::NotFound);
     let units: Vec<u16> = "nope".encode_utf16().collect();
-    let missing = tree::update(&mut root, &mut store, &upcase, &units, reference(1), &mut |_| {});
+    let missing = tree::update(
+        &mut root,
+        &mut store,
+        Order::Names(&upcase),
+        &units,
+        reference(1),
+        &mut |_| {},
+    );
     assert_eq!(missing.unwrap_err(), Error::NotFound);
 }
 
@@ -406,6 +434,44 @@ fn run_lists_pack_as_they_read() {
     let mut runs = crate::runs::Runs::new();
     runs.append(0x10, 137).unwrap();
     assert_eq!(&runs.pack(0, 137).unwrap()[..], &[0x12, 0x89, 0x00, 0x10, 0x00][..]);
+}
+
+#[test]
+fn runs_are_replaced_in_place() {
+    use crate::runs::{HOLE, Run, Runs};
+    let mut runs = Runs::new();
+    runs.append(100, 16).unwrap();
+    runs.append(HOLE, 16).unwrap();
+    runs.append(500, 16).unwrap();
+    // A unit stored in fewer clusters, across the first run's end.
+    let freed = runs.replace(8, 16, &[(900, 4), (HOLE, 12)]).unwrap();
+    assert_eq!(&freed[..], &[Run { vcn: 8, len: 8, lcn: 108 }][..]);
+    assert_eq!(
+        runs.as_slice(),
+        &[
+            Run { vcn: 0, len: 8, lcn: 100 },
+            Run { vcn: 8, len: 4, lcn: 900 },
+            Run { vcn: 12, len: 20, lcn: HOLE },
+            Run { vcn: 32, len: 16, lcn: 500 },
+        ][..]
+    );
+    // A hole filled where its neighbours are on the disk joins them.
+    let mut runs = Runs::new();
+    runs.append(100, 4).unwrap();
+    runs.append(HOLE, 4).unwrap();
+    runs.append(108, 4).unwrap();
+    assert!(runs.replace(4, 4, &[(104, 4)]).unwrap().is_empty());
+    assert_eq!(runs.as_slice(), &[Run { vcn: 0, len: 12, lcn: 100 }][..]);
+    // The middle of a run, and the whole list.
+    let freed = runs.replace(5, 2, &[(HOLE, 2)]).unwrap();
+    assert_eq!(&freed[..], &[Run { vcn: 5, len: 2, lcn: 105 }][..]);
+    assert_eq!(runs.allocated_in(0, 12), 10);
+    let freed = runs.replace(0, 12, &[(7, 12)]).unwrap();
+    assert_eq!(freed.iter().map(|r| r.len).sum::<u64>(), 10);
+    assert_eq!(runs.as_slice(), &[Run { vcn: 0, len: 12, lcn: 7 }][..]);
+    // Past the end, or not covering what it replaces.
+    assert!(runs.replace(8, 8, &[(HOLE, 8)]).is_err());
+    assert!(runs.replace(0, 4, &[(HOLE, 3)]).is_err());
 }
 
 proptest! {

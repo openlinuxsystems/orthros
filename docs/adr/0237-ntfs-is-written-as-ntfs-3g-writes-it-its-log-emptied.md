@@ -89,7 +89,9 @@ volume must stay one that Windows mounts without a check, and that
   - A new name is a Win32 name, or Win32 and DOS together when it is a
     valid upper-case 8.3 name already, as Windows makes it. Radix makes
     no other short names, as Windows does not on a volume other than
-    its system's.
+    its system's. (ADR 0238 puts a name that is not an 8.3 name in the
+    POSIX namespace instead, as Windows' `chkdsk` takes a Win32 name
+    without a short one for an error.)
   - A name Windows could not open fails with `BadName`, as ntfs-3g's
     `windows_names` option refuses it: one with `\ / : * ? " < > |` or
     a control character in it, one ending in a space or a dot, and a

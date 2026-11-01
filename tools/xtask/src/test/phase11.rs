@@ -192,7 +192,7 @@ const NTFS_WRITE_DISKS: &[Disk] = &[
 /// clusters in use, `ntfsfix -n` finds `$MFTMirr` matching `$MFT`, and
 /// the volume is not left marked dirty, since the program syncs what it
 /// wrote (ADR 0237).
-fn ntfs_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
+pub(super) fn ntfs_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
     let image = disk.path.display();
     let mut resize = std::process::Command::new(fat_tool("ntfsresize"));
     let info = host_tool(resize.env("LC_ALL", "C").args(["-i", "-f", "-n"]).arg(&disk.path))
@@ -211,8 +211,10 @@ fn ntfs_checked(disk: &DiskImage, _log: &str) -> Result<(), String> {
     let info = String::from_utf8_lossy(&info);
     let flags = info
         .lines()
+        // `Volume Flags: 0x0001 DIRTY`.
         .find_map(|line| line.trim().strip_prefix("Volume Flags:"))
-        .and_then(|flags| u16::from_str_radix(flags.trim().trim_start_matches("0x"), 16).ok())
+        .and_then(|flags| flags.split_whitespace().next())
+        .and_then(|flags| u16::from_str_radix(flags.trim_start_matches("0x"), 16).ok())
         .ok_or_else(|| format!("{image}: ntfsinfo gives no volume flags"))?;
     // `$Volume`'s dirty flag.
     if flags & 1 != 0 {
