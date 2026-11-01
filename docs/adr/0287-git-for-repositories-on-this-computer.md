@@ -71,7 +71,8 @@ are not re-encoded.
 
 - The `utilities` part of the posix boot test runs git as a person
   and a script do: commits whose hashes it checks, with the names and
-  times set, branches, a merge, a conflict undone, tags, `stash`,
+  times set, branches, a merge, a conflict undone, a rebase stopped
+  by a conflict and continued, a second working tree, tags, `stash`,
   `grep`, `blame`, a clone over `file://`, a push into a bare
   repository, `gc` and `fsck`, `submodule` and `bisect run`, and the
   programs another computer runs by name, through `git-shell` too.

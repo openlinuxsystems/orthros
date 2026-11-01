@@ -856,14 +856,20 @@ static void versioning(void) {
 	// A conflict: the merge stops, names the file, and is undone.
 	OUTPUT("", "1\nf\n", "/bin/sh", "-c",
 			"cd /tmp/git/a && git switch -q -c clash HEAD~1 && sed -i s/one/uno/ f && git commit -q -am Clash && git switch -q main && { git merge -q clash >/dev/null 2>&1; echo $?; } && git diff --name-only --diff-filter=U && git merge --abort && git status --short");
+	// A rebase that stops at a conflict, which is resolved and continued.
+	OUTPUT("", "1\nf\nClash\nMerge branch 'side'\nThird\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && git switch -q -c topic clash && { git rebase -q main >/dev/null 2>&1; echo $?; } && git diff --name-only --diff-filter=U && printf 'uno\\ntwo\\nthree\\nfour\\nfive\\n' >f && git add f && GIT_EDITOR=true git rebase --continue >/dev/null 2>&1 && git log --format=%s -3 && git switch -q main");
+	// A second working tree of the same repository.
+	OUTPUT("", "side\n/tmp/git/a\n/tmp/git/w\n1\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && git worktree add -q /tmp/git/w side && git -C /tmp/git/w branch --show-current && git worktree list | sed 's/ .*//' && git worktree remove /tmp/git/w && git worktree list | wc -l");
 	// Cloning through the file:// transport, which runs git-upload-pack, and pushing, which
 	// runs git-receive-pack.
-	OUTPUT("", "Merge branch 'side'\n  origin/HEAD -> origin/main\n  origin/clash\n  origin/main\n  origin/side\n", "/bin/sh", "-c",
+	OUTPUT("", "Merge branch 'side'\n  origin/HEAD -> origin/main\n  origin/clash\n  origin/main\n  origin/side\n  origin/topic\n", "/bin/sh", "-c",
 			"git clone -q file:///tmp/git/a /tmp/git/b && git -C /tmp/git/b log -1 --format=%s && git -C /tmp/git/b branch -r");
 	OUTPUT("", "Fourth\n", "/bin/sh", "-c",
 			"git clone -q --bare /tmp/git/a /tmp/git/c.git && cd /tmp/git/b && echo seven >>f && git commit -q -am Fourth && git push -q /tmp/git/c.git main && git -C /tmp/git/c.git log -1 --format=%s");
 	// Packing and checking every object.
-	OUTPUT("", "count: 0\nin-pack: 25\n", "/bin/sh", "-c",
+	OUTPUT("", "count: 0\nin-pack: 28\n", "/bin/sh", "-c",
 			"cd /tmp/git/a && git gc -q && git fsck --no-progress --no-dangling && git count-objects -v | grep -E '^(count|in-pack)'");
 	// Shell scripts of git's: submodule, and bisect running a test.
 	OUTPUT("", " sub (v1-1-g276f6ce)\n.gitmodules\nf\nsub\n", "/bin/sh", "-c",
