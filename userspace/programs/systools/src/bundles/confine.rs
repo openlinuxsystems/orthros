@@ -132,6 +132,24 @@ fn start(archive: &File, folder: &Path) -> Result<Report, String> {
     radix::start(archive, folder)
 }
 
+/// Unpacks the archive `archive` into the empty folder open as `folder`,
+/// in a process of its own that holds that folder's capability, as
+/// bundled(8) does into the folder it made (ADR 0223).
+#[cfg(target_os = "radix")]
+pub fn unpack_into(archive: &File, folder: &std::os::fd::OwnedFd) -> Result<Report, String> {
+    use std::os::fd::AsRawFd;
+    radix::start_with(archive, crate::sys::slot_of(folder.as_raw_fd()))
+}
+
+/// Built for another system, for tests: the same work, in this process,
+/// through the folder's name in /proc.
+#[cfg(not(target_os = "radix"))]
+pub fn unpack_into(archive: &File, folder: &std::os::fd::OwnedFd) -> Result<Report, String> {
+    use std::os::fd::AsRawFd;
+    let path = std::path::PathBuf::from(format!("/proc/self/fd/{}", folder.as_raw_fd()));
+    start(archive, &path)
+}
+
 #[cfg(target_os = "radix")]
 mod radix {
     use std::fs::File;
@@ -158,6 +176,21 @@ mod radix {
 
     /// Starts the unpacker on `archive`, with `folder`, and reads its report.
     pub fn start(archive: &File, folder: &Path) -> Result<Report, String> {
+        let path =
+            std::fs::canonicalize(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+        let path = path.as_os_str().as_bytes();
+        let path = path.strip_prefix(b"/").unwrap_or(path);
+        let spares = signin::Spares::new(1).map_err(|e| format!("no slots: {e}"))?;
+        let dir = spares.slot(0);
+        let rights = Rights(Rights::READ.bits() | Rights::WRITE.bits());
+        directory::open(&SYS, startup::SLOT_ROOT, path, OpenFlags::DIRECTORY, rights, dir, 0)
+            .map_err(status("opening the new folder"))?;
+        start_with(archive, dir)
+    }
+
+    /// Starts the unpacker on `archive`, with the folder whose capability
+    /// is in slot `dir`, and reads its report.
+    pub fn start_with(archive: &File, dir: u32) -> Result<Report, String> {
         // The pipe first: the spare slots below are free descriptors to
         // the C library until they are filled, and pipe2 would take one.
         let mut fds = [0i32; 2];
@@ -168,15 +201,11 @@ mod radix {
         // SAFETY: pipe2 made both, and nothing else owns them.
         let (reader, writer) =
             unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-        let path =
-            std::fs::canonicalize(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
-        let path = path.as_os_str().as_bytes();
-        let path = path.strip_prefix(b"/").unwrap_or(path);
-        let spares = signin::Spares::new(3).map_err(|e| format!("no slots: {e}"))?;
-        let [program, child, dir] = [0, 1, 2].map(|i| spares.slot(i));
+        let spares = signin::Spares::new(2).map_err(|e| format!("no slots: {e}"))?;
+        let [program, child] = [0, 1].map(|i| spares.slot(i));
+        // The folder without the bypass right or control, whatever the
+        // starter's holds.
         let rights = Rights(Rights::READ.bits() | Rights::WRITE.bits());
-        directory::open(&SYS, startup::SLOT_ROOT, path, OpenFlags::DIRECTORY, rights, dir, 0)
-            .map_err(status("opening the new folder"))?;
         let program_path = PROGRAM.trim_start_matches('/').as_bytes();
         directory::open(
             &SYS,

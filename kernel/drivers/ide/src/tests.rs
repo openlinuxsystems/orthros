@@ -23,15 +23,24 @@ fn full(phys: u32) -> u64 {
     HIGH.with(|h| h.get().expect("memory was allocated")) | u64::from(phys)
 }
 
+/// `pages` of the test's memory, in the same 4 GiB as the rest of it. The
+/// host's allocator may put a block anywhere, so one that lands in other
+/// 4 GiB, or across a 4 GiB line, is kept aside and another asked for.
 fn alloc(pages: usize, below: bool) -> Option<Dma> {
     assert!(below, "the PRD table is below 4 GiB");
-    let dma = Dma::fake(pages * 4096);
-    let high = dma.phys() & !0xffff_ffff;
-    HIGH.with(|h| {
-        assert_eq!(*h.get().get_or_insert(high), high, "the test's memory is in one 4 GiB");
-        h.set(Some(high));
-    });
-    Some(dma)
+    let mut aside = Vec::new();
+    for _ in 0..64 {
+        let dma = Dma::fake(pages * 4096);
+        let high = dma.phys() & !0xffff_ffff;
+        let last = (dma.phys() + (pages * 4096) as u64 - 1) & !0xffff_ffff;
+        let fits = HIGH.with(|h| last == high && *h.get().get_or_insert(high) == high);
+        if fits {
+            HIGH.with(|h| h.set(Some(high)));
+            return Some(dma);
+        }
+        aside.push(dma);
+    }
+    panic!("the host gave no memory in the test's 4 GiB")
 }
 
 fn low(dma: &Dma) -> u32 {
@@ -402,11 +411,18 @@ fn what_is_written_reads_back() {
 #[test]
 fn a_buffer_across_64_kib_takes_two_prds() {
     let mut rig = rig([Some(SimDisk::new(64)), None]);
-    let buffer = alloc(32, true).unwrap();
+    // 68 KiB always holds a 64 KiB line with 2 KiB either side, and stays
+    // under the host allocator's threshold for blocks of their own, which
+    // land anywhere.
+    let buffer = alloc(17, true).unwrap();
     let start = low(&buffer);
     // From 2 KiB before the next 64 KiB line, 4 KiB.
-    let at = (start | 0xffff) + 1 - 2048;
-    let at = if at >= start && at + 4096 <= start + 32 * 4096 { at } else { start };
+    let at = (start | 0xffff).wrapping_add(1).wrapping_sub(2048);
+    let at = if at >= start && u64::from(at) + 4096 <= u64::from(start) + 17 * 4096 {
+        at
+    } else {
+        start
+    };
     assert_eq!(run(&mut rig, 0, Op::Read, 0, 8, &[(at, 4096)]), Ok(()));
     let prds = rig.sim.lock().unwrap().prds.last().unwrap().clone();
     if at != start {

@@ -8,6 +8,7 @@
 //! ob(1); `docs/man/ob.1.scd` is the source of that page.
 
 mod account;
+mod baseline;
 mod bench;
 mod btrfs;
 mod config;
@@ -389,9 +390,10 @@ Boots Radix in QEMU on 2 CPUs with selftest=bench, where user programs time
 the cheapest system calls and IPC round trips over endpoints,
 notifications, shared-memory channels and rings, on one CPU and across
 two. Then measures the closest Linux operations (tools/linux-bench) in a
-virtual machine set up the same way, the baseline, and on this machine
-for reference. Writes out/bench/report.md and out/bench/results.json and
-prints the report. Without KVM the Radix numbers measure QEMU's emulation
+virtual machine set up the same way, the baseline, which boots one
+pinned release of Ubuntu's kernel, and on this machine for reference.
+Writes out/bench/report.md and out/bench/results.json and prints the
+report. Without KVM the Radix numbers measure QEMU's emulation
 and take minutes.
 
   --no-linux          Skip the Linux baseline
@@ -400,7 +402,8 @@ and take minutes.
                       virtual machine at any operation, measuring both
                       again (up to 6 more runs) while one is over
   --linux-kernel <file>
-                      The Linux kernel to boot for the baseline
+                      Boot this Linux kernel instead of the pinned baseline
+                      (Ubuntu's, fetched once into .cache/linux-baseline)
   --runs <n>          Measure Radix and Linux in turn this many times and
                       keep each operation's fastest run (default 3; one
                       without KVM)

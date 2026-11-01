@@ -5,7 +5,7 @@ bundle(1) "Dukovo" "Dukovo Manual"
 
 # NAME
 
-bundle - make, check, sign and pack bundles
+bundle - make, check, sign, pack, install and run bundles
 
 # SYNOPSIS
 
@@ -27,13 +27,25 @@ bundle - make, check, sign and pack bundles
 
 *bundle unpack* _file_*.dkv* _folder_
 
+*bundle install* _file_*.dkv* [*--for-everyone*] [*--yes*]
+
+*bundle list*
+
+*bundle info* _id_
+
+*bundle remove* _id_ [*--for-everyone*] [*--keep-data* | *--purge*]
+
+*bundle run* [*--command* _name_] _id_ [_argument_...]
+
 # DESCRIPTION
 
 A bundle is an app, a command-line tool or a service in one folder,
 which its _manifest.json_ describes (*manifest.json*(5)). bundle makes
 and checks manifests with the same reader that installs bundles, so what
 *bundle check* says is what installing will say. It signs a bundle,
-packs it into one _.dkv_ file to share, and checks and unpacks one.
+packs it into one _.dkv_ file to share, and checks and unpacks one. It
+installs, lists and removes bundles through *bundled*(8), as apt and
+dpkg do packages, and runs them, each in a sandbox of its own.
 
 A signed bundle has _files.sha256_, the SHA-256 of each of its other
 files as *sha256sum*(1) writes them, and _signature_, minisign's Ed25519
@@ -114,6 +126,84 @@ folder and as a _.dkv_ file, which is a zip of the folder.
 	A program the manifest names may be run once unpacked, as may a file
 	the archive marks so.
 
+*install* _file_*.dkv* [*--for-everyone*] [*--yes*]
+	Installs the bundle for you, in your _applications_ folder, or with
+	*--for-everyone*, which only an administrator may, through
+	*elevate*(8), in _/applications_. *bundled*(8) unpacks and checks it,
+	and shows the install sheet: what it is, whose key signed it and
+	whether this computer knows the key, its size, the permissions it
+	asks for in the system's own words, and its commands. bundle asks
+	*Install it?*; *--yes* answers for scripts. Installed, the bundle is
+	sealed: root's and read-only, so nothing changes it. A bundle signed
+	by your developer key installs with no warning for you; any other key
+	this computer does not know installs after a warning, and from then
+	on only that key may install that ID.
+
+*list*
+	Lists the bundles you can run, yours and everyone's: ID, version,
+	whose, and name.
+
+*info* _id_
+	Shows an installed bundle's sheet, when it was installed, where, and
+	where its data is.
+
+*remove* _id_ [*--for-everyone*] [*--keep-data* | *--purge*]
+	Removes your bundle, or with *--for-everyone* one installed for
+	everyone, through *elevate*(8). It asks whether to delete its
+	settings and data, _~/app-data/id_, too; *--keep-data* and *--purge*
+	answer for scripts. Kept data is picked up by a later version from
+	the same publisher.
+
+*run* [*--command* _name_] _id_ [_argument_...]
+	Runs the bundle's command _name_, or its first command, or with no
+	command its only program, with each _argument_, options included;
+	see RUNNING.
+
+# RUNNING
+
+A bundle's commands are on your *PATH*: *bundled*(8) links each, by its
+name, in _/applications/commands_ or your _applications/commands_, to
+bundle, which run by a name that is none of its own runs the bundle
+command of that name. *notes* and *bundle run org.example.notes* run the
+same program.
+
+Before anything runs, bundle asks bundled which bundle it is and what it
+recorded at install, and checks the bundle's folder against that: still
+sealed (root's, mode 0555), its signed list the one recorded and signed
+by the key recorded, its manifest the one the list names, and the
+program a sealed file the list names. A bundle that fails any check does
+not run, and bundle says why.
+
+A command whose manifest says it runs with your access runs as a program
+of the system's, with all you hold; the install sheet says so plainly.
+Any other runs in the bundle's sandbox (ADR 0225), a process whose root
+is a view of:
+
+- _/system/commands_, _libraries_, _resources_ and _settings_,
+  _/system/live/notify_, _/processes_ and _/kernel_, read-only;
+- _/devices/null_, _zero_, _random_ and _urandom_;
+- the bundle's own folder, read-only, at its path;
+- its data folder, _~/app-data/id_, which it may change, made if it
+  is not there, mode 0700, and its home;
+- a _/tmp_ of its own, which is _/tmp/.app-id_ of yours;
+- the links of _/_ and _/system_, so _/bin/sh_ is there.
+
+Nothing else of your home, nor of anyone's, is in it. It holds the
+network only as its manifest asks: with *network.outbound*, to connect
+out; with *network.listen*, to listen on those ports, out of those you
+may (from 1024 for anyone but an administrator); and without either, no
+network at all, so it cannot make a socket. Its environment is clean:
+*HOME*, *USER*, *LOGNAME*, *PATH*=_/system/commands_, *TERM*, and your
+*LANG*, *LC\_\** and *TZ*. Its descriptors 0 to 2 are yours; bundle
+waits for it and exits with its status.
+
+Until grants and the permission prompts come, a bundle gets the
+permissions given at install (*network.outbound*, *network.listen*)
+and those always given (*notifications*). One that requires a permission
+asked for on first use, with a warning or by an administrator does not
+run, saying which; one that asks for it as optional runs without it. A
+program narrows itself to fewer with *programs.*_name_*.permissions*.
+
 # FILES
 
 _$XDG_DATA_HOME/bundle/developer.key_, _developer.pub_
@@ -121,10 +211,20 @@ _$XDG_DATA_HOME/bundle/developer.key_, _developer.pub_
 	0600, and its public half. _$XDG_DATA_HOME_ is _~/.local/share_
 	unless set.
 
+_/applications_, _~/applications_
+	The bundles for everyone and your own, sealed, and their
+	_commands_ folders.
+
+_~/app-data/id_
+	A bundle's settings and data, its home when it runs.
+
 # EXIT STATUS
 
 0 when the manifest reads, and 1 when it does not, a file it names is
-missing, a bundle does not check, or the command line is wrong.
+missing, a bundle does not check, or the command line is wrong. *install*
+and *remove* exit with 1 when bundled refused. *run* and a bundle's
+command exit with the program's status, 128 and the signal's number for
+one a signal ended, or 1 when it did not run.
 
 # EXAMPLES
 
@@ -139,6 +239,13 @@ notes: signed org.example.notes 0.1.0, 3 files, with your developer key RWS...
 wrote org.example.notes-0.1.0.dkv: org.example.notes 0.1.0, 3 files, 1.7K, signed by your developer key RWS...
 $ bundle unpack org.example.notes-0.1.0.dkv /tmp/notes
 /tmp/notes: unpacked org.example.notes 0.1.0, 3 files, signed by your developer key RWS...
+$ bundle install org.example.notes-0.1.0.dkv
+notes 0.1.0, for yourself
+  org.example.notes, by alice
+  ...
+Install it? [y/N] y
+installed org.example.notes 0.1.0, for you
+$ notes
 ```
 
 The same checks with other tools, on any system:
@@ -151,4 +258,4 @@ $ unzip -t org.example.notes-0.1.0.dkv
 
 # SEE ALSO
 
-*manifest.json*(5), *service.toml*(5), *sha256sum*(1), *zip*(1), *systools*(1)
+*bundled*(8), *manifest.json*(5), *service.toml*(5), *elevate*(8), *sha256sum*(1), *zip*(1), *systools*(1)

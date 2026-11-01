@@ -18,24 +18,37 @@
 //! - `bundle verify [FOLDER | FILE.dkv]` checks one's signature and files.
 //! - `bundle unpack FILE.dkv FOLDER` unpacks one, in a process that holds
 //!   nothing but the archive and the new folder.
+//! - `bundle install FILE.dkv`, `bundle list`, `bundle info ID` and
+//!   `bundle remove ID` ask bundled(8), which installs, seals and removes
+//!   bundles (ADR 0223).
 
 mod base64;
-mod confine;
-mod minisign;
+pub(crate) mod confine;
+pub(crate) mod folder;
+pub(crate) mod minisign;
+pub(crate) mod protocol;
+pub(crate) mod registry;
+pub(crate) mod run;
 mod sbom;
-mod signed;
-mod sums;
+pub(crate) mod sheet;
+pub(crate) mod signed;
+pub(crate) mod sums;
 mod zip;
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufReader, IsTerminal, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
 use manifest::bundle::{self, Manifest};
 
 use self::minisign::{PublicKey, SecretKey};
+use self::protocol::{Answer, Request};
+use self::registry::Place;
 use crate::args::{Arg, Args};
+use crate::signin;
 use crate::util::{self, Fail, fail, usage};
 
 const USAGE: &str =
@@ -47,10 +60,15 @@ const USAGE: &str =
        bundle sign [FOLDER] [--key SECRET-KEY-FILE]
        bundle pack [FOLDER] [--key SECRET-KEY-FILE] [--output FILE]
        bundle verify [FOLDER | FILE.dkv] [--key PUBLIC-KEY]
-       bundle unpack FILE.dkv FOLDER";
+       bundle unpack FILE.dkv FOLDER
+       bundle install FILE.dkv [--for-everyone] [--yes]
+       bundle list
+       bundle info ID
+       bundle remove ID [--for-everyone] [--keep-data | --purge]
+       bundle run [--command NAME] ID [ARGUMENT...]";
 
 /// The manifest's name in a bundle's folder.
-const MANIFEST: &str = "manifest.json";
+pub(crate) const MANIFEST: &str = "manifest.json";
 
 /// A packed bundle's extension.
 const EXTENSION: &str = "dkv";
@@ -61,9 +79,9 @@ const DEVELOPER_PUBLIC: &str = "developer.pub";
 
 /// Where random bytes come from.
 #[cfg(target_os = "radix")]
-const RANDOM: &str = "/devices/urandom";
+pub(crate) const RANDOM: &str = "/devices/urandom";
 #[cfg(not(target_os = "radix"))]
-const RANDOM: &str = "/dev/urandom";
+pub(crate) const RANDOM: &str = "/dev/urandom";
 
 /// The license `bundle new` writes when none is given: the publisher's
 /// own terms, until they choose a license.
@@ -71,6 +89,9 @@ const LICENSE: &str = "LicenseRef-Proprietary";
 
 pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let subcommand = args.subcommand().map(|s| s.to_string_lossy().into_owned());
+    if subcommand.as_deref() == Some("run") {
+        return run_main(args);
+    }
     let mut operands = Vec::new();
     let mut name = None;
     let mut publisher = None;
@@ -78,8 +99,16 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     let mut key = None;
     let mut output = None;
     let mut confined = false;
+    let mut everyone = false;
+    let mut yes = false;
+    let mut data = None;
     while let Some(arg) = args.next()? {
         match arg {
+            Arg::Long(l) if l == "for-everyone" => everyone = true,
+            Arg::Long(l) if l == "yes" => yes = true,
+            Arg::Short('y') => yes = true,
+            Arg::Long(l) if l == "keep-data" && data.is_none() => data = Some(false),
+            Arg::Long(l) if l == "purge" && data.is_none() => data = Some(true),
             Arg::Long(l) if l == "name" => name = Some(args.text()?),
             Arg::Long(l) if l == "publisher" => publisher = Some(args.text()?),
             Arg::Long(l) if l == "license" => license = Some(args.text()?),
@@ -102,6 +131,12 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     if !key_ok || !output_ok || (confined && (sub != Some("unpack") || !operands.is_empty())) {
         return Err(usage(USAGE.into()));
     }
+    let everyone_ok = matches!(sub, Some("install" | "remove")) || !everyone;
+    let yes_ok = sub == Some("install") || !yes;
+    let data_ok = sub == Some("remove") || data.is_none();
+    if !everyone_ok || !yes_ok || !data_ok {
+        return Err(usage(USAGE.into()));
+    }
     let folder = || operands.first().map_or(".", String::as_str);
     match (sub, operands.as_slice()) {
         (Some("new"), [id, rest @ ..]) if rest.len() <= 1 => {
@@ -120,8 +155,33 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
         (Some("verify"), [] | [_]) => verify(folder(), key.as_deref()),
         (Some("unpack"), []) if confined => Ok(confine::confined()),
         (Some("unpack"), [archive, folder]) => unpack(archive, folder),
+        (Some("install"), [archive]) => install(archive, everyone, yes),
+        (Some("list"), []) => list(),
+        (Some("info"), [id]) => info(id),
+        (Some("remove"), [id]) => remove(id, everyone, data),
         _ => Err(usage(USAGE.into())),
     }
+}
+
+/// `bundle run [--command NAME] ID [ARGUMENT...]`: what follows the ID
+/// is the program's, options included.
+fn run_main(args: &mut Args) -> Result<i32, Fail> {
+    args.stop_at_operand();
+    let mut command = None;
+    let id = loop {
+        match args.next()? {
+            Some(Arg::Long(l)) if l == "command" && command.is_none() => {
+                command = Some(args.text()?);
+            }
+            Some(Arg::Long(l)) if l == "help" => {
+                println!("{USAGE}");
+                return Ok(0);
+            }
+            Some(Arg::Operand(id)) => break id.to_string_lossy().into_owned(),
+            _ => return Err(usage(USAGE.into())),
+        }
+    };
+    run::run(&id, command.as_deref(), args.rest())
 }
 
 /// The manifest `what` names: a folder's manifest.json, or a file.
@@ -200,13 +260,14 @@ fn new(
              \"license\" to choose another"
         );
     }
-    let (_, made) = developer_key()?;
+    let (key, made) = developer_key()?;
     if made {
         println!(
             "made your developer key, which signs your own builds: {}",
             key_folder()?.join(DEVELOPER_KEY).display()
         );
     }
+    let _ = tell_bundled(&key.public());
     Ok(0)
 }
 
@@ -406,7 +467,187 @@ fn show_key() -> Result<i32, Fail> {
         "it signs your own builds; its public half is in {}",
         folder.join(DEVELOPER_PUBLIC).display()
     );
+    match tell_bundled(&key.public()) {
+        Ok(()) => println!("this computer installs what it signs for you with no warning"),
+        Err(why) => eprintln!("bundle: {why}"),
+    }
     Ok(0)
+}
+
+/// Tells bundled(8) the developer key, which it trusts for this person's
+/// own installs (ADR 0223).
+fn tell_bundled(key: &PublicKey) -> Result<(), String> {
+    let (_, mut input) = ask(&Request::DeveloperKey { key: *key }, None)?;
+    match Answer::read(&mut input) {
+        Ok(Some(Answer::Ok(_))) => Ok(()),
+        Ok(Some(Answer::Error(why))) => Err(why),
+        _ => Err("bundled gave no answer".into()),
+    }
+}
+
+/// Sends `request` to bundled(8), with `archive` for an install; the
+/// connection, and a reader of its answers.
+fn ask(
+    request: &Request,
+    archive: Option<&File>,
+) -> Result<(UnixStream, BufReader<UnixStream>), String> {
+    let stream = UnixStream::connect(protocol::SOCKET).map_err(|e| {
+        format!("cannot reach bundled at {}: {}", protocol::SOCKET, util::strip_os_error(&e))
+    })?;
+    let line = request.line();
+    let sent = match archive {
+        Some(file) => signin::send_with_fds(&stream, line.as_bytes(), &[file.as_raw_fd()]),
+        None => (&stream).write_all(line.as_bytes()),
+    };
+    sent.map_err(|e| format!("bundled: {e}"))?;
+    let input = stream.try_clone().map_err(|e| format!("bundled: {e}"))?;
+    Ok((stream, BufReader::new(input)))
+}
+
+/// The next answer, or why there is none.
+fn answer(input: &mut BufReader<UnixStream>) -> Result<Answer, Fail> {
+    match Answer::read(input) {
+        Ok(Some(answer)) => Ok(answer),
+        Ok(None) => Err(fail("bundled gave no answer".into())),
+        Err(e) => Err(fail(format!("bundled: {e}"))),
+    }
+}
+
+/// Asks `question` on the terminal: whether the line typed starts with
+/// one of `yes`'s letters.
+fn agree(question: &str, yes: &[char]) -> Result<bool, Fail> {
+    print!("{question}");
+    io::stdout().flush().map_err(|e| util::failed(&"the output", e))?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line).map_err(|e| util::failed(&"the input", e))?;
+    Ok(line.trim_start().chars().next().is_some_and(|c| yes.contains(&c.to_ascii_lowercase())))
+}
+
+/// `bundle install FILE.dkv`: bundled shows the install sheet, asks, and
+/// installs it sealed, for this person or for everyone.
+fn install(archive: &str, everyone: bool, yes: bool) -> Result<i32, Fail> {
+    let path = Path::new(archive);
+    if path.is_dir() {
+        return Err(fail(format!(
+            "{archive} is a folder: make its .{EXTENSION} file with `bundle pack {archive}`, \
+             then install that"
+        )));
+    }
+    let file = File::open(path).map_err(|e| util::failed(&archive, e))?;
+    let (stream, mut input) =
+        ask(&Request::Install { everyone, yes }, Some(&file)).map_err(fail)?;
+    loop {
+        match answer(&mut input)? {
+            Answer::Sheet(text) => print!("{text}"),
+            Answer::Question => {
+                let agreed = agree("Install it? [y/N] ", &['y'])?;
+                let reply: &[u8] = if agreed { b"yes\n" } else { b"no\n" };
+                (&stream).write_all(reply).map_err(|e| fail(format!("bundled: {e}")))?;
+            }
+            Answer::Ok(what) => {
+                println!("{what}");
+                return Ok(0);
+            }
+            Answer::Error(why) => {
+                eprintln!("bundle: {archive}: {why}");
+                return Ok(1);
+            }
+            _ => return Err(fail("bundled answered out of turn".into())),
+        }
+    }
+}
+
+/// `bundle list`: the bundles this person can run, theirs and everyone's.
+fn list() -> Result<i32, Fail> {
+    let (_stream, mut input) = ask(&Request::List, None).map_err(fail)?;
+    let mut rows = Vec::new();
+    loop {
+        match answer(&mut input)? {
+            Answer::Listed(l) => rows.push(l),
+            Answer::Ok(_) => break,
+            Answer::Error(why) => {
+                eprintln!("bundle: {why}");
+                return Ok(1);
+            }
+            _ => return Err(fail("bundled answered out of turn".into())),
+        }
+    }
+    if rows.is_empty() {
+        println!("no bundles are installed");
+        return Ok(0);
+    }
+    rows.sort_by(|a, b| a.id.cmp(&b.id).then(a.place.cmp(&b.place)));
+    let width = rows.iter().map(|r| r.id.len()).max().unwrap_or(2).max(2);
+    let version_width = rows.iter().map(|r| r.version.len()).max().unwrap_or(7).max(7);
+    println!("{:width$}  {:version_width$}  {:9}  NAME", "ID", "VERSION", "FOR");
+    for row in rows {
+        let whose = match row.place {
+            Place::Everyone => "everyone",
+            Place::User(_) => "you",
+        };
+        println!("{:width$}  {:version_width$}  {whose:9}  {}", row.id, row.version, row.name);
+    }
+    Ok(0)
+}
+
+/// `bundle info ID`: an installed bundle's sheet, where it is and when it
+/// was installed.
+fn info(id: &str) -> Result<i32, Fail> {
+    bundle::check_id(id).map_err(usage)?;
+    let (_stream, mut input) = ask(&Request::Info { id: id.into() }, None).map_err(fail)?;
+    loop {
+        match answer(&mut input)? {
+            Answer::Sheet(text) => print!("{text}"),
+            Answer::Ok(what) => {
+                for part in what.split("; ") {
+                    let mut chars = part.chars();
+                    let first = chars.next().map(|c| c.to_uppercase().to_string());
+                    println!("  {}{}", first.unwrap_or_default(), chars.as_str());
+                }
+                return Ok(0);
+            }
+            Answer::Error(why) => {
+                eprintln!("bundle: {why}");
+                return Ok(1);
+            }
+            _ => return Err(fail("bundled answered out of turn".into())),
+        }
+    }
+}
+
+/// `bundle remove ID`: removes it, after asking whether to delete its
+/// settings and data unless `--keep-data` or `--purge` answers.
+fn remove(id: &str, everyone: bool, data: Option<bool>) -> Result<i32, Fail> {
+    bundle::check_id(id).map_err(usage)?;
+    let purge = match data {
+        Some(purge) => purge,
+        // Removing for everyone leaves each person's data.
+        None if everyone => false,
+        None if io::stdin().is_terminal() => {
+            agree("Also delete its settings and data? [k]eep or [d]elete: ", &['d'])?
+        }
+        None => {
+            return Err(usage(
+                "say whether to delete its settings and data: --keep-data or --purge".into(),
+            ));
+        }
+    };
+    let (_stream, mut input) =
+        ask(&Request::Remove { id: id.into(), everyone, purge }, None).map_err(fail)?;
+    match answer(&mut input)? {
+        Answer::Ok(what) => {
+            println!("{what}");
+            if !purge && !everyone {
+                println!("its settings and data stay; a later version of it picks them up");
+            }
+            Ok(0)
+        }
+        Answer::Error(why) => {
+            eprintln!("bundle: {why}");
+            Ok(1)
+        }
+        _ => Err(fail("bundled answered out of turn".into())),
+    }
 }
 
 /// The time a signature and an SBOM say they were made: now, or

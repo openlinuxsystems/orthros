@@ -45,7 +45,10 @@ accounts, which *user*(8) makes and lists and whose passwords
 *passwd*(1) changes, starts the sessions of those who sign in with
 *login*(1), records them for *last*(1), *lastb*(1) and *lastlog*(8),
 and runs the commands an administrator runs with *elevate*(8), or
-*sudo*(8), as root. The user columns show the user each
+*sudo*(8), as root; *bundled*(8) installs, seals and removes the
+bundles *bundle*(1) makes, and *bundle run* runs them in their sandbox,
+as does a bundle's command, a link to _/system/commands/bundle_ by its
+name. The user columns show the user each
 process acts for (*radix-names*(2)).
 
 A mistake in the command line makes a tool fail with exit status 2 (1
@@ -63,7 +66,9 @@ error that starts with the tool's name.
 |  *blkid*(8)
 :  what each disk and partition holds: filesystems, labels and UUIDs
 |  *bundle*(1)
-:  make, check, sign and pack bundles
+:  make, check, sign and pack bundles; install, list, remove and run them
+|  *bundled*(8)
+:  install, seal and remove bundles
 |  *chgrp*(1), *chmod*(1), *chown*(1)
 :  change a file's group, mode or owner
 |  *column*(1)

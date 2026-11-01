@@ -13,10 +13,10 @@
 //! domain at its limit refuses new objects, as it refuses new threads.
 
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use radix_abi::errors::Kernel;
 use radix_mm::{Flags, HEAP, Kmalloc, PAGE_SIZE};
-use radix_sync::SpinLock;
 
 use super::{Result, error};
 use crate::domains::DomainRef;
@@ -27,8 +27,12 @@ pub type AccountRef = Arc<Account, Kmalloc>;
 /// Kernel memory charged to a domain on behalf of one process.
 pub struct Account {
     domain: DomainRef,
-    /// The bytes charged.
-    bytes: SpinLock<u64>,
+    /// The bytes charged. Each change is one compare-and-swap, and the
+    /// domain is charged or given back the pages that change moves the
+    /// count across, so the domain holds the pages of what the account
+    /// holds once no change is under way (opening a file charges and
+    /// gives back one object's bytes, on its fast path).
+    bytes: AtomicU64,
 }
 
 /// Bytes charged to an account, given back when it is dropped: kept by
@@ -45,7 +49,7 @@ fn pages(bytes: u64) -> u64 {
 impl Account {
     /// A new account in `domain`, with nothing charged.
     pub fn new(domain: DomainRef) -> Option<AccountRef> {
-        let account = Account { domain, bytes: SpinLock::new(0) };
+        let account = Account { domain, bytes: AtomicU64::new(0) };
         Arc::try_new_in(account, HEAP.with(Flags::MAY_SLEEP)).ok()
     }
 
@@ -56,20 +60,36 @@ impl Account {
 
     /// The bytes charged now.
     pub fn bytes(&self) -> u64 {
-        *self.bytes.lock()
+        self.bytes.load(Ordering::Relaxed)
     }
 
     /// Charges `bytes`, unless the domain or one above it would pass its
     /// limit.
     pub fn charge(account: &AccountRef, bytes: u64) -> Result<Charge> {
-        let mut charged = account.bytes.lock();
-        let after = charged.checked_add(bytes).ok_or(error(Kernel::NoMemory))?;
-        let more = pages(after) - pages(*charged);
-        if more > 0 {
-            account.domain.charge(more).map_err(|_| error(Kernel::NoMemory))?;
+        let mut charged = account.bytes.load(Ordering::Relaxed);
+        loop {
+            let after = charged.checked_add(bytes).ok_or(error(Kernel::NoMemory))?;
+            let more = pages(after) - pages(charged);
+            if more > 0 {
+                account.domain.charge(more).map_err(|_| error(Kernel::NoMemory))?;
+            }
+            match account.bytes.compare_exchange_weak(
+                charged,
+                after,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(Charge { account: account.clone(), bytes }),
+                Err(now) => {
+                    // Another charge or release came first: give back
+                    // the pages taken for the count it changed.
+                    if more > 0 {
+                        account.domain.uncharge(more);
+                    }
+                    charged = now;
+                }
+            }
         }
-        *charged = after;
-        Ok(Charge { account: account.clone(), bytes })
     }
 }
 
@@ -84,12 +104,25 @@ impl Charge {
 
 impl Drop for Charge {
     fn drop(&mut self) {
-        let mut charged = self.account.bytes.lock();
-        let after = *charged - self.bytes;
-        let fewer = pages(*charged) - pages(after);
-        *charged = after;
-        if fewer > 0 {
-            self.account.domain.uncharge(fewer);
+        let bytes = self.bytes;
+        let mut charged = self.account.bytes.load(Ordering::Relaxed);
+        loop {
+            let after = charged - bytes;
+            match self.account.bytes.compare_exchange_weak(
+                charged,
+                after,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    let fewer = pages(charged) - pages(after);
+                    if fewer > 0 {
+                        self.account.domain.uncharge(fewer);
+                    }
+                    return;
+                }
+                Err(now) => charged = now,
+            }
         }
     }
 }

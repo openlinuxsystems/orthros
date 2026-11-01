@@ -166,16 +166,29 @@ pub fn insert_charged(
             let _ = table.push_within_capacity(None);
         }
     }
-    replace(table, index, Entry { generation: id.generation, cached: false, object, charge });
+    replace(table, index, id.generation, object, charge);
     Ok(())
 }
 
-/// Puts `entry` in the registry's slot `index`, which is normally empty;
-/// if a CPU may have cached what it held, the version moves.
-fn replace(table: &mut [Option<Entry>], index: usize, entry: Entry) {
-    if table[index].replace(entry).is_some_and(|old| old.cached) {
+/// Puts an entry of `generation` for `object` and its `charge` in the
+/// registry's slot `index`, which is normally empty; if a CPU may have
+/// cached what it held, the version moves. It takes the entry's fields,
+/// not an `Entry`, so that the entry is built in its slot: moving a whole
+/// one, 72 bytes, is a `rep movsq`, whose start alone costs an open more
+/// than writing the fields.
+#[inline(always)]
+fn replace(
+    table: &mut [Option<Entry>],
+    index: usize,
+    generation: u32,
+    object: Object,
+    charge: Option<Charge>,
+) {
+    let slot = &mut table[index];
+    if slot.as_ref().is_some_and(|old| old.cached) {
         caps::mark_stale();
     }
+    *slot = Some(Entry { generation, cached: false, object, charge });
 }
 
 /// Makes an object of `kind` in the store, with its original capability,
@@ -214,7 +227,7 @@ pub fn create_with_rights(
         let _ = table.push_within_capacity(None);
     }
     let object = taken;
-    replace(table, index, Entry { generation: id.generation, cached: false, object, charge });
+    replace(table, index, id.generation, object, charge);
     Ok(())
 }
 
