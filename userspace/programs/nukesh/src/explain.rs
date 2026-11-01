@@ -511,7 +511,11 @@ pub fn manual_summary(dir: &str, name: &str) -> Option<String> {
             if matches!(line.trim(), ".SH NAME" | ".SH \"NAME\"") {
                 let next = lines.find(|l| !l.starts_with(".") || l.trim() == ".")?;
                 let next = if next.trim() == "." { lines.next()? } else { next };
-                return next.split_once("\\-").map(|(_, about)| tidy(about));
+                // `\-` in man pages, a plain ` - ` in scdoc's.
+                return next
+                    .split_once("\\-")
+                    .or_else(|| next.split_once(" - "))
+                    .map(|(_, about)| tidy(about));
             }
         }
     }
@@ -598,7 +602,9 @@ pub fn render(parts: &[Part], nebix: Option<&str>, paint: bool) -> String {
     let mut out = String::new();
     for part in parts {
         if part.warning {
-            let text = format!("⚠ {}", part.text);
+            // The console's font has no ⚠.
+            let mark = if std::env::var("TERM").is_ok_and(|t| t == "linux") { "!" } else { "⚠" };
+            let text = format!("{mark} {}", part.text);
             out.push_str(&if paint {
                 nu_ansi_term::Style::new().bold().paint(text).to_string()
             } else {
@@ -789,9 +795,15 @@ mod tests {
             ".TH LS 1\n.SH NAME\nls \\- List directory contents.\n",
         )
         .unwrap();
+        std::fs::write(
+            dir.join("man1/chmod.1"),
+            ".TH chmod 1\n.P\n.SH NAME\n.P\nchmod - change a file'\\&s mode\n",
+        )
+        .unwrap();
         let d = dir.to_str().unwrap();
         assert_eq!(manual_summary(d, "tar").as_deref(), Some("Manipulate tape archives"));
         assert_eq!(manual_summary(d, "ls").as_deref(), Some("List directory contents"));
+        assert_eq!(manual_summary(d, "chmod").as_deref(), Some("Change a file's mode"));
         assert_eq!(manual_summary(d, "nope"), None);
         let _ = std::fs::remove_dir_all(dir);
     }
