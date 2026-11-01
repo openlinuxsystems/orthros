@@ -25,7 +25,9 @@ fn main() {
     for name in &names {
         let module = name.replace('-', "_");
         let path = dir.join(format!("{name}.rs"));
-        writeln!(out, "#[path = {:?}]\nmod {module};", path.display().to_string()).unwrap();
+        // Seen by the harness, for what a test's disk needs made.
+        writeln!(out, "#[path = {:?}]\npub(super) mod {module};", path.display().to_string())
+            .unwrap();
     }
     out.push_str("/// The cases of src/test/cases: each file's name, case and text.\n");
     out.push_str("pub const FILES: &[(&str, &Case, &str)] = &[\n");

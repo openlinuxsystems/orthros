@@ -392,6 +392,21 @@ fn requirements() -> Vec<Requirement> {
             fallback: None,
         },
         Requirement {
+            name: "dislocker",
+            purpose: "decrypts, as it decrypts what Windows encrypts, the BitLocker volumes of the BitLocker tests",
+            found: |_| program_version("dislocker-file", "-h"),
+            // Arch has it only in the AUR.
+            packages: Packages { apt: Some("dislocker"), dnf: Some("dislocker"), pacman: None },
+            fallback: None,
+        },
+        Requirement {
+            name: "libbde",
+            purpose: "bdeinfo, which unlocks the BitLocker volumes of radix-bitlocker's tests as Windows' are unlocked",
+            found: |_| program_version("bdeinfo", "-V"),
+            packages: Packages { apt: Some("libbde-utils"), dnf: None, pacman: None },
+            fallback: None,
+        },
+        Requirement {
             name: "Clang",
             purpose: "compiles the kernel's AML interpreter, the C library and the ports (version 20 or later)",
             found: |_| ports::find_clang().map(|(_, version)| version),

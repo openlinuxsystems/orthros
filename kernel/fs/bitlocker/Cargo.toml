@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-bitlocker"
+description = "BitLocker volumes unlocked: their metadata read, their keys unwrapped, and their sectors decrypted and encrypted (ADR 0240)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[features]
+# The unlocked volume as a block device, for the kernel.
+device = ["dep:radix-block"]
+# A key from a password or recovery key, and the volume's keys unwrapped
+# with it, for unlock(8).
+keys = ["dep:sha2", "dep:ccm"]
+# Volumes encrypted as Windows encrypts them, for tests on the host: the
+# bitlocker boot test's.
+make = ["keys"]
+
+[dependencies]
+# AES (MIT OR Apache-2.0), in software in the kernel, which has no SSE
+# (`--cfg aes_force_soft`), and with AES-NI where it finds it elsewhere;
+# its keys wiped when dropped.
+aes = { version = "0.8.4", features = ["zeroize"] }
+# AES-CCM, which wraps BitLocker's keys (MIT OR Apache-2.0).
+ccm = { version = "0.5.0", default-features = false, optional = true }
+radix-block = { path = "../block", optional = true }
+# SHA-256, which turns a password or recovery key into a key (MIT OR
+# Apache-2.0).
+sha2 = { version = "0.10.9", default-features = false, optional = true }
+zeroize = { version = "1.8.1", default-features = false }
+
+[dev-dependencies]
+ccm = { version = "0.5.0", default-features = false }
+radix-block = { path = "../block", features = ["host"] }
+sha2 = { version = "0.10.9", default-features = false }
+# NTFS on an unlocked volume, as Windows formats one.
+radix-ntfs = { path = "../ntfs", features = ["host"] }
+radix-vfs = { path = "../vfs", features = ["host"] }
+
+[lints]
+workspace = true

@@ -33,6 +33,7 @@ members = [
     "drivers/vtd",
     "drivers/watchdog",
     "drivers/xhci",
+    "fs/bitlocker",
     "fs/block",
     "fs/btrfs",
     "fs/exfat",

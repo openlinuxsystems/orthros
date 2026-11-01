@@ -76,6 +76,29 @@ const HEALTH_NVME: u32 = 2;
 /// are zeros.
 const HEALTH_SMART_OFF: u32 = 1;
 
+/// Unlocks the BitLocker volume on the device (unlock(8), ADR 0240):
+/// Dukovo's own request, as Linux leaves it to device-mapper. It reads
+/// UNLOCK_SIZE bytes: a u32, the volume's encryption method as its
+/// metadata numbers it (0x8000 to 0x8005: AES-CBC with the Elephant
+/// diffuser, of 128 or 256 bits; AES-CBC; AES-XTS); a u32 of flags,
+/// UNLOCK_READ_ONLY or none; then 64 bytes, its full volume encryption
+/// key, the FVEK, of as many bytes as the method takes, unwrapped. The
+/// volume unlocked is a device of its own, named after this one with
+/// `-unlocked` after it (`sdb1-unlocked`), which reads and writes the
+/// volume's filesystem as Windows sees it, decrypted; it goes with its
+/// device. A volume Windows is still encrypting or decrypting is unlocked
+/// read-only, as is one on a device that refuses writes. Needs the write
+/// right but with UNLOCK_READ_ONLY; fails with unknown_filesystem if the
+/// device holds no BitLocker volume, not_supported for Windows Vista's
+/// and for a method or sector size not read, corrupt if no copy of its
+/// metadata reads, invalid_argument if the method is not the volume's or
+/// the key does not decrypt it, and in_use if it is unlocked already.
+const UNLOCK: u32 = 0x40485204;
+/// The bytes UNLOCK reads.
+const UNLOCK_SIZE: u32 = 72;
+/// UNLOCK's flag that keeps the volume unlocked read-only.
+const UNLOCK_READ_ONLY: u32 = 1;
+
 /// Turns on the swap area mkswap(8) made on the device (swapon(8), ADR
 /// 0152): Dukovo's own request, as Linux has the swapon(2) system call
 /// for it, whose flags it reads as a u32. With SWAP_PREFER set, the low

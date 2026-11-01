@@ -21,6 +21,7 @@ static const char *const ELSEWHERE[][2] = {
 		{"volumed", "the volumes boot test's service: it mounts a stick plugged in after boot"},
 		{"eject", "the volumes boot test's: it unmounts the stick volumed mounted"},
 		{"remount", "the volumes boot test's: it mounts the stick volumed mounted again"},
+		{"unlock", "the bitlocker boot test's: it unlocks a stick BitLocker encrypted, at the console"},
 		{"logd", "the logging boot test's service: it keeps the log the services write"},
 		{"log", "the logging boot test's: it reads the log through logd"},
 		{"journalctl", "the logging boot test's: it reads the log through logd"},

@@ -19,7 +19,7 @@ pub const BLOCKS: &str = "/kernel/block";
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Filesystem {
     /// libblkid's name for its kind: `vfat`, `exfat`, `ntfs`, `ext4`,
-    /// `btrfs`, `udf`, `iso9660`, `swap`.
+    /// `btrfs`, `udf`, `iso9660`, `swap`, `BitLocker`.
     pub kind: &'static str,
     /// Its version, as lsblk's FSVER shows it: `FAT32`, `1.0`.
     pub version: String,
@@ -151,6 +151,11 @@ pub fn filesystem(read: &mut Read<'_>) -> Option<Filesystem> {
     if boot[510..512] != [0x55, 0xaa] {
         return None;
     }
+    // Before FAT: BitLocker To Go's first sector is a FAT's, for Windows
+    // to show the files of its reader.
+    if let Some(found) = bitlocker(&boot) {
+        return Some(found);
+    }
     if &boot[3..11] == b"EXFAT   " {
         return Some(exfat(&boot, read));
     }
@@ -158,6 +163,24 @@ pub fn filesystem(read: &mut Read<'_>) -> Option<Filesystem> {
         return Some(ntfs(&boot, read));
     }
     fat(&boot)
+}
+
+/// A BitLocker volume, from its first sector (ADR 0240): libblkid's
+/// version 1 for Windows Vista's, 2 for Windows 7's and later, and 3 for
+/// BitLocker To Go's, and its sectors' size.
+fn bitlocker(boot: &[u8]) -> Option<Filesystem> {
+    use radix_bitlocker::format::{self, TO_GO_SIGNATURE, Volume};
+    let (version, block_size) = match format::volume(boot)? {
+        Volume::Vista => ("1", u32::from(u16_at(boot, 11))),
+        Volume::Locked { sector, .. } if &boot[3..11] == TO_GO_SIGNATURE => ("3", sector as u32),
+        Volume::Locked { sector, .. } => ("2", sector as u32),
+    };
+    Some(Filesystem {
+        kind: "BitLocker",
+        version: version.to_string(),
+        block_size: Some(block_size),
+        ..Filesystem::default()
+    })
 }
 
 /// UDF: its label is the logical volume's identifier, its UUID the start
@@ -557,6 +580,28 @@ mod tests {
         assert_eq!((found.kind, found.uuid.as_str()), ("dos", "deadbeef"));
         let ids = partition_ids(&mut reading(&image), 512, 2);
         assert_eq!(ids.uuid.as_deref(), Some("deadbeef-02"));
+    }
+
+    #[test]
+    fn finds_bitlocker_before_the_fat_it_shows() {
+        let mut image = vec![0u8; 64 * 1024];
+        image[3..11].copy_from_slice(b"-FVE-FS-");
+        image[11..13].copy_from_slice(&512u16.to_le_bytes());
+        image[82..90].copy_from_slice(b"FAT32   ");
+        image[160..176].copy_from_slice(&radix_bitlocker::format::BITLOCKER_ID);
+        image[510..512].copy_from_slice(&[0x55, 0xaa]);
+        let found = filesystem(&mut reading(&image)).unwrap();
+        assert_eq!((found.kind, found.version.as_str()), ("BitLocker", "2"));
+        assert_eq!((found.label, found.block_size), (None, Some(512)));
+        // BitLocker To Go's.
+        image[3..11].copy_from_slice(b"MSWIN4.1");
+        image[160..176].fill(0);
+        image[424..440].copy_from_slice(&radix_bitlocker::format::BITLOCKER_ID);
+        let found = filesystem(&mut reading(&image)).unwrap();
+        assert_eq!((found.kind, found.version.as_str()), ("BitLocker", "3"));
+        // Without its identifier, it is the FAT it shows.
+        image[424..440].fill(0);
+        assert_eq!(filesystem(&mut reading(&image)).unwrap().kind, "vfat");
     }
 
     #[test]

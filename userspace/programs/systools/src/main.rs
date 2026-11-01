@@ -85,6 +85,7 @@ mod swap;
 mod sys;
 mod top;
 mod tree;
+mod unlock;
 mod util;
 mod volumed;
 mod watch;
@@ -180,6 +181,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("taskset", priority::taskset),
     ("top", top::main),
     ("tree", tree::main),
+    ("unlock", unlock::main),
     ("uptime", sessions::uptime),
     ("user", account::user),
     ("users", sessions::users),

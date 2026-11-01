@@ -206,6 +206,20 @@ pub fn mbr_entries(sector: &[u8; SECTOR]) -> Option<[MbrEntry; 4]> {
 /// The type of a protective MBR's entry, which says the disk has a GPT.
 const PROTECTIVE: u8 = 0xee;
 
+/// BitLocker's identifier, as a BitLocker To Go volume's first sector
+/// has it at 424.
+const BITLOCKER_ID: [u8; 16] = [
+    0x3b, 0xd6, 0x67, 0x49, 0x29, 0x2e, 0xd8, 0x4a, 0x83, 0x99, 0xf6, 0xa3, 0x39, 0xe3, 0xd0, 0x01,
+];
+
+/// Whether `sector` is a BitLocker volume's first sector, which ends as a
+/// table does: a BitLocker To Go volume's offsets of its metadata, at 440,
+/// read as partition entries of a boot indicator of 0 (ADR 0240).
+fn is_bitlocker(sector: &[u8; SECTOR]) -> bool {
+    let name = &sector[3..11];
+    name == b"-FVE-FS-" || name == b"MSWIN4.1" && sector[424..440] == BITLOCKER_ID
+}
+
 fn is_extended(kind: u8) -> bool {
     matches!(kind, 0x05 | 0x0f | 0x85)
 }
@@ -241,6 +255,9 @@ pub fn read(
     }
     let mut sector = [0u8; SECTOR];
     read(0, &mut sector)?;
+    if is_bitlocker(&sector) {
+        return Ok((Scheme::None, found));
+    }
     let Some(entries) = mbr_entries(&sector) else { return Ok((Scheme::None, found)) };
     if entries.iter().any(|e| e.kind == PROTECTIVE) {
         let scheme = gpt(disk, read, &mut found)?;

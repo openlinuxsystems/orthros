@@ -22,6 +22,8 @@ radix-ahci = { path = "../drivers/ahci" }
 radix-ide = { path = "../drivers/ide" }
 radix-nvme = { path = "../drivers/nvme" }
 radix-block = { path = "../fs/block" }
+# BitLocker volumes unlocked as block devices of their own (ADR 0240).
+radix-bitlocker = { path = "../fs/bitlocker", features = ["device"] }
 radix-bootfs = { path = "../lib/bootfs" }
 radix-cap = { path = "../cap" }
 radix-crosec = { path = "../drivers/crosec" }
@@ -64,6 +66,9 @@ radix-vfs = { path = "../fs/vfs" }
 radix-virtio = { path = "../drivers/virtio" }
 radix-usbhc = { path = "../drivers/usbhc" }
 radix-xhci = { path = "../drivers/xhci" }
+# The BitLocker keys unlock(8) hands the kernel, wiped once used
+# (MIT OR Apache-2.0).
+zeroize = { version = "1.8.1", default-features = false }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 radix-arch-x86_64 = { path = "../arch/x86_64" }

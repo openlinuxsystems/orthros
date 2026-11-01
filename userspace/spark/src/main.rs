@@ -698,7 +698,15 @@ fn mount_disk(root: &Dir, name: &str, compress: bool) -> Option<MountFlags> {
         }
         Err(err) => {
             let _ = root.remove(&at);
-            if err.is(FileError::UnknownFilesystem) {
+            let mut boot = [0u8; 512];
+            let locked = err.is(FileError::UnknownFilesystem)
+                && device.read_at(0, &mut boot).is_ok_and(|got| got == boot.len())
+                && radix_bitlocker::format::volume(&boot).is_some();
+            if locked {
+                // unlock(8) unlocks it, and volumed(8) mounts what it
+                // unlocks (ADR 0240).
+                println!("spark: {name} is a locked BitLocker volume; `unlock {name}` unlocks it");
+            } else if err.is(FileError::UnknownFilesystem) {
                 println!(
                     "spark: {name} holds no FAT, exFAT, NTFS, Btrfs, ext4, UDF or ISO 9660 filesystem; left alone"
                 );

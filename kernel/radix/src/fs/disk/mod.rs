@@ -47,8 +47,12 @@ mod queue;
 pub mod usb;
 mod virtio;
 
-/// A disk's name: `vda`, `vda1`.
-pub type Name = TextBuf<16>;
+/// A disk's name: `vda`, `vda1`, `nvme0n1p12-unlocked`.
+pub type Name = TextBuf<24>;
+
+/// What follows the name of a device whose BitLocker volume is unlocked
+/// in the name of the volume unlocked (ADR 0240).
+const UNLOCKED: &str = "-unlocked";
 
 /// What every disk has done since boot, for `/processes/stat` and vmstat(8):
 /// the reads and writes finished, and the 512-byte sectors they moved.
@@ -483,8 +487,10 @@ fn register(entry: Entry) {
 /// them, and their requests fail; what is mounted from them is lost, and
 /// unmounts though it cannot be written (ADR 0163).
 fn unregister(name: &str) {
+    // The disk, its partitions, and the BitLocker volumes unlocked on
+    // them.
     let ours = |disk: &str| {
-        let rest = disk.strip_prefix(name);
+        let rest = disk.strip_prefix(name).map(|rest| rest.strip_suffix(UNLOCKED).unwrap_or(rest));
         let rest = rest.map(|rest| rest.strip_prefix('p').unwrap_or(rest));
         rest.is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_digit()))
     };
@@ -546,8 +552,8 @@ pub fn for_each(mut f: impl FnMut(&Entry)) {
 /// radix-block(2)'s `control` requests on `device`: `argument` is the
 /// caller's address of the value a request writes or reads, and
 /// `may_write` whether the caller's capability has the write right, which
-/// DISCARD, FLUSH, SWAP_ON and SWAP_OFF need. Any other request is not
-/// one of a block device.
+/// DISCARD, FLUSH, SWAP_ON and SWAP_OFF need, and UNLOCK but to unlock
+/// read-only. Any other request is not one of a block device.
 pub fn control(
     device: &DeviceRef,
     request: u32,
@@ -605,8 +611,83 @@ pub fn control(
         }
         request::SWAP_OFF => crate::swap::off(device),
         request::GET_HEALTH => health(device, argument),
+        request::UNLOCK => unlock(device, argument, may_write),
         _ => Err(Kernel::NotTerminal.status(0)),
     }
+}
+
+/// UNLOCK: unlocks the BitLocker volume on `device` with the method and
+/// key at the caller's `argument`, and registers it unlocked, as a device
+/// of its own named after `device`'s (ADR 0240).
+#[inline(never)]
+fn unlock(device: &DeviceRef, argument: u64, may_write: bool) -> Result<(), Status> {
+    use radix_bitlocker::cipher::Method;
+    use radix_bitlocker::device::{OpenError, Unlocked};
+    use radix_block::BlockDevice;
+
+    const _: () = assert!(request::UNLOCK_SIZE == 72);
+    let mut asked = zeroize::Zeroizing::new([0u8; request::UNLOCK_SIZE as usize]);
+    if !<Arch as UserMode>::copy_from_user(&mut *asked, argument) {
+        return Err(Kernel::BadAddress.status(0));
+    }
+    let word =
+        |at: usize| u32::from_le_bytes([asked[at], asked[at + 1], asked[at + 2], asked[at + 3]]);
+    let (method, flags) = (word(0), word(4));
+    if flags & !request::UNLOCK_READ_ONLY != 0 {
+        return Err(Kernel::InvalidArgument.status(0));
+    }
+    let read_only = flags & request::UNLOCK_READ_ONLY != 0;
+    if !read_only && !may_write {
+        return Err(Kernel::MissingRights.status(0));
+    }
+    let Some(found) = u16::try_from(method).ok().and_then(Method::from_number) else {
+        return Err(Kernel::InvalidArgument.status(0));
+    };
+    let Some(name) = name_of(device) else { return Err(Kernel::InvalidArgument.status(0)) };
+    let mut unlocked_name = Name::new();
+    if write!(unlocked_name, "{name}{UNLOCKED}").is_err() || name.as_str().ends_with(UNLOCKED) {
+        return Err(Kernel::NotSupported.status(0));
+    }
+    if for_each_find(|entry| entry.name.as_str() == unlocked_name.as_str()) {
+        return Err(FileError::InUse.status(0));
+    }
+    let key = &asked[8..8 + found.key_bytes()];
+    let unlocked =
+        Unlocked::open(device.clone(), found.number(), key, read_only).map_err(|err| {
+            use radix_bitlocker::Error;
+            match err {
+                OpenError::BitLocker(Error::NotBitLocker) => FileError::UnknownFilesystem.status(0),
+                OpenError::BitLocker(Error::NotSupported) => Kernel::NotSupported.status(0),
+                OpenError::BitLocker(Error::Damaged) => FileError::Corrupt.status(0),
+                OpenError::BitLocker(Error::WrongKey | Error::NoProtector) => {
+                    Kernel::InvalidArgument.status(1)
+                }
+                OpenError::Device(err) => block_status(err),
+            }
+        })?;
+    let partly = !unlocked.layout().whole();
+    let ro = unlocked.info().read_only;
+    let size = unlocked.info().sectors * radix_block::SECTOR;
+    let device: DeviceRef =
+        radix_vfs::mem::arc(unlocked).map_err(|_| Kernel::NoMemory.status(0))?;
+    info!(
+        "Disk: {unlocked_name}: the BitLocker volume on {name} unlocked, {}, {}{}",
+        found.name(),
+        Size(size),
+        match (partly, ro) {
+            (true, _) => ", read-only: Windows is still encrypting or decrypting it",
+            (false, true) => ", read-only",
+            (false, false) => "",
+        }
+    );
+    register(Entry { name: unlocked_name, device, place: None, ident: None });
+    Ok(())
+}
+
+/// Whether `f` holds for a disk or partition there is.
+fn for_each_find(f: impl FnMut(&Entry) -> bool) -> bool {
+    let disks = DISKS.lock();
+    disks.iter().flatten().any(f)
 }
 
 const _: () = assert!(request::HEALTH_SIZE == 8 + 1024);

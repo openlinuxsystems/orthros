@@ -102,8 +102,11 @@ fuzzed.
     Windows' `chkdsk /f` must mend each, and find the synced files at
     their paths.
   - The `ntfs-power-cut` boot test cuts QEMU's power while the storage
-    test writes: what it synced must be there, and the volume dirty.
-    Radix then mounts it read-only, until Windows checks it.
+    test writes: what it synced must be there, and the volume dirty, or
+    clean and sound to ntfs-3g when the cut came just after a sync,
+    which clears the mark. Radix then mounts it read-only, as it mounts
+    a dirty volume until Windows checks it; the test marks a clean one
+    dirty first.
 - **Damaged volumes**: a property test flips bytes in the records and
   index blocks of the ntfs-3g volume, past what their update sequences
   catch, mounts it read-only and writable, reads everything on it and

@@ -1,0 +1,7 @@
+<!--
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+-->
+
+Section: In every image
+| [aes](https://github.com/RustCrypto/block-ciphers) 0.8.4, [ccm](https://github.com/RustCrypto/AEADs) 0.5.0, [aead](https://github.com/RustCrypto/traits) 0.5.2, [cipher](https://github.com/RustCrypto/traits) 0.4.4, [ctr](https://github.com/RustCrypto/block-modes) 0.9.2, [inout](https://github.com/RustCrypto/utils) 0.1.4, [sha2](https://github.com/RustCrypto/hashes) 0.10.9, [digest](https://github.com/RustCrypto/traits) 0.10.7, [crypto-common](https://github.com/RustCrypto/traits) 0.1.7, [block-buffer](https://github.com/RustCrypto/utils) 0.10.4, [cpufeatures](https://github.com/RustCrypto/utils) 0.2.17 and [zeroize](https://github.com/RustCrypto/utils) 1.9.1 by the RustCrypto developers, with [subtle](https://github.com/dalek-cryptography/subtle) 2.6.1, [generic-array](https://github.com/fizyk20/generic-array) 0.14.7, [typenum](https://github.com/paholg/typenum) 1.20.1 and [cfg-if](https://github.com/rust-lang/cfg-if) 1.0.5, from crates.io | BitLocker: AES, in software in the kernel, decrypting and encrypting an unlocked volume, and AES-CCM and SHA-256 unwrapping its keys in unlock(8) ([ADR 0240](docs/adr/0240-bitlocker-volumes-unlock-with-a-password-or-recovery-key.md)) | MIT OR Apache-2.0 (generic-array: MIT; subtle: BSD-3-Clause; zeroize: Apache-2.0 OR MIT) |
