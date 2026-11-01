@@ -959,6 +959,11 @@ pub fn check_bundle_path(path: &str) -> Result<(), String> {
     }
 }
 
+/// Checks the name of a program, command or socket, as [`Name`] does.
+pub fn check_command_name(name: &str) -> Result<(), String> {
+    check_name(name, "a name")
+}
+
 fn check_name(name: &str, what: &str) -> Result<(), String> {
     let fits = (1..=64).contains(&name.len())
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))

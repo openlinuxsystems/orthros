@@ -63,7 +63,7 @@ impl Checked {
 }
 
 /// Reads a manifest the list names, checking its hash.
-fn manifest_of(bytes: &[u8], listed: &[Entry]) -> Result<Manifest, String> {
+pub fn manifest_of(bytes: &[u8], listed: &[Entry]) -> Result<Manifest, String> {
     let entry = listed
         .iter()
         .find(|e| e.path == MANIFEST)
@@ -104,7 +104,10 @@ pub fn read_signature(bytes: &[u8]) -> Result<(PublicKey, Signature), String> {
 }
 
 /// Checks the signature of `list` and reads the list.
-fn check_list(list: &[u8], signature: &[u8]) -> Result<(PublicKey, String, Vec<Entry>), String> {
+pub fn check_list(
+    list: &[u8],
+    signature: &[u8],
+) -> Result<(PublicKey, String, Vec<Entry>), String> {
     let (key, signature) = read_signature(signature)?;
     let trusted = key.verify(list, &signature).map_err(|why| format!("{SIGNATURE}: {why}"))?;
     let text = std::str::from_utf8(list).map_err(|_| format!("{LIST}: not text"))?;
