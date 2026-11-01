@@ -30,6 +30,7 @@ mod editor;
 mod exec;
 mod expand;
 mod explain;
+mod fix;
 mod folders;
 #[cfg(test)]
 mod fuzz;

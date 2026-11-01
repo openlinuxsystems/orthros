@@ -138,8 +138,14 @@ fn empty_line_hint(shell: &Shell, last: &str, status: i32, folder: &str) -> (Str
     if last.is_empty() || settings.screen_reader {
         return (String::new(), String::new());
     }
-    if status != 0 && status != 130 && settings.explain_offer {
-        return ("Alt+E explains what went wrong".into(), String::new());
+    if status != 0 && status != 130 {
+        // The command fixed (ADR 0275), and the offer of Alt+E.
+        let offer = if settings.explain_offer { "Alt+E explains what went wrong" } else { "" };
+        return match crate::fix::fix(shell, last, status) {
+            Some(fixed) if offer.is_empty() => (fixed.clone(), fixed),
+            Some(fixed) => (format!("{fixed}   · {offer}"), fixed),
+            None => (offer.to_string(), String::new()),
+        };
     }
     if !settings.suggest_next {
         return (String::new(), String::new());
