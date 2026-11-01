@@ -54,6 +54,8 @@ when it exits.
   followed; a detached head is 7 hex digits), in `[prompt] took`,
   `jobs` and `branch`'s styles.
 
+- **On the console** (Chase, 2026-11-01): consoled no longer switches consoles with Alt+← and Alt+→; it sends them to the program as xterm does (`ESC [1;3D`, `ESC [1;3C`), so the folder keys work there too. Alt+F1 to Alt+F6 still switch.
+
 ## Consequences
 
 - Shells see each other's commands at once, with no daemon and no

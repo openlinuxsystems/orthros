@@ -125,8 +125,9 @@ passwords.
 # KEYS
 
 *Alt+F1* to *Alt+F6*
-	Show that console. *Alt+Left* and *Alt+Right* show the one before
-	or after.
+	Show that console. *Alt+Left* and *Alt+Right* go to the program on
+	the console, as in a terminal window: *nukesh*(1) goes back and
+	forward through its folders with them.
 
 *Shift+Page Up*, *Shift+Page Down*
 	Look back through the console's last 1000 lines and forward again.
