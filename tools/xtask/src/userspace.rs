@@ -91,6 +91,7 @@ pub const STD_ARCHIVE: &[(&str, &str)] = &[
     ("system/commands/consoled", "consoled"),
     ("system/commands/nukesh", "nukesh"),
     ("system/commands/systools", "systools"),
+    ("system/tests/posix/git-https-test", "git-https-test"),
     ("system/tests/posix/netservices-test", "netservices-test"),
     ("system/tests/posix/std-test", "std-test"),
     ("system/tests/posix/tls-test", "tls-test"),
@@ -272,8 +273,16 @@ pub const STD_MANIFEST: &str = "userspace/programs/Cargo.toml";
 
 /// The programs on Rust's standard library whose unit tests run on the
 /// host: what they test does not need Radix.
-pub const HOST_TESTED: &[&str] =
-    &["accounts", "consoled", "keymap", "manifest", "netproto", "nukesh", "systools"];
+pub const HOST_TESTED: &[&str] = &[
+    "accounts",
+    "consoled",
+    "git-https-test",
+    "keymap",
+    "manifest",
+    "netproto",
+    "nukesh",
+    "systools",
+];
 
 /// The Cargo.lock of the host builds of the programs on Rust's standard
 /// library. They take the crates the ports patch for Radix from

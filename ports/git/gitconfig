@@ -32,3 +32,8 @@
 	sort = -committerdate
 [tag]
 	sort = version:refname
+[credential]
+	# A token or password typed for an https:// remote is kept in
+	# memory, by git credential-cache, for 8 hours, and never written
+	# to disk (ADR 0292). The keyring takes over in Phase 13g.
+	helper = cache --timeout=28800
