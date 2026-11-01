@@ -299,82 +299,11 @@ jobs:
           if-no-files-found: ignore
 
   # The cost of system calls and IPC round trips on Radix, held to Linux
-  # in the same kind of virtual machine (ADR 0039), each operation's
-  # fastest of three runs on each side (ADR 0046). The report goes into
-  # the job's summary on every pull request and every merge to main, and
-  # the numbers into an artifact.
+  # in the same kind of virtual machine (ADR 0039): the job is
+  # bench.yml's, which also runs every night on main (ADR 0290).
   bench:
     name: Benchmarks
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Allow QEMU to use KVM
-        run: |
-          if [ -e /dev/kvm ]; then
-            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-            sudo udevadm control --reload-rules
-            sudo udevadm trigger --name-match=kvm
-          fi
-
-      - name: Install host packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
-            xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g dislocker libbde-utils scdoc mandoc \
-            udftools udfclient genisoimage \
-            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison
-
-      - name: Install the pinned Rust toolchain
-        run: rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> target"
-
-      # The ports main built last, as in the build job.
-      - name: Note the port toolchain's version
-        id: ports-key
-        run: echo "clang=$(clang-20 --version | head -n1 | tr -c 'A-Za-z0-9.\n' -)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore the built ports
-        if: github.event_name != 'push'
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            out/sysroot
-            out/toolchain
-            out/ports
-            target/ports/sources
-          key: ports-host-${{ steps.ports-key.outputs.clang }}-${{ hashFiles('ports/**', 'abi/**', 'tools/**', 'rust-toolchain.toml') }}
-          restore-keys: ports-host-${{ steps.ports-key.outputs.clang }}-
-
-      # The baseline Radix is held to is Linux in the same kind of virtual
-      # machine (ADR 0039): the runner's own kernel, which only root may
-      # read where Ubuntu installs it.
-      - name: Copy the runner's Linux kernel
-        run: sudo install -m 644 "/boot/vmlinuz-$(uname -r)" "$RUNNER_TEMP/vmlinuz"
-
-      - name: ./ob bench
-        run: |
-          ./ob bench --gate --linux-kernel "$RUNNER_TEMP/vmlinuz" \
-            --summary "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload the benchmark numbers
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmarks
-          path: |
-            out/bench/report.md
-            out/bench/results.json
-            out/bench/boot-bench.log
-            out/bench/boot-posix-bench.log
-            out/bench/boot-linux.log
-          if-no-files-found: ignore
-          retention-days: 90
+    uses: ./.github/workflows/bench.yml
 
   # Instructions per operation, counted by QEMU (`ob bench --instructions`,
   # ADR 0045): the same on every runner, so a hot path that grows fails
