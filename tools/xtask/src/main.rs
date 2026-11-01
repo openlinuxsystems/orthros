@@ -29,6 +29,7 @@ mod patched;
 mod ports;
 mod process;
 mod qemu;
+mod riscv;
 mod screen;
 mod signoff;
 mod test;
@@ -195,7 +196,7 @@ press Ctrl-A then X to quit QEMU. KVM is used when /dev/kvm is accessible.
                        takes them"
         }
         "test" => {
-            "Usage: ./ob test [unit | boot | kani | tla | corpus] [--case <name>]...
+            "Usage: ./ob test [unit | boot | kani | tla | corpus | riscv] [--case <name>]...
                  [--shard <part>/<parts>] [--timeout <seconds>] [--debug | --release]
        ./ob test --list
 
@@ -208,7 +209,9 @@ models with TLC, and `corpus` compares Nukesh with dash and bash on POSIX's
 shell tests and real projects' scripts, in a sandbox (minutes each, so plain
 `ob test` leaves them out; TLC needs Java, and ob downloads the pinned TLA+
 tools into .cache/tla). With `corpus`, --case names a source in
-userspace/programs/nukesh/tests/corpus.toml. `boot --shard 2/3` runs every
+userspace/programs/nukesh/tests/corpus.toml. `riscv` builds the RISC-V smoke
+boot and boots it on QEMU's virt machine under OpenSBI (seconds; it needs
+qemu-system-riscv64). `boot --shard 2/3` runs every
 third boot test from the second, as CI's parallel jobs do. --list names every
 boot test; those that Phases 11 to 13 add from now on are listed only there
 (ob(1) has them all). The boot tests are:

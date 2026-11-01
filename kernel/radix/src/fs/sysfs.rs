@@ -61,7 +61,16 @@
 //!   counts in amperes `charge_*` (µAh) and `current_now` (µA), and
 //!   `model_name`, `manufacturer` and `serial_number`. A value the
 //!   battery does not know, as the rest while its bay is empty, fails to
-//!   read (EIO), as Linux's do (ENODEV);
+//!   read (EIO), as Linux's do (ENODEV); and for each USB-C port the
+//!   firmware's UCSI device has (ADR 0248), Linux's
+//!   `ucsi-source-psy-USBC000:00<n>`: its `type` (`USB`), `online` (a
+//!   supply powers the machine through it), `voltage_now` (µV),
+//!   `current_now` and `current_max` (µA);
+//! - `/kernel/class/typec/port<n>`, for each such port, from 0: its
+//!   `data_role` (`[host] device`), `power_role` (`[source] sink`),
+//!   `port_type` (`[dual] source sink`) and `power_operation_mode`
+//!   (`default`, `1.5A`, `3.0A` or `usb_power_delivery`), as Linux's
+//!   `typec` class has them, the role now in brackets;
 //! - `/kernel/class/thermal/thermal_zone<n>`, for each of the firmware's
 //!   thermal zones (ADR 0203), as Linux's ACPI thermal driver shows them:
 //!   its `type` (`acpitz`), `temp` (thousandths of a degree Celsius, read
@@ -114,7 +123,7 @@ use radix_vfs::{Error, FsKind, FsRef, KArc, Kind, NodeRef, Result, Text, mem, ne
 use radix_uacpi::thermal::STEPS;
 
 use super::disk;
-use crate::acpi::{devices, thermal};
+use crate::acpi::{devices, thermal, ucsi};
 
 mod net;
 mod usb;
@@ -154,7 +163,9 @@ pub fn make() -> Result<FsRef> {
     let firmware = root.add_dir("firmware", next_id())?;
     let memmap: radix_vfs::mem::KBox<dyn Listing> = mem::boxed(MemoryMap)?;
     firmware.add("memmap", ListedDir::make(next_id(), memmap)?)?;
-    let power = devices::batteries().next().is_some() || devices::adapters().next().is_some();
+    let usb_c = ucsi::ports().next().is_some();
+    let power =
+        devices::batteries().next().is_some() || devices::adapters().next().is_some() || usb_c;
     let thermal = thermal::zones().next().is_some();
     let mut monitors = false;
     hwmon::devices(&mut |_| monitors = true);
@@ -187,6 +198,9 @@ pub fn make() -> Result<FsRef> {
     }
     if thermal {
         thermal_class(&class)?;
+    }
+    if usb_c {
+        typec_class(&class)?;
     }
     if monitors {
         hwmon_class(&class)?;
@@ -287,6 +301,37 @@ fn power_supply(class: &FixedDir) -> Result<()> {
         dir.add(
             "online",
             value(move |text| writeln!(text, "{}", u8::from(adapter.online().ok_or(fmt::Error)?)))?,
+        )?;
+    }
+    for port in ucsi::ports() {
+        let mut name = TextBuf::<40>::new();
+        let _ = write!(name, "ucsi-source-psy-USBC000:{:03}", port.number);
+        let dir = supplies.add_dir(name.as_str(), next_id())?;
+        dir.add("type", value(|text| writeln!(text, "USB"))?)?;
+        dir.add(
+            "online",
+            value(move |text| writeln!(text, "{}", u8::from(ucsi::supply(port).0)))?,
+        )?;
+        dir.add("voltage_now", value(move |text| writeln!(text, "{}", ucsi::supply(port).1))?)?;
+        dir.add("current_now", value(move |text| writeln!(text, "{}", ucsi::supply(port).2))?)?;
+        dir.add("current_max", value(move |text| writeln!(text, "{}", ucsi::supply(port).3))?)?;
+    }
+    Ok(())
+}
+
+/// `/kernel/class/typec`: the firmware's USB-C ports.
+fn typec_class(class: &FixedDir) -> Result<()> {
+    let dir = class.add_dir("typec", next_id())?;
+    for port in ucsi::ports() {
+        let mut name = TextBuf::<16>::new();
+        let _ = write!(name, "port{}", port.number - 1);
+        let port_dir = dir.add_dir(name.as_str(), next_id())?;
+        port_dir.add("data_role", value(move |text| ucsi::write_data_role(port, text))?)?;
+        port_dir.add("power_role", value(move |text| ucsi::write_power_role(port, text))?)?;
+        port_dir.add("port_type", value(move |text| ucsi::write_port_type(port, text))?)?;
+        port_dir.add(
+            "power_operation_mode",
+            value(move |text| writeln!(text, "{}", port.reading().status.power.as_str()))?,
         )?;
     }
     Ok(())

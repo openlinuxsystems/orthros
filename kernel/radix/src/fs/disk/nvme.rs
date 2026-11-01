@@ -24,7 +24,7 @@ use core::fmt::Write;
 
 use radix_block::{DeviceRef, Error, Health, Info, Page};
 use radix_hal::{Devices, Smp};
-use radix_hw::pci::{Bar, Function, MsiX};
+use radix_hw::pci::{Address, Bar, Function, MsiX};
 use radix_klog::{TextBuf, info, warn};
 use radix_mm::{Flags, HEAP, Kmalloc};
 use radix_nvme::identify::{self, Unusable};
@@ -166,8 +166,22 @@ impl Controller for NvmeLane {
 /// not if it is not. Kept out of the frame of `init`'s scan.
 #[inline(never)]
 pub fn bind(function: &Function, next: &mut usize) {
-    if let Err(why) = try_bind(function, next) {
+    if let Err(why) = try_bind(function, next, None) {
         warn!("Disk: could not set up the NVMe controller at {}: {why}", function.address());
+    }
+}
+
+/// Sets up the NVMe controller `function` in the domain of the Intel VMD
+/// at `vmd` ([`super::vmd`]), as [`bind`] does, but polled: its MSI-X
+/// messages would reach the VMD, not a CPU. Its DMA comes from the VMD's
+/// address, which the IOMMU sees.
+#[inline(never)]
+pub fn bind_behind(function: &Function, next: &mut usize, vmd: Address) {
+    if let Err(why) = try_bind(function, next, Some(vmd)) {
+        warn!(
+            "Disk: could not set up the NVMe controller at {} behind the VMD at {vmd}: {why}",
+            function.address()
+        );
     }
 }
 
@@ -198,7 +212,7 @@ impl From<&'static str> for Why {
     }
 }
 
-fn try_bind(function: &Function, next: &mut usize) -> Result<(), Why> {
+fn try_bind(function: &Function, next: &mut usize, vmd: Option<Address>) -> Result<(), Why> {
     let index = *next;
     if index >= MAX_HOSTS {
         return Err("too many controllers".into());
@@ -211,13 +225,13 @@ fn try_bind(function: &Function, next: &mut usize) -> Result<(), Why> {
         .ok()
         .and_then(|size| <Arch as Devices>::map_device(address, size))
         .ok_or("its registers could not be mapped")?;
-    let source = function.address();
+    let source = vmd.unwrap_or(function.address());
     let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(source, pages, false);
     let delay = &mut queue::delay;
     let mut nvme = Nvme::new(regs, &mut alloc, delay)?;
     // A lane for each CPU, within the vectors the controller has (one is
     // the admin queue's, which is polled) and the queues it grants.
-    let msix = MsiX::find(function);
+    let msix = if vmd.is_some() { None } else { MsiX::find(function) };
     let mut wanted = <Arch as Smp>::cpu_count().clamp(1, MAX_LANES);
     if let Some(msix) = msix {
         wanted = wanted.min(usize::from(msix.entries()).saturating_sub(1).max(1));
@@ -294,10 +308,14 @@ fn try_bind(function: &Function, next: &mut usize) -> Result<(), Why> {
     if identity.sgls {
         let _ = how.write_str(", scatter gather lists");
     }
+    let mut place = TextBuf::<64>::new();
+    let _ = write!(place, "{}", function.address());
+    if let Some(vmd) = vmd {
+        let _ = write!(place, " behind the VMD at {vmd}");
+    }
     info!(
-        "Disk: {name} is an NVMe {major}.{minor} controller at {}: {}, firmware {}, {granted} \
-         I/O {} of {} commands, {how}",
-        function.address(),
+        "Disk: {name} is an NVMe {major}.{minor} controller at {place}: {}, firmware {}, \
+         {granted} I/O {} of {} commands, {how}",
         identify::trimmed(&identity.model),
         identify::trimmed(&identity.firmware),
         if granted == 1 { "queue" } else { "queues" },

@@ -53,7 +53,7 @@ it signs the owner in. Only the first account is made this way; the
 owner makes the others with *user add*.
 
 ```
-Dukovo Server 0.10.4 (tty1)
+Dukovo Server 0.11.0 (tty1)
 
 Welcome to Dukovo. This computer has no account yet: make yours, the owner's,
 which administers it. Nothing but a name and a password is needed, and the

@@ -53,6 +53,9 @@ const GPIO_TABLE: &str = "file=gpio.aml";
 /// The SSDT `i2c` gives QEMU (`src/acpi/i2c.asl`), likewise.
 const I2C_AML: &[u8] = include_bytes!("acpi/i2c.aml");
 const I2C_TABLE: &str = "file=i2c.aml";
+/// The SSDT `usb-c` gives QEMU (`src/acpi/ucsi.asl`), likewise.
+const UCSI_AML: &[u8] = include_bytes!("acpi/ucsi.aml");
+const UCSI_TABLE: &str = "file=ucsi.aml";
 /// The two ends of a serial line between QEMU's character devices
 /// `line0` and `line1`, given as `-chardev`'s argument: a Unix socket in
 /// the test's directory that the first listens on and the second connects
@@ -124,11 +127,13 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-sync",
     "radix-tty",
     "radix-uacpi",
+    "radix-ucsi",
     "radix-udf",
     "radix-usb",
     "radix-usbhc",
     "radix-vfs",
     "radix-virtio",
+    "radix-vmd",
     "radix-vtd",
     "radix-watchdog",
     "radix-xhci",
@@ -2559,11 +2564,12 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         Some("kani") if selected.is_empty() => return kani(ctx),
         Some("tla") if selected.is_empty() => return tla::check(ctx),
         Some("corpus") => return corpus::test(ctx, &selected),
-        Some(suite @ ("unit" | "kani" | "tla")) => {
+        Some("riscv") if selected.is_empty() => return crate::riscv::test(ctx),
+        Some(suite @ ("unit" | "kani" | "tla" | "riscv")) => {
             crate::bail!("--case and --shard select boot tests; they cannot be used with `{suite}`")
         }
         Some(other) => crate::bail!(
-            "unknown test suite `{other}`; use `unit`, `boot`, `kani`, `tla` or `corpus`"
+            "unknown test suite `{other}`; use `unit`, `boot`, `kani`, `tla`, `corpus` or `riscv`"
         ),
     };
     if shard.is_some() && which.as_deref() != Some("boot") {
@@ -2851,6 +2857,7 @@ fn run_case(
             CROSEC_TABLE => ("crosec.aml", CROSEC_AML.to_vec()),
             GPIO_TABLE => ("gpio.aml", GPIO_AML.to_vec()),
             I2C_TABLE => ("i2c.aml", I2C_AML.to_vec()),
+            UCSI_TABLE => ("ucsi.aml", UCSI_AML.to_vec()),
             DDR4_DEVICE => ("ddr4.smbios", ddr4_device()),
             _ => continue,
         };

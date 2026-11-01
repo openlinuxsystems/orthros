@@ -48,7 +48,7 @@ release, *\\l* the console's name, *\\n* the host's name, *\\v* the
 kernel's version and *\\m* the machine:
 
 ```
-Dukovo Server 0.10.4 (tty1)
+Dukovo Server 0.11.0 (tty1)
 
 Name:
 ```

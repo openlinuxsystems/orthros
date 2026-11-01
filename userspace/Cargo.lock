@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "hello"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "libradix",
  "radix-rt",
@@ -96,14 +96,14 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libradix"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "radix-abi",
 ]
 
 [[package]]
 name = "manifest"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "radix-abi",
  "schemars",
@@ -138,14 +138,14 @@ dependencies = [
 
 [[package]]
 name = "radix-abi"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "ridlc",
 ]
 
 [[package]]
 name = "radix-bitlocker"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "aes",
  "zeroize",
@@ -153,15 +153,15 @@ dependencies = [
 
 [[package]]
 name = "radix-bootfs"
-version = "0.10.4"
+version = "0.11.0"
 
 [[package]]
 name = "radix-elf"
-version = "0.10.4"
+version = "0.11.0"
 
 [[package]]
 name = "radix-rt"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "libradix",
  "radix-abi",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "ridlc"
-version = "0.10.4"
+version = "0.11.0"
 
 [[package]]
 name = "schemars"
@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "sockets"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "libradix",
  "radix-rt",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "spark"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "libradix",
  "manifest",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "storage"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "libradix",
  "radix-rt",
@@ -363,7 +363,7 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "usertests"
-version = "0.10.4"
+version = "0.11.0"
 dependencies = [
  "libradix",
 ]

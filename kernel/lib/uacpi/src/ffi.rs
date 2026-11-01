@@ -526,6 +526,28 @@ impl Node {
     /// as the 16 bytes of its buffer, with no arguments, as an integer.
     /// From a thread that may sleep.
     pub fn dsm(self, uuid: &[u8; 16], revision: u64, function: u64) -> Result<u64, Error> {
+        let object = self.eval_dsm(uuid, revision, function)?;
+        let object = object.ok_or(Error(INVALID_ARGUMENT))?;
+        let mut value = 0;
+        // SAFETY: `object` is alive; `value` is written on success.
+        check(unsafe { uacpi_object_get_integer(object.0.as_ptr(), &raw mut value) })?;
+        Ok(value)
+    }
+
+    /// Runs the device's `_DSM` as [`Node::dsm`] does, for a function
+    /// whose value, if it has one, means nothing: UCSI's, which pass its
+    /// mailbox to and from the firmware.
+    pub fn dsm_run(self, uuid: &[u8; 16], revision: u64, function: u64) -> Result<(), Error> {
+        self.eval_dsm(uuid, revision, function).map(drop)
+    }
+
+    /// Evaluates `_DSM`; what it returned, if anything.
+    fn eval_dsm(
+        self,
+        uuid: &[u8; 16],
+        revision: u64,
+        function: u64,
+    ) -> Result<Option<Object>, Error> {
         let created = |object: Handle| NonNull::new(object).map(Object).ok_or(Error(OUT_OF_MEMORY));
         // SAFETY: uACPI copies the bytes into a new buffer, and hands
         // over new objects, or null.
@@ -549,11 +571,7 @@ impl Node {
         check(unsafe {
             uacpi_eval(self.0.as_ptr(), c"_DSM".as_ptr(), &raw const args, &raw mut object)
         })?;
-        let object = NonNull::new(object).map(Object).ok_or(Error(INVALID_ARGUMENT))?;
-        let mut value = 0;
-        // SAFETY: `object` is alive; `value` is written on success.
-        check(unsafe { uacpi_object_get_integer(object.0.as_ptr(), &raw mut value) })?;
-        Ok(value)
+        Ok(NonNull::new(object).map(Object))
     }
 
     /// The node at `path`, absolute (as `\_SB.PCI0.GPI0`) or from this

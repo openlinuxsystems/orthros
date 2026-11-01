@@ -46,6 +46,9 @@ Only the trusted computing base may use `unsafe`. Today that is:
 
 - the architecture crate `kernel/arch/x86_64`, for everything that touches
   hardware: port and MSR access, page tables, descriptor tables, assembly;
+- the RISC-V crate `kernel/arch/riscv64`, which is `#![deny(unsafe_code)]`
+  and allows it only in its smoke boot (ADR 0270): its entry and trap
+  assembly, SBI calls, CSRs and the device tree OpenSBI passes;
 - `kernel/lib/sync`, whose locks hand out references guarded by atomics;
 - the device access library `kernel/lib/hw`, which is
   `#![deny(unsafe_code)]` and allows it only in the volatile accesses to
@@ -127,7 +130,8 @@ Wherever `unsafe` is used:
   A boot test can check the serial log, type `kdb` commands and read the
   framebuffer; paths that only run on failure get a `selftest=` case.
 - Kernel code reaches hardware only through the `radix-hal` traits, so it
-  also compiles against the AArch64 stubs, which `./ob lint` checks.
+  also compiles against the AArch64 and RISC-V stubs, which `./ob lint`
+  checks.
 
 ## Dependencies
 

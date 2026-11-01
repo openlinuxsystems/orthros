@@ -26,7 +26,7 @@
 //!
 //! Everything here is independent of the processor architecture: hardware
 //! is reached only through the `radix-hal` traits, implemented by
-//! `radix-arch-x86_64` (and by AArch64 stubs that CI compiles, so this
+//! `radix-arch-x86_64` (and by AArch64 and RISC-V stubs that CI compiles, so this
 //! crate stays portable). The command-line flags are listed in
 //! `radix_hal::cmdline::FLAGS` and documented in dukovo-boot(7).
 //!
@@ -87,6 +87,8 @@ mod work;
 
 #[cfg(target_arch = "aarch64")]
 use radix_arch_aarch64::Arch;
+#[cfg(target_arch = "riscv64")]
+use radix_arch_riscv64::Arch;
 #[cfg(target_arch = "x86_64")]
 use radix_arch_x86_64::Arch;
 

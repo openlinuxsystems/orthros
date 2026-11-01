@@ -50,7 +50,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
             xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g dislocker libbde-utils scdoc mandoc \
-            udftools udfclient genisoimage \
+            udftools udfclient genisoimage qemu-system-misc \
             clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison
 
       - name: Install mdBook
@@ -91,6 +91,9 @@ jobs:
 
       - name: ./ob lint
         run: ./ob lint
+
+      - name: ./ob test riscv
+        run: ./ob test riscv
 
       - name: ./ob docs --check
         run: ./ob docs --check

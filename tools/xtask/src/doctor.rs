@@ -619,6 +619,14 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
             absent.join(", ")
         );
     }
+    match program_version(crate::riscv::QEMU, "--version") {
+        Some(version) => println!("  ok       {:<15} {version}", "RISC-V QEMU"),
+        None => println!(
+            "  note     {:<15} not installed; only `./ob test riscv` needs it (package \
+             qemu-system-misc, which brings OpenSBI)",
+            "RISC-V QEMU"
+        ),
+    }
     if qemu::kvm_available() {
         println!("  ok       {:<15} /dev/kvm is usable", "KVM");
     } else {

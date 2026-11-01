@@ -212,7 +212,11 @@ and the next mount, on Dukovo or Linux, replays it.
 
 Virtual disks, SATA disks and NVMe drives have drivers: on the Dell, its
 two SSDs are `sda` and `sdb`; on the Framework Desktop, its two
-NVMe drives are `nvme0n1` and `nvme1n1`. USB sticks, card readers and
+NVMe drives are `nvme0n1` and `nvme1n1`. On laptops whose firmware sets
+the storage to RST or RAID, which hides the NVMe drives behind Intel's
+Volume Management Device, they are found and named the same way, but
+run more slowly: setting it to AHCI in the firmware's setup is better,
+and changes nothing else for Dukovo. USB sticks, card readers and
 USB disks are disks too, named after the SATA ones (`sdc` and on, on the
 Dell), whether they speak the Bulk-Only Transport or, as USB 3 disks do,
 USB Attached SCSI. An SD card in a laptop's own card reader is
