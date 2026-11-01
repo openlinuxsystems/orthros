@@ -189,7 +189,10 @@ fn measure(program: &Path, args: &[&str], home: &Path) -> Result<(Duration, Dura
 }
 
 fn find_bash() -> Option<PathBuf> {
-    ["/usr/bin/bash", "/bin/bash", "/usr/local/bin/bash"].iter().map(PathBuf::from).find(|p| p.exists())
+    ["/usr/bin/bash", "/bin/bash", "/usr/local/bin/bash"]
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
 }
 
 fn shown(d: Duration) -> String {
