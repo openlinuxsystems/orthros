@@ -10,8 +10,9 @@ use radix_hw::{Mmio, Registers};
 use radix_nic::{Error, Nic};
 
 use super::{alloc, no_delay, read_mem, u64_at, write_mem};
+use crate::Card as Running;
 use crate::Interrupt;
-use crate::em::{Em, Mac};
+use crate::em::{self, Mac};
 
 const MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 const FALLBACK: [u8; 6] = [0x02, 0, 0, 0, 0, 1];
@@ -210,9 +211,9 @@ impl Registers for Card {
     }
 }
 
-fn start(card: &Arc<Card>, interrupt: Interrupt) -> Result<Em, Error> {
+fn start(card: &Arc<Card>, interrupt: Interrupt) -> Result<Running, Error> {
     let regs = Mmio::fake(card.clone(), SIZE);
-    Em::start("test", card.mac, regs, interrupt, FALLBACK, &mut alloc, &mut no_delay)
+    em::start("test", card.mac, regs, interrupt, FALLBACK, &mut alloc, &mut no_delay)
 }
 
 fn frame(n: usize) -> Vec<u8> {
@@ -389,7 +390,7 @@ fn a_card_that_is_gone_is_refused() {
 fn a_window_too_small_is_refused() {
     let card = Card::new(Mac::I82540, false);
     let regs = Mmio::fake(card.clone(), 0x1000);
-    let started = Em::start(
+    let started = em::start(
         "test",
         Mac::I82540,
         regs,

@@ -9,6 +9,9 @@
 //!   VirtualBox and VMware emulate as their `e1000`, and the PCI Express
 //!   82571, 82572, 82573, 82574 and 82583 (e1000e's), which QEMU emulates
 //!   as `e1000e`. Their descriptors are the legacy 16-byte ones.
+//! - [`igb`]: the 82576 (which QEMU emulates as its `igb`), 82580, I350,
+//!   I210 and I211, on servers' cards and many boards, with advanced
+//!   descriptors.
 //!
 //! Each driver is written from Intel's datasheets, with FreeBSD's drivers
 //! (BSD-3-Clause, Intel's shared code) as the reference for the sequences
@@ -25,10 +28,14 @@
 #![forbid(unsafe_code)]
 
 pub mod em;
-mod legacy;
+pub mod igb;
+mod rings;
+mod shared;
 
 use radix_hw::{Dma, Mmio};
 use radix_nic::{Error, Info, Link, Nic};
+
+use crate::rings::Rings;
 
 /// Intel's PCI vendor ID.
 pub const VENDOR: u16 = 0x8086;
@@ -60,6 +67,7 @@ impl Model {
     pub fn msi(&self) -> bool {
         match self.kind {
             Kind::Em(mac) => mac.pcie(),
+            Kind::Igb(_) => true,
         }
     }
 }
@@ -69,6 +77,8 @@ impl Model {
 pub enum Kind {
     /// The e1000 and e1000e family ([`em`]).
     Em(em::Mac),
+    /// The igb family ([`igb`]).
+    Igb(igb::Mac),
 }
 
 /// The card with Intel's device ID `device`, if a driver here knows it.
@@ -78,13 +88,9 @@ pub fn identify(vendor: u16, device: u16) -> Option<Model> {
     if vendor != VENDOR {
         return None;
     }
-    em::identify(device).map(|(name, mac)| Model { name, kind: Kind::Em(mac) })
-}
-
-/// A card set up and running.
-pub enum Card {
-    /// An e1000 or e1000e.
-    Em(em::Em),
+    em::identify(device)
+        .map(|(name, mac)| Model { name, kind: Kind::Em(mac) })
+        .or_else(|| igb::identify(device).map(|(name, mac)| Model { name, kind: Kind::Igb(mac) }))
 }
 
 /// Resets the card `model`, whose registers are `regs` (its first BAR),
@@ -101,62 +107,116 @@ pub fn start(
     delay: &mut dyn FnMut(u32),
 ) -> Result<Card, Error> {
     match model.kind {
-        Kind::Em(mac) => {
-            em::Em::start(model.name, mac, regs, interrupt, fallback_mac, alloc, delay)
-                .map(Card::Em)
-        }
+        Kind::Em(mac) => em::start(model.name, mac, regs, interrupt, fallback_mac, alloc, delay),
+        Kind::Igb(mac) => igb::start(model.name, mac, regs, interrupt, fallback_mac, alloc, delay),
     }
 }
 
-impl Card {
-    fn nic(&self) -> &dyn Nic {
-        match self {
-            Card::Em(card) => card,
-        }
-    }
+/// What tells one family's running card from another's.
+struct Ops {
+    /// The interrupt cause register, which reading acknowledges.
+    icr: usize,
+    /// The link, as the card's registers say.
+    link: fn(&Mmio) -> Link,
+    /// Stops the card: its interrupts off, then its DMA.
+    halt: fn(&Mmio),
+}
 
-    fn nic_mut(&mut self) -> &mut dyn Nic {
-        match self {
-            Card::Em(card) => card,
-        }
+/// A card set up and running: one queue pair, as every driver here
+/// drives it.
+pub struct Card {
+    regs: Mmio,
+    rings: Rings,
+    info: Info,
+    interrupt: Interrupt,
+    ops: &'static Ops,
+    /// Whether it was stopped.
+    stopped: bool,
+}
+
+impl Card {
+    fn new(
+        model: &'static str,
+        mac: [u8; 6],
+        regs: Mmio,
+        rings: Rings,
+        interrupt: Interrupt,
+        ops: &'static Ops,
+    ) -> Card {
+        let (receive, transmit) = rings.sizes();
+        let info = Info {
+            model,
+            mac,
+            // One receive descriptor is always the card's tail, and one
+            // transmit descriptor tells a full ring from an empty one.
+            receive_slots: (receive - 1) as u16,
+            transmit_slots: (transmit - 1) as u16,
+        };
+        Card { regs, rings, info, interrupt, ops, stopped: false }
     }
 }
 
 impl Nic for Card {
     fn info(&self) -> Info {
-        self.nic().info()
+        self.info
     }
 
     fn link(&self) -> Link {
-        self.nic().link()
+        (self.ops.link)(&self.regs)
     }
 
     fn failed(&self) -> bool {
-        self.nic().failed()
+        // A card that is gone reads as all ones.
+        self.regs.read32(shared::reg::STATUS) == u32::MAX
     }
 
     fn receive(&mut self, frame: &mut [u8]) -> Option<usize> {
-        self.nic_mut().receive(frame)
+        if self.stopped {
+            return None;
+        }
+        if let Some(len) = self.rings.receive(frame) {
+            return Some(len);
+        }
+        if self.interrupt == Interrupt::Msi {
+            // Acknowledge the interrupt, then look again for a frame that
+            // came in between.
+            let _ = self.regs.read32(self.ops.icr);
+            if self.rings.received() {
+                return self.rings.receive(frame);
+            }
+        }
+        None
     }
 
     fn can_send(&mut self) -> bool {
-        self.nic_mut().can_send()
+        !self.stopped && self.rings.can_send()
     }
 
     fn send(&mut self, frame: &[u8]) -> bool {
-        self.nic_mut().send(frame)
+        !self.stopped && self.rings.send(frame)
     }
 
     fn flush(&mut self) {
-        self.nic_mut().flush();
+        if !self.stopped {
+            self.rings.flush();
+        }
     }
 
     fn dropped(&self) -> u64 {
-        self.nic().dropped()
+        self.rings.dropped()
     }
 
     fn stop(&mut self) {
-        self.nic_mut().stop();
+        if !self.stopped {
+            self.stopped = true;
+            (self.ops.halt)(&self.regs);
+        }
+    }
+}
+
+impl Drop for Card {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 

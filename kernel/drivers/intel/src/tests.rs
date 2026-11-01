@@ -6,6 +6,7 @@
 //! out through the descriptors in (fake) DMA memory.
 
 mod em;
+mod igb;
 
 use radix_hw::{Dma, fake_memory, fake_memory_write};
 use radix_nic::PAGE;

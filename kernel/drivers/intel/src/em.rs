@@ -8,11 +8,12 @@
 //! Developer's Manual and the 82574 datasheet), copper ones only.
 //!
 //! The driver resets the card (stopping its DMA first on PCI Express),
-//! applies the errata settings the 82571 family needs, powers the PHY
-//! up and lets it negotiate the link's speed, reads the card's MAC
-//! address and programs it as its one unicast address, and takes every
-//! multicast frame, which IPv6 and mDNS need, and broadcasts. It drives
-//! one queue pair of [`legacy`](crate::legacy) descriptors: the receive
+//! applies the errata settings the 82571 family needs, tells the card's
+//! firmware a driver has it (on PCI Express), powers the PHY up and lets
+//! it negotiate the link's speed, reads the card's MAC address and
+//! programs it as its one unicast address, and takes every multicast
+//! frame, which IPv6 and mDNS need, and broadcasts. It drives one queue
+//! pair of legacy descriptors ([`rings`](crate::rings)): the receive
 //! buffers are [`SLOT`](radix_nic::SLOT) bytes, the frame check sequence
 //! is stripped, and short frames are padded. With an MSI the card raises
 //! it for frames received and sent and for link changes, at most 20,000
@@ -20,25 +21,15 @@
 //! driver does once no frame is left to take, acknowledges it.
 
 use radix_hw::{Dma, Mmio};
-use radix_nic::{Error, Info, Link, Nic, usable_mac, wait_for};
+use radix_nic::{Error, usable_mac, wait_for};
 
-use crate::Interrupt;
-use crate::legacy::{self, Rings};
+use crate::rings::{self, Format, Rings};
+use crate::shared::{self, CAUSES, EECD_AUTO_RD, ctrl, status, tctl};
+use crate::{Card, Interrupt, Ops};
 
 /// The registers, from the start of BAR 0.
 mod reg {
-    pub const CTRL: usize = 0x0000;
-    pub const STATUS: usize = 0x0008;
-    pub const EECD: usize = 0x0010;
-    pub const EERD: usize = 0x0014;
-    pub const CTRL_EXT: usize = 0x0018;
-    pub const MDIC: usize = 0x0020;
-    pub const ICR: usize = 0x00c0;
-    pub const ITR: usize = 0x00c4;
-    pub const IMS: usize = 0x00d0;
-    pub const IMC: usize = 0x00d8;
-    pub const RCTL: usize = 0x0100;
-    pub const TCTL: usize = 0x0400;
+    pub use crate::shared::reg::*;
     pub const TIPG: usize = 0x0410;
     pub const EXTCNF_CTRL: usize = 0x0f00;
     pub const PBA_ECC: usize = 0x1100;
@@ -49,94 +40,27 @@ mod reg {
     pub const TARC0: usize = 0x3840;
     pub const TARC1: usize = 0x3940;
     pub const RFCTL: usize = 0x5008;
-    pub const MTA: usize = 0x5200;
-    pub const RAL0: usize = 0x5400;
-    pub const RAH0: usize = 0x5404;
     pub const GCR: usize = 0x5b00;
     pub const GCR2: usize = 0x5b64;
     /// The last register the driver touches, and its size.
     pub const END: usize = GCR2 + 4;
 }
 
-/// CTRL's bits.
-mod ctrl {
-    pub const LRST: u32 = 1 << 3;
-    pub const GIO_MASTER_DISABLE: u32 = 1 << 2;
-    pub const ASDE: u32 = 1 << 5;
-    pub const SLU: u32 = 1 << 6;
-    pub const ILOS: u32 = 1 << 7;
-    pub const FRCSPD: u32 = 1 << 11;
-    pub const FRCDPX: u32 = 1 << 12;
-    pub const RST: u32 = 1 << 26;
-    pub const RFCE: u32 = 1 << 27;
-    pub const TFCE: u32 = 1 << 28;
-    /// Cleared on the 82573, 82574 and 82583, as their errata say.
-    pub const BIT_29: u32 = 1 << 29;
-    pub const VME: u32 = 1 << 30;
-    pub const PHY_RST: u32 = 1 << 31;
-}
+/// CTRL's bit the 82573, 82574 and 82583 clear, as their errata say.
+const CTRL_BIT_29: u32 = 1 << 29;
+/// STATUS's bit that says the card is the second port of two.
+const STATUS_FUNC_1: u32 = 1 << status::FUNC_SHIFT;
 
-/// STATUS's bits.
-mod status {
-    pub const FD: u32 = 1 << 0;
-    pub const LU: u32 = 1 << 1;
-    pub const FUNC_1: u32 = 1 << 2;
-    pub const SPEED_SHIFT: u32 = 6;
-    pub const GIO_MASTER_ENABLE: u32 = 1 << 19;
-}
-
-/// RCTL's bits.
-mod rctl {
-    pub const EN: u32 = 1 << 1;
-    pub const MPE: u32 = 1 << 4;
-    pub const BAM: u32 = 1 << 15;
-    /// Strips the frame check sequence. Buffers of 2048 bytes are BSIZE 0.
-    pub const SECRC: u32 = 1 << 26;
-}
-
-/// TCTL's bits.
-mod tctl {
-    pub const EN: u32 = 1 << 1;
-    pub const PSP: u32 = 1 << 3;
-    pub const CT: u32 = 0x0f << 4;
-    pub const COLD: u32 = 63 << 12;
-    pub const RTLC: u32 = 1 << 24;
-    pub const MULR: u32 = 1 << 28;
-}
-
-/// The interrupt causes it raises: transmit descriptor written back, link
-/// status change, receive sequence error, receive descriptor minimum
-/// threshold, receiver overrun and receive timer.
-const CAUSES: u32 = (1 << 0) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 6) | (1 << 7);
 /// At most 20,000 interrupts a second: ITR counts 256 ns.
 const ITR: u32 = 1_000_000_000 / (20_000 * 256);
 /// The interpacket gap for copper: IPGT 8, IPGR1 8, IPGR2 6.
 const TIPG: u32 = 8 | (8 << 10) | (6 << 20);
-
-/// MDIC's bits, for the PHY's registers.
-mod mdic {
-    pub const PHY_SHIFT: u32 = 21;
-    pub const REG_SHIFT: u32 = 16;
-    pub const OP_WRITE: u32 = 1 << 26;
-    pub const OP_READ: u32 = 2 << 26;
-    pub const READY: u32 = 1 << 28;
-    pub const ERROR: u32 = 1 << 30;
-}
-
-/// The PHY's control register (IEEE 802.3 clause 22) and its bits.
-const PHY_CONTROL: u32 = 0;
-const PHY_RESTART_AUTONEG: u16 = 1 << 9;
-const PHY_POWER_DOWN: u16 = 1 << 11;
-const PHY_AUTONEG: u16 = 1 << 12;
-/// The internal PHY's address on MDIO.
-const PHY_ADDRESS: u32 = 1;
 
 /// How long things take.
 const RESET_US: u32 = 10_000;
 const MASTER_US: u32 = 80_000;
 const AUTO_READ_US: u32 = 10_000;
 const NVM_US: u32 = 10_000;
-const MDIC_US: u32 = 10_000;
 const SEMAPHORE_US: u32 = 100_000;
 const STEP_US: u32 = 10;
 
@@ -218,178 +142,88 @@ pub fn identify(device: u16) -> Option<(&'static str, Mac)> {
     })
 }
 
-/// A card of the family, running.
-pub struct Em {
-    regs: Mmio,
+/// Resets the card `mac`, a `model`, and sets it running: see
+/// [`crate::start`].
+pub fn start(
+    model: &'static str,
     mac: Mac,
-    rings: Rings,
-    info: Info,
+    regs: Mmio,
     interrupt: Interrupt,
-    /// Whether it was stopped.
-    stopped: bool,
+    fallback_mac: [u8; 6],
+    alloc: &mut dyn FnMut(usize) -> Option<Dma>,
+    delay: &mut dyn FnMut(u32),
+) -> Result<Card, Error> {
+    if regs.len() < reg::END {
+        return Err(Error::Registers);
+    }
+    if regs.read32(reg::STATUS) == u32::MAX {
+        return Err(Error::Device("its registers read as all ones"));
+    }
+    reset(&regs, mac, delay)?;
+    let ops = if mac.pcie() {
+        errata(&regs, mac);
+        // The card's firmware leaves it to the driver from here.
+        if mac == Mac::I82573 {
+            shared::update(&regs, reg::SWSM, shared::SWSM_DRV_LOAD, 0);
+            &OPS_82573
+        } else {
+            shared::update(&regs, reg::CTRL_EXT, shared::CTRL_EXT_DRV_LOAD, 0);
+            &OPS_PCIE
+        }
+    } else {
+        &OPS
+    };
+    shared::set_up_link(&regs);
+    power_up_phy(&regs, mac, delay);
+    let address = read_mac(&regs, mac, delay).unwrap_or(fallback_mac);
+    shared::set_address(&regs, address);
+    let mut rings = Rings::new(regs.clone(), rings::EM, Format::Legacy, RECEIVE, TRANSMIT, alloc)?;
+    rings.hand_over();
+    // No delays on receive or transmit interrupts: the throttle spaces
+    // them.
+    regs.write32(reg::RDTR, 0);
+    regs.write32(reg::TIDV, 0);
+    regs.write32(reg::ITR, ITR);
+    regs.write32(reg::TIPG, TIPG);
+    let mut transmit = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD | tctl::RTLC;
+    if mac.pcie() {
+        transmit |= tctl::MULR;
+    }
+    regs.write32(reg::TCTL, transmit);
+    let receive = shared::rctl::EN | shared::rctl::BAM | shared::rctl::MPE | shared::rctl::SECRC;
+    regs.write32(reg::RCTL, receive);
+    let _ = regs.read32(reg::ICR);
+    if interrupt == Interrupt::Msi {
+        regs.write32(reg::IMS, CAUSES);
+    }
+    Ok(Card::new(model, address, regs, rings, interrupt, ops))
 }
 
-impl Em {
-    /// Resets the card and sets it running: see [`crate::start`].
-    pub fn start(
-        model: &'static str,
-        mac: Mac,
-        regs: Mmio,
-        interrupt: Interrupt,
-        fallback_mac: [u8; 6],
-        alloc: &mut dyn FnMut(usize) -> Option<Dma>,
-        delay: &mut dyn FnMut(u32),
-    ) -> Result<Em, Error> {
-        if regs.len() < reg::END {
-            return Err(Error::Registers);
-        }
-        if regs.read32(reg::STATUS) == u32::MAX {
-            return Err(Error::Device("its registers read as all ones"));
-        }
-        reset(&regs, mac, delay)?;
-        if mac.pcie() {
-            errata(&regs, mac);
-        }
-        // The link: let the PHY negotiate, and the MAC take its speed.
-        let mut control = regs.read32(reg::CTRL);
-        control |= ctrl::SLU | ctrl::ASDE;
-        control &= !(ctrl::LRST
-            | ctrl::PHY_RST
-            | ctrl::ILOS
-            | ctrl::FRCSPD
-            | ctrl::FRCDPX
-            | ctrl::VME
-            | ctrl::RFCE
-            | ctrl::TFCE);
-        regs.write32(reg::CTRL, control);
-        power_up_phy(&regs, mac, delay);
-        let address = read_mac(&regs, mac, delay).unwrap_or(fallback_mac);
-        // Its one unicast address, the others off, and no multicast
-        // filter: it takes every multicast frame.
-        let low = u32::from_le_bytes([address[0], address[1], address[2], address[3]]);
-        let high = u32::from(u16::from_le_bytes([address[4], address[5]])) | (1 << 31);
-        regs.write32(reg::RAL0, low);
-        regs.write32(reg::RAH0, high);
-        for entry in 1..16 {
-            regs.write32(reg::RAL0 + 8 * entry, 0);
-            regs.write32(reg::RAH0 + 8 * entry, 0);
-        }
-        for word in 0..128 {
-            regs.write32(reg::MTA + 4 * word, 0);
-        }
-        let rings = Rings::new(regs.clone(), legacy::EM, RECEIVE, TRANSMIT, alloc)?;
-        // No delays on receive or transmit interrupts: the throttle
-        // spaces them.
-        regs.write32(reg::RDTR, 0);
-        regs.write32(reg::TIDV, 0);
-        regs.write32(reg::ITR, ITR);
-        regs.write32(reg::TIPG, TIPG);
-        let mut transmit = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD | tctl::RTLC;
-        if mac.pcie() {
-            transmit |= tctl::MULR;
-        }
-        regs.write32(reg::TCTL, transmit);
-        regs.write32(reg::RCTL, rctl::EN | rctl::BAM | rctl::MPE | rctl::SECRC);
-        let _ = regs.read32(reg::ICR);
-        if interrupt == Interrupt::Msi {
-            regs.write32(reg::IMS, CAUSES);
-        }
-        let (receive_slots, transmit_slots) = rings.sizes();
-        let info = Info {
-            model,
-            mac: address,
-            // One receive descriptor is always the card's tail.
-            receive_slots: (receive_slots - 1) as u16,
-            transmit_slots: (transmit_slots - 1) as u16,
-        };
-        Ok(Em { regs, mac, rings, info, interrupt, stopped: false })
-    }
+/// How a card of the family is stopped, by its kind: the 8254x, the
+/// 82573, and the others on PCI Express.
+static OPS: Ops = Ops { icr: reg::ICR, link: shared::link, halt: |regs| halt(regs, None) };
+static OPS_82573: Ops = Ops {
+    icr: reg::ICR,
+    link: shared::link,
+    halt: |regs| halt(regs, Some((reg::SWSM, shared::SWSM_DRV_LOAD))),
+};
+static OPS_PCIE: Ops = Ops {
+    icr: reg::ICR,
+    link: shared::link,
+    halt: |regs| halt(regs, Some((reg::CTRL_EXT, shared::CTRL_EXT_DRV_LOAD))),
+};
 
-    /// Which controller it is.
-    pub fn mac(&self) -> Mac {
-        self.mac
+/// Stops the card: interrupts off, the card given back to its firmware
+/// (`firmware`: the register and bit that told it a driver had it), then
+/// a reset, which stops its DMA.
+fn halt(regs: &Mmio, firmware: Option<(usize, u32)>) {
+    regs.write32(reg::IMC, u32::MAX);
+    regs.write32(reg::RCTL, 0);
+    regs.write32(reg::TCTL, 0);
+    if let Some((at, bit)) = firmware {
+        shared::update(regs, at, 0, bit);
     }
-
-    /// Stops the card: interrupts off, then a reset, which stops its DMA.
-    fn halt(&mut self) {
-        if self.stopped {
-            return;
-        }
-        self.stopped = true;
-        self.regs.write32(reg::IMC, u32::MAX);
-        self.regs.write32(reg::RCTL, 0);
-        self.regs.write32(reg::TCTL, 0);
-        let control = self.regs.read32(reg::CTRL);
-        self.regs.write32(reg::CTRL, control | ctrl::RST);
-    }
-}
-
-impl Drop for Em {
-    fn drop(&mut self) {
-        self.halt();
-    }
-}
-
-impl Nic for Em {
-    fn info(&self) -> Info {
-        self.info
-    }
-
-    fn link(&self) -> Link {
-        let status = self.regs.read32(reg::STATUS);
-        let up = status & status::LU != 0 && status != u32::MAX;
-        let mbps = match (status >> status::SPEED_SHIFT) & 3 {
-            0 => 10,
-            1 => 100,
-            _ => 1000,
-        };
-        Link { up, mbps: if up { mbps } else { 0 }, full_duplex: up && status & status::FD != 0 }
-    }
-
-    fn failed(&self) -> bool {
-        // A card that is gone reads as all ones.
-        self.regs.read32(reg::STATUS) == u32::MAX
-    }
-
-    fn receive(&mut self, frame: &mut [u8]) -> Option<usize> {
-        if self.stopped {
-            return None;
-        }
-        if let Some(len) = self.rings.receive(frame) {
-            return Some(len);
-        }
-        if self.interrupt == Interrupt::Msi {
-            // Acknowledge the interrupt, then look again for a frame that
-            // came in between.
-            let _ = self.regs.read32(reg::ICR);
-            if self.rings.received() {
-                return self.rings.receive(frame);
-            }
-        }
-        None
-    }
-
-    fn can_send(&mut self) -> bool {
-        !self.stopped && self.rings.can_send()
-    }
-
-    fn send(&mut self, frame: &[u8]) -> bool {
-        !self.stopped && self.rings.send(frame)
-    }
-
-    fn flush(&mut self) {
-        if !self.stopped {
-            self.rings.flush();
-        }
-    }
-
-    fn dropped(&self) -> u64 {
-        self.rings.dropped()
-    }
-
-    fn stop(&mut self) {
-        self.halt();
-    }
+    shared::update(regs, reg::CTRL, ctrl::RST, 0);
 }
 
 /// Resets the card, its interrupts off. On PCI Express, its DMA is
@@ -397,14 +231,8 @@ impl Nic for Em {
 /// 82574 and 82583 share it with their firmware.
 fn reset(regs: &Mmio, mac: Mac, delay: &mut dyn FnMut(u32)) -> Result<(), Error> {
     regs.write32(reg::IMC, u32::MAX);
-    if mac.pcie() {
-        let control = regs.read32(reg::CTRL);
-        regs.write32(reg::CTRL, control | ctrl::GIO_MASTER_DISABLE);
-        if !wait_for(delay, MASTER_US, 100, || {
-            regs.read32(reg::STATUS) & status::GIO_MASTER_ENABLE == 0
-        }) {
-            return Err(Error::Timeout("stopping its DMA before a reset"));
-        }
+    if mac.pcie() && !shared::stop_dma(regs, MASTER_US, delay) {
+        return Err(Error::Timeout("stopping its DMA before a reset"));
     }
     regs.write32(reg::RCTL, 0);
     regs.write32(reg::TCTL, tctl::PSP);
@@ -425,7 +253,7 @@ fn reset(regs: &Mmio, mac: Mac, delay: &mut dyn FnMut(u32)) -> Result<(), Error>
     }
     if mac.pcie() {
         // It reads its NVM again after the reset.
-        if !wait_for(delay, AUTO_READ_US, STEP_US, || regs.read32(reg::EECD) & (1 << 9) != 0) {
+        if !wait_for(delay, AUTO_READ_US, STEP_US, || regs.read32(reg::EECD) & EECD_AUTO_RD != 0) {
             return Err(Error::Timeout("reading its NVM after a reset"));
         }
         match mac {
@@ -447,10 +275,7 @@ fn reset(regs: &Mmio, mac: Mac, delay: &mut dyn FnMut(u32)) -> Result<(), Error>
 /// The settings the 82571 family's specification updates ask for, as
 /// FreeBSD's e1000_initialize_hw_bits_82571 applies them.
 fn errata(regs: &Mmio, mac: Mac) {
-    let set = |at: usize, on: u32, off: u32| {
-        let value = regs.read32(at);
-        regs.write32(at, (value & !off) | on);
-    };
+    let set = |at: usize, on: u32, off: u32| shared::update(regs, at, on, off);
     set(reg::TXDCTL0, 1 << 22, 0);
     set(reg::TXDCTL1, 1 << 22, 0);
     match mac {
@@ -465,7 +290,7 @@ fn errata(regs: &Mmio, mac: Mac) {
         _ => set(reg::TARC0, 0, 0xf << 27),
     }
     if mac.mdio_semaphore() {
-        set(reg::CTRL, 0, ctrl::BIT_29);
+        set(reg::CTRL, 0, CTRL_BIT_29);
         set(reg::CTRL_EXT, 1 << 22, 1 << 23);
     }
     if mac == Mac::I82571 {
@@ -496,49 +321,13 @@ fn give_mdio(regs: &Mmio) {
     regs.write32(reg::EXTCNF_CTRL, value & !(1 << 5));
 }
 
-/// Reads PHY register `register`.
-fn phy_read(regs: &Mmio, register: u32, delay: &mut dyn FnMut(u32)) -> Option<u16> {
-    regs.write32(
-        reg::MDIC,
-        (register << mdic::REG_SHIFT) | (PHY_ADDRESS << mdic::PHY_SHIFT) | mdic::OP_READ,
-    );
-    let mut value = 0;
-    let done = wait_for(delay, MDIC_US, 50, || {
-        value = regs.read32(reg::MDIC);
-        value & mdic::READY != 0
-    });
-    (done && value & mdic::ERROR == 0).then_some(value as u16)
-}
-
-/// Writes PHY register `register`: whether the card took it.
-fn phy_write(regs: &Mmio, register: u32, data: u16, delay: &mut dyn FnMut(u32)) -> bool {
-    regs.write32(
-        reg::MDIC,
-        u32::from(data)
-            | (register << mdic::REG_SHIFT)
-            | (PHY_ADDRESS << mdic::PHY_SHIFT)
-            | mdic::OP_WRITE,
-    );
-    let mut value = 0;
-    wait_for(delay, MDIC_US, 50, || {
-        value = regs.read32(reg::MDIC);
-        value & mdic::READY != 0
-    }) && value & mdic::ERROR == 0
-}
-
-/// Powers the PHY up, if a reset or the firmware left it down, and has
-/// it negotiate the link. A PHY that does not answer is left as it is:
-/// the link may still come up.
+/// Powers the PHY up and has it negotiate the link, with MDIO held from
+/// the firmware where the card shares it.
 fn power_up_phy(regs: &Mmio, mac: Mac, delay: &mut dyn FnMut(u32)) {
-    let held = mac.mdio_semaphore() && take_mdio(regs, delay);
-    if (held || !mac.mdio_semaphore())
-        && let Some(control) = phy_read(regs, PHY_CONTROL, delay)
-        && (control & PHY_POWER_DOWN != 0 || control & PHY_AUTONEG == 0)
-    {
-        let control = (control & !PHY_POWER_DOWN) | PHY_AUTONEG | PHY_RESTART_AUTONEG;
-        let _ = phy_write(regs, PHY_CONTROL, control, delay);
-    }
-    if held {
+    if !mac.mdio_semaphore() {
+        shared::power_up_phy(regs, delay);
+    } else if take_mdio(regs, delay) {
+        shared::power_up_phy(regs, delay);
         give_mdio(regs);
     }
 }
@@ -561,12 +350,7 @@ fn nvm_word(regs: &Mmio, mac: Mac, word: u32, delay: &mut dyn FnMut(u32)) -> Opt
 /// RAL0 and RAH0, which the card loaded from its NVM. Each falls back on
 /// the other; `None` when neither has an address.
 fn read_mac(regs: &Mmio, mac: Mac, delay: &mut dyn FnMut(u32)) -> Option<[u8; 6]> {
-    let from_registers = || {
-        let low = regs.read32(reg::RAL0).to_le_bytes();
-        let high = regs.read32(reg::RAH0).to_le_bytes();
-        let address = [low[0], low[1], low[2], low[3], high[0], high[1]];
-        usable_mac(address).then_some(address)
-    };
+    let from_registers = || shared::registers_mac(regs);
     let mut from_nvm = || {
         let mut address = [0u8; 6];
         for word in 0..3 {
@@ -574,7 +358,7 @@ fn read_mac(regs: &Mmio, mac: Mac, delay: &mut dyn FnMut(u32)) -> Option<[u8; 6]
             address[2 * word as usize] = value[0];
             address[2 * word as usize + 1] = value[1];
         }
-        if mac == Mac::I82546 && regs.read32(reg::STATUS) & status::FUNC_1 != 0 {
+        if mac == Mac::I82546 && regs.read32(reg::STATUS) & STATUS_FUNC_1 != 0 {
             address[5] ^= 1;
         }
         usable_mac(address).then_some(address)
