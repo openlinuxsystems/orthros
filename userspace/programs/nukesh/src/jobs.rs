@@ -266,6 +266,11 @@ impl Reaped {
 fn child_max() -> usize {
     static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
+        // Dukovo sets no per-user process limit: mlibc's sysconf only
+        // warns on the console and says 25, which the floor raises anyway.
+        if cfg!(target_os = "radix") {
+            return 4096;
+        }
         // SAFETY: sysconf only reads a limit.
         let limit = unsafe { libc::sysconf(libc::_SC_CHILD_MAX) };
         usize::try_from(limit).unwrap_or(0).clamp(4096, 32768)
