@@ -53,6 +53,13 @@ const GPIO_TABLE: &str = "file=gpio.aml";
 /// The SSDT `i2c` gives QEMU (`src/acpi/i2c.asl`), likewise.
 const I2C_AML: &[u8] = include_bytes!("acpi/i2c.aml");
 const I2C_TABLE: &str = "file=i2c.aml";
+/// The two ends of a serial line between QEMU's character devices
+/// `line0` and `line1`, given as `-chardev`'s argument: a Unix socket in
+/// the test's directory that the first listens on and the second connects
+/// to, so that a byte one USB serial port sends, the other receives (the
+/// `usb-serial` case). QEMU plugs a USB serial port in only once its
+/// character device is connected, which a UDP one never is.
+const SERIAL_LINE: [&str; 2] = ["<serial line 0>", "<serial line 1>"];
 /// The SMBIOS memory device of the `smbus` case, which QEMU gives in place
 /// of its own ([`ddr4_device`]).
 const DDR4_DEVICE: &str = "file=ddr4.smbios";
@@ -107,6 +114,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-relocs",
     "radix-sched",
     "radix-scsi",
+    "radix-sdhci",
     "radix-sensors",
     "radix-smbios",
     "radix-smbus",
@@ -298,6 +306,11 @@ enum Bus {
     /// with streams, `3` or `4` at high speed, without. Named as a stick
     /// is, its units in order.
     Uas(&'static str, u8),
+    /// A card in an SD card reader of the case's own, one for each card
+    /// (QEMU's `sdhci-pci`, a version 2.00 controller with one slot and
+    /// 32-bit descriptors, holding an `sd-card`): `mmcblk0` and on, in
+    /// order. QEMU takes only cards whose size is a power of two.
+    Sd,
 }
 
 impl Disk {
@@ -409,17 +422,19 @@ pub struct DiskImage {
 
 /// The names the kernel gives a case's disks: `vda`, `vdb` and on for
 /// virtio ones, `sda`, `sdb` and on for SATA ones, then USB ones after
-/// the boot stick's, each in their order, and `nvme<n>n1` and on for
-/// each NVMe controller's namespaces.
+/// the boot stick's, each in their order, `nvme<n>n1` and on for each
+/// NVMe controller's namespaces, and `mmcblk0` and on for SD cards.
 fn disk_names(disks: &[Disk]) -> Vec<String> {
     let sata_disks =
         disks.iter().filter(|disk| matches!(disk.bus, Bus::Sata | Bus::Ide)).count() as u8;
     let (mut virtio, mut sata, mut usb) = (b'a', b'a', b'a' + sata_disks + 1);
     let mut namespaces = [0u32; 256];
+    let mut cards = 0..;
     disks
         .iter()
         .map(|disk| {
             let (prefix, letter) = match disk.bus {
+                Bus::Sd => return format!("mmcblk{}", cards.next().unwrap_or_default()),
                 Bus::Virtio => ("vd", &mut virtio),
                 Bus::Sata | Bus::Ide => ("sd", &mut sata),
                 Bus::Usb(_) | Bus::Uas(..) => ("sd", &mut usb),
@@ -2811,6 +2826,14 @@ fn run_case(
     let qmp = dir.join(format!("{}.qmp", case.name));
     let disks = make_disks(ctx, dir, case, base, root)?;
     let mut extra: Vec<String> = case.qemu.iter().map(ToString::to_string).collect();
+    let socket = qemu::option_value(&dir.join(format!("{}.line", case.name)));
+    for arg in &mut extra {
+        if *arg == SERIAL_LINE[0] {
+            *arg = format!("socket,id=line0,path={socket},server=on,wait=off");
+        } else if *arg == SERIAL_LINE[1] {
+            *arg = format!("socket,id=line1,path={socket},reconnect=1");
+        }
+    }
     for arg in &mut extra {
         let (name, bytes) = match arg.as_str() {
             POWER_TABLE => ("power.aml", POWER_AML.to_vec()),
@@ -2831,6 +2854,11 @@ fn run_case(
     if case.disks.iter().any(|disk| disk.bus == Bus::Ide) {
         extra.extend(["-device".into(), "piix3-ide,id=pata".into()]);
     }
+    // A reader for each card, before them; each card names its reader's
+    // bus by its path, as every reader's is called `sd-bus`.
+    for n in 0..case.disks.iter().filter(|disk| disk.bus == Bus::Sd).count() {
+        extra.extend(["-device".into(), format!("sdhci-pci,id=sd{n}")]);
+    }
     if case.disks.iter().any(|disk| matches!(disk.bus, Bus::Usb(_) | Bus::Uas(..)))
         && case.media != Media::Usb
     {
@@ -2845,7 +2873,7 @@ fn run_case(
         extra.extend(["-device".into(), format!("nvme,id=nvme{n},serial=dukovo-test-{n}")]);
     }
     let mut namespaces = [0u32; 256];
-    let (mut port, mut end) = (0, 0);
+    let (mut port, mut end, mut card) = (0, 0, 0);
     for (i, (disk, image)) in case.disks.iter().zip(&disks).enumerate() {
         let mut file = qemu::option_value(&image.path);
         if disk.errors.is_some() {
@@ -2882,6 +2910,10 @@ fn run_case(
             }
             Bus::Uas(port, lun) => {
                 format!("scsi-hd,drive=disk{i},bus=uas{port}.0,scsi-id=0,lun={lun}{device}")
+            }
+            Bus::Sd => {
+                card += 1;
+                format!("sd-card,drive=disk{i},bus=pcie.0/sd{}/sd-bus", card - 1)
             }
         });
     }
@@ -5850,6 +5882,18 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
                     disk.sector
                 ),
             ),
+            // QEMU's cards up to 2 GiB are of standard capacity, and its
+            // reader's 52 MHz clock is halved twice for the 25 the card
+            // takes.
+            Bus::Sd => (
+                line_of(&format!(
+                    "Disk: {name} is an SD card of {size} in the SD card reader at "
+                ))?,
+                format!(
+                    ", slot 1: QEMU!, 13 MHz on a 4-bit bus, a version 2.00 reader{}",
+                    if disk.read_only { ", write-protected" } else { "" }
+                ),
+            ),
         };
         // Only a SATA or IDE disk's line says whether it is solid state.
         let says_solid = matches!(disk.bus, Bus::Sata | Bus::Ide) && disk.solid();
@@ -5877,10 +5921,13 @@ fn disks_found(vm: &mut Vm, case: &Case) -> Result<(), String> {
     let on = |bus: Bus| case.disks.iter().filter(|disk| disk.bus == bus).count();
     let plural =
         |count: usize, what: &str| format!("{count} {what}{}", if count == 1 { "" } else { "s" });
-    let ide = match on(Bus::Ide) {
+    let mut ide = match on(Bus::Ide) {
         0 => String::new(),
         count => format!(", {}", plural(count, "IDE disk")),
     };
+    if on(Bus::Sd) > 0 {
+        ide += &format!(", {}", plural(on(Bus::Sd), "SD card"));
+    }
     line_of(&format!(
         "; {}, {}, {}{ide}",
         plural(on(Bus::Virtio), "virtio disk"),
@@ -6007,6 +6054,7 @@ fn storage_write(vm: &mut Vm, case: &Case) -> Result<(), String> {
             Bus::Sata | Bus::Ide => "QEMU HARDDISK",
             Bus::Nvme(_) => "QEMU NVMe Ctrl",
             Bus::Usb(_) | Bus::Uas(..) => "QEMU QEMU HARDDISK",
+            Bus::Sd => "QEMU!",
             Bus::Virtio => "",
         };
         if disk.table == Table::None && !model.is_empty() {

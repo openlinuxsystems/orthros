@@ -484,6 +484,23 @@ We implement these from their published descriptions. No code is copied.
   `isofs` and `udf` (GPL-2.0)
   ([ADR 0245](docs/adr/0245-iso-9660-and-udf-are-read-only-and-tried-after-the-disks-filesystems.md)).
   No code is taken from them.
+- The USB Implementers Forum's *Universal Serial Bus Communications
+  Class Subclass Specification for PSTN Devices*, revision 1.2, whose
+  Abstract Control Model `radix_usb::serial` speaks, and FTDI's
+  application notes AN232B-04 and AN232B-05 and the FT232H and FT2232H
+  data sheets, from which it sets FTDI's chips' lines and divisors. The
+  names `ttyACM0` and `ttyUSB0`, and when DTR and RTS are raised, follow
+  Linux's `cdc-acm` and `ftdi_sio` (GPL-2.0)
+  ([ADR 0246](docs/adr/0246-usb-serial-ports-are-terminals-whose-master-is-the-kernel.md)).
+  No code is taken from them.
+- The SD Association's *SD Specifications Part A2, SD Host Controller
+  Simplified Specification*, version 4.20, and *Part 1, Physical Layer
+  Simplified Specification*, version 9.10, from which `radix-sdhci`
+  drives SD card readers and sets their cards up. The names `mmcblk0`
+  and `mmcblk0p1`, and what `/kernel/block/mmcblk0/device` shows, follow
+  Linux's `mmc_block` (GPL-2.0)
+  ([ADR 0247](docs/adr/0247-sd-card-readers-are-polled-adma2-queues.md)).
+  No code is taken from it.
 - The MBR partition table, and the GUID partition table of the UEFI
   specification with its CRC32 checks.
 - The System V ABI's ELF format and the x86-64 psABI, by Michael Matz,

@@ -404,3 +404,229 @@ fn hid_requests_go_to_the_interface() {
     assert_eq!(Setup::set_protocol(2, true).to_u64(), 0x0000_0002_0001_0b21);
     assert_eq!(Setup::set_report(0, hid::REPORT_OUTPUT, 1, 2).to_u64(), 0x0002_0000_0201_0921);
 }
+
+/// A CDC-ACM device's descriptor and configuration, as a board's: the
+/// communications interface with its functional descriptors and its
+/// notification endpoint, then the data interface with its bulk pair.
+fn acm_device() -> (DeviceDescriptor, Vec<u8>) {
+    let device = DeviceDescriptor::parse(&[
+        18, 1, 0x00, 0x02, 2, 0, 0, 64, 0x8a, 0x2e, 0x0a, 0x00, 0x00, 0x01, 1, 2, 3, 1,
+    ])
+    .unwrap();
+    let mut bytes = std::vec![9, 2, 0, 0, 2, 1, 0, 0x80, 50];
+    bytes.extend([9, 4, 0, 0, 1, 2, 2, 1, 0]);
+    bytes.extend([5, 0x24, 0x00, 0x10, 0x01]);
+    bytes.extend([5, 0x24, 0x01, 0x00, 0x01]);
+    bytes.extend([4, 0x24, 0x02, 0x02]);
+    bytes.extend([5, 0x24, 0x06, 0x00, 0x01]);
+    bytes.extend([7, 5, 0x83, 3, 8, 0, 16]);
+    bytes.extend([9, 4, 1, 0, 2, 0x0a, 0, 0, 0]);
+    bytes.extend([7, 5, 0x81, 2, 0x40, 0, 0]);
+    bytes.extend([7, 5, 0x02, 2, 0x40, 0, 0]);
+    let len = bytes.len() as u16;
+    bytes[2..4].copy_from_slice(&len.to_le_bytes());
+    (device, bytes)
+}
+
+/// An FTDI chip with `interfaces` vendor-specific interfaces, each with a
+/// bulk pair, of release `release`, as QEMU's `usb-serial` (one, 0x0400).
+fn ftdi_device(product: u16, release: u16, interfaces: u8) -> (DeviceDescriptor, Vec<u8>) {
+    let [p0, p1] = product.to_le_bytes();
+    let [r0, r1] = release.to_le_bytes();
+    let device =
+        DeviceDescriptor::parse(&[18, 1, 0, 2, 0, 0, 0, 8, 0x03, 0x04, p0, p1, r0, r1, 1, 2, 3, 1])
+            .unwrap();
+    let mut bytes = std::vec![9, 2, 0, 0, interfaces, 1, 0, 0x80, 50];
+    for i in 0..interfaces {
+        bytes.extend([9, 4, i, 0, 2, 0xff, 0xff, 0xff, 2]);
+        bytes.extend([7, 5, 0x81 + 2 * i, 2, 0x40, 0, 0]);
+        bytes.extend([7, 5, 0x02 + 2 * i, 2, 0x40, 0, 0]);
+    }
+    let len = bytes.len() as u16;
+    bytes[2..4].copy_from_slice(&len.to_le_bytes());
+    (device, bytes)
+}
+
+#[test]
+fn acm_port_is_found_through_its_union() {
+    let (device, bytes) = acm_device();
+    let config = Configuration::parse(&bytes).unwrap();
+    let mut ports = [None; 2].map(|_: Option<()>| serial::Port {
+        protocol: serial::Protocol::Acm { control: 9 },
+        data: 0,
+        bulk_in: EndpointDescriptor::default(),
+        bulk_out: EndpointDescriptor::default(),
+    });
+    assert_eq!(serial::ports(&device, &config, &mut ports), 1);
+    let port = ports[0];
+    assert_eq!(port.protocol, serial::Protocol::Acm { control: 0 });
+    assert_eq!((port.data, port.bulk_in.address, port.bulk_out.address), (1, 0x81, 0x02));
+    assert_eq!((port.driver(), port.prefix()), ("cdc_acm", "ttyACM"));
+    // Not FTDI's, and a keyboard has none.
+    assert_eq!(serial::ftdi::chip(&device), None);
+    let keyboard = DeviceDescriptor::parse(&KEYBOARD).unwrap();
+    let config = configuration();
+    assert_eq!(serial::ports(&keyboard, &Configuration::parse(&config).unwrap(), &mut ports), 0);
+}
+
+#[test]
+fn acm_without_a_union_takes_the_next_interface() {
+    let (device, mut bytes) = acm_device();
+    // The union and the call management descriptors become unknown ones.
+    for at in 0..bytes.len() - 2 {
+        if bytes[at + 1] == 0x24 && matches!(bytes[at + 2], 0x01 | 0x06) {
+            bytes[at + 2] = 0x0f;
+        }
+    }
+    let config = Configuration::parse(&bytes).unwrap();
+    let mut ports = [serial::Port {
+        protocol: serial::Protocol::Acm { control: 9 },
+        data: 0,
+        bulk_in: EndpointDescriptor::default(),
+        bulk_out: EndpointDescriptor::default(),
+    }];
+    assert_eq!(serial::ports(&device, &config, &mut ports), 1);
+    assert_eq!(ports[0].data, 1);
+}
+
+#[test]
+fn ftdi_ports_are_each_interface() {
+    let blank = serial::Port {
+        protocol: serial::Protocol::Acm { control: 0 },
+        data: 0,
+        bulk_in: EndpointDescriptor::default(),
+        bulk_out: EndpointDescriptor::default(),
+    };
+    let (qemu, bytes) = ftdi_device(0x6001, 0x0400, 1);
+    let mut ports = [blank; 4];
+    let config = Configuration::parse(&bytes).unwrap();
+    assert_eq!(serial::ports(&qemu, &config, &mut ports), 1);
+    let chip = serial::ftdi::Chip::Bm;
+    assert_eq!(ports[0].protocol, serial::Protocol::Ftdi { chip, index: 0 });
+    assert_eq!((ports[0].driver(), ports[0].prefix()), ("ftdi_sio", "ttyUSB"));
+    let (dual, bytes) = ftdi_device(0x6010, 0x0700, 2);
+    let config = Configuration::parse(&bytes).unwrap();
+    assert_eq!(serial::ports(&dual, &config, &mut ports), 2);
+    let chip = serial::ftdi::Chip::Ft2232h;
+    assert_eq!(ports[1].protocol, serial::Protocol::Ftdi { chip, index: 2 });
+    assert_eq!((ports[1].bulk_in.address, ports[1].bulk_out.address), (0x83, 0x04));
+    // Another vendor's product of the same number is not FTDI's.
+    let mut other = qemu;
+    other.vendor = 0x1234;
+    assert_eq!(serial::ftdi::chip(&other), None);
+}
+
+#[test]
+fn lines_are_read_from_cflag() {
+    use serial::{B9600, Line, Parity, Stop, cflag};
+    // A serial port's start: B9600 | CS8 | CREAD | HUPCL | CLOCAL.
+    let start = Line::from_cflag(B9600 | cflag::CSIZE | 0o200 | cflag::HUPCL | cflag::CLOCAL, 0);
+    assert_eq!(
+        start,
+        Line { rate: 9600, data_bits: 8, parity: Parity::None, stop: Stop::One, rts_cts: false }
+    );
+    // 7E2 at 115200 with RTS and CTS.
+    let flags = 0o10002 | 0o40 | cflag::PARENB | cflag::CSTOPB | cflag::CRTSCTS;
+    let line = Line::from_cflag(flags, 0);
+    assert_eq!(
+        line,
+        Line { rate: 115_200, data_bits: 7, parity: Parity::Even, stop: Stop::Two, rts_cts: true }
+    );
+    // Mark parity, five bits and a half stop bit more, and a speed of its own.
+    let line = Line::from_cflag(
+        cflag::BOTHER | cflag::PARENB | cflag::PARODD | cflag::CMSPAR | cflag::CSTOPB,
+        250_000,
+    );
+    assert_eq!(
+        (line.rate, line.data_bits, line.parity, line.stop),
+        (250_000, 5, Parity::Mark, Stop::OneAndHalf)
+    );
+    assert_eq!(Line::from_cflag(0, 0).rate, 0);
+    assert_eq!(serial::acm::line_coding(&start), [0x80, 0x25, 0, 0, 0, 0, 8]);
+    let coding = serial::acm::line_coding(&Line::from_cflag(flags, 0));
+    assert_eq!(coding, [0x00, 0xc2, 0x01, 0x00, 2, 2, 7]);
+    let setup = Setup::set_line_coding(3);
+    assert_eq!((setup.request_type, setup.request, setup.index, setup.length), (0x21, 0x20, 3, 7));
+    let setup = Setup::set_control_lines(3, serial::acm::DTR | serial::acm::RTS);
+    assert_eq!((setup.request_type, setup.request, setup.value), (0x21, 0x22, 3));
+}
+
+#[test]
+fn ftdi_divisors_are_as_ftdi_gives_them() {
+    use serial::ftdi::{Chip, baud_rate, divisor, rate_of_divisor};
+    // AN232B-05's: 9600 is 312.5 (0x4138), 115200 is 26 (0x1a), and the
+    // two below 2.
+    assert_eq!(divisor(Chip::Bm, 9600), Some(0x4138));
+    assert_eq!(divisor(Chip::Bm, 115_200), Some(0x1a));
+    assert_eq!(divisor(Chip::Bm, 3_000_000), Some(0));
+    assert_eq!(divisor(Chip::Bm, 2_000_000), Some(1));
+    assert_eq!(divisor(Chip::Bm, 0), None);
+    assert_eq!(divisor(Chip::Bm, 4_000_000), None);
+    // Too slow for 14 bits.
+    assert_eq!(divisor(Chip::Bm, 100), None);
+    // The H series' 12 MHz, with bit 17.
+    assert_eq!(divisor(Chip::Ft232h, 115_200), Some(0x2_c068));
+    assert_eq!(divisor(Chip::Ft232h, 12_000_000), Some(0x2_0000));
+    assert_eq!(divisor(Chip::Ft232h, 300), divisor(Chip::Bm, 300));
+    for chip in [Chip::Am, Chip::Bm, Chip::Ft232r, Chip::Ft2232h] {
+        for rate in [300, 1200, 9600, 19200, 38400, 57600, 115_200, 230_400, 460_800, 921_600] {
+            let got = rate_of_divisor(chip, divisor(chip, rate).unwrap());
+            let off = (f64::from(got) - f64::from(rate)).abs() / f64::from(rate);
+            assert!(off < 0.03, "{chip:?} at {rate}: {got}");
+        }
+    }
+    // A single port's divisor's high bits in wIndex; a dual one's above
+    // the port's number.
+    let setup = baud_rate(Chip::Bm, 0, 9600).unwrap();
+    assert_eq!((setup.request_type, setup.request, setup.value, setup.index), (0x40, 3, 0x4138, 0));
+    let setup = baud_rate(Chip::Ft2232h, 2, 115_200).unwrap();
+    assert_eq!((setup.value, setup.index), (0xc068, 0x0202));
+}
+
+#[test]
+fn ftdi_requests_and_packets() {
+    use serial::ftdi;
+    let line = serial::Line::from_cflag(0o10002 | 0o40 | serial::cflag::PARENB, 0);
+    assert_eq!(ftdi::data(1, &line).value, 7 | 2 << 8);
+    assert_eq!(ftdi::modem_control(0, true).value, 0x0303);
+    assert_eq!(ftdi::modem_control(0, false).value, 0x0300);
+    assert_eq!(ftdi::flow_control(1, true).index, 0x0101);
+    assert_eq!(ftdi::reset(1).request, ftdi::request::RESET);
+    // A packet of eight bytes and a short one, each with its status.
+    let came = [1, 0x60, b'a', b'b', b'c', b'd', b'e', b'f', 1, 0x60, b'g', b'h'];
+    let mut out = [0u8; 16];
+    assert_eq!(ftdi::strip(&came, 8, &mut out), 8);
+    assert_eq!(&out[..8], b"abcdefgh");
+    // Only the status: nothing came.
+    assert_eq!(ftdi::strip(&[1, 0x60], 64, &mut out), 0);
+    let mut small = [0u8; 3];
+    assert_eq!(ftdi::strip(&came, 8, &mut small), 3);
+}
+
+proptest! {
+    #[test]
+    fn ftdi_divisors_round_trip(rate in 200u32..2_000_000, h in any::<bool>()) {
+        let chip = if h { serial::ftdi::Chip::Ft232h } else { serial::ftdi::Chip::Ft232r };
+        if let Some(encoded) = serial::ftdi::divisor(chip, rate) {
+            let got = serial::ftdi::rate_of_divisor(chip, encoded);
+            let off = (f64::from(got) - f64::from(rate)).abs() / f64::from(rate);
+            prop_assert!(off <= 0.2, "{} {}", rate, got);
+        }
+    }
+
+    #[test]
+    fn serial_ports_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..200)) {
+        if let Some(config) = Configuration::parse(&bytes) {
+            let (device, _) = ftdi_device(0x6001, 0x0400, 1);
+            let (acm, _) = acm_device();
+            let mut ports = [serial::Port {
+                protocol: serial::Protocol::Acm { control: 0 },
+                data: 0,
+                bulk_in: EndpointDescriptor::default(),
+                bulk_out: EndpointDescriptor::default(),
+            }; 2];
+            let _ = serial::ports(&device, &config, &mut ports);
+            let _ = serial::ports(&acm, &config, &mut ports);
+        }
+    }
+}
