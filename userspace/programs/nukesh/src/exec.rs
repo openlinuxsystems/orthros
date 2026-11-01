@@ -1517,7 +1517,11 @@ impl Shell {
                             // A bundle has it (ADR 0275): its install
                             // command is the next line's hint.
                             Some((id, about)) => {
-                                let about = if about.is_empty() { String::new() } else { format!(" ({about})") };
+                                let about = if about.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" ({about})")
+                                };
                                 self.error(&format!(
                                     "{printable}: command not found. The bundle {id}{about} has it: → puts its install command in the line"
                                 ));

@@ -221,7 +221,11 @@ pub fn notification(
         title,
         body: clean(&request.body, BODY_MAX, true),
         seconds,
-        terminal: request.terminal.as_deref().map(|t| clean(t, 32, false)).filter(|t| !t.is_empty()),
+        terminal: request
+            .terminal
+            .as_deref()
+            .map(|t| clean(t, 32, false))
+            .filter(|t| !t.is_empty()),
     })
 }
 

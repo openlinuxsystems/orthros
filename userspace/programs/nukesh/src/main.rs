@@ -86,7 +86,8 @@ struct Invocation {
     operands: Vec<String>,
 }
 
-const USAGE: &str = "usage: nukesh [--posix] [--login] [--norc] [--noprofile] [--private] [--rcfile file]
+const USAGE: &str =
+    "usage: nukesh [--posix] [--login] [--norc] [--noprofile] [--private] [--rcfile file]
               [-abefhimnprstuvxBCEHPT] [-o option] [-O shopt]
               [-c command [name [argument...]] | -s [argument...] | [script [argument...]]]
        nukesh --colors [--check] [file...]

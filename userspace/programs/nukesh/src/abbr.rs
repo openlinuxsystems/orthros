@@ -66,7 +66,8 @@ fn valid(name: &str) -> bool {
 /// or a reserved word that runs a command next.
 fn command_word(line: &str, end: usize) -> Option<usize> {
     let before = &line[..end];
-    let start = before.rfind(|c: char| c.is_whitespace() || "|&;()".contains(c)).map_or(0, |i| i + 1);
+    let start =
+        before.rfind(|c: char| c.is_whitespace() || "|&;()".contains(c)).map_or(0, |i| i + 1);
     let mut rest = before[..start].trim_end();
     loop {
         if rest.is_empty() || rest.ends_with(['|', '&', ';', '(', '!']) {

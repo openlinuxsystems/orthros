@@ -21,8 +21,18 @@ use crate::colors::Problem;
 pub const SYSTEM_FILE: &str = "/system/settings/nukesh/settings.toml";
 
 /// A person's own, under their home.
-const SECTIONS: &[&str] =
-    &["files", "prompt", "notify", "nebix", "suggest", "accessibility", "terminal", "history", "commands", "folders"];
+const SECTIONS: &[&str] = &[
+    "files",
+    "prompt",
+    "notify",
+    "nebix",
+    "suggest",
+    "accessibility",
+    "terminal",
+    "history",
+    "commands",
+    "folders",
+];
 
 pub const USER_FILE: &str = ".config/nukesh/settings.toml";
 
@@ -128,15 +138,23 @@ impl Settings {
             };
             for (key, value) in keys {
                 match (section.as_str(), key.as_str()) {
-                    ("notify", "after") => match value.as_integer().and_then(|n| u64::try_from(n).ok()) {
-                        Some(n) => self.notify_after = n,
-                        None => problems.push(format!("[notify] {key}: a number of seconds")),
-                    },
-                    (section, key) if self.switch(section, key).is_some() => match value.as_bool() {
-                        Some(on) => *self.switch(section, key).unwrap_or_else(|| unreachable!()) = on,
-                        None => problems.push(format!("[{section}] {key}: true or false")),
-                    },
-                    (section, _) if SECTIONS.contains(&section) => problems.push(format!("[{section}] {key}: no such key")),
+                    ("notify", "after") => {
+                        match value.as_integer().and_then(|n| u64::try_from(n).ok()) {
+                            Some(n) => self.notify_after = n,
+                            None => problems.push(format!("[notify] {key}: a number of seconds")),
+                        }
+                    }
+                    (section, key) if self.switch(section, key).is_some() => {
+                        match value.as_bool() {
+                            Some(on) => {
+                                *self.switch(section, key).unwrap_or_else(|| unreachable!()) = on
+                            }
+                            None => problems.push(format!("[{section}] {key}: true or false")),
+                        }
+                    }
+                    (section, _) if SECTIONS.contains(&section) => {
+                        problems.push(format!("[{section}] {key}: no such key"))
+                    }
                     _ => {
                         problems.push(format!("[{section}]: no such section"));
                         break;
@@ -187,7 +205,9 @@ mod tests {
     #[test]
     fn keys_are_checked() {
         let mut settings = Settings::default();
-        let problems = settings.apply("[files]\nshow-hidden = true\n[notify]\nafter = \"x\"\nloud = 1\n[nope]\na = 1\n");
+        let problems = settings.apply(
+            "[files]\nshow-hidden = true\n[notify]\nafter = \"x\"\nloud = 1\n[nope]\na = 1\n",
+        );
         assert_eq!(problems.len(), 3, "{problems:?}");
         assert!(settings.show_hidden);
         assert_eq!(settings.notify_after, 30);
@@ -197,12 +217,16 @@ mod tests {
     fn show_hidden_shows_them() {
         let mut shell = crate::shell::Shell::new("test", false);
         shell.aliases.insert("ls".into(), "ls --color=auto".into());
-        shell.settings = std::rc::Rc::new(Settings { show_hidden: true, links: false, ..Settings::default() });
+        shell.settings =
+            std::rc::Rc::new(Settings { show_hidden: true, links: false, ..Settings::default() });
         apply_to(&mut shell);
         assert!(shell.shopt("dotglob"));
         assert_eq!(shell.aliases.get("ls").map(String::as_str), Some("ls --color=auto -A"));
         shell.settings = std::rc::Rc::new(Settings::default());
         apply_to(&mut shell);
-        assert_eq!(shell.aliases.get("ls").map(String::as_str), Some("ls --color=auto -A --hyperlink=auto"));
+        assert_eq!(
+            shell.aliases.get("ls").map(String::as_str),
+            Some("ls --color=auto -A --hyperlink=auto")
+        );
     }
 }

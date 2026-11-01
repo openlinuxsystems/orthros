@@ -134,7 +134,8 @@ pub fn run(shell: Shell) -> i32 {
                 let result = run_line(&mut shell, &text, line_number);
                 line_number += lines;
                 if marks {
-                    let _ = sys::write_all(1, format!("\x1b]133;D;{}\x1b\\", shell.status).as_bytes());
+                    let _ =
+                        sys::write_all(1, format!("\x1b]133;D;{}\x1b\\", shell.status).as_bytes());
                 }
                 after_command(&mut shell, &text, &folder, started);
                 if let Some(code) = result {

@@ -46,7 +46,15 @@ pub struct ShellHinter {
 
 impl ShellHinter {
     pub fn new(shell: Handle, style: nu_ansi_term::Style, history: bool, options: bool) -> Self {
-        ShellHinter { shell, style, history, options, shown: String::new(), taken: String::new(), empty: None }
+        ShellHinter {
+            shell,
+            style,
+            history,
+            options,
+            shown: String::new(),
+            taken: String::new(),
+            empty: None,
+        }
     }
 }
 
@@ -66,7 +74,8 @@ impl Hinter for ShellHinter {
         }
         let Ok(mut shell) = self.shell.0.try_borrow_mut() else { return String::new() };
         if line.is_empty() {
-            let key = (shell.last_command.clone(), shell.status, shell.get("PWD").unwrap_or_default());
+            let key =
+                (shell.last_command.clone(), shell.status, shell.get("PWD").unwrap_or_default());
             if self.empty.as_ref().is_none_or(|(k, _, _)| *k != key) {
                 let (shown, taken) = empty_line_hint(&shell, &key.0, key.1, &key.2);
                 self.empty = Some((key, shown, taken));
@@ -86,7 +95,10 @@ impl Hinter for ShellHinter {
             // Syntax mistakes, before Enter (ADR 0274); → takes nothing.
             self.shown = match token {
                 Some(token) => format!("  ← `{token}` cannot go there"),
-                None => format!("  ← {}", message.trim_start_matches("syntax error").trim_start_matches(": ").trim()),
+                None => format!(
+                    "  ← {}",
+                    message.trim_start_matches("syntax error").trim_start_matches(": ").trim()
+                ),
             };
         } else if self.options
             && let Some((rest, about)) = option_help(&mut shell, line)
@@ -363,8 +375,14 @@ mod tests {
         let mut shell = Shell::new("test", false);
         shell.set_var("NUKESH_COMPLETION_PATH", dir.to_str().unwrap());
         let help = |shell: &mut Shell, line: &str| option_help(shell, line);
-        assert_eq!(help(&mut shell, "tool -l"), Some((String::new(), "use a long listing format".into())));
-        assert_eq!(help(&mut shell, "tool --lo"), Some(("ng".into(), "use a long listing format".into())));
+        assert_eq!(
+            help(&mut shell, "tool -l"),
+            Some((String::new(), "use a long listing format".into()))
+        );
+        assert_eq!(
+            help(&mut shell, "tool --lo"),
+            Some(("ng".into(), "use a long listing format".into()))
+        );
         assert_eq!(help(&mut shell, "tool --colo"), Some(("r".into(), "colour the output".into())));
         // --co could be --color or --count.
         assert_eq!(help(&mut shell, "tool --co"), None);
@@ -377,7 +395,10 @@ mod tests {
     fn heads_name_their_branch() {
         assert_eq!(branch_of("ref: refs/heads/main\n").as_deref(), Some("main"));
         assert_eq!(branch_of("ref: refs/heads/feature/x").as_deref(), Some("feature/x"));
-        assert_eq!(branch_of("8f5747610fc618b79e7901b5f1b36a1f95968c44").as_deref(), Some("8f57476"));
+        assert_eq!(
+            branch_of("8f5747610fc618b79e7901b5f1b36a1f95968c44").as_deref(),
+            Some("8f57476")
+        );
         assert_eq!(branch_of("junk"), None);
     }
 }

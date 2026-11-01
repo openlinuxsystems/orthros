@@ -133,9 +133,7 @@ impl Records {
     /// of other shells, at the next [`Records::refresh`].
     pub fn add(&mut self, record: &Record) {
         let Some(path) = &self.path else { return };
-        let open = || {
-            std::fs::OpenOptions::new().append(true).create(true).mode(0o600).open(path)
-        };
+        let open = || std::fs::OpenOptions::new().append(true).create(true).mode(0o600).open(path);
         let opened = open().or_else(|err| {
             // The first: its folder, which only its owner may read.
             let dir = std::path::Path::new(path).parent().ok_or(err)?;
@@ -159,7 +157,9 @@ impl Records {
         let start = self.all.len().saturating_sub(KEEP);
         let kept: String = self.all[start..].iter().map(Record::line).collect();
         let temporary = format!("{path}.new");
-        if std::fs::write(&temporary, kept.as_bytes()).is_ok() && std::fs::rename(&temporary, path).is_ok() {
+        if std::fs::write(&temporary, kept.as_bytes()).is_ok()
+            && std::fs::rename(&temporary, path).is_ok()
+        {
             self.all.drain(..start);
             self.offset = kept.len() as u64;
         }
@@ -241,7 +241,8 @@ impl Records {
 /// start, and a match at the start score more; an empty `typed` matches
 /// everything alike.
 pub fn fuzzy(typed: &str, text: &str) -> Option<i64> {
-    let typed: Vec<char> = typed.chars().flat_map(char::to_lowercase).filter(|c| !c.is_whitespace()).collect();
+    let typed: Vec<char> =
+        typed.chars().flat_map(char::to_lowercase).filter(|c| !c.is_whitespace()).collect();
     if typed.is_empty() {
         return Some(0);
     }
@@ -250,7 +251,8 @@ pub fn fuzzy(typed: &str, text: &str) -> Option<i64> {
     let mut at = 0;
     let mut last: Option<usize> = None;
     for wanted in typed {
-        let found = (at..text.len()).find(|&i| text[i].to_lowercase().eq(std::iter::once(wanted)))?;
+        let found =
+            (at..text.len()).find(|&i| text[i].to_lowercase().eq(std::iter::once(wanted)))?;
         score += 1;
         if last.is_some_and(|l| l + 1 == found) {
             score += 5;
@@ -336,7 +338,10 @@ mod tests {
         assert_eq!(two.all.len(), 1);
         two.add(&record(2, "/b", "make clean"));
         one.refresh();
-        assert_eq!(one.all.iter().map(|r| r.command.as_str()).collect::<Vec<_>>(), ["make test", "make clean"]);
+        assert_eq!(
+            one.all.iter().map(|r| r.command.as_str()).collect::<Vec<_>>(),
+            ["make test", "make clean"]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -392,7 +397,12 @@ mod tests {
         assert_eq!(records.next_after("", "/p"), None);
         // Too long after is not next.
         let records = Records {
-            all: vec![record(0, "/p", "a"), record(5000, "/p", "b"), record(6000, "/p", "a"), record(9000, "/p", "b")],
+            all: vec![
+                record(0, "/p", "a"),
+                record(5000, "/p", "b"),
+                record(6000, "/p", "a"),
+                record(9000, "/p", "b"),
+            ],
             ..Records::default()
         };
         assert_eq!(records.next_after("a", "/p"), None);

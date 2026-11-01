@@ -314,26 +314,42 @@ mod tests {
 
     #[test]
     fn fits_the_line() {
-        let shown = Shown { text: "a: b".into(), urgency: Urgency::Normal, until: None, terminal: None };
+        let shown =
+            Shown { text: "a: b".into(), urgency: Urgency::Normal, until: None, terminal: None };
         let cells = shown.cells(10);
         assert_eq!(text(&cells), " a: b     ");
         assert_eq!((cells[0].fg, cells[0].bg), (15, 4));
-        let shown = Shown { text: "x: 0123456789".into(), urgency: Urgency::Critical, until: None, terminal: None };
+        let shown = Shown {
+            text: "x: 0123456789".into(),
+            urgency: Urgency::Critical,
+            until: None,
+            terminal: None,
+        };
         let cells = shown.cells(10);
         assert_eq!(text(&cells), " x: 012...");
         assert_eq!(cells.len(), 10);
         assert_eq!((cells[1].bg, cells[1].flags), (1, BOLD));
         // Exactly full: no dots.
-        let shown = Shown { text: "x: 012345".into(), urgency: Urgency::Low, until: None, terminal: None };
+        let shown =
+            Shown { text: "x: 012345".into(), urgency: Urgency::Low, until: None, terminal: None };
         assert_eq!(text(&shown.cells(10)), " x: 012345");
         // Wide characters take two cells; control characters show as `?`.
-        let shown = Shown { text: "日本\u{1b}[2J".into(), urgency: Urgency::Normal, until: None, terminal: None };
+        let shown = Shown {
+            text: "日本\u{1b}[2J".into(),
+            urgency: Urgency::Normal,
+            until: None,
+            terminal: None,
+        };
         let cells = shown.cells(12);
         assert_eq!(text(&cells), " 日本?[2J   ");
         assert_eq!(cells[2].flags & WIDE_TAIL, WIDE_TAIL);
         // A wide character that would not fit before the dots goes.
-        let shown =
-            Shown { text: "ab日本語です".into(), urgency: Urgency::Normal, until: None, terminal: None };
+        let shown = Shown {
+            text: "ab日本語です".into(),
+            urgency: Urgency::Normal,
+            until: None,
+            terminal: None,
+        };
         let cells = shown.cells(8);
         assert_eq!((cells.len(), text(&cells).as_str()), (8, " ab日..."));
     }

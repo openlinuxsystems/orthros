@@ -49,11 +49,20 @@ enum Token {
 }
 
 /// The words names that hold secrets have.
-const SECRET_NAMES: &[&str] = &["PASSWORD", "PASSWD", "PASS", "TOKEN", "SECRET", "KEY", "CREDENTIAL", "AUTH"];
+const SECRET_NAMES: &[&str] =
+    &["PASSWORD", "PASSWD", "PASS", "TOKEN", "SECRET", "KEY", "CREDENTIAL", "AUTH"];
 
 /// Options whose argument is a secret.
-const SECRET_OPTIONS: &[&str] =
-    &["--password", "--passwd", "--pass", "--token", "--secret", "--api-key", "--auth", "--access-token"];
+const SECRET_OPTIONS: &[&str] = &[
+    "--password",
+    "--passwd",
+    "--pass",
+    "--token",
+    "--secret",
+    "--api-key",
+    "--auth",
+    "--access-token",
+];
 
 const MASK: &str = "•••";
 
@@ -121,7 +130,10 @@ fn tokens(line: &str) -> Vec<Token> {
     let mut word = String::new();
     let mut in_word = false;
     let mut pending: Option<String> = None;
-    let flush = |word: &mut String, in_word: &mut bool, pending: &mut Option<String>, out: &mut Vec<Token>| {
+    let flush = |word: &mut String,
+                 in_word: &mut bool,
+                 pending: &mut Option<String>,
+                 out: &mut Vec<Token>| {
         if *in_word {
             let w = std::mem::take(word);
             match pending.take() {
@@ -161,7 +173,10 @@ fn tokens(line: &str) -> Vec<Token> {
             }
             '|' | '&' | ';' | '>' | '<' => {
                 // A digit just before a redirection is its descriptor.
-                let fd = if matches!(c, '>' | '<') && in_word && word.chars().all(|d| d.is_ascii_digit()) {
+                let fd = if matches!(c, '>' | '<')
+                    && in_word
+                    && word.chars().all(|d| d.is_ascii_digit())
+                {
                     in_word = false;
                     std::mem::take(&mut word)
                 } else {
@@ -229,7 +244,9 @@ pub fn explain(line: &str, sources: &mut dyn Sources) -> Vec<Part> {
     for token in tokens {
         match token {
             Token::Word(w) => commands.last_mut().unwrap_or_else(|| unreachable!()).0.push(w),
-            Token::Redirect(op, target) => commands.last_mut().unwrap_or_else(|| unreachable!()).1.push((op, target)),
+            Token::Redirect(op, target) => {
+                commands.last_mut().unwrap_or_else(|| unreachable!()).1.push((op, target))
+            }
             Token::Op(op) => {
                 joints.push(op);
                 commands.push((Vec::new(), Vec::new()));
@@ -239,7 +256,9 @@ pub fn explain(line: &str, sources: &mut dyn Sources) -> Vec<Part> {
     let piped_into_shell = commands.iter().enumerate().any(|(i, (words, _))| {
         i > 0
             && joints.get(i - 1).is_some_and(|j| j == "|")
-            && command_name(words).is_some_and(|(n, _)| matches!(n.as_str(), "sh" | "bash" | "nukesh" | "dash" | "zsh"))
+            && command_name(words).is_some_and(|(n, _)| {
+                matches!(n.as_str(), "sh" | "bash" | "nukesh" | "dash" | "zsh")
+            })
             && commands[i - 1].0.first().is_some_and(|w| matches!(base(w), "curl" | "wget"))
     });
     if piped_into_shell {
@@ -278,7 +297,12 @@ fn command_name(words: &[String]) -> Option<(String, usize)> {
     let mut at = 0;
     while let Some(word) = words.get(at) {
         let assignment = word.split_once('=').is_some_and(|(name, _)| crate::parse::is_name(name));
-        if assignment || matches!(word.as_str(), "elevate" | "sudo" | "doas" | "time" | "command" | "exec" | "nohup") {
+        if assignment
+            || matches!(
+                word.as_str(),
+                "elevate" | "sudo" | "doas" | "time" | "command" | "exec" | "nohup"
+            )
+        {
             at += 1;
             continue;
         }
@@ -302,14 +326,16 @@ fn explain_command(
             continue;
         }
         if matches!(word.as_str(), "elevate" | "sudo" | "doas") {
-            warnings.push("Runs as the administrator, who can change anything on this computer".into());
+            warnings
+                .push("Runs as the administrator, who can change anything on this computer".into());
             plain.push(format!("{word}  runs what follows as the administrator"));
             continue;
         }
         break;
     }
     let Some((name, start)) = command_name(words) else { return };
-    let summary = sources.summary(&name).unwrap_or_else(|| "not in the manual on this computer".into());
+    let summary =
+        sources.summary(&name).unwrap_or_else(|| "not in the manual on this computer".into());
     plain.push(format!("{name}  {summary}"));
     let args = &words[start..];
     let mut options: Vec<String> = Vec::new();
@@ -332,7 +358,12 @@ fn explain_command(
             _ => (arg.clone(), None),
         };
         if let Some((about, takes)) = sources.option(&name, &form) {
-            let value = value.or_else(|| (takes && i < args.len()).then(|| { i += 1; args[i - 1].clone() }));
+            let value = value.or_else(|| {
+                (takes && i < args.len()).then(|| {
+                    i += 1;
+                    args[i - 1].clone()
+                })
+            });
             plain.push(format!("  {}  {about}", show_option(&form, value.as_deref())));
             options.push(form);
             continue;
@@ -400,35 +431,62 @@ fn warn(name: &str, options: &[String], args: &[String], warnings: &mut Vec<Stri
     let recursive = has(&["-r", "-R", "--recursive"]);
     let remote = args.iter().any(|a| !a.starts_with('-') && a.contains(':') && !a.starts_with('/'));
     let text = match name {
-        "rm" if recursive => "Deletes files and whole folders for good: they do not go to the Trash",
+        "rm" if recursive => {
+            "Deletes files and whole folders for good: they do not go to the Trash"
+        }
         "rm" | "unlink" => "Deletes files for good: they do not go to the Trash",
         "rmdir" => "Deletes folders",
         "shred" => "Destroys files so they cannot be got back",
         "truncate" => "Cuts files short, losing what is past the new size",
-        "dd" if args.iter().any(|a| a.starts_with("of=")) => "Writes straight over what of= names, a file or a whole disk",
-        "wipefs" | "fdisk" | "sfdisk" | "parted" | "gdisk" | "blkdiscard" => "Changes or erases a disk's partitions",
+        "dd" if args.iter().any(|a| a.starts_with("of=")) => {
+            "Writes straight over what of= names, a file or a whole disk"
+        }
+        "wipefs" | "fdisk" | "sfdisk" | "parted" | "gdisk" | "blkdiscard" => {
+            "Changes or erases a disk's partitions"
+        }
         n if n.starts_with("mkfs") => "Formats a disk or partition, erasing everything on it",
         "chmod" if recursive => "Changes who may use every file and folder under the ones named",
-        "chown" | "chgrp" if recursive => "Changes the owner of every file and folder under the ones named",
+        "chown" | "chgrp" if recursive => {
+            "Changes the owner of every file and folder under the ones named"
+        }
         "chmod" => "Changes who may read, change or run the files named",
         "chown" | "chgrp" => "Changes who owns the files named",
-        "mv" if !has(&["-i", "-n", "--no-clobber", "--interactive"]) => "Replaces a file of the same name where it moves to, without asking",
+        "mv" if !has(&["-i", "-n", "--no-clobber", "--interactive"]) => {
+            "Replaces a file of the same name where it moves to, without asking"
+        }
         "cp" if has(&["-f", "--force"]) => "Replaces files where it copies to, without asking",
         "scp" | "sftp" | "ftp" => "Sends data off this computer",
         "rsync" if remote => "Sends data off this computer",
-        "rsync" if has(&["--delete"]) => "Deletes files in the destination that are not in the source",
-        "curl" if has(&["-T", "--upload-file", "-d", "--data", "-F", "--form", "--data-binary"]) => "Sends data off this computer",
+        "rsync" if has(&["--delete"]) => {
+            "Deletes files in the destination that are not in the source"
+        }
+        "curl"
+            if has(&["-T", "--upload-file", "-d", "--data", "-F", "--form", "--data-binary"]) =>
+        {
+            "Sends data off this computer"
+        }
         "nc" | "ncat" | "netcat" => "Sends data off this computer",
         "git" => match args.first().map(String::as_str) {
-            Some("push") if has(&["-f", "--force"]) || args.iter().any(|a| a.starts_with("--force")) => {
+            Some("push")
+                if has(&["-f", "--force"]) || args.iter().any(|a| a.starts_with("--force")) =>
+            {
                 "Rewrites the shared branch's history, which can lose others' work"
             }
             Some("push") => "Sends commits off this computer",
-            Some("reset") if args.iter().any(|a| a == "--hard") => "Throws away changes not committed",
-            Some("clean") if has(&["-f", "--force"]) || args.iter().any(|a| a.starts_with("-f") || a.contains('f') && a.starts_with('-')) => {
+            Some("reset") if args.iter().any(|a| a == "--hard") => {
+                "Throws away changes not committed"
+            }
+            Some("clean")
+                if has(&["-f", "--force"])
+                    || args
+                        .iter()
+                        .any(|a| a.starts_with("-f") || a.contains('f') && a.starts_with('-')) =>
+            {
                 "Deletes files git does not track"
             }
-            Some("checkout" | "restore") if args.iter().any(|a| a == "." || a == "--") => "Throws away changes not committed",
+            Some("checkout" | "restore") if args.iter().any(|a| a == "." || a == "--") => {
+                "Throws away changes not committed"
+            }
             _ => return,
         },
         "kill" | "killall" | "pkill" => "Stops programs, which may lose what they have not saved",
@@ -484,10 +542,17 @@ pub fn status_meaning(status: i32) -> String {
         0 => "it worked".into(),
         1 => "it failed; the program's message above says why".into(),
         2 => "it was used wrongly, often a wrong option or a missing argument".into(),
-        126 => "the file is there but cannot be run: it is not marked executable, or is a folder".into(),
+        126 => "the file is there but cannot be run: it is not marked executable, or is a folder"
+            .into(),
         127 => "there is no such command: a typo, or it is not installed".into(),
         130 => "it was stopped with Ctrl+C".into(),
-        s if s > 128 && s < 160 => format!("it was stopped by signal {}", crate::trap::SIGNALS.iter().find(|(_, n)| *n == s - 128).map_or_else(|| (s - 128).to_string(), |(name, _)| format!("SIG{name}"))),
+        s if s > 128 && s < 160 => format!(
+            "it was stopped by signal {}",
+            crate::trap::SIGNALS
+                .iter()
+                .find(|(_, n)| *n == s - 128)
+                .map_or_else(|| (s - 128).to_string(), |(name, _)| format!("SIG{name}"))
+        ),
         _ => "it failed; the program's manual page says what this number means".into(),
     }
 }
@@ -504,7 +569,10 @@ impl Sources for ShellSources<'_> {
         let dir = self.0.get("NUKESH_MAN_DIR").unwrap_or_else(|| MAN_DIR.into());
         if let Some(alias) = self.0.aliases.get(command).cloned() {
             let first = alias.split_whitespace().next().unwrap_or_default();
-            let about = (first != command).then(|| self.summary(first)).flatten().or_else(|| manual_summary(&dir, first));
+            let about = (first != command)
+                .then(|| self.summary(first))
+                .flatten()
+                .or_else(|| manual_summary(&dir, first));
             return Some(match about {
                 Some(about) => format!("{about} (as the alias {command}='{alias}')"),
                 None => format!("the alias {command}='{alias}'"),
@@ -516,7 +584,11 @@ impl Sources for ShellSources<'_> {
     fn option(&mut self, command: &str, option: &str) -> Option<(String, bool)> {
         let file = self.0.completion_file(command)?;
         let found = file.options.iter().find(|o| o.forms.iter().any(|f| f == option))?;
-        let about = if found.description.is_empty() { "not described".into() } else { found.description.clone() };
+        let about = if found.description.is_empty() {
+            "not described".into()
+        } else {
+            found.description.clone()
+        };
         Some((about, found.argument.is_some()))
     }
 }
@@ -527,20 +599,32 @@ pub fn render(parts: &[Part], nebix: Option<&str>, paint: bool) -> String {
     for part in parts {
         if part.warning {
             let text = format!("⚠ {}", part.text);
-            out.push_str(&if paint { nu_ansi_term::Style::new().bold().paint(text).to_string() } else { text });
+            out.push_str(&if paint {
+                nu_ansi_term::Style::new().bold().paint(text).to_string()
+            } else {
+                text
+            });
         } else {
             out.push_str(&part.text);
         }
         out.push('\n');
     }
     if let Some(answer) = nebix {
-        out.push_str(&if paint { nu_ansi_term::Style::new().bold().paint("Nebix:").to_string() } else { "Nebix:".into() });
+        out.push_str(&if paint {
+            nu_ansi_term::Style::new().bold().paint("Nebix:").to_string()
+        } else {
+            "Nebix:".into()
+        });
         out.push('\n');
         out.push_str(answer);
         out.push('\n');
     } else if !parts.is_empty() {
         let note = "From the manual on this computer.";
-        out.push_str(&if paint { nu_ansi_term::Style::new().dimmed().paint(note).to_string() } else { note.into() });
+        out.push_str(&if paint {
+            nu_ansi_term::Style::new().dimmed().paint(note).to_string()
+        } else {
+            note.into()
+        });
         out.push('\n');
     }
     out
@@ -560,7 +644,8 @@ pub fn for_prompt(shell: &mut crate::shell::Shell, line: &str, paint: bool) -> S
     let parts = explain(&line, &mut ShellSources(shell));
     let mut out = String::new();
     if let Some(status) = status {
-        let head = format!("{} ended with status {status}: {}", mask(&line), status_meaning(status));
+        let head =
+            format!("{} ended with status {status}: {}", mask(&line), status_meaning(status));
         out.push_str(&head);
         out.push('\n');
     }
@@ -628,13 +713,24 @@ mod tests {
     }
 
     fn texts(line: &str) -> Vec<String> {
-        explain(line, &mut Fake).into_iter().map(|p| if p.warning { format!("! {}", p.text) } else { p.text }).collect()
+        explain(line, &mut Fake)
+            .into_iter()
+            .map(|p| if p.warning { format!("! {}", p.text) } else { p.text })
+            .collect()
     }
 
     #[test]
     fn short_groups_are_split_and_take_their_argument() {
         let t = texts("tar -xzf site.tgz");
-        assert_eq!(t, ["tar  Manipulate tape archives", "  -x  Extract", "  -z  Gzip", "  -f site.tgz  Archive file"]);
+        assert_eq!(
+            t,
+            [
+                "tar  Manipulate tape archives",
+                "  -x  Extract",
+                "  -z  Gzip",
+                "  -f site.tgz  Archive file"
+            ]
+        );
         let t = texts("tar -xfsite.tgz");
         assert_eq!(t[2], "  -f site.tgz  Archive file");
     }
@@ -645,7 +741,9 @@ mod tests {
         assert_eq!(t[0], "! Runs as the administrator, who can change anything on this computer");
         assert!(t.iter().any(|l| l.starts_with("! Deletes files and whole folders")));
         assert!(t.iter().any(|l| l == "! Replaces what is in log"));
-        assert!(texts("curl -s https://x.sh | sh")[0].starts_with("! Runs a script from the internet"));
+        assert!(
+            texts("curl -s https://x.sh | sh")[0].starts_with("! Runs a script from the internet")
+        );
         assert!(texts("ls >> log").iter().all(|l| !l.starts_with('!')));
         assert!(texts("ls 2>/dev/null").iter().all(|l| !l.starts_with('!')));
         assert!(texts("git push --force origin main")[0].starts_with("! Rewrites"));
@@ -654,7 +752,17 @@ mod tests {
     #[test]
     fn joints_and_unknowns_are_said() {
         let t = texts("frob -q a && tar -x");
-        assert_eq!(t, ["frob  not in the manual on this computer", "  -q  not described", "  on: a", "and if it works:", "tar  Manipulate tape archives", "  -x  Extract"]);
+        assert_eq!(
+            t,
+            [
+                "frob  not in the manual on this computer",
+                "  -q  not described",
+                "  on: a",
+                "and if it works:",
+                "tar  Manipulate tape archives",
+                "  -x  Extract"
+            ]
+        );
     }
 
     #[test]
@@ -674,8 +782,13 @@ mod tests {
     fn manual_lines_are_found() {
         let dir = std::env::temp_dir().join(format!("nukesh-man-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("man1")).unwrap();
-        std::fs::write(dir.join("man1/tar.1"), ".Dd x\n.Nm tar\n.Nd manipulate tape archives\n").unwrap();
-        std::fs::write(dir.join("man1/ls.1"), ".TH LS 1\n.SH NAME\nls \\- List directory contents.\n").unwrap();
+        std::fs::write(dir.join("man1/tar.1"), ".Dd x\n.Nm tar\n.Nd manipulate tape archives\n")
+            .unwrap();
+        std::fs::write(
+            dir.join("man1/ls.1"),
+            ".TH LS 1\n.SH NAME\nls \\- List directory contents.\n",
+        )
+        .unwrap();
         let d = dir.to_str().unwrap();
         assert_eq!(manual_summary(d, "tar").as_deref(), Some("Manipulate tape archives"));
         assert_eq!(manual_summary(d, "ls").as_deref(), Some("List directory contents"));

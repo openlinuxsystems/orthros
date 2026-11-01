@@ -85,7 +85,11 @@ pub fn at_prompt_hang_up() {
         if let Some((path, data)) = &ready.history {
             // SAFETY: as above; the path is a C string of ours.
             unsafe {
-                let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT, 0o600);
+                let fd = libc::open(
+                    path.as_ptr(),
+                    libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT,
+                    0o600,
+                );
                 if fd >= 0 {
                     libc::write(fd, data.as_ptr().cast(), data.len());
                     libc::close(fd);

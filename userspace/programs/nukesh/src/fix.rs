@@ -21,19 +21,23 @@ pub const CATALOGUE: &str = "/system/state/bundled/catalogue-commands";
 
 /// Commands that only work for the administrator.
 const ADMIN_ONLY: &[&str] = &[
-    "mount", "umount", "fdisk", "sfdisk", "parted", "mkfs", "fsck", "wipefs", "modprobe", "reboot", "poweroff",
-    "shutdown", "useradd", "userdel", "usermod", "groupadd", "chroot", "iptables", "nft", "sysctl",
+    "mount", "umount", "fdisk", "sfdisk", "parted", "mkfs", "fsck", "wipefs", "modprobe", "reboot",
+    "poweroff", "shutdown", "useradd", "userdel", "usermod", "groupadd", "chroot", "iptables",
+    "nft", "sysctl",
 ];
 
 /// The bundle that has `command` in `catalogue`, and what it is.
 pub fn bundle_for(catalogue: &str, command: &str) -> Option<(String, String)> {
-    catalogue.lines().find_map(|line| {
-        let mut fields = line.split('\t');
-        (fields.next()? == command).then(|| {
-            let id = fields.next().unwrap_or_default().to_string();
-            (id, fields.next().unwrap_or_default().to_string())
+    catalogue
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split('\t');
+            (fields.next()? == command).then(|| {
+                let id = fields.next().unwrap_or_default().to_string();
+                (id, fields.next().unwrap_or_default().to_string())
+            })
         })
-    }).filter(|(id, _)| !id.is_empty())
+        .filter(|(id, _)| !id.is_empty())
 }
 
 /// The catalogue's bundle for `command`, read now.
@@ -61,7 +65,8 @@ pub fn fix(shell: &Shell, last: &str, status: i32) -> Option<String> {
         return None;
     }
     let rest = || words[1..].join(" ");
-    let joined = |head: &str| if words.len() > 1 { format!("{head} {}", rest()) } else { head.to_string() };
+    let joined =
+        |head: &str| if words.len() > 1 { format!("{head} {}", rest()) } else { head.to_string() };
     match status {
         127 => {
             if let Some(likely) = crate::suggest::did_you_mean(shell, first) {
@@ -86,7 +91,9 @@ pub fn fix(shell: &Shell, last: &str, status: i32) -> Option<String> {
                 .map(|e| e.file_name().to_string_lossy().into_owned())
                 .filter(|name| {
                     name.eq_ignore_ascii_case(base)
-                        || (base.chars().count() >= 3 && crate::suggest::distance(&base.to_lowercase(), &name.to_lowercase()) <= 1)
+                        || (base.chars().count() >= 3
+                            && crate::suggest::distance(&base.to_lowercase(), &name.to_lowercase())
+                                <= 1)
                 })
                 .collect();
             found.sort();
@@ -97,7 +104,10 @@ pub fn fix(shell: &Shell, last: &str, status: i32) -> Option<String> {
             };
             Some(format!("cd {fixed}"))
         }
-        s if s != 0 && s != 130 && ADMIN_ONLY.contains(&first.rsplit('/').next().unwrap_or(first)) => {
+        s if s != 0
+            && s != 130
+            && ADMIN_ONLY.contains(&first.rsplit('/').next().unwrap_or(first)) =>
+        {
             (crate::sys::geteuid() != 0).then(|| format!("elevate {last}"))
         }
         _ => None,
@@ -111,7 +121,10 @@ mod tests {
     #[test]
     fn the_catalogue_names_bundles() {
         let catalogue = "vim\torg.vim.Vim\tVi IMproved\nhtop\tdev.htop.Htop\t\n";
-        assert_eq!(bundle_for(catalogue, "vim"), Some(("org.vim.Vim".into(), "Vi IMproved".into())));
+        assert_eq!(
+            bundle_for(catalogue, "vim"),
+            Some(("org.vim.Vim".into(), "Vi IMproved".into()))
+        );
         assert_eq!(bundle_for(catalogue, "htop").map(|b| b.0).as_deref(), Some("dev.htop.Htop"));
         assert_eq!(bundle_for(catalogue, "emacs"), None);
     }

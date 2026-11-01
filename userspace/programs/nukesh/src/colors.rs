@@ -315,9 +315,8 @@ const SUGGEST: &[(&str, &str)] = &[
 ];
 
 /// The numbers: section, key, default and what it is.
-pub const NUMBERS: &[(&str, &str, u64, &str)] = &[
-    ("prompt", "took-after", 3, "seconds a command takes before the right prompt says how long"),
-];
+pub const NUMBERS: &[(&str, &str, u64, &str)] =
+    &[("prompt", "took-after", 3, "seconds a command takes before the right prompt says how long")];
 
 /// The themes, and the keys each changes from the defaults.
 /// A theme: its name, what it is for, and its keys.
@@ -519,7 +518,9 @@ impl Colors {
                         if NUMBERS.iter().any(|(s, k, _, _)| *s == section && k == key) {
                             match value.as_integer().and_then(|n| u64::try_from(n).ok()) {
                                 Some(n) => self.set_number(&format!("{section}.{key}"), n),
-                                None => problems.push(format!("[{section}] {key}: a number of seconds")),
+                                None => {
+                                    problems.push(format!("[{section}] {key}: a number of seconds"))
+                                }
                             }
                             continue;
                         }
@@ -887,11 +888,16 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         let defaults = Colors::default();
         assert_eq!(colors.styles, defaults.styles);
-        assert!(colors.enabled && colors.history_hints && colors.did_you_mean && colors.option_help);
+        assert!(
+            colors.enabled && colors.history_hints && colors.did_you_mean && colors.option_help
+        );
         assert_eq!(colors.numbers, defaults.numbers);
         assert_eq!(colors.theme, "default");
         for (section, key, number, _) in NUMBERS {
-            assert!(SHIPPED.contains(&format!("{key} = {number}")), "colors.toml lacks {key} in [{section}]");
+            assert!(
+                SHIPPED.contains(&format!("{key} = {number}")),
+                "colors.toml lacks {key} in [{section}]"
+            );
         }
         for section in SECTIONS {
             for key in section.keys {

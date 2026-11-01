@@ -97,11 +97,14 @@ pub fn matches(path: &str, words: &[String]) -> bool {
 }
 
 /// The best folder for `words`, other than `here`, that still exists.
-pub fn best<'a>(folders: &'a [Folder], words: &[String], here: &str, now: i64) -> Option<&'a Folder> {
-    let mut found: Vec<&Folder> = folders
-        .iter()
-        .filter(|f| f.path != here && matches(&f.path, words))
-        .collect();
+pub fn best<'a>(
+    folders: &'a [Folder],
+    words: &[String],
+    here: &str,
+    now: i64,
+) -> Option<&'a Folder> {
+    let mut found: Vec<&Folder> =
+        folders.iter().filter(|f| f.path != here && matches(&f.path, words)).collect();
     found.sort_by(|a, b| score(b, now).total_cmp(&score(a, now)));
     found.into_iter().find(|f| std::fs::metadata(&f.path).is_ok_and(|m| m.is_dir()))
 }
@@ -112,7 +115,9 @@ fn path_of(shell: &Shell) -> Option<String> {
 }
 
 fn load(shell: &Shell) -> Vec<Folder> {
-    path_of(shell).and_then(|p| std::fs::read_to_string(p).ok()).map_or_else(Vec::new, |t| parse(&t))
+    path_of(shell)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map_or_else(Vec::new, |t| parse(&t))
 }
 
 fn save(shell: &Shell, folders: &[Folder]) {

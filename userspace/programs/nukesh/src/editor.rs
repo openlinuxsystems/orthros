@@ -453,7 +453,9 @@ fn now_millis() -> u64 {
 /// colors.toml's `enabled = false`. The editor runs only at a terminal
 /// that is not dumb.
 fn colors(shell: &Shell) -> bool {
-    shell.get("NO_COLOR").is_none_or(|v| v.is_empty()) && shell.colors.enabled && !shell.settings.screen_reader
+    shell.get("NO_COLOR").is_none_or(|v| v.is_empty())
+        && shell.colors.enabled
+        && !shell.settings.screen_reader
 }
 
 /// The prompt drawn while `PS1` is its default, `$ ` or `# ` (ADR 0258):
@@ -900,7 +902,8 @@ pub fn read_line(shell: &mut Shell, prompt: &str, initial: &str) -> Option<Strin
     if !initial.is_empty() {
         line.run_edit_commands(&[EditCommand::InsertString(initial.to_string())]);
     }
-    let prompt = ShellPrompt { left: prompt.to_string(), right: String::new(), more: String::new() };
+    let prompt =
+        ShellPrompt { left: prompt.to_string(), right: String::new(), more: String::new() };
     match line.read_line(&prompt) {
         Ok(Signal::Success(text)) => Some(text),
         Ok(Signal::CtrlC) => {

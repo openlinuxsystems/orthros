@@ -647,7 +647,8 @@ pub fn tier(word: &str, name: &str) -> Option<u8> {
     let most = if length >= 7 { 2 } else { 1 };
     let name: Vec<char> = name.to_lowercase().chars().collect();
     let close = (length.saturating_sub(1)..=length + 1).any(|n| {
-        n <= name.len() && crate::suggest::distance(&lower, &name[..n].iter().collect::<String>()) <= most
+        n <= name.len()
+            && crate::suggest::distance(&lower, &name[..n].iter().collect::<String>()) <= most
     });
     close.then_some(2)
 }
@@ -719,7 +720,11 @@ pub fn files(shell: &Shell, word: &str, dirs_only: bool) -> Vec<String> {
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let name = text::from_os(&entry.file_name());
-        let fits = if shell.completions_loose { tier(&base, &name).is_some() } else { name.starts_with(&base) };
+        let fits = if shell.completions_loose {
+            tier(&base, &name).is_some()
+        } else {
+            name.starts_with(&base)
+        };
         if !fits {
             continue;
         }
@@ -851,7 +856,15 @@ impl Shell {
         {
             if word.ends_with("...") || word.ends_with(".../") {
                 let text = format!("{}/", expanded.trim_end_matches('/'));
-                return (start, vec![Candidate { display: text.clone(), text, space: false, description: None }]);
+                return (
+                    start,
+                    vec![Candidate {
+                        display: text.clone(),
+                        text,
+                        space: false,
+                        description: None,
+                    }],
+                );
             }
             let changed = format!("{}{expanded}{}", &line[..start], &line[pos..]);
             return self.complete_line(&changed, start + expanded.len());
@@ -1056,7 +1069,8 @@ mod tests {
         assert_eq!(tier("ehco", "echo"), Some(2));
         assert_eq!(tier("dw", "Downloads"), None);
         assert_eq!(tier("xyz", "Documents"), None);
-        let names = vec!["Desktop/".to_string(), "documents/".to_string(), "Dcouments/".to_string()];
+        let names =
+            vec!["Desktop/".to_string(), "documents/".to_string(), "Dcouments/".to_string()];
         assert_eq!(best_tier("Docu", names), ["documents/"]);
     }
 
