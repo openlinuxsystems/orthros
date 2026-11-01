@@ -127,8 +127,15 @@ pub fn run(shell: Shell) -> i32 {
                 let lines = text.matches('\n').count() as u32 + 1;
                 let folder = shell.get("PWD").unwrap_or_default();
                 let started = std::time::Instant::now();
+                let marks = shell.settings.marks;
+                if marks {
+                    let _ = sys::write_all(1, b"\x1b]133;C\x1b\\");
+                }
                 let result = run_line(&mut shell, &text, line_number);
                 line_number += lines;
+                if marks {
+                    let _ = sys::write_all(1, format!("\x1b]133;D;{}\x1b\\", shell.status).as_bytes());
+                }
                 after_command(&mut shell, &text, &folder, started);
                 if let Some(code) = result {
                     if code == EXIT_REFUSED {
@@ -199,7 +206,11 @@ fn after_command(shell: &mut Shell, text: &str, folder: &str, started: std::time
     }
     // A command after a space is kept out of the record, as bash's
     // HISTCONTROL=ignorespace keeps it out of the history.
-    if command.trim().is_empty() || command.starts_with(' ') || !shell.history.on {
+    if command.trim().is_empty()
+        || command.starts_with(' ')
+        || !shell.history.on
+        || (shell.settings.skip_secrets && crate::explain::holds_secret(command))
+    {
         return;
     }
     let status = shell.status;

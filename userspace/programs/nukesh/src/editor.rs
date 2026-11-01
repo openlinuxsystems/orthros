@@ -117,6 +117,12 @@ impl Editor {
         let handle = Handle(self.shell.clone());
         let (editor, file) = buffer_editor(&self.shell.borrow());
         let mut line = new_reedline(vi, abbrs, colors).with_buffer_editor(editor, file);
+        // OSC 133 marks around the prompt and the line typed, so that
+        // terminals can jump between commands (ADR 0272); the marks of a
+        // command's output are written around it (interactive.rs).
+        if self.shell.borrow().settings.marks {
+            line = line.with_semantic_markers(Some(reedline::Osc133Markers::boxed()));
+        }
         if colors && palette.on("line") {
             line = line.with_highlighter(Box::new(ShellHighlighter {
                 shell: handle.clone(),
@@ -269,7 +275,7 @@ impl Editor {
                 records.refresh();
             }
             let rich = rich_prompt(&mut shell);
-            let right = if rich.is_some() {
+            let right = if rich.is_some() && !shell.settings.screen_reader {
                 crate::assist::right_prompt(&shell, colors(&shell))
             } else {
                 String::new()
@@ -447,7 +453,7 @@ fn now_millis() -> u64 {
 /// colors.toml's `enabled = false`. The editor runs only at a terminal
 /// that is not dumb.
 fn colors(shell: &Shell) -> bool {
-    shell.get("NO_COLOR").is_none_or(|v| v.is_empty()) && shell.colors.enabled
+    shell.get("NO_COLOR").is_none_or(|v| v.is_empty()) && shell.colors.enabled && !shell.settings.screen_reader
 }
 
 /// The prompt drawn while `PS1` is its default, `$ ` or `# ` (ADR 0258):
@@ -456,7 +462,13 @@ fn colors(shell: &Shell) -> bool {
 /// they may be used.
 fn rich_prompt(shell: &mut Shell) -> Option<String> {
     let ps1 = shell.get("PS1").unwrap_or_default();
-    if !matches!(ps1.as_str(), "$ " | "# ") || !shell.colors.enabled || !shell.colors.on("prompt") {
+    if !matches!(ps1.as_str(), "$ " | "# ") {
+        return None;
+    }
+    if shell.settings.screen_reader {
+        return Some(spoken_prompt(shell));
+    }
+    if !shell.colors.enabled || !shell.colors.on("prompt") {
         return None;
     }
     let palette = shell.colors.clone();
@@ -493,6 +505,24 @@ fn rich_prompt(shell: &mut Shell) -> Option<String> {
     out.push_str(&style("symbol", if root { "#" } else { "$" }));
     out.push(' ');
     Some(out)
+}
+
+/// The prompt in screen-reader mode (ADR 0269): words a reader says
+/// well, and nothing drawn: `~/src, failed 1, admin # `.
+fn spoken_prompt(shell: &mut Shell) -> String {
+    let mut out = prompt::expand(shell, "\\w");
+    if shell.status != 0 {
+        out.push_str(&format!(", failed {}", shell.status));
+    }
+    let root = sys::geteuid() == 0;
+    if root {
+        out.push_str(", admin");
+    }
+    if shell.private {
+        out.push_str(", private");
+    }
+    out.push_str(if root { " # " } else { " $ " });
+    out
 }
 
 /// reedline with the keys for `vi` or Emacs, and no colouring of its own

@@ -149,19 +149,27 @@ impl Settings {
 }
 
 /// At the start of an interactive shell, before its startup files:
-/// `show-hidden` turns on `dotglob` and adds `-A` to `ls`.
+/// `show-hidden` turns on `dotglob` and adds `-A` to `ls`, and `links`
+/// adds `--hyperlink=auto`.
 pub fn apply_to(shell: &mut crate::shell::Shell) {
-    if !shell.settings.show_hidden {
-        return;
+    let mut ls = shell.aliases.get("ls").cloned().unwrap_or_else(|| "ls".into());
+    let had = ls.clone();
+    if shell.settings.show_hidden {
+        shell.shopts.insert("dotglob", true);
+        if !ls.split_whitespace().any(|w| w == "-A" || w == "-a") {
+            ls.push_str(" -A");
+        }
     }
-    shell.shopts.insert("dotglob", true);
-    let ls = shell.aliases.get("ls").cloned().unwrap_or_else(|| "ls".into());
-    if !ls.split_whitespace().any(|w| w == "-A" || w == "-a") {
-        shell.aliases.insert("ls".into(), format!("{ls} -A"));
+    // `[terminal] links`: ls names files as links a terminal can open
+    // (OSC 8, ADR 0272); `auto` leaves pipes and files plain.
+    if shell.settings.links && !ls.contains("--hyperlink") {
+        ls.push_str(" --hyperlink=auto");
+    }
+    if ls != had {
+        shell.aliases.insert("ls".into(), ls);
     }
 }
 
-/// The file shipped as /system/settings/nukesh/settings.toml.
 #[cfg(test)]
 const SHIPPED: &str = include_str!("../../../defaults/nukesh/settings.toml");
 
@@ -189,9 +197,12 @@ mod tests {
     fn show_hidden_shows_them() {
         let mut shell = crate::shell::Shell::new("test", false);
         shell.aliases.insert("ls".into(), "ls --color=auto".into());
-        shell.settings = std::rc::Rc::new(Settings { show_hidden: true, ..Settings::default() });
+        shell.settings = std::rc::Rc::new(Settings { show_hidden: true, links: false, ..Settings::default() });
         apply_to(&mut shell);
         assert!(shell.shopt("dotglob"));
         assert_eq!(shell.aliases.get("ls").map(String::as_str), Some("ls --color=auto -A"));
+        shell.settings = std::rc::Rc::new(Settings::default());
+        apply_to(&mut shell);
+        assert_eq!(shell.aliases.get("ls").map(String::as_str), Some("ls --color=auto -A --hyperlink=auto"));
     }
 }

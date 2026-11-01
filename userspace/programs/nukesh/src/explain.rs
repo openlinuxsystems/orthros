@@ -98,6 +98,11 @@ pub fn mask(line: &str) -> String {
     out
 }
 
+/// Whether `line` holds a secret that [`mask`] would hide.
+pub fn holds_secret(line: &str) -> bool {
+    mask(line) != line
+}
+
 /// `scheme://user:pass@host` with the password masked.
 fn mask_url(word: &str) -> String {
     let Some(start) = word.find("://") else { return word.to_string() };
@@ -661,6 +666,8 @@ mod tests {
         assert_eq!(mask("curl https://host/a:b@c"), "curl https://host/a:b@c");
         assert_eq!(mask("ls -la PATH=x"), "ls -la PATH=x");
         assert!(texts("TOKEN=abc ls").iter().all(|l| !l.contains("abc")));
+        assert!(holds_secret("export GITHUB_TOKEN=abc"));
+        assert!(!holds_secret("export PATH=/bin"));
     }
 
     #[test]
