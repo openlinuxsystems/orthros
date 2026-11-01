@@ -129,7 +129,10 @@ pub fn run(shell: Shell) -> i32 {
                 let lines = text.matches('\n').count() as u32 + 1;
                 let folder = shell.get("PWD").unwrap_or_default();
                 let started = std::time::Instant::now();
-                let marks = shell.settings.marks;
+                // Only for a terminal: output to a file or a pipe is the
+                // command's alone.
+                // SAFETY: isatty only asks about a descriptor.
+                let marks = shell.settings.marks && unsafe { libc::isatty(1) } == 1;
                 if marks {
                     let _ = sys::write_all(1, b"\x1b]133;C\x1b\\");
                 }
