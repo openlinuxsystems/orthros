@@ -121,6 +121,14 @@ default via 10.0.2.2 dev net0
 	With *link*, what each interface received and sent: bytes,
 	packets, errors and drops.
 
+*-c*, *-color*[*=always*|*auto*|*never*]
+	Interface names, states, addresses and MAC addresses in colour,
+	always (the default) or with *auto* only on a terminal and not
+	with *NO_COLOR* set. *IP_COLORS* changes the colours, as
+	_name_*=*_SGR_ pairs joined by *:*, with the names *name*, *up*,
+	*down*, *address* and *mac*; *nukesh*(1) sets it from
+	*colors.toml*(5), and its alias gives *-color=auto*.
+
 *-4*
 	IPv4, all there is until Phase 12c of the roadmap; *-6* fails.
 
@@ -153,5 +161,5 @@ net0             UP             192.168.1.20/24
 
 # SEE ALSO
 
-*ss*(8), *radix-network*(2), *radix-proc*(5),
+*ss*(8), *colors.toml*(5), *radix-network*(2), *radix-proc*(5),
 *radix-sysfs*(5), *spark*(8), *systools*(1)

@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The welcome banner above the sign-in prompt on the consoles: Duke and
+# the name in plain ASCII, the tagline, and the system's name and version
+# (welcome.toml(5), consoled(8)). Edit this file to change it; it takes
+# effect the next time consoled starts. Where the banner shows,
+# /system/settings/issue's text does not.
+
+# When it shows: "every-boot", "first-boot" (only while the system boots
+# for the first time) or "never" (issue's text instead).
+show = "every-boot"
+
+# What is drawn: "duke", "small" (the name only), "none", or the path of
+# a file of your own. A screen too small for it gets less.
+art = "duke"
+
+# The words beside Duke; false or "" for none.
+tagline = "A bright future. A human future."
+
+# The system's name and version, with issue's escapes (\s the system's
+# name, \r its version, \n the computer's name); false or "" for none.
+version = "\\s Server \\r"
+
+# Duke in yellow, the name in white and the version dimmed; false for
+# the console's own colour.
+colors = true

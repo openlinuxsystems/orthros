@@ -240,7 +240,70 @@ fn refused(status: Status) -> Fail {
 struct Command {
     brief: bool,
     statistics: bool,
+    /// The colours, with `-color` (ADR 0260).
+    colors: Option<Colors>,
     words: Vec<String>,
+}
+
+/// The colours of `-color`, as SGR parameters: iproute2's, or those
+/// `IP_COLORS` gives (`name=36:up=32:...`), which nukesh(1) makes from
+/// colors.toml(5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Colors {
+    name: String,
+    up: String,
+    down: String,
+    address: String,
+    mac: String,
+}
+
+impl Colors {
+    /// iproute2's colours, changed by `IP_COLORS`'s.
+    fn new(ip_colors: Option<&str>) -> Colors {
+        let mut colors = Colors {
+            name: "36".into(),
+            up: "32".into(),
+            down: "31".into(),
+            address: "35".into(),
+            mac: "33".into(),
+        };
+        for pair in ip_colors.unwrap_or_default().split(':') {
+            let Some((key, value)) = pair.split_once('=') else { continue };
+            if !value.bytes().all(|b| b.is_ascii_digit() || b == b';') {
+                continue;
+            }
+            let slot = match key {
+                "name" => &mut colors.name,
+                "up" => &mut colors.up,
+                "down" => &mut colors.down,
+                "address" => &mut colors.address,
+                "mac" => &mut colors.mac,
+                _ => continue,
+            };
+            *slot = value.to_string();
+        }
+        colors
+    }
+}
+
+/// `text` in the colour `pick` chooses, with `-color`.
+fn paint(command: &Command, pick: fn(&Colors) -> &str, text: &str) -> String {
+    match &command.colors {
+        Some(colors) if !pick(colors).is_empty() && pick(colors) != "0" => {
+            format!("\x1b[{}m{text}\x1b[0m", pick(colors))
+        }
+        _ => text.to_string(),
+    }
+}
+
+/// An interface's state, `UP` in green and `DOWN` in red with `-color`.
+fn painted_state(command: &Command, interface: &Interface) -> String {
+    let state = state(interface);
+    match state.as_str() {
+        "UP" => paint(command, |c| &c.up, &state),
+        "DOWN" | "LOWERLAYERDOWN" => paint(command, |c| &c.down, &state),
+        _ => state,
+    }
 }
 
 /// Whether `word` is one of `full`'s first letters, at least `least` of
@@ -251,7 +314,7 @@ fn matches(word: &str, full: &str, least: usize) -> bool {
 
 const HELP: &str = "Usage: ip [ OPTIONS ] OBJECT { COMMAND | help }
 where  OBJECT := { link | address | route }
-       OPTIONS := { -4 | -s[tatistics] | -br[ief] }
+       OPTIONS := { -4 | -s[tatistics] | -br[ief] | -c[olor][={always|auto|never}] }
        ip link [ show [ [ dev ] NAME ] ]
        ip link set [ dev ] NAME up
        ip address [ show [ [ dev ] NAME ] ]
@@ -263,7 +326,7 @@ where  OBJECT := { link | address | route }
 ";
 
 pub fn main(args: &mut Args) -> Result<i32, Fail> {
-    let mut command = Command { brief: false, statistics: false, words: Vec::new() };
+    let mut command = Command { brief: false, statistics: false, colors: None, words: Vec::new() };
     let mut options = true;
     for word in args.rest() {
         let word = word.into_string().map_err(|_| usage("an argument is not UTF-8".into()))?;
@@ -276,6 +339,26 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
                     return Ok(0);
                 }
                 _ if matches(option, "brief", 2) => command.brief = true,
+                // As iproute2: -c, -color, -color=always|auto|never; auto
+                // only on a terminal, and never with NO_COLOR set.
+                _ if matches(option.split('=').next().unwrap_or(""), "color", 1) => {
+                    let when = option.split_once('=').map_or("always", |(_, when)| when);
+                    let on = match when {
+                        "always" => true,
+                        "never" => false,
+                        "auto" => {
+                            crate::util::is_terminal(1)
+                                && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+                        }
+                        other => {
+                            return Err(usage(format!(
+                                "Option \"-color={other}\" is unknown, try \"ip -help\"."
+                            )));
+                        }
+                    };
+                    command.colors =
+                        on.then(|| Colors::new(std::env::var("IP_COLORS").ok().as_deref()));
+                }
                 _ if matches(option, "statistics", 1) || option == "stats" => {
                     command.statistics = true;
                 }
@@ -384,15 +467,20 @@ fn state(interface: &Interface) -> String {
 }
 
 /// The first line of an interface, and its link's.
-fn heading(interface: &Interface, mode: bool, out: &mut dyn Write) -> io::Result<()> {
+fn heading(
+    command: &Command,
+    interface: &Interface,
+    mode: bool,
+    out: &mut dyn Write,
+) -> io::Result<()> {
     writeln!(
         out,
         "{}: {}: {} mtu {} qdisc noqueue state {}{} group default",
         interface.index,
-        interface.name,
+        paint(command, |c| &c.name, &interface.name),
         flags(interface),
         interface.mtu,
-        state(interface),
+        painted_state(command, interface),
         if mode { " mode DEFAULT" } else { "" },
     )?;
     let (kind, broadcast) = if interface.loopback {
@@ -400,7 +488,8 @@ fn heading(interface: &Interface, mode: bool, out: &mut dyn Write) -> io::Result
     } else {
         ("ether", "ff:ff:ff:ff:ff:ff")
     };
-    writeln!(out, "    link/{kind} {} brd {broadcast}", interface.mac)
+    let mac = paint(command, |c| &c.mac, &interface.mac);
+    writeln!(out, "    link/{kind} {mac} brd {broadcast}")
 }
 
 /// `ip link`.
@@ -409,15 +498,15 @@ fn link(command: &Command, interfaces: &[&Interface], out: &mut dyn Write) -> Re
         if command.brief {
             writeln!(
                 out,
-                "{:<16} {:<14} {} {} ",
-                interface.name,
-                state(interface),
-                interface.mac,
+                "{} {} {} {} ",
+                padded(command, |c| &c.name, &interface.name, 16),
+                padded_state(command, interface),
+                paint(command, |c| &c.mac, &interface.mac),
                 flags(interface)
             )?;
             continue;
         }
-        heading(interface, true, out)?;
+        heading(command, interface, true, out)?;
         if command.statistics {
             let [bytes, packets, errors, dropped] = interface.received;
             writeln!(out, "    RX:  bytes packets errors dropped  missed   mcast")?;
@@ -443,14 +532,19 @@ fn link(command: &Command, interfaces: &[&Interface], out: &mut dyn Write) -> Re
 fn address(command: &Command, interfaces: &[&Interface], out: &mut dyn Write) -> Result<(), Fail> {
     for interface in interfaces {
         if command.brief {
-            write!(out, "{:<16} {:<14} ", interface.name, state(interface))?;
+            write!(
+                out,
+                "{} {} ",
+                padded(command, |c| &c.name, &interface.name, 16),
+                padded_state(command, interface)
+            )?;
             for cidr in &interface.addresses {
-                write!(out, "{cidr} ")?;
+                write!(out, "{} ", paint(command, |c| &c.address, &cidr.to_string()))?;
             }
             writeln!(out)?;
             continue;
         }
-        heading(interface, false, out)?;
+        heading(command, interface, false, out)?;
         for (at, cidr) in interface.addresses.iter().enumerate() {
             let secondary = interface.addresses[..at]
                 .iter()
@@ -459,16 +553,30 @@ fn address(command: &Command, interfaces: &[&Interface], out: &mut dyn Write) ->
                 cidr.broadcast().filter(|_| !interface.loopback).map(|b| format!(" brd {b}"));
             writeln!(
                 out,
-                "    inet {cidr}{} scope {}{} {}",
+                "    inet {}{} scope {}{} {}",
+                paint(command, |c| &c.address, &cidr.to_string()),
                 broadcast.unwrap_or_default(),
                 if interface.loopback { "host" } else { "global" },
                 if secondary { " secondary" } else { "" },
-                interface.name,
+                paint(command, |c| &c.name, &interface.name),
             )?;
             writeln!(out, "       valid_lft forever preferred_lft forever")?;
         }
     }
     Ok(())
+}
+
+/// `text` painted, then padded to `width` columns as `{:<width}` would.
+fn padded(command: &Command, pick: fn(&Colors) -> &str, text: &str, width: usize) -> String {
+    let pad = width.saturating_sub(text.chars().count());
+    format!("{}{}", paint(command, pick, text), " ".repeat(pad))
+}
+
+/// The state, painted and padded to 14 columns, as `-brief` has it.
+fn padded_state(command: &Command, interface: &Interface) -> String {
+    let state = state(interface);
+    let pad = 14usize.saturating_sub(state.chars().count());
+    format!("{}{}", painted_state(command, interface), " ".repeat(pad))
 }
 
 /// `ip route`: the default routes, then each address's network, as
@@ -774,6 +882,7 @@ mod tests {
         Command {
             brief: false,
             statistics: false,
+            colors: None,
             words: words.split_whitespace().map(str::to_string).collect(),
         }
     }
@@ -924,6 +1033,25 @@ mod tests {
         assert_eq!(out.unwrap_err().message, "RTNETLINK answers: No such process");
         let (out, _) = ip("route add 10.1.0.0/16 via 10.0.2.2");
         assert_eq!(out.unwrap_err().code, 2);
+    }
+
+    #[test]
+    fn colors_come_from_ip_colors() {
+        let colors = Colors::new(Some("name=1;36:up=92:bogus=1:down=x;y"));
+        assert_eq!(colors.name, "1;36");
+        assert_eq!(colors.up, "92");
+        assert_eq!(colors.down, "31");
+        let mut colored = command("address show dev net0");
+        colored.colors = Some(Colors::new(None));
+        let mut out = Vec::new();
+        run(&colored, &interfaces(), &Kept::default(), &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains(": \x1b[36mnet0\x1b[0m: "), "{out}");
+        assert!(out.contains("state \x1b[32mUP\x1b[0m"), "{out}");
+        assert!(out.contains("inet \x1b[35m"), "{out}");
+        // Without -color, none.
+        let (plain, _) = ip("address show dev net0");
+        assert!(!plain.unwrap().contains('\x1b'));
     }
 
     #[test]

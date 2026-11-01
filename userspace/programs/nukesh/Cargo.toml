@@ -13,7 +13,11 @@ publish.workspace = true
 [dependencies]
 indexmap = "2"
 libc = "0.2.191"
+# Its styles, which reedline paints with (MIT).
+nu-ansi-term = "0.50.3"
 reedline = { version = "0.52.1", default-features = false }
+# colors.toml(5) (Apache-2.0 OR MIT).
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
 
 [lints]
 workspace = true
