@@ -24,6 +24,9 @@ cd "$PORT_BUILD/src"
 	tail -n 40 "$PORT_BUILD/autoconf.log" >&2
 	exit 1
 }
+# configure stops if configure.ac looks newer, which a copy and
+# Autoconf within the same clock tick can make it seem.
+touch configure config.h.in
 # mlibc's getopt moves options from after the first argument to the
 # front, as glibc's does: `ssh host ls -l` would take -l as ssh's. With
 # optreset seen missing, OpenSSH uses its own getopt, which stops at
