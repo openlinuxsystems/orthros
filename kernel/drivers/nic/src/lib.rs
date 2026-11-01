@@ -180,8 +180,19 @@ impl Slots {
     /// If `index` is not below [`Slots::count`] or `out` is longer than a
     /// slot.
     pub fn read(&self, index: usize, out: &mut [u8]) {
-        assert!(index < self.count && out.len() <= SLOT);
-        self.memory.read(index * SLOT, out);
+        self.read_at(index, 0, out);
+    }
+
+    /// Copies the `out.len()` bytes from `offset` in slot `index` into
+    /// `out`: for a card that writes a frame further into its slot.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is not below [`Slots::count`] or the bytes run past the
+    /// end of the slot.
+    pub fn read_at(&self, index: usize, offset: usize, out: &mut [u8]) {
+        assert!(index < self.count && offset.checked_add(out.len()).is_some_and(|end| end <= SLOT));
+        self.memory.read(index * SLOT + offset, out);
     }
 
     /// Copies `data` to the start of slot `index`.

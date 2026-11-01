@@ -6,16 +6,28 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 # Networking
 
 This chapter describes networking in Dukovo as of Phase 12a.5 of the
-roadmap. Phase 12 builds it up in steps: sockets for programs, TCP
-that matches Linux, `netd` with DHCP, DNS and `curl`, the time service,
-the Realtek, Intel and USB Ethernet cards, IPv6, the firewall and
-WireGuard. This page grows with each.
+roadmap, with the Intel cards of 12b. Phase 12 builds it up in steps:
+sockets for programs, TCP that matches Linux, `netd` with DHCP, DNS and
+`curl`, the time service, the Realtek, Intel and USB Ethernet cards,
+IPv6, the firewall and WireGuard. This page grows with each.
 
 ## What works now
 
 - **virtio network cards**, the ones QEMU and clouds on KVM give a
-  virtual machine, up to eight of them. The PCI scan finds each one and
-  gives it a kernel thread, `net0`, `net1` and on.
+  virtual machine. The PCI scan finds each card and gives it a kernel
+  thread, `net0`, `net1` and on, up to eight cards in all.
+- **Intel's, VMware's, Amazon's and Google's cards**: Intel's e1000 and
+  e1000e, the cards QEMU, VirtualBox and VMware give a machine by
+  default, its igb, igc at 2.5 Gb/s and ixgbe at 10 Gb/s; VMware's
+  VMXNET3; Amazon's ENA, on EC2; and Google's gVNIC, on Compute Engine
+  (e1000(4), igb(4), igc(4), ixgbe(4), vmxnet3(4), ena(4), gve(4)).
+  Every card is driven behind the IOMMU, through the same interface,
+  and set up as a virtio card is
+  ([ADR 0197](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0197-network-cards-share-one-driver-interface-and-copy-frames-through-slots.md)).
+  QEMU emulates the e1000, e1000e, igb and VMXNET3, which the
+  `network-cards` boot test runs; the others are checked against
+  models of the cards, and the first boot on each kind of machine is
+  their real test.
 - **The TCP/IP stack runs in the kernel**, built on
   [smoltcp](https://github.com/smoltcp-rs/smoltcp) in safe Rust
   ([ADR 0180](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0180-the-tcp-ip-stack-runs-in-the-kernel-on-smoltcp.md)).
@@ -213,7 +225,10 @@ selftest net: passed; the router answered 4 pings, the fastest in 1.390 ms
 ```
 
 `ob test --case net` runs the same test behind QEMU's IOMMU, as CI
-does.
+does. QEMU's `e1000`, `e1000e`, `igb` and `vmxnet3` cards work the same
+way in place of `virtio-net-pci`, and `ob test --case network-cards`
+runs them all at once, with the e1000's 82545EM, each on a network of
+its own.
 
 ## Setting a card up by hand
 

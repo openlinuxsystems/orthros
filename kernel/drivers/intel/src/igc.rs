@@ -11,8 +11,8 @@
 //! registers moved (ICR to 0x1500), CTRL resets the device with another
 //! bit, the internal PHY is at address 0 on MDIO, the firmware says
 //! nothing of its ports, and STATUS tells 2.5 Gb/s from 1 Gb/s with one
-//! more bit. FreeBSD's igc driver (BSD-3-Clause) was the reference for
-//! these.
+//! more bit. FreeBSD's igc driver (BSD-2-Clause, with Intel's shared code
+//! under BSD-3-Clause) was the reference for these.
 
 use radix_hw::{Dma, Mmio};
 use radix_nic::{Error, Link};

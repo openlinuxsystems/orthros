@@ -811,6 +811,10 @@ pub enum Known {
     Intel(radix_intel_net::Model),
     /// VMware's paravirtual card (`radix-vmxnet3`).
     Vmxnet3,
+    /// Amazon's Elastic Network Adapter (`radix-ena`).
+    Ena,
+    /// Google's virtual network card (`radix-gve`).
+    Gve,
 }
 
 impl Known {
@@ -818,15 +822,20 @@ impl Known {
     fn msi(self) -> bool {
         match self {
             Known::Intel(model) => model.msi(),
-            Known::Vmxnet3 => true,
+            Known::Vmxnet3 | Known::Ena | Known::Gve => true,
         }
+    }
+
+    /// Whether its interrupt is MSI-X's, which it alone has.
+    fn msix(self) -> bool {
+        matches!(self, Known::Ena | Known::Gve)
     }
 
     /// The article its name takes.
     fn article(self) -> &'static str {
         match self {
-            Known::Intel(_) => "an",
-            Known::Vmxnet3 => "a",
+            Known::Intel(_) | Known::Ena => "an",
+            Known::Vmxnet3 | Known::Gve => "a",
         }
     }
 }
@@ -837,6 +846,8 @@ impl fmt::Display for Known {
         match self {
             Known::Intel(model) => write!(f, "Intel {}", model.name),
             Known::Vmxnet3 => f.write_str("VMware VMXNET3"),
+            Known::Ena => f.write_str("Amazon ENA"),
+            Known::Gve => f.write_str("Google gVNIC"),
         }
     }
 }
@@ -847,6 +858,12 @@ pub fn identify(function: &Function) -> Option<Known> {
     let (vendor, device) = (function.vendor_id(), function.device_id());
     if (vendor, device) == (radix_vmxnet3::VENDOR, radix_vmxnet3::DEVICE) {
         return Some(Known::Vmxnet3);
+    }
+    if radix_ena::identify(vendor, device) {
+        return Some(Known::Ena);
+    }
+    if (vendor, device) == (radix_gve::VENDOR, radix_gve::DEVICE) {
+        return Some(Known::Gve);
     }
     radix_intel_net::identify(vendor, device).map(Known::Intel)
 }
@@ -971,19 +988,26 @@ fn map_registers(function: &Function, bar: usize) -> Result<Mmio, Failure> {
 fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Failure> {
     function.enable_memory_and_dma();
     let regs = map_registers(function, 0)?;
-    // VMXNET3's commands are in a second BAR.
-    let commands = match card {
+    // VMXNET3's commands are in a second BAR, and gVNIC's doorbells in
+    // its third.
+    let more = match card {
         Known::Vmxnet3 => Some(map_registers(function, 1)?),
-        Known::Intel(_) => None,
+        Known::Gve => Some(map_registers(function, 2)?),
+        Known::Intel(_) | Known::Ena => None,
     };
     let source = function.address();
-    // One MSI, for everything, if the card should have one and it and
-    // the kernel have one; otherwise the card is polled.
-    let interrupt = card.msi().then(|| Msi::find(function)).flatten().and_then(|msi| {
-        let (vector, message) = <Arch as Devices>::allocate_interrupt(source, on_interrupt, index)?;
-        msi.enable(function, message);
-        Some(vector)
-    });
+    // One interrupt, for everything, if the card should have one and it
+    // and the kernel have one; otherwise the card is polled.
+    let interrupt = if card.msix() {
+        msix_all(function, index)
+    } else {
+        card.msi().then(|| Msi::find(function)).flatten().and_then(|msi| {
+            let (vector, message) =
+                <Arch as Devices>::allocate_interrupt(source, on_interrupt, index)?;
+            msi.enable(function, message);
+            Some(vector)
+        })
+    };
     let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(source, pages, false);
     let mut delay = delay;
     let how = match interrupt {
@@ -995,10 +1019,28 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
             radix_intel_net::start(model, regs, how, fallback_mac(), &mut alloc, &mut delay)
                 .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory))
         }
-        Known::Vmxnet3 => commands
+        Known::Vmxnet3 => more
             .ok_or(radix_nic::Error::Registers)
             .and_then(|commands| {
                 radix_vmxnet3::start(regs, commands, how, fallback_mac(), &mut alloc)
+            })
+            .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
+        Known::Ena => {
+            radix_ena::start(regs, function.revision(), how, fallback_mac(), &mut alloc, &mut delay)
+                .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory))
+        }
+        Known::Gve => more
+            .ok_or(radix_nic::Error::Registers)
+            .and_then(|doors| {
+                radix_gve::start(
+                    regs,
+                    doors,
+                    function.revision(),
+                    how,
+                    fallback_mac(),
+                    &mut alloc,
+                    &mut delay,
+                )
             })
             .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
     };
@@ -1012,11 +1054,30 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
     let info = nic.info();
     let mut about = About::new(info.mac, info.receive_slots, info.transmit_slots);
     let _ = write!(about.what, "{} {card} network card", card.article());
+    let kind = if card.msix() { "MSI-X" } else { "MSI" };
     let _ = match interrupt {
-        Some(vector) => write!(about.how, "MSI vector {vector:#x}"),
+        Some(vector) => write!(about.how, "{kind} vector {vector:#x}"),
         None => about.how.write_str("polled"),
     };
     attach(function, index, Card::Nic { nic, vector: interrupt }, &about)
+}
+
+/// An MSI-X interrupt for `function`, the card numbered `index`, with
+/// every entry of its table given the same message: whichever vector the
+/// card raises comes to its thread.
+fn msix_all(function: &Function, index: usize) -> Option<u32> {
+    let msix = MsiX::find(function)?;
+    let (bar, offset) = msix.table_location();
+    let Some(Bar::Memory { address, .. }) = function.bar(bar) else { return None };
+    let table = <Arch as Devices>::map_device(address + offset, msix.table_len())?;
+    let (vector, message) =
+        <Arch as Devices>::allocate_interrupt(function.address(), on_interrupt, index)?;
+    msix.enable_masked(function);
+    for entry in 0..msix.entries() {
+        msix.set_entry(&table, entry, message);
+    }
+    msix.unmask_all(function);
+    Some(vector)
 }
 
 /// `nic` on the heap, as a [`Card::Nic`] holds it; dropped, which stops

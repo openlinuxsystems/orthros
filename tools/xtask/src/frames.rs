@@ -35,6 +35,7 @@ const ALLOWED: &[(&str, &str)] = &[
         "sets up a network card and its stack at boot, on the boot CPU's 64 KiB stack",
     ),
     ("radix::net::bind_card", "sets up a network card at boot, on the boot CPU's 64 KiB stack"),
+    ("radix_ena::start", "sets up an ENA card for radix::net::bind_card, at boot"),
     ("radix::net::attach", "builds a network card's stack at boot, on the boot CPU's 64 KiB stack"),
     (
         "radix::net::start_loopback",

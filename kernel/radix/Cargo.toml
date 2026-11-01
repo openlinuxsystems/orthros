@@ -31,6 +31,7 @@ radix-bootfs = { path = "../lib/bootfs" }
 radix-cap = { path = "../cap" }
 radix-crosec = { path = "../drivers/crosec" }
 radix-elf = { path = "../lib/elf" }
+radix-ena = { path = "../drivers/ena" }
 radix-btrfs = { path = "../fs/btrfs" }
 radix-exfat = { path = "../fs/exfat" }
 radix-ext4 = { path = "../fs/ext4" }
@@ -40,6 +41,7 @@ radix-udf = { path = "../fs/udf" }
 radix-fat = { path = "../fs/fat" }
 radix-fbcon = { path = "../lib/fbcon" }
 radix-gpio = { path = "../drivers/gpio" }
+radix-gve = { path = "../drivers/gve" }
 radix-i2c = { path = "../drivers/i2c" }
 radix-hal = { path = "../hal" }
 radix-hw = { path = "../lib/hw" }

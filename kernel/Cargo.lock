@@ -259,11 +259,13 @@ dependencies = [
  "radix-cap",
  "radix-crosec",
  "radix-elf",
+ "radix-ena",
  "radix-exfat",
  "radix-ext4",
  "radix-fat",
  "radix-fbcon",
  "radix-gpio",
+ "radix-gve",
  "radix-hal",
  "radix-hid",
  "radix-hw",
@@ -440,6 +442,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-ena"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
+]
+
+[[package]]
 name = "radix-exfat"
 version = "0.11.0"
 dependencies = [
@@ -486,6 +496,14 @@ name = "radix-gpio"
 version = "0.11.0"
 dependencies = [
  "radix-hw",
+]
+
+[[package]]
+name = "radix-gve"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
 ]
 
 [[package]]
