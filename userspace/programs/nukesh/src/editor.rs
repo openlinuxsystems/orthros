@@ -259,7 +259,10 @@ impl Editor {
         self.deadline.store(due, Ordering::Relaxed);
         let prompt = ShellPrompt { left: ps1, right, more: ps2 };
         let Some(line) = self.line.as_mut() else { return Ok(Input::Eof) };
-        Ok(match line.read_line(&prompt) {
+        crate::hangup::enter_prompt(&self.shell.borrow());
+        let read = line.read_line(&prompt);
+        crate::hangup::leave_prompt();
+        Ok(match read {
             Ok(Signal::HostCommand(key)) => return Err(key),
             Ok(Signal::Success(text)) => {
                 self.submitted = Some(text.clone());

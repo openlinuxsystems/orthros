@@ -33,6 +33,7 @@ mod folders;
 #[cfg(test)]
 mod fuzz;
 mod glob;
+mod hangup;
 mod highlight;
 mod history;
 mod interactive;
