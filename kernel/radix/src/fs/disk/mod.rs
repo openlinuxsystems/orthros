@@ -10,12 +10,13 @@
 //! and SATA controllers in IDE mode ([`ide`], whose disks are named the
 //! same way), NVMe
 //! controllers ([`nvme`], whose namespaces are named `nvme0n1` and on),
+//! SD card readers ([`sdhci`], whose cards are named `mmcblk0` and on),
 //! and xHCI controllers (`crate::usb`), whose sticks and USB disks
 //! ([`usb`]) are named `sda` and on too: each `sd` disk takes the first
 //! letter free, as on Linux, the SATA disks found at boot first, and a
 //! USB disk's goes back when it is unplugged. A
 //! disk's partitions are named after it (`vda1`, `sda2`, and with a `p`
-//! after a name that ends in a digit, `nvme0n1p1`), read from its MBR or
+//! after a name that ends in a digit, `nvme0n1p1`, `mmcblk0p1`), read from its MBR or
 //! GPT (`radix_block::partition`); every one appears in `/devices` and
 //! `/kernel/block`, and leaves them with its disk ([`unregister`]).
 //! Requests to every disk go through the same queue
@@ -44,6 +45,7 @@ mod ahci;
 mod ide;
 mod nvme;
 mod queue;
+mod sdhci;
 pub mod usb;
 mod virtio;
 
@@ -233,6 +235,7 @@ pub fn init() {
     let mut disks = 0;
     let mut sata = 0;
     let mut ide = 0;
+    let mut cards = 0;
     let mut controllers = 0;
     for segment in segments.iter().flatten() {
         let PciSegment { base, segment: number, first_bus, last_bus } = *segment;
@@ -264,6 +267,13 @@ pub fn init() {
                         function.address()
                     );
                 }
+            } else if is_sd_reader(&function) {
+                if let Err(why) = sdhci::bind(&function, &mut cards) {
+                    warn!(
+                        "Disk: could not set up the SD card reader at {}: {why}",
+                        function.address()
+                    );
+                }
             } else if function.class() == radix_nvme::PCI_CLASS {
                 nvme::bind(&function, &mut controllers);
             } else if crate::i2c::designware::is_lpss(&function) {
@@ -275,9 +285,12 @@ pub fn init() {
     }
     crate::usb::bind_found();
     let plural = |n: usize, one: &'static str, many: &'static str| if n == 1 { one } else { many };
-    let mut on_ide = TextBuf::<24>::new();
+    let mut on_ide = TextBuf::<40>::new();
     if ide > 0 {
         let _ = write!(on_ide, ", {ide} IDE {}", plural(ide, "disk", "disks"));
+    }
+    if cards > 0 {
+        let _ = write!(on_ide, ", {cards} SD {}", plural(cards, "card", "cards"));
     }
     info!(
         "PCI: {functions} {} on {count} {}; {disks} virtio {}, {sata} SATA {}, {controllers} NVMe \
@@ -296,6 +309,12 @@ pub fn init() {
 fn is_ide(function: &Function) -> bool {
     let (class, subclass, _) = function.class();
     (class, subclass) == radix_ide::PCI_CLASS
+}
+
+/// Whether `function` is an SD host controller, as a card reader is.
+fn is_sd_reader(function: &Function) -> bool {
+    let (class, subclass, _) = function.class();
+    (class, subclass) == radix_sdhci::PCI_CLASS
 }
 
 /// Logs a function: where it is, its IDs and what its class says it is.
@@ -334,6 +353,7 @@ fn describe(function: &Function) {
         (0x06, 0x04) => "PCI bridge",
         (0x06, _) => "bridge",
         (0x07, _) => "communication controller",
+        (0x08, 0x05) => "SD host controller",
         (0x08, _) => "system peripheral",
         (0x0c, 0x03) => "USB controller",
         (0x0c, 0x05) => "SMBus controller",

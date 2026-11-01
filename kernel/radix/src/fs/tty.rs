@@ -29,6 +29,17 @@
 //! master goes, the foreground process group gets SIGHUP (and SIGCONT)
 //! and the terminal belongs to no session.
 //!
+//! A serial line (Phase 11g, ADR 0246) is a terminal whose master is its
+//! driver in the kernel ([`make_line`]): a USB serial port's, which gives
+//! what the line received as typing ([`Tty::line_give`]), takes what
+//! programs wrote to send it ([`Tty::line_take`]), and sets the line as
+//! the terminal's settings say ([`Tty::line_settings`]). Its node is
+//! `/devices/ttyACM0` or `/devices/ttyUSB0`, as Linux names it, and it
+//! starts at 9600 baud with CLOCAL, as Linux's serial ports do. The
+//! terminal wakes its driver whenever something changes; when the device
+//! goes, the node goes, and the terminal hangs up as when a master goes
+//! ([`Tty::line_gone`]).
+//!
 //! Lock order: a terminal's state, then the process tree. Signals are sent
 //! with neither held.
 
@@ -99,6 +110,19 @@ pub struct Tty {
     foreground: AtomicU64,
     /// Its pollers, on either side.
     polled: Polled,
+    /// If it is a serial line, what its driver needs.
+    line: Option<LineSide>,
+}
+
+/// What a serial line's terminal keeps for its driver.
+struct LineSide {
+    /// Its node's name in `/devices`.
+    name: radix_klog::TextBuf<16>,
+    /// Wakes the driver, with its argument.
+    wake: fn(usize),
+    argument: usize,
+    /// Counts the changes of the settings.
+    generation: AtomicU64,
 }
 
 /// A terminal's state.
@@ -141,8 +165,18 @@ impl Tty {
         core::ptr::from_ref::<Tty>(self) as usize
     }
 
-    /// Something changed: the waits look again, and so do its pollers.
+    /// Something changed: the waits look again, and so do its pollers, and
+    /// a serial line's driver.
     fn changed(&self) {
+        self.changed_here();
+        if let Some(line) = &self.line {
+            (line.wake)(line.argument);
+        }
+    }
+
+    /// Something changed that a serial line's driver did: the waits and
+    /// the pollers look again.
+    fn changed_here(&self) {
         wait::wake_all(self.key());
         self.polled.changed();
     }
@@ -600,6 +634,9 @@ impl Tty {
                 if request == abi::SET_ATTRIBUTES_FLUSH {
                     state.ldisc.flush_input();
                 }
+                if let Some(line) = &this.line {
+                    line.generation.fetch_add(1, Ordering::AcqRel);
+                }
                 this.mirror(&state);
                 drop(state);
                 this.changed();
@@ -701,7 +738,8 @@ impl Tty {
                 put(&(this.session() as u32).to_le_bytes())
             }
             // Both sides tell, the terminal's for `ttyname`.
-            abi::GET_PTY_NUMBER => put(&this.number.to_le_bytes()),
+            // A serial line is no pseudo-terminal.
+            abi::GET_PTY_NUMBER if this.line.is_none() => put(&this.number.to_le_bytes()),
             abi::SET_PTY_LOCK if master => {
                 let lock = word_in()? != 0;
                 this.state.lock().locked = lock;
@@ -844,6 +882,10 @@ fn open_side(tty: &TtyRef, master: bool) -> radix_vfs::Result<NodeRef> {
     } else {
         tty.slaves.fetch_add(1, Ordering::AcqRel);
         tty.opened.store(true, Ordering::Release);
+        // A serial line's driver raises the modem lines.
+        if tty.line.is_some() {
+            tty.changed();
+        }
     }
     Ok(handle)
 }
@@ -968,6 +1010,7 @@ fn make() -> radix_vfs::Result<TtyRef> {
         session: AtomicU64::new(0),
         foreground: AtomicU64::new(0),
         polled: Polled::new(),
+        line: None,
     })?;
     list[number] = KArc::downgrade(&tty);
     drop(ptys);
@@ -976,6 +1019,144 @@ fn make() -> radix_vfs::Result<TtyRef> {
     let _ = core::fmt::Write::write_fmt(&mut name, format_args!("{number}"));
     pts.add(name.as_str(), entry)?;
     Ok(tty)
+}
+
+/// The control flags a serial line starts with, as Linux's: B9600, CS8,
+/// CREAD, HUPCL and CLOCAL.
+const LINE_CFLAG: u32 = 0o15 | 0o60 | 0o200 | 0o2000 | 0o4000;
+
+/// Makes the terminal of a serial line, whose driver is its master, and
+/// its node `/devices/{name}`; `wake(argument)` wakes the driver whenever
+/// the terminal changes. The driver lets go of it with [`Tty::line_gone`].
+pub fn make_line(name: &str, wake: fn(usize), argument: usize) -> radix_vfs::Result<TtyRef> {
+    let input = buffer(INPUT).ok_or(radix_vfs::Error::NoMemory)?;
+    let output = buffer(OUTPUT).ok_or(radix_vfs::Error::NoMemory)?;
+    let mut ldisc = Ldisc::new(input);
+    let mut settings = Settings::new();
+    settings.cflag = LINE_CFLAG;
+    settings.ispeed = 0o15;
+    settings.ospeed = 0o15;
+    ldisc.set(settings);
+    let mut text = radix_klog::TextBuf::<16>::new();
+    let _ = core::fmt::Write::write_str(&mut text, name);
+    let tty = mem::arc(Tty {
+        number: u32::MAX,
+        id: next_id(),
+        state: Mutex::new(State {
+            ldisc,
+            output: Ring::new(output),
+            window: [0; 4],
+            locked: false,
+        }),
+        input_ready: AtomicBool::new(false),
+        input_pending: AtomicUsize::new(0),
+        input_room: AtomicBool::new(true),
+        output_stopped: AtomicBool::new(false),
+        output_len: AtomicUsize::new(0),
+        // The driver.
+        masters: AtomicU32::new(1),
+        slaves: AtomicU32::new(0),
+        opened: AtomicBool::new(false),
+        session: AtomicU64::new(0),
+        foreground: AtomicU64::new(0),
+        polled: Polled::new(),
+        line: Some(LineSide { name: text, wake, argument, generation: AtomicU64::new(1) }),
+    })?;
+    let entry: NodeRef = mem::arc(Entry { tty: tty.clone() })?;
+    super::devfs::add(name, entry)?;
+    Ok(tty)
+}
+
+impl Tty {
+    /// A serial line's driver: copies what programs wrote, processed for
+    /// the line, to `out`, taking it from the terminal; says how much.
+    pub fn line_take(&self, out: &mut [u8]) -> usize {
+        let mut state = self.state.lock();
+        let n = state.output.pop(out);
+        self.mirror(&state);
+        drop(state);
+        if n > 0 {
+            self.changed_here();
+        }
+        n
+    }
+
+    /// A serial line's driver: `data` came on the line, and is typed;
+    /// says how much the terminal took, which is less than all once its
+    /// input is full. While the terminal is not open, what comes is
+    /// dropped, as on Linux.
+    pub fn line_give(&self, data: &[u8]) -> usize {
+        if self.slaves.load(Ordering::Acquire) == 0 {
+            return data.len();
+        }
+        let mut taken = 0;
+        while taken < data.len() {
+            let mut signals = [0u32; 4];
+            let mut count = 0;
+            let start = taken;
+            {
+                let mut state = self.state.lock();
+                let State { ldisc, output, .. } = &mut *state;
+                for &byte in &data[taken..] {
+                    match ldisc.receive(byte, &mut |echo| {
+                        output.push(echo);
+                    }) {
+                        Received::Full => break,
+                        Received::Signal(signal) => {
+                            signals[count] = signal;
+                            count += 1;
+                        }
+                        _ => {}
+                    }
+                    taken += 1;
+                    if count == signals.len() {
+                        break;
+                    }
+                }
+                self.mirror(&state);
+            }
+            if taken > start {
+                // Echoes go out on the line too.
+                self.changed_here();
+            }
+            for &signal in &signals[..count] {
+                self.signal_foreground(signal);
+            }
+            if taken == start || count < signals.len() {
+                break;
+            }
+        }
+        taken
+    }
+
+    /// A serial line's driver: how many times the settings changed, and
+    /// the control flags and output speed they now say.
+    pub fn line_settings(&self) -> (u64, u32, u32) {
+        let generation = self.line.as_ref().map_or(0, |l| l.generation.load(Ordering::Acquire));
+        let state = self.state.lock();
+        (generation, state.ldisc.settings.cflag, state.ldisc.settings.ospeed)
+    }
+
+    /// A serial line's driver: whether a program has the terminal open.
+    pub fn line_open(&self) -> bool {
+        self.slaves.load(Ordering::Acquire) > 0
+    }
+
+    /// A serial line's driver: whether there is output to take.
+    pub fn line_output(&self) -> bool {
+        self.output_len.load(Ordering::Acquire) > 0
+    }
+
+    /// A serial line's driver: the device is gone. Its node goes, and the
+    /// terminal hangs up: reads find the end of the file, and writes fail.
+    pub fn line_gone(&self) {
+        if let Some(line) = &self.line {
+            super::devfs::remove(line.name.as_str());
+        }
+        self.masters.store(0, Ordering::Release);
+        self.hang_up();
+        self.changed_here();
+    }
 }
 
 /// Takes `tty`'s `/devices/pts/N` away.

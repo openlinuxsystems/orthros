@@ -53,6 +53,7 @@ use radix_xhci::{BUFFER_SIZE, Device, Event, Handoff, Host, MAX_ENDPOINTS, Place
 use super::STARTS;
 use super::hid::{self, Hid, HidPlan, MAX_HIDS};
 use super::hub::Hub;
+use super::serial::{self, MAX_SERIALS, Serial};
 use super::shown::{self, Interface, MAX_INTERFACES, RootHub, Shown};
 use super::storage::{LinkRef, StoragePlan};
 use crate::Arch;
@@ -158,6 +159,8 @@ pub(super) struct Attached {
     pub(super) hids: Vec<Hid, Kmalloc>,
     /// Its mass storage interface's link with its thread, if it has one.
     pub(super) storage: Option<LinkRef>,
+    /// Its serial ports that are carried.
+    pub(super) serials: Vec<Serial, Kmalloc>,
 }
 
 /// A controller, as its thread runs it.
@@ -226,12 +229,20 @@ pub(super) struct Plan {
     hid_count: usize,
     /// Its first mass storage interface.
     pub(super) storage: Option<StoragePlan>,
+    /// Its serial ports, the first `serial_count`.
+    serials: [radix_usb::serial::Port; MAX_SERIALS],
+    serial_count: usize,
 }
 
 impl Plan {
     /// Its HID interfaces.
     pub(super) fn hids(&self) -> &[HidPlan] {
         &self.hids[..self.hid_count]
+    }
+
+    /// Its serial ports.
+    pub(super) fn serials(&self) -> &[radix_usb::serial::Port] {
+        &self.serials[..self.serial_count]
     }
 }
 
@@ -258,14 +269,20 @@ pub fn run(index: usize) {
     super::looked();
     let sleep = if start.interrupt.is_some() && !controller.dbc { IDLE_NS } else { POLL_NS };
     loop {
-        let busy =
-            controller.events() | controller.work() | controller.lights() | controller.storage();
+        let busy = controller.events()
+            | controller.work()
+            | controller.lights()
+            | controller.storage()
+            | controller.serial();
         if controller.xhci.failed() {
             if controller.dbc {
                 super::dbc::stop();
             }
             for link in controller.devices.iter().filter_map(|d| d.storage.as_ref()) {
                 link.gone();
+            }
+            for device in &mut controller.devices {
+                serial::gone(&mut device.serials);
             }
             for device in &controller.devices {
                 shown::remove(controller.bus, device.path);
@@ -484,7 +501,7 @@ impl Controller {
             attached.hids.iter().position(|h| h.endpoint == endpoint && h.pending == trb)
         {
             self.hid_report(at, index, code, residual);
-        } else {
+        } else if !self.serial_transfer(at, trb, endpoint, code, residual) {
             self.storage_transfer(at, trb, endpoint, code, residual);
         }
     }
@@ -515,6 +532,7 @@ impl Controller {
             info!("USB: {}: {} was unplugged", Name(bus, gone.path), gone.name);
             shown::remove(bus, gone.path);
             hid::gone(&mut gone.hids);
+            serial::gone(&mut gone.serials);
             if let Some(link) = gone.storage.take() {
                 link.gone();
             }
@@ -657,6 +675,7 @@ impl Controller {
             hub: None,
             hids: hid::none(),
             storage: None,
+            serials: serial::none(),
         };
         let _ = self.devices.push_within_capacity(attached);
         if let Some(shown) = &shown
@@ -684,6 +703,21 @@ impl Controller {
                     "USB: {}: interface {} could not be read: {why}",
                     Name(self.bus, path),
                     interface.interface
+                ),
+            }
+        }
+        for &port in plan.serials() {
+            match self.start_serial(slot, port) {
+                Ok(()) => {
+                    shown::set_driver(self.bus, path, port.data, port.driver());
+                    if let radix_usb::serial::Protocol::Acm { control } = port.protocol {
+                        shown::set_driver(self.bus, path, control, port.driver());
+                    }
+                }
+                Err(why) => warn!(
+                    "USB: {}: interface {}: its serial port cannot be used: {why}",
+                    Name(self.bus, path),
+                    port.data
                 ),
             }
         }
@@ -809,6 +843,13 @@ pub(super) fn read_device(
         hids: [HidPlan::default(); MAX_HIDS],
         hid_count: 0,
         storage: None,
+        serials: [radix_usb::serial::Port {
+            protocol: radix_usb::serial::Protocol::Acm { control: 0 },
+            data: 0,
+            bulk_in: EndpointDescriptor::default(),
+            bulk_out: EndpointDescriptor::default(),
+        }; MAX_SERIALS],
+        serial_count: 0,
     };
     let mut named: [&str; 4] = [""; 4];
     let mut count = 0;
@@ -863,6 +904,8 @@ pub(super) fn read_device(
             endpoints += 1;
         }
     }
+    plan.serial_count =
+        radix_usb::serial::ports(&found, &config, &mut plan.serials).min(MAX_SERIALS);
     let mut kind = TextBuf::<64>::new();
     if found.class != class::PER_INTERFACE {
         let _ = kind.write_str(class_name(found.class, found.subclass, found.protocol));

@@ -172,7 +172,11 @@ changed, kept by tmpfs and Btrfs; FAT and exFAT give *modified*.
 	the firmware set up (*radix-framebuffer*(2)), and _kbd_, the PS/2
 	keyboard's key events (*radix-input*(2)), which *consoled*(8) uses;
 	from Phase 11a _kbd_ has every USB keyboard's keys too, and _mouse_
-	has what USB mice and tablets do.
+	has what USB mice and tablets do. From Phase 11g each serial port on
+	USB is a terminal: _ttyACM_*N* for a CDC-ACM one (modems, boards
+	such as the Arduino), _ttyUSB_*N* for an FTDI chip's, numbered as
+	they are plugged in, their lines set by their termios settings, as
+	*stty*(1) sets them (ADR 0246).
 
 *bootfs*
 	The boot archive (*radix-processes*(7)), read-only, with the
@@ -292,7 +296,9 @@ virtio disks, _sda_, _sdb_ for SATA disks and then USB ones (sticks, card
 readers and USB disks, each taking the lowest letter free, at boot in the
 order they were found), _nvme0n1_, _nvme0n2_ for the
 namespaces of the first NVMe controller and _nvme1n1_ for the second's,
-_vda1_ for a partition, and _nvme0n1p1_ after a name that ends in a digit.
+_mmcblk0_, _mmcblk1_ for the cards in SD card readers on PCI (ADR 0247),
+_vda1_ for a partition, and _nvme0n1p1_ or _mmcblk0p1_ after a name that
+ends in a digit.
 A USB disk plugged in later appears then, and one unplugged leaves
 _/devices_ and _/kernel/block_ with its partitions, its letter free for
 the next; a filesystem mounted from it stays mounted, its requests
@@ -362,6 +368,7 @@ Disk: sda is a SATA disk of 64 MiB on AHCI port 0: QEMU HARDDISK, 512 bytes a bl
 Disk: sdb is an ATA disk of 32 MiB on the IDE primary channel at 0000:00:03.0, master: QEMU HARDDISK, 512 bytes a block, write cache
 Disk: nvme0 is an NVMe 1.4 controller at 0000:00:04.0: QEMU NVMe Ctrl, firmware 8.2.2, 4 I/O queues of 63 commands, an MSI-X vector for each of 4 CPUs, shadow doorbells, scatter gather lists
 Disk: nvme0n1 is an NVMe namespace of 64 MiB: QEMU NVMe Ctrl, 512 bytes a block, write cache, deallocates
+Disk: mmcblk0 is an SD card of 64 MiB in the SD card reader at 0000:00:05.0, slot 1: QEMU!, 13 MHz on a 4-bit bus, a version 2.00 reader
 Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 ```
 
@@ -394,6 +401,11 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 	An IDE or SATA disk in IDE mode stopped answering, and its channel
 	was reset (a software reset of both its disks).
 
+*Disk: a request to the SD card in the reader at* _place_ *went unanswered for 30 s; the slot was reset, and what was in flight goes again*
+	An SD card stopped answering, and its slot's command and data
+	lines were reset; the card is stopped (CMD12) before the request
+	goes again.
+
 *Disk:* _name_*: a request went unanswered for 30 s; the controller was reset, and what was in flight goes again*
 	An NVMe controller stopped answering, or said it failed, and was
 	disabled and enabled again, its queues made again. When it does
@@ -413,8 +425,9 @@ Files: mounted fat from vda on /volumes/vda, labelled RADIX16
 
 - virtio block devices, SATA disks on AHCI controllers, ATA and SATA
   disks on IDE controllers (and SATA controllers in IDE mode), NVMe
-  namespaces and USB disks, over the Bulk-Only Transport or USB Attached
-  SCSI (UAS), have drivers. Port multipliers, optical drives, disks with
+  namespaces, USB disks, over the Bulk-Only Transport or USB Attached
+  SCSI (UAS), and SD, SDHC and SDXC cards in SD card readers on PCI that
+  were in them at boot, have drivers. Port multipliers, optical drives, disks with
   logical sectors larger than 4096 bytes and NVMe namespaces with
   metadata are not supported.
 - FAT has no journal: a power cut in the middle of a write can leave lost

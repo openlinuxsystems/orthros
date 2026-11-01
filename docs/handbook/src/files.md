@@ -215,7 +215,9 @@ two SSDs are `sda` and `sdb`; on the Framework Desktop, its two
 NVMe drives are `nvme0n1` and `nvme1n1`. USB sticks, card readers and
 USB disks are disks too, named after the SATA ones (`sdc` and on, on the
 Dell), whether they speak the Bulk-Only Transport or, as USB 3 disks do,
-USB Attached SCSI. Those plugged in at boot are mounted as the others
+USB Attached SCSI. An SD card in a laptop's own card reader is
+`mmcblk0`, its partitions `mmcblk0p1` and on, as on Linux, when it is
+in the reader at boot. Those plugged in at boot are mounted as the others
 are. One plugged in later is mounted by its filesystem's label, at
 `/volumes/<label>`, by volumed(8), which also unmounts the volumes of a
 stick pulled out. Before pulling one out, eject it, so that what it holds

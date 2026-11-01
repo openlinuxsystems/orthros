@@ -11,8 +11,9 @@
 //! (`kbd`, from `keyboard`) and the screen (`fb0`, from `framebuffer`), and
 //! since Phase 11a the pointers (`mouse`, from `mouse`). Programs make and
 //! remove nothing in it; only the kernel adds devices, `pts/N` comes and
-//! goes with its pseudo-terminal, and a USB disk and its partitions with
-//! the disk (Phase 11b).
+//! goes with its pseudo-terminal, a USB disk and its partitions with
+//! the disk (Phase 11b), and a USB serial port's terminal, `ttyACM0` or
+//! `ttyUSB0` and on, with the port (Phase 11g).
 
 use radix_block::DeviceRef;
 use radix_klog::{error, warn};
@@ -88,6 +89,18 @@ pub fn add_block(name: &str, device: DeviceRef) {
 
 /// Takes the block device `name` away: its disk is gone.
 pub fn remove_block(name: &str) {
+    if let Some(root) = ROOT.get() {
+        root.remove_entry(name);
+    }
+}
+
+/// Adds the device `node` as `name`: a serial line's terminal.
+pub fn add(name: &str, node: NodeRef) -> Result<()> {
+    ROOT.get().ok_or(radix_vfs::Error::NoMemory)?.add(name, node)
+}
+
+/// Takes the device `name` away.
+pub fn remove(name: &str) {
     if let Some(root) = ROOT.get() {
         root.remove_entry(name);
     }
