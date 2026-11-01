@@ -9,8 +9,8 @@
 // their scripts, tar, cpio, zip and its tools, 7-Zip, file and jq
 // (ports/<name>), and their manual pages; the editors, nano and vi, and
 // the terminal tools, typed at on a pseudo-terminal; tmux, its server and
-// a client attached at a pseudo-terminal; and the shell by each of its
-// names. The `commands` test then checks that every program in
+// a client attached at a pseudo-terminal; git, in repositories on this
+// computer; and the shell by each of its names. The `commands` test then checks that every program in
 // /system/commands was run.
 
 #include <dirent.h>
@@ -821,6 +821,81 @@ static void multiplexing(void) {
 // Every program in /system/commands has its manual page, which man finds by
 // the program's name, and its completion file for the shell; ob checks
 // both when it builds the system (ADR 0102).
+// git (ports/git) as a person and a script use it, in repositories on
+// this computer: the commits' names are the hashes of what they hold, so
+// with the names and times set they are the same as on any system.
+static void versioning(void) {
+	static const char *const ENV[][2] = {{"HOME", "/tmp/git/home"},
+			{"GIT_AUTHOR_NAME", "Dukovo"}, {"GIT_AUTHOR_EMAIL", "test@dukovo.org"},
+			{"GIT_COMMITTER_NAME", "Dukovo"}, {"GIT_COMMITTER_EMAIL", "test@dukovo.org"},
+			{"GIT_AUTHOR_DATE", "2026-11-01T12:00:00Z"},
+			{"GIT_COMMITTER_DATE", "2026-11-01T12:00:00Z"}};
+	const char *home = getenv("HOME");
+	char *was_home = home ? strdup(home) : NULL;
+	for(size_t i = 0; i < sizeof(ENV) / sizeof(ENV[0]); i++)
+		setenv(ENV[i][0], ENV[i][1], 1);
+	STATUS(0, "/bin/mkdir", "-p", "/tmp/git/home");
+	CONTAINS("git version 2.55.0", "/bin/git", "--version");
+	OUTPUT("", "refs/heads/main\n", "/bin/sh", "-c",
+			"git init -q /tmp/git/a && git -C /tmp/git/a symbolic-ref HEAD");
+	OUTPUT("", "cc06e7d412c7d2cc7fccdd86964e3543048ab5e6 First\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && printf 'one\\ntwo\\nthree\\n' >f && git add f && git commit -q -m First && git log --format='%H %s'");
+	OUTPUT("", " M f\n f | 1 +\n 1 file changed, 1 insertion(+)\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && echo four >>f && git status --short && git diff --stat");
+	// Branches, and a merge of changes to different lines.
+	OUTPUT("", "Auto-merging f\n*   Merge branch 'side'\n|\\  \n| * Side\n* | Third\n|/  \n* Second\n* First\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && git commit -q -am Second && git switch -q -c side && sed -i s/one/ONE/ f && git commit -q -am Side && git switch -q main && echo five >>f && git commit -q -am Third && git merge -q --no-edit side && git log --graph --format=%s");
+	OUTPUT("", "ONE\ntwo\nthree\nfour\nfive\ne13c7142024f8ae6e85d057d52da8e8efcd835f5\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && cat f && git rev-parse HEAD");
+	OUTPUT("", "v1\nv1\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && git tag -a -m 'Version 1' v1 && git describe && git tag");
+	OUTPUT("", " M f\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && echo six >>f && git stash -q && git status --short && git stash pop -q && git status --short && git checkout -q f && git status --short");
+	OUTPUT("", "f:1:ONE\n1) ONE\n2) two\n3) three\n4) four\n5) five\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && git grep -n ONE && git blame -s f | cut -c10-");
+	// A conflict: the merge stops, names the file, and is undone.
+	OUTPUT("", "1\nf\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && git switch -q -c clash HEAD~1 && sed -i s/one/uno/ f && git commit -q -am Clash && git switch -q main && { git merge -q clash >/dev/null 2>&1; echo $?; } && git diff --name-only --diff-filter=U && git merge --abort && git status --short");
+	// Cloning through the file:// transport, which runs git-upload-pack, and pushing, which
+	// runs git-receive-pack.
+	OUTPUT("", "Merge branch 'side'\n  origin/HEAD -> origin/main\n  origin/clash\n  origin/main\n  origin/side\n", "/bin/sh", "-c",
+			"git clone -q file:///tmp/git/a /tmp/git/b && git -C /tmp/git/b log -1 --format=%s && git -C /tmp/git/b branch -r");
+	OUTPUT("", "Fourth\n", "/bin/sh", "-c",
+			"git clone -q --bare /tmp/git/a /tmp/git/c.git && cd /tmp/git/b && echo seven >>f && git commit -q -am Fourth && git push -q /tmp/git/c.git main && git -C /tmp/git/c.git log -1 --format=%s");
+	// Packing and checking every object.
+	OUTPUT("", "count: 0\nin-pack: 25\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && git gc -q && git fsck --no-progress --no-dangling && git count-objects -v | grep -E '^(count|in-pack)'");
+	// Shell scripts of git's: submodule, and bisect running a test.
+	OUTPUT("", " sub (v1-1-g276f6ce)\n.gitmodules\nf\nsub\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && git -c protocol.file.allow=always submodule add -q /tmp/git/c.git sub && git submodule status | cut -c42- && git commit -q -m Sub && git ls-files");
+	OUTPUT("", "a548972b3431cc1d69aa17933741440a41c54b23 is the first 'bad' commit\nbisect found first 'bad' commit\nmain\n", "/bin/sh", "-c",
+			"cd /tmp/git/a && git bisect start HEAD v1~2 >/dev/null && git bisect run sh -c '! grep -q five f' | grep 'first .bad. commit' ; git bisect reset >/dev/null 2>&1; git branch --show-current");
+	// The programs another computer runs by name: the refs each offers, git-shell letting only
+	// them run, and an archive asked for over the protocol.
+	OUTPUT("", "refs/heads/clash\n", "/bin/sh", "-c",
+			"git-upload-pack --advertise-refs /tmp/git/a | head -2 | tail -1 | cut -c46-");
+	OUTPUT("", "refs/heads/clash\n", "/bin/sh", "-c",
+			"git-receive-pack --advertise-refs /tmp/git/c.git | head -1 | cut -c46-61");
+	OUTPUT("", "refs/heads/main\n", "/bin/sh", "-c",
+			"git-shell -c \"git-upload-pack '/tmp/git/a'\" </dev/null 2>/dev/null | head -3 | tail -1 | cut -c46-");
+	STATUS(128, "/bin/sh", "-c",
+			"git-shell -c ls 2>/dev/null");
+	OUTPUT("", "f\n", "/bin/sh", "-c",
+			"git archive --remote=/tmp/git/a --format=tar v1 | tar -tf -");
+	OUTPUT("", "0008ACK\n0000", "/bin/sh", "-c",
+			"printf '0012argument HEAD\\n0000' | git-upload-archive /tmp/git/a | head -c 12");
+	// Its manual pages, which `git help` shows.
+	OUTPUT("", "/system/resources/man/man1/git-commit.1\n/system/resources/man/man7/gitglossary.7\n",
+			"/bin/man", "-w", "git-commit", "gitglossary");
+	STATUS(0, "/bin/rm", "-rf", "/tmp/git");
+	for(size_t i = 0; i < sizeof(ENV) / sizeof(ENV[0]); i++)
+		unsetenv(ENV[i][0]);
+	if(was_home) {
+		setenv("HOME", was_home, 1);
+		free(was_home);
+	}
+}
+
 static void manuals(void) {
 	DIR *bin = opendir("/system/commands");
 	CHECK(bin != NULL);
@@ -876,6 +951,7 @@ int main(void) {
 	RUN(editing);
 	RUN(terminals);
 	RUN(multiplexing);
+	RUN(versioning);
 	RUN(shells);
 	RUN(manuals);
 	return check_end();
