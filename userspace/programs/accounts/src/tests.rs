@@ -60,16 +60,72 @@ fn groups_and_administrators() {
 fn new_accounts_take_the_lowest_free_number() {
     let users = users("root:x:0:0::/:/bin/sh\na:x:1000:1000::/users/a:/bin/sh\n");
     let groups = groups("root:x:0:\na:x:1000:\nstaff:x:1001:\n");
-    assert_eq!(free_number(&users, &groups), Some(1002));
+    assert_eq!(free_number(&users, &groups, &[]), Some(1002));
+    // A removed account's number is never given again.
+    let retired = retired("1002:carol:2026-10-31\nbroken\n1003:dave:2026-10-31\n");
+    assert_eq!(retired, [1002, 1003]);
+    assert_eq!(free_number(&users, &groups, &retired), Some(1004));
+}
+
+#[test]
+fn removing_accounts() {
+    let mut users = users(
+        "root:x:0:0::/:/bin/sh\nalice:x:1000:1000::/users/alice:/bin/sh\n\
+         bob:x:1001:1001::/users/bob:/bin/sh\n",
+    );
+    let mut groups = groups("admins:x:10:alice,bob\nalice:x:1000:\nbob:x:1001:\nstaff:x:50:bob\n");
+    let bob = remove(&mut users, &mut groups, "bob").unwrap();
+    assert_eq!((bob.uid, bob.home.as_str()), (1001, "/users/bob"));
+    assert_eq!(users.entries().map(|u| u.name.as_str()).collect::<Vec<_>>(), ["root", "alice"]);
+    assert_eq!(groups.text(), "admins:x:10:alice\nalice:x:1000:\nstaff:x:50:\n");
+    assert!(remove(&mut users, &mut groups, "bob").unwrap_err().contains("no account bob"));
+    assert_eq!(retired_line(&bob, "2026-10-31"), "1001:bob:2026-10-31\n");
+}
+
+#[test]
+fn renaming_accounts() {
+    let mut users =
+        users("alice:x:1000:1000:Alice:/users/alice:/bin/sh\nbob:x:1001:1001::/data/bob:/bin/sh\n");
+    let mut groups = groups("admins:x:10:alice\nalice:x:1000:\nbob:x:1001:alice\n");
+    let (before, after) = rename(&mut users, &mut groups, "alice", "ally").unwrap();
+    assert_eq!((before.home.as_str(), after.home.as_str()), ("/users/alice", "/users/ally"));
+    assert_eq!((after.uid, after.full_name.as_str()), (1000, "Alice"));
+    assert_eq!(groups.text(), "admins:x:10:ally\nally:x:1000:\nbob:x:1001:ally\n");
+    // A home elsewhere stays where it is.
+    let (_, bob) = rename(&mut users, &mut groups, "bob", "robert").unwrap();
+    assert_eq!(bob.home, "/data/bob");
+    for (name, new, why) in [
+        ("ally", "robert", "an account robert"),
+        ("ally", "admins", "a group admins"),
+        ("ally", "Ally", "cannot be a name"),
+        ("carol", "caz", "no account carol"),
+    ] {
+        assert!(rename(&mut users, &mut groups, name, new).unwrap_err().contains(why), "{new}");
+    }
+}
+
+#[test]
+fn administrators_come_and_go() {
+    let mut groups = groups("alice:x:1000:\n");
+    set_admin(&mut groups, "alice", false).unwrap();
+    assert_eq!(groups.text(), "alice:x:1000:\n");
+    set_admin(&mut groups, "alice", true).unwrap();
+    set_admin(&mut groups, "alice", true).unwrap();
+    set_admin(&mut groups, "bob", true).unwrap();
+    assert_eq!(groups.text(), "alice:x:1000:\nadmins:x:10:alice,bob\n");
+    set_admin(&mut groups, "alice", false).unwrap();
+    assert_eq!(groups.text(), "alice:x:1000:\nadmins:x:10:bob\n");
+    let mut taken = self::groups("staff:x:10:\n");
+    assert!(set_admin(&mut taken, "alice", true).unwrap_err().contains("another group"));
 }
 
 #[test]
 fn adding_accounts() {
     let mut users = users("root:x:0:0:root:/:/system/commands/nukesh\n");
     let mut groups = groups("root:x:0:\n");
-    let alice = add(&mut users, &mut groups, "alice", "Alice Liddell", true).unwrap();
+    let alice = add(&mut users, &mut groups, "alice", "Alice Liddell", true, &[]).unwrap();
     assert_eq!((alice.uid, alice.gid, alice.home.as_str()), (1000, 1000, "/users/alice"));
-    let bob = add(&mut users, &mut groups, "bob", "", false).unwrap();
+    let bob = add(&mut users, &mut groups, "bob", "", false, &[]).unwrap();
     assert_eq!(bob.uid, 1001);
     assert!(is_admin(&alice, &groups) && !is_admin(&bob, &groups));
     assert_eq!(groups.text(), "root:x:0:\nadmins:x:10:alice\nalice:x:1000:\nbob:x:1001:\n");
@@ -80,11 +136,13 @@ fn adding_accounts() {
     for (name, full_name) in
         [("alice", ""), ("root", ""), ("admins", ""), ("Eve", ""), ("eve", "a:b")]
     {
-        assert!(add(&mut users, &mut groups, name, full_name, false).is_err(), "{name}");
+        assert!(add(&mut users, &mut groups, name, full_name, false, &[]).is_err(), "{name}");
     }
     // The administrators' number taken by another group: no account.
     let mut groups = self::groups("staff:x:10:\n");
-    assert!(add(&mut users, &mut groups, "carol", "", true).unwrap_err().contains("another group"));
+    assert!(
+        add(&mut users, &mut groups, "carol", "", true, &[]).unwrap_err().contains("another group")
+    );
 }
 
 #[test]
@@ -96,6 +154,17 @@ fn password_lines() {
     // Fields after the hash, as /etc/shadow's, are not kept: authd
     // writes none.
     assert_eq!(table.text(), "alice:$argon2id$v=19$x:\nbob::\ncarol:!:\n");
+    // A disabled account keeps its password behind the mark.
+    let mut alice = table.entries().next().unwrap().clone();
+    assert!(!alice.is_disabled());
+    alice.set_disabled(true);
+    alice.set_disabled(true);
+    assert_eq!((alice.hash.as_str(), alice.own_hash()), ("!$argon2id$v=19$x", "$argon2id$v=19$x"));
+    assert!(alice.is_disabled());
+    alice.set_disabled(false);
+    assert_eq!(alice.hash, "$argon2id$v=19$x");
+    let carol = table.entries().nth(2).unwrap();
+    assert!(carol.is_disabled() && carol.own_hash().is_empty());
 }
 
 #[test]
@@ -176,6 +245,13 @@ fn requests_go_and_come_back() {
         Request::Prompted { id: 0, typed: Prompted::Password(Vec::new()) },
         Request::Prompted { id: u64::MAX, typed: Prompted::Cancelled },
         Request::Prompted { id: 8, typed: Prompted::Elsewhere },
+        Request::Disable { name: "bob".into() },
+        Request::Enable { name: "bob".into() },
+        Request::Remove { name: "bob".into() },
+        Request::Rename { name: "bob".into(), new: "robert".into() },
+        Request::Set { name: "bob".into(), full_name: Some("Bob Smith".into()), admin: None },
+        Request::Set { name: "bob".into(), full_name: Some(String::new()), admin: Some(true) },
+        Request::Set { name: "bob".into(), full_name: None, admin: Some(false) },
     ];
     for request in requests {
         assert_eq!(Request::decode(&request.encode()), Ok(request));
@@ -201,6 +277,16 @@ fn requests_go_and_come_back() {
     // A password typed is sent whatever `ask` says.
     assert_eq!(elevate.encode(), b"elevate\0shell\0password\0pw\0linux\0/x\0LANG=C\0--\0id\0");
     assert_eq!(Request::Unlock { password: None, ask: true }.encode(), b"unlock\0ask\0\0");
+    assert_eq!(Request::Disable { name: "bob".into() }.encode(), b"disable\0bob\0");
+    assert_eq!(
+        Request::Rename { name: "bob".into(), new: "rob".into() }.encode(),
+        b"rename\0bob\0rob\0"
+    );
+    assert_eq!(
+        Request::Set { name: "bob".into(), full_name: Some("Bob".into()), admin: Some(false) }
+            .encode(),
+        b"set\0bob\0full-name\0Bob\0admin\0no\0"
+    );
     assert_eq!(
         Request::Prompted { id: 12, typed: Prompted::Password(b"pw".to_vec()) }.encode(),
         b"prompted\x0012\0password\0pw\0"
@@ -234,6 +320,16 @@ fn requests_go_and_come_back() {
         b"prompted\x007\0elsewhere\0x\0",
         b"prompted\x007\0maybe\0\0",
         b"prompted\x007\0password\0",
+        // An account's request with a field too many or too few; settings
+        // with none, one twice, or a value there is not.
+        b"disable\0",
+        b"enable\0bob\0x\0",
+        b"rename\0bob\0",
+        b"set\0bob\0",
+        b"set\0bob\0full-name\0",
+        b"set\0bob\0admin\0maybe\0",
+        b"set\0bob\0admin\0yes\0admin\0no\0",
+        b"set\0bob\0shell\0/bin/sh\0",
     ] {
         assert!(Request::decode(bad).is_err(), "{bad:?}");
     }

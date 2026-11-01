@@ -1669,7 +1669,13 @@ impl Shell {
         };
         let monitor = std::mem::replace(&mut self.opts.monitor, false);
         let pid = self.fork_child(0, true);
-        self.opts.monitor = monitor;
+        // Only the shell gets its job control back: the substitution runs
+        // without it, as bash's does, so a pipeline in it stays in the
+        // shell's group, the terminal's, and a program in it that sets the
+        // terminal is not stopped as a background job's would be.
+        if !matches!(pid, Ok(0)) {
+            self.opts.monitor = monitor;
+        }
         let pid = pid?;
         if pid == 0 {
             self.in_subst = true;

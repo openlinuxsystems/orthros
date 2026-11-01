@@ -122,7 +122,8 @@ account, and its owner must make one at the first boot.
   in again and a wrong password, and that root sees both sessions as
   leaders on different terminals.
 - **Not yet:** elevate and administrators acting as root (13b.6);
-  `last`, private `/tmp` per session, and the account settings (13b.7);
+  `last` (ADR 0254), a private `/tmp` for each person (ADR 0255), and
+  the account settings (13b.7);
   graphical sign-in (Phase 14); remote sign-in over SSH (13c), which
   will ask authd for its sessions the same way.
 

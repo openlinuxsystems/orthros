@@ -42,7 +42,7 @@ use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -50,12 +50,14 @@ use std::time::{Duration, Instant};
 
 use accounts::hash::{self, Cost};
 use accounts::request::{self, Answer, Mode, Prompt, Prompted, REQUEST_MAX, Relay, Request};
-use accounts::{Group, Password, Table, User};
+use accounts::signins::{self, Event, Latest, Place, Record, Seat};
+use accounts::{DISABLED, Group, Password, Table, User};
+use radix_abi::names;
 
 use crate::args::Args;
 use crate::elevate::{self, Plan};
 use crate::util::{self, Fail};
-use crate::{proc, signin, sys};
+use crate::{proc, sessions, signin, sys};
 
 /// How long a connection has to send its request.
 const REQUEST_TIME: Duration = Duration::from_secs(10);
@@ -234,10 +236,14 @@ extern "C" fn on_child(_: libc::c_int) {
 }
 
 /// A session authd started, or an elevated command: whose it is, and on
-/// what terminal, for the audit log.
+/// what terminal, for the audit log and the sign-in records.
 struct Session {
     name: String,
     terminal: String,
+    /// The account's number and its own group, whose sign-in records
+    /// the session's go in.
+    number: u32,
+    group: u32,
     /// Whether it is an elevated command.
     elevated: bool,
 }
@@ -292,10 +298,16 @@ impl Files {
         self.users.entries().find(|u| u.name == name)
     }
 
-    /// The hash of `name`'s password: `None` for an account with no line
-    /// in the passwords file, which no password opens.
+    /// The hash of `name`'s password, without the mark of a disabled
+    /// account: `None` for an account with no line in the passwords file,
+    /// which no password opens.
     fn hash(&self, name: &str) -> Option<&str> {
-        self.passwords.entries().find(|p| p.name == name).map(|p| p.hash.as_str())
+        self.passwords.entries().find(|p| p.name == name).map(Password::own_hash)
+    }
+
+    /// Whether `name`'s account is disabled (ADR 0220).
+    fn disabled(&self, name: &str) -> bool {
+        self.passwords.entries().any(|p| p.name == name && p.is_disabled())
     }
 }
 
@@ -368,13 +380,26 @@ fn give(path: &Path, user: &User, mode: u32) -> io::Result<()> {
 /// and the home is given last, so that the user, who may be running
 /// already, can put nothing in authd's way: no link where a folder is
 /// to be.
-fn make_home(user: &User) -> Result<&'static str, String> {
+fn make_home(user: &User) -> Result<String, String> {
     let home = Path::new(&user.home);
     let failed =
         |err: io::Error| format!("cannot make {}: {}", home.display(), util::strip_os_error(&err));
     match fs::DirBuilder::new().mode(0o700).create(home) {
+        // A removed account's, kept, is still the removed account's
+        // (ADR 0220): the administrator decides.
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-            return Ok("; its home was there already, and is as it was");
+            let owner = fs::symlink_metadata(home).map_or(user.uid, |m| m.uid());
+            return Ok(if owner == user.uid {
+                "; its home was there already, and is as it was".into()
+            } else {
+                format!(
+                    "; its home was there already, and is user {owner}'s: `elevate chown -R \
+                     {}: {}` gives it to {}",
+                    user.name,
+                    home.display(),
+                    user.name
+                )
+            });
         }
         other => other.map_err(failed)?,
     }
@@ -388,7 +413,7 @@ fn make_home(user: &User) -> Result<&'static str, String> {
             .map_err(failed)?;
     }
     give(home, user, 0o700).map_err(failed)?;
-    Ok("")
+    Ok(String::new())
 }
 
 impl Authd {
@@ -534,6 +559,13 @@ impl Authd {
                 }
                 Request::Reset { name, password } => {
                     (self.reset(&files, name, password, peer), now)
+                }
+                Request::Disable { name } => (self.disable(&files, name, peer), now),
+                Request::Enable { name } => (enable(&files, name, peer), now),
+                Request::Remove { name } => (self.remove(files, name, peer), now),
+                Request::Rename { name, new } => (self.rename(files, name, new, peer), now),
+                Request::Set { name, full_name, admin } => {
+                    (self.set(files, name, full_name.as_deref(), *admin, peer), now)
                 }
                 Request::Session { name, password, term } => {
                     let (answer, at) = self.session(i, &files, name, password, term, peer, now);
@@ -706,6 +738,24 @@ impl Authd {
         };
         let key = (name.to_string(), peer.source());
         match right {
+            // Said only to someone who knows the password, as Linux's
+            // login tells of an expired account.
+            Ok(true) if files.disabled(name) => {
+                self.wrong.remove(&key);
+                audit!(
+                    "refused {} to process {} (user {}): the account is disabled",
+                    shown(name),
+                    peer.process,
+                    peer.user
+                );
+                let why = format!(
+                    "the account {} is disabled: an administrator enables it with elevate user \
+                     enable {}",
+                    shown(name),
+                    shown(name)
+                );
+                Err((Answer::Refused(why), now))
+            }
             Ok(true) => {
                 self.wrong.remove(&key);
                 Ok(())
@@ -755,7 +805,19 @@ impl Authd {
                        needs `names = true`";
             return (Answer::Refused(why.into()), now);
         };
+        let tty = signin::terminal_name(&terminal);
         if let Err(refused) = self.check_password(files, name, password, peer, now) {
+            // A wrong password at a sign-in is recorded for lastb(1), and
+            // for the person whose account it was, who is told at their
+            // next sign-in (ADR 0254).
+            if matches!(&refused.0, Answer::Refused(why) if why == request::WRONG_PASSWORD) {
+                let failed =
+                    Event::Failed { name: shown(name), terminal: tty.clone(), from: String::new() };
+                match files.user(name) {
+                    Some(user) => record(&signins::of(user.uid), user.gid, 0o640, failed),
+                    None => record(signins::UNKNOWN, 0, 0o600, failed),
+                }
+            }
             return refused;
         }
         // A right password is an account's.
@@ -764,15 +826,20 @@ impl Authd {
         };
         let groups =
             accounts::other_groups(user, &files.groups, radix_abi::names::GROUPS_MAX as usize);
-        let tty = signin::terminal_name(&terminal);
-        // What happened while they were away comes first, on the
-        // terminal, before the session's programs write to it.
+        // Their last sign-in and the wrong passwords typed for them
+        // since, then what happened while they were away, come first, on
+        // the terminal, before the session's programs write to it.
+        let records = read_text(&signins::of(user.uid)).unwrap_or_default();
+        let mut lines = latest_lines(&signins::latest(&signins::parse(&records)), name, |time| {
+            util::local_time(time, WHEN)
+        });
         let notices = Notices::read();
         let theirs = notices.of(name);
-        if !theirs.is_empty()
+        lines.extend(theirs.iter().cloned());
+        if !lines.is_empty()
             && let Ok(copy) = terminal.try_clone()
         {
-            let text = format!("\n{}\n\n", theirs.join("\n"));
+            let text = format!("\n{}\n\n", lines.join("\n"));
             let _ = File::from(copy).write_all(text.as_bytes());
         }
         match signin::start(names, user, &groups, &terminal, term) {
@@ -788,7 +855,20 @@ impl Authd {
                     eprintln!("authd: {why}");
                 }
                 let process = process as i32;
-                let session = Session { name: name.into(), terminal: tty, elevated: false };
+                let seat = Seat {
+                    name: name.into(),
+                    terminal: tty.clone(),
+                    from: String::new(),
+                    session: process as u32,
+                };
+                record(&signins::of(user.uid), user.gid, 0o640, Event::In(seat));
+                let session = Session {
+                    name: name.into(),
+                    terminal: tty,
+                    number: user.uid,
+                    group: user.gid,
+                    elevated: false,
+                };
                 self.sessions.insert(process, session);
                 self.clients[i].session = Some(process);
                 (Answer::Done(process.to_string()), now)
@@ -835,6 +915,13 @@ impl Authd {
                         session.name,
                         session.terminal
                     );
+                    let seat = Seat {
+                        name: session.name.clone(),
+                        terminal: session.terminal.clone(),
+                        from: String::new(),
+                        session: process as u32,
+                    };
+                    record(&signins::of(session.number), session.group, 0o640, Event::Out(seat));
                 }
             }
             for client in &mut self.clients {
@@ -954,7 +1041,13 @@ impl Authd {
             plan.shown,
             peer.process
         );
-        let session = Session { name: user.name, terminal, elevated: true };
+        let session = Session {
+            name: user.name,
+            terminal,
+            number: user.uid,
+            group: user.gid,
+            elevated: true,
+        };
         self.sessions.insert(process, session);
         let client = &mut self.clients[i];
         client.session = Some(process);
@@ -1106,15 +1199,17 @@ impl Authd {
                  elevate passwd {name}"
             ));
         }
-        if let Err(why) = set_password(files, name, password) {
+        // The owner gets back in: a disabled account is enabled too.
+        if let Err(why) = set_password(files, name, password, true) {
             return Answer::Refused(why);
         }
         // The new password opens the account at once.
         self.wrong.retain(|(account, _), _| account != name);
         let empty = if password.is_empty() { ", to an empty one" } else { "" };
+        let enabled = if files.disabled(name) { ", and the account enabled," } else { "" };
         audit!(
-            "the password of {name} was reset{empty} from the startup-trouble menu, by process {} \
-             (user {})",
+            "the password of {name} was reset{empty}{enabled} from the startup-trouble menu, by \
+             process {} (user {})",
             peer.process,
             peer.user
         );
@@ -1159,7 +1254,7 @@ impl Authd {
                 return refused;
             }
         }
-        if let Err(why) = set_password(files, name, new) {
+        if let Err(why) = set_password(files, name, new, false) {
             return (Answer::Refused(why), now);
         }
         let empty = if new.is_empty() { ", to an empty one" } else { "" };
@@ -1172,12 +1267,339 @@ impl Authd {
     }
 }
 
-/// Puts the hash of `password` in `name`'s line of the passwords file.
-fn set_password(files: &Files, name: &str, password: &[u8]) -> Result<(), String> {
+/// How many times [`Authd::end`] asks the kernel to end an account's
+/// processes before it gives up: each time ends those that a process it
+/// ended the time before made as it ended.
+const END_PASSES: u32 = 100;
+
+impl Authd {
+    /// Ends everything that acts for `user` (ADR 0220): the elevated
+    /// commands authd started for it, elevate unlocked in its panes, and
+    /// every process the kernel has act for it, its sessions with them,
+    /// while every capability made for it fails from then on. How many of
+    /// its processes the kernel ended.
+    fn end(&mut self, user: &User) -> Result<u32, String> {
+        let Some(names) = self.names else {
+            return Err("authd holds no names capability to end the account's processes with: \
+                        its service file needs `names = true`"
+                .into());
+        };
+        self.unlocked.retain(|pane, _| pane.user != user.uid);
+        for (&process, _) in self.sessions.iter().filter(|(_, s)| s.elevated && s.name == user.name)
+        {
+            signal_command(process, libc::SIGKILL);
+        }
+        let mut ended = 0u32;
+        for _ in 0..END_PASSES {
+            let now = names::end(&sys::SYS, names, user.uid)
+                .map_err(|status| {
+                    format!("the kernel did not end its processes: {}", sys::status_name(status.0))
+                })?
+                .ended;
+            ended = ended.saturating_add(now);
+            if now == 0 {
+                return Ok(ended);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Err(format!("its processes made more as fast as {ended} of them ended"))
+    }
+
+    /// Disables `name`'s account (ADR 0220): nothing signs in to it, and
+    /// what acts for it ends.
+    fn disable(&mut self, files: &Files, name: &str, peer: Peer) -> Answer {
+        let user = match person(files, name, peer, "disables accounts") {
+            Ok(user) => user.clone(),
+            Err(why) => return Answer::Refused(why),
+        };
+        if let Err(why) = mark_disabled(files, name, true) {
+            return Answer::Refused(why);
+        }
+        match self.end(&user) {
+            Ok(ended) => {
+                audit!(
+                    "disabled the account {name} ({}), for process {} (user {}); {ended} of its \
+                     processes ended",
+                    user.uid,
+                    peer.process,
+                    peer.user
+                );
+                Answer::Done(ended.to_string())
+            }
+            Err(why) => {
+                audit!("disabled the account {name} ({}), but {why}", user.uid);
+                Answer::Refused(format!("{name} is disabled, but {why}"))
+            }
+        }
+    }
+
+    /// Removes `name`'s account: disables it, ends what acts for it,
+    /// retires its number and takes its lines out of the account files.
+    /// Its home is left to the asker.
+    fn remove(&mut self, files: Files, name: &str, peer: Peer) -> Answer {
+        let user = match person(&files, name, peer, "removes accounts") {
+            Ok(user) => user.clone(),
+            Err(why) => return Answer::Refused(why),
+        };
+        // Nothing signs in to it from now on, whatever fails later.
+        if let Err(why) = mark_disabled(&files, name, true) {
+            return Answer::Refused(why);
+        }
+        let ended = match self.end(&user) {
+            Ok(ended) => ended,
+            Err(why) => {
+                audit!("disabled the account {name} ({}) to remove it, but {why}", user.uid);
+                return Answer::Refused(format!("{name} is disabled but not removed: {why}"));
+            }
+        };
+        let Files { mut users, mut groups, mut passwords } = files;
+        if let Err(why) = accounts::remove(&mut users, &mut groups, name) {
+            return Answer::Refused(why);
+        }
+        passwords.retain_entries(|p| p.name != name);
+        // Its number first, so that it is never given again, then the
+        // user, whose line going removes the account, and the rest.
+        let day = util::local_time(util::now_ns() as i64 / 1_000_000_000, "%Y-%m-%d");
+        let removed = retire(&user, &day)
+            .and_then(|()| replace(accounts::PASSWD, &users.text(), 0o644))
+            .and_then(|()| replace(accounts::GROUP, &groups.text(), 0o644))
+            .and_then(|()| replace(accounts::PASSWORDS, &passwords.text(), 0o600));
+        if let Err(why) = removed {
+            return Answer::Refused(format!("{name} is disabled but not wholly removed: {why}"));
+        }
+        let notices = Notices::read();
+        if !notices.of(name).is_empty()
+            && let Err(why) = notices.without(name).write()
+        {
+            eprintln!("authd: {why}");
+        }
+        self.wrong.retain(|(account, _), _| account != name);
+        // Its own /tmp goes with it (ADR 0255); its sign-in records stay,
+        // root's to read.
+        let tmp = format!("{}/{}", signin::TMP, user.uid);
+        if let Err(err) = fs::remove_dir_all(&tmp)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            eprintln!("authd: cannot remove {tmp}: {}", util::strip_os_error(&err));
+        }
+        audit!(
+            "removed the account {name} ({}), for process {} (user {}); {ended} of its processes \
+             ended, and its number is retired",
+            user.uid,
+            peer.process,
+            peer.user
+        );
+        Answer::Done(user.home)
+    }
+
+    /// Renames `name`'s account to `new`, with its own group and its home
+    /// in `/users`, while nothing acts for it.
+    fn rename(&mut self, files: Files, name: &str, new: &str, peer: Peer) -> Answer {
+        let user = match person(&files, name, peer, "renames accounts") {
+            Ok(user) => user.clone(),
+            Err(why) => return Answer::Refused(why),
+        };
+        // Its processes would go on with the old name and home.
+        let running = match proc::processes() {
+            Ok(all) => all.iter().filter(|p| p.user == user.uid && !p.zombie()).count(),
+            Err(err) => return Answer::Refused(format!("cannot read /processes: {err}")),
+        };
+        if running > 0 {
+            let processes =
+                if running == 1 { "a process".to_string() } else { format!("{running} processes") };
+            return Answer::Refused(format!(
+                "{name} is running {processes}: rename the account once {name} has signed out, \
+                 and what runs for them has ended"
+            ));
+        }
+        let Files { mut users, mut groups, mut passwords } = files;
+        let (before, after) = match accounts::rename(&mut users, &mut groups, name, new) {
+            Ok(both) => both,
+            Err(why) => return Answer::Refused(why),
+        };
+        for line in passwords.entries_mut().filter(|p| p.name == name) {
+            line.name = new.into();
+        }
+        // Its home moves first, then the files say where it is.
+        let moves = before.home != after.home && Path::new(&before.home).exists();
+        if moves {
+            if Path::new(&after.home).exists() {
+                return Answer::Refused(format!("{} is there already", after.home));
+            }
+            if let Err(err) = fs::rename(&before.home, &after.home) {
+                let err = util::strip_os_error(&err);
+                return Answer::Refused(format!(
+                    "cannot move {} to {}: {err}",
+                    before.home, after.home
+                ));
+            }
+        }
+        let written = replace(accounts::PASSWORDS, &passwords.text(), 0o600)
+            .and_then(|()| replace(accounts::GROUP, &groups.text(), 0o644))
+            .and_then(|()| replace(accounts::PASSWD, &users.text(), 0o644));
+        if let Err(why) = written {
+            if moves {
+                let _ = fs::rename(&after.home, &before.home);
+            }
+            return Answer::Refused(why);
+        }
+        let notices = Notices::read();
+        if !notices.of(name).is_empty()
+            && let Err(why) = notices.renamed(name, new).write()
+        {
+            eprintln!("authd: {why}");
+        }
+        self.wrong.retain(|(account, _), _| account != name);
+        audit!(
+            "renamed the account {name} ({}) to {new}, its home {}, for process {} (user {})",
+            user.uid,
+            after.home,
+            peer.process,
+            peer.user
+        );
+        Answer::Done(format!("renamed {name} to {new}, home {}", after.home))
+    }
+
+    /// Changes `name`'s full name, or whether it is an administrator.
+    fn set(
+        &mut self,
+        files: Files,
+        name: &str,
+        full_name: Option<&str>,
+        admin: Option<bool>,
+        peer: Peer,
+    ) -> Answer {
+        let Some(user) = files.user(name).cloned() else {
+            return Answer::Refused(format!("there is no account {}", shown(name)));
+        };
+        // Anyone changes their own full name, as chfn(1) lets them.
+        let own = peer.user == user.uid && admin.is_none();
+        if !peer.is_root() && !own {
+            let why = "only an administrator, inside elevate, changes an account's settings; \
+                       anyone changes their own full name";
+            return Answer::Refused(why.into());
+        }
+        if !user.is_person() {
+            return Answer::Refused(format!("{name} is not a person's account"));
+        }
+        let Files { mut users, mut groups, .. } = files;
+        let mut changed = Vec::new();
+        if let Some(full_name) = full_name {
+            if let Err(why) = accounts::check_full_name(full_name) {
+                return Answer::Refused(why);
+            }
+            for line in users.entries_mut().filter(|u| u.name == name) {
+                line.full_name = full_name.into();
+            }
+            changed.push(format!("full name {full_name:?}"));
+        }
+        if let Some(admin) = admin {
+            if let Err(why) = accounts::set_admin(&mut groups, name, admin) {
+                return Answer::Refused(why);
+            }
+            if accounts::is_admin(&user, &groups) != admin {
+                return Answer::Refused(format!(
+                    "{name}'s own group is the {} group",
+                    accounts::ADMINS
+                ));
+            }
+            changed.push(if admin { "an administrator" } else { "not an administrator" }.into());
+        }
+        let written = replace(accounts::GROUP, &groups.text(), 0o644)
+            .and_then(|()| replace(accounts::PASSWD, &users.text(), 0o644));
+        if let Err(why) = written {
+            return Answer::Refused(why);
+        }
+        // Someone who is no longer an administrator keeps nothing of the
+        // admin set.
+        if admin == Some(false) {
+            self.unlocked.retain(|pane, _| pane.user != user.uid);
+            for (&process, _) in self.sessions.iter().filter(|(_, s)| s.elevated && s.name == name)
+            {
+                signal_command(process, libc::SIGKILL);
+            }
+        }
+        let changed = changed.join(", ");
+        audit!(
+            "changed the account {name} ({}): {changed}, for process {} (user {})",
+            user.uid,
+            peer.process,
+            peer.user
+        );
+        Answer::Done(changed)
+    }
+}
+
+/// The account of a person `name`, for a request that changes it: root's
+/// to ask, from an administrator inside elevate, which `what` says.
+fn person<'a>(files: &'a Files, name: &str, peer: Peer, what: &str) -> Result<&'a User, String> {
+    if !peer.is_root() {
+        return Err(format!("only an administrator, inside elevate, {what}"));
+    }
+    let user = files.user(name).ok_or_else(|| format!("there is no account {}", shown(name)))?;
+    if !user.is_person() {
+        return Err(format!("{} is not a person's account", shown(name)));
+    }
+    Ok(user)
+}
+
+/// Enables `name`'s account again, with the password it had.
+fn enable(files: &Files, name: &str, peer: Peer) -> Answer {
+    if let Err(why) = person(files, name, peer, "enables accounts") {
+        return Answer::Refused(why);
+    }
+    if !files.disabled(name) {
+        return Answer::Done(format!("{name} was not disabled"));
+    }
+    if let Err(why) = mark_disabled(files, name, false) {
+        return Answer::Refused(why);
+    }
+    audit!("enabled the account {name}, for process {} (user {})", peer.process, peer.user);
+    Answer::Done(String::new())
+}
+
+/// Marks `name`'s account disabled, or not, in the passwords file. One
+/// with no line, which no password opens, gets `!*`, Linux's for an
+/// account locked with no password, so that enabling it opens it to no
+/// password still.
+fn mark_disabled(files: &Files, name: &str, disabled: bool) -> Result<(), String> {
+    if files.disabled(name) == disabled {
+        return Ok(());
+    }
+    let mut passwords = files.passwords.clone();
+    if let Some(line) = passwords.entries_mut().find(|p| p.name == name) {
+        line.set_disabled(disabled);
+    } else {
+        passwords.push(Password { name: name.into(), hash: format!("{DISABLED}*") });
+    }
+    replace(accounts::PASSWORDS, &passwords.text(), 0o600)
+}
+
+/// Adds `user`'s number, removed on `day`, to the retired ones, which no
+/// account gets again.
+fn retire(user: &User, day: &str) -> Result<(), String> {
+    let failed = |err: io::Error| {
+        format!("cannot write {}: {}", accounts::RETIRED, util::strip_os_error(&err))
+    };
+    let mut file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(accounts::RETIRED)
+        .map_err(failed)?;
+    file.write_all(accounts::retired_line(user, day).as_bytes()).map_err(failed)?;
+    file.sync_all().map_err(failed)
+}
+
+/// Puts the hash of `password` in `name`'s line of the passwords file. A
+/// disabled account stays disabled, unless `enable`.
+fn set_password(files: &Files, name: &str, password: &[u8], enable: bool) -> Result<(), String> {
     let hash = hash_of(password)?;
     let mut passwords = files.passwords.clone();
     if let Some(line) = passwords.entries_mut().find(|p| p.name == name) {
+        let disabled = line.is_disabled() && !enable;
         line.hash = hash;
+        line.set_disabled(disabled);
     } else {
         passwords.push(Password { name: name.into(), hash });
     }
@@ -1234,9 +1656,92 @@ impl Notices {
         Notices(self.0.iter().filter(|(n, _)| n != name).cloned().collect())
     }
 
+    /// The same, `name`'s now `new`'s.
+    fn renamed(&self, name: &str, new: &str) -> Notices {
+        let rename = |n: &String| if n == name { new.to_string() } else { n.clone() };
+        Notices(self.0.iter().map(|(n, text)| (rename(n), text.clone())).collect())
+    }
+
     fn write(&self) -> Result<(), String> {
         replace(NOTICES, &self.text(), 0o600)
     }
+}
+
+/// How a sign-in record's time reads on a terminal: `Sat Oct 31 12:40
+/// 2026`.
+const WHEN: &str = "%a %b %e %H:%M %Y";
+
+/// Adds a record of `event`, now, to the sign-in records' file at `path`
+/// (ADR 0254): root's and `group`'s, with `mode`, made if it is not
+/// there, and trimmed once it grew past [`signins::FILE_MAX`]. A record
+/// that cannot be written is said on authd's standard error, and the
+/// sign-in goes on.
+fn record(path: &str, group: u32, mode: u32, event: Event) {
+    let record = Record { time: (util::now_ns() / 1_000_000_000) as i64, event };
+    if let Err(err) = append(path, group, mode, &record.line()) {
+        eprintln!("authd: cannot write {path}: {}", util::strip_os_error(&err));
+    }
+}
+
+fn append(path: &str, group: u32, mode: u32, line: &str) -> io::Result<()> {
+    let own = |file: &File| -> io::Result<()> {
+        let meta = file.metadata()?;
+        if meta.uid() != 0 || meta.gid() != group {
+            std::os::unix::fs::fchown(file, Some(0), Some(group))?;
+        }
+        if meta.mode() & 0o7777 != mode {
+            file.set_permissions(fs::Permissions::from_mode(mode))?;
+        }
+        Ok(())
+    };
+    let mut file = OpenOptions::new().append(true).create(true).mode(mode).open(path)?;
+    own(&file)?;
+    file.write_all(line.as_bytes())?;
+    if file.metadata()?.len() <= signins::FILE_MAX {
+        return Ok(());
+    }
+    let kept = signins::trimmed(&read_text(path)?);
+    let new = format!("{path}.new");
+    let written = (|| {
+        let mut file =
+            OpenOptions::new().write(true).create(true).truncate(true).mode(mode).open(&new)?;
+        own(&file)?;
+        file.write_all(kept.as_bytes())?;
+        fs::rename(&new, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&new);
+    }
+    written
+}
+
+/// `terminal`, and where from if not at the computer itself.
+fn place_text(place: &Place, when: &impl Fn(i64) -> String) -> String {
+    let from = if place.from.is_empty() { String::new() } else { format!(" from {}", place.from) };
+    format!("{} on {}{from}", when(place.time), place.terminal)
+}
+
+/// What `name` reads as they sign in, from their `latest` records: their
+/// last sign-in, and the wrong passwords typed for them since, as Linux's
+/// login says them; nothing at the first, unless wrong ones came before.
+fn latest_lines(latest: &Latest, name: &str, when: impl Fn(i64) -> String) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(sign_in) = &latest.sign_in {
+        lines.push(format!("Last sign-in: {}", place_text(sign_in, &when)));
+    }
+    if let Some(last) = &latest.last_failed {
+        let count = match latest.failed {
+            1 => "1 wrong password was".to_string(),
+            n => format!("{n} wrong passwords were"),
+        };
+        let since = if latest.sign_in.is_some() { "Since then" } else { "Before this sign-in" };
+        lines.push(format!(
+            "{since}, {count} typed for {}, the last on {}.",
+            shown(name),
+            place_text(last, &when)
+        ));
+    }
+    lines
 }
 
 /// What an `elevate` request asks to run.
@@ -1297,7 +1802,11 @@ fn add(
         return Answer::Refused("only an administrator, inside elevate, makes accounts".into());
     }
     let Files { mut users, mut groups, mut passwords } = files;
-    let user = match accounts::add(&mut users, &mut groups, name, full_name, admin) {
+    let retired = match read_text(accounts::RETIRED) {
+        Ok(text) => accounts::retired(&text),
+        Err(err) => return Answer::Refused(format!("cannot read {}: {err}", accounts::RETIRED)),
+    };
+    let user = match accounts::add(&mut users, &mut groups, name, full_name, admin, &retired) {
         Ok(user) => user,
         Err(why) => return Answer::Refused(why),
     };
@@ -1513,7 +2022,8 @@ fn watch_children() -> io::Result<File> {
 /// sign-in makes the owner's account first.
 fn needs_owner(files: &Files) -> bool {
     let person = files.users.entries().any(User::is_person);
-    let root_signs_in = files.hash("root").is_some_and(|phc| phc.is_empty() || hash::readable(phc));
+    let root_signs_in = !files.disabled("root")
+        && files.hash("root").is_some_and(|phc| phc.is_empty() || hash::readable(phc));
     !person && !root_signs_in
 }
 
@@ -1545,6 +2055,18 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     // Its own files, which only it reads; the hashes are root's 0600 in
     // there too.
     own_dir(accounts::STATE, 0o700)?;
+    // The sign-in records (ADR 0254), which no one but root lists.
+    own_dir(signins::DIR, 0o711)?;
+    let boot = sessions::boot_seconds();
+    let system = signins::parse(&read_text(signins::SYSTEM).unwrap_or_default());
+    // Started again since the computer started, it records no start.
+    if signins::last_boot(&system).is_none_or(|last| (last - boot).abs() > 1) {
+        let release = util::uname().1;
+        let started = Record { time: boot, event: Event::Boot { release } };
+        if let Err(err) = append(signins::SYSTEM, 0, 0o644, &started.line()) {
+            eprintln!("authd: cannot write {}: {}", signins::SYSTEM, util::strip_os_error(&err));
+        }
+    }
     let dir = Path::new(accounts::SOCKET).parent().unwrap_or(Path::new("/"));
     own_dir(&dir.to_string_lossy(), 0o755)?;
     let _ = fs::remove_file(accounts::SOCKET);
@@ -1583,12 +2105,46 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     };
     authd.run_loop().map_err(|e| util::failed(&"authd", e))?;
     let _ = fs::remove_file(accounts::SOCKET);
+    // Asked to end: the computer is stopping, as Spark asks each service
+    // to end then. The sessions that run end with it.
+    record(signins::SYSTEM, 0, 0o644, Event::Down);
     Ok(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_last_sign_in_is_told_with_the_wrong_passwords_since() {
+        let when = |time: i64| format!("<{time}>");
+        let place = |time, terminal: &str, from: &str| Place {
+            time,
+            terminal: terminal.into(),
+            from: from.into(),
+        };
+        assert!(latest_lines(&Latest::default(), "bob", when).is_empty());
+        let latest = Latest { sign_in: Some(place(5, "pts/1", "")), failed: 0, last_failed: None };
+        assert_eq!(latest_lines(&latest, "bob", when), ["Last sign-in: <5> on pts/1"]);
+        let latest = Latest {
+            sign_in: Some(place(5, "pts/1", "")),
+            failed: 1,
+            last_failed: Some(place(9, "pts/2", "10.0.0.2")),
+        };
+        assert_eq!(
+            latest_lines(&latest, "bob", when),
+            [
+                "Last sign-in: <5> on pts/1",
+                "Since then, 1 wrong password was typed for bob, the last on <9> on pts/2 from \
+                 10.0.0.2."
+            ]
+        );
+        let latest = Latest { sign_in: None, failed: 3, last_failed: Some(place(9, "tty1", "")) };
+        assert_eq!(
+            latest_lines(&latest, "bob", when),
+            ["Before this sign-in, 3 wrong passwords were typed for bob, the last on <9> on tty1."]
+        );
+    }
 
     #[test]
     fn notices_wait_for_each_person() {
@@ -1602,6 +2158,11 @@ mod tests {
         assert_eq!(left.text(), "bob\tThe password of alice was reset.\n");
         assert_eq!(Notices::parse(&left.text()), left);
         assert!(notices.of("carol").is_empty());
+        // A renamed account's go with it.
+        let renamed = notices.renamed("alice", "ally");
+        assert!(renamed.of("alice").is_empty());
+        assert_eq!(renamed.of("ally").len(), 2);
+        assert_eq!(renamed.of("bob"), ["The password of alice was reset."]);
     }
 
     #[test]

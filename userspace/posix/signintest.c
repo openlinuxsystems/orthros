@@ -13,10 +13,17 @@
 //
 // `signintest mount`, which bob runs from his shell, checks that his
 // session's root holds no control right: he mounts and unmounts nothing.
+// `signintest network` checks that his session listens on port 8080 and
+// connects to it, but not on port 80; `signintest network --low`, which
+// alice runs through elevate, that an elevated command does (ADR 0257).
 
+#include <arpa/inet.h>
 #include <dirent.h>
+#include <errno.h>
+#include <netinet/in.h>
 #include <pwd.h>
 #include <radix/radix.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "authd.h"
@@ -92,9 +99,61 @@ static int mount_nothing(void) {
 	return check_end();
 }
 
+// A TCP socket bound to 127.0.0.1:`port`: its descriptor, or -1 with
+// errno.
+static int bound(unsigned port) {
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if(fd < 0)
+		return -1;
+	struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons(port)};
+	address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	if(bind(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+		int error = errno;
+		close(fd);
+		errno = error;
+		return -1;
+	}
+	return fd;
+}
+
+// `signintest network`, in a session (ADR 0257): with `low`, as an
+// administrator's elevated command; otherwise as anyone's. Anyone
+// listens on port 8080 and connects to it; only the elevated listen on
+// port 80.
+static int network(int low) {
+	check_start(low ? "signintest-network-elevated" : "signintest-network");
+	int server = bound(8080);
+	CHECK(server >= 0);
+	CHECK(listen(server, 1) == 0);
+	int client = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(client >= 0);
+	struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons(8080)};
+	address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	CHECK(connect(client, (struct sockaddr *)&address, sizeof(address)) == 0);
+	int accepted = accept(server, NULL, NULL);
+	CHECK(accepted >= 0);
+	CHECK(write(client, "hatter", 6) == 6);
+	char got[8] = "";
+	CHECK(read(accepted, got, sizeof(got)) == 6 && !memcmp(got, "hatter", 6));
+	close(accepted);
+	close(client);
+	close(server);
+	int low_port = bound(80);
+	if(low) {
+		CHECK(low_port >= 0);
+	} else {
+		CHECK(low_port < 0 && errno == EACCES);
+	}
+	if(low_port >= 0)
+		close(low_port);
+	return check_end();
+}
+
 int main(int argc, char **argv) {
 	if(argc > 1 && !strcmp(argv[1], "mount"))
 		return mount_nothing();
+	if(argc > 1 && !strcmp(argv[1], "network"))
+		return network(argc > 2 && !strcmp(argv[2], "--low"));
 	check_start("signintest");
 	authd_answers();
 	CHECK(has_account("alice"));

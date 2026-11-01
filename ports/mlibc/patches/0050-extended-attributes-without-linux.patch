@@ -1,0 +1,136 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+The extended attribute calls without the Linux option (ADR 0256): their
+sysdep tags and signatures leave the Linux option's block, so a system
+layer without that option can implement them, and <abi-bits/xattr.h>
+no longer refuses to be included without it. The Radix system layer
+builds the Linux option's setxattr, getxattr, listxattr, removexattr and
+their l and f forms (options/linux/generic/sys-xattr.cpp) and installs
+its <sys/xattr.h> (ports/mlibc/build.sh), which need nothing of Linux's;
+the BSDs have calls of their own for the same attributes.
+
+diff --git a/abis/linux/xattr.h b/abis/linux/xattr.h
+--- a/abis/linux/xattr.h
++++ b/abis/linux/xattr.h
+@@ -3,10 +3,6 @@
+ 
+ #include <mlibc-config.h>
+ 
+-#if !__MLIBC_LINUX_OPTION
+-#  error "<sys/xattr.h> is inherently Linux specific. Enable the Linux option or do not use this header."
+-#endif /* !__MLIBC_LINUX_OPTION */
+-
+ /* __USE_KERNEL_XATTR_DEFS is exported when XATTR_* are emitted, and
+  * __UAPI_DEF_XATTR is used to determine the behaviour of the
+  * <linux/xattr.h> header (through <linux/libc-compat.h>), if it's set
+diff --git a/options/internal/include/mlibc/sysdep-tags.hpp b/options/internal/include/mlibc/sysdep-tags.hpp
+--- a/options/internal/include/mlibc/sysdep-tags.hpp
++++ b/options/internal/include/mlibc/sysdep-tags.hpp
+@@ -647,30 +647,6 @@
+ struct Swapon {};
+ // int sys_swapoff(const char *path);
+ struct Swapoff {};
+-// int sys_setxattr(const char *path, const char *name, const void *val, size_t size, int flags);
+-struct Setxattr {};
+-// int sys_lsetxattr(const char *path, const char *name, const void *val, size_t size, int flags);
+-struct Lsetxattr {};
+-// int sys_fsetxattr(int fd, const char *name, const void *val, size_t size, int flags);
+-struct Fsetxattr {};
+-// int sys_getxattr(const char *path, const char *name, void *val, size_t size, ssize_t *nread);
+-struct Getxattr {};
+-// int sys_lgetxattr(const char *path, const char *name, void *val, size_t size, ssize_t *nread);
+-struct Lgetxattr {};
+-// int sys_fgetxattr(int fd, const char *name, void *val, size_t size, ssize_t *nread);
+-struct Fgetxattr {};
+-// int sys_listxattr(const char *path, char *list, size_t size, ssize_t *nread);
+-struct Listxattr {};
+-// int sys_llistxattr(const char *path, char *list, size_t size, ssize_t *nread);
+-struct Llistxattr {};
+-// int sys_flistxattr(int fd, char *list, size_t size, ssize_t *nread);
+-struct Flistxattr {};
+-// int sys_removexattr(const char *path, const char *name);
+-struct Removexattr {};
+-// int sys_lremovexattr(const char *path, const char *name);
+-struct Lremovexattr {};
+-// int sys_fremovexattr(int fd, const char *name);
+-struct Fremovexattr {};
+ // int sys_statfs(const char *path, struct statfs *buf);
+ struct Statfs {};
+ // int sys_fstatfs(int fd, struct statfs *buf);
+@@ -715,6 +691,33 @@
+ struct Renameat2 {};
+ #endif // __MLIBC_LINUX_OPTION
+ 
++// The extended attribute calls, which the Radix system layer has without
++// the Linux option.
++// int sys_setxattr(const char *path, const char *name, const void *val, size_t size, int flags);
++struct Setxattr {};
++// int sys_lsetxattr(const char *path, const char *name, const void *val, size_t size, int flags);
++struct Lsetxattr {};
++// int sys_fsetxattr(int fd, const char *name, const void *val, size_t size, int flags);
++struct Fsetxattr {};
++// int sys_getxattr(const char *path, const char *name, void *val, size_t size, ssize_t *nread);
++struct Getxattr {};
++// int sys_lgetxattr(const char *path, const char *name, void *val, size_t size, ssize_t *nread);
++struct Lgetxattr {};
++// int sys_fgetxattr(int fd, const char *name, void *val, size_t size, ssize_t *nread);
++struct Fgetxattr {};
++// int sys_listxattr(const char *path, char *list, size_t size, ssize_t *nread);
++struct Listxattr {};
++// int sys_llistxattr(const char *path, char *list, size_t size, ssize_t *nread);
++struct Llistxattr {};
++// int sys_flistxattr(int fd, char *list, size_t size, ssize_t *nread);
++struct Flistxattr {};
++// int sys_removexattr(const char *path, const char *name);
++struct Removexattr {};
++// int sys_lremovexattr(const char *path, const char *name);
++struct Lremovexattr {};
++// int sys_fremovexattr(int fd, const char *name);
++struct Fremovexattr {};
++
+ #if __MLIBC_LINUX_EPOLL_OPTION
+ #include <sys/epoll.h>
+ 
+diff --git a/options/internal/include/mlibc/sysdep-signatures.hpp b/options/internal/include/mlibc/sysdep-signatures.hpp
+--- a/options/internal/include/mlibc/sysdep-signatures.hpp
++++ b/options/internal/include/mlibc/sysdep-signatures.hpp
+@@ -304,18 +304,6 @@
+ SYSDEP_FUNC(Sysinfo, struct sysinfo *info);
+ SYSDEP_FUNC(Swapon, const char *path, int flags);
+ SYSDEP_FUNC(Swapoff, const char *path);
+-SYSDEP_FUNC(Setxattr, const char *path, const char *name, const void *val, size_t size, int flags);
+-SYSDEP_FUNC(Lsetxattr, const char *path, const char *name, const void *val, size_t size, int flags);
+-SYSDEP_FUNC(Fsetxattr, int fd, const char *name, const void *val, size_t size, int flags);
+-SYSDEP_FUNC(Getxattr, const char *path, const char *name, void *val, size_t size, ssize_t *nread);
+-SYSDEP_FUNC(Lgetxattr, const char *path, const char *name, void *val, size_t size, ssize_t *nread);
+-SYSDEP_FUNC(Fgetxattr, int fd, const char *name, void *val, size_t size, ssize_t *nread);
+-SYSDEP_FUNC(Listxattr, const char *path, char *list, size_t size, ssize_t *nread);
+-SYSDEP_FUNC(Llistxattr, const char *path, char *list, size_t size, ssize_t *nread);
+-SYSDEP_FUNC(Flistxattr, int fd, char *list, size_t size, ssize_t *nread);
+-SYSDEP_FUNC(Removexattr, const char *path, const char *name);
+-SYSDEP_FUNC(Lremovexattr, const char *path, const char *name);
+-SYSDEP_FUNC(Fremovexattr, int fd, const char *name);
+ SYSDEP_FUNC(Statfs, const char *path, struct statfs *buf);
+ SYSDEP_FUNC(Fstatfs, int fd, struct statfs *buf);
+ SYSDEP_FUNC(Statx, int dirfd, const char *pathname, int flags, unsigned int mask, struct statx *statxbuf);
+@@ -339,6 +327,19 @@
+ SYSDEP_FUNC(Renameat2, int olddirfd, const char *old_path, int newdirfd, const char *new_path, unsigned int flags);
+ #endif // __MLIBC_LINUX_OPTION
+ 
++SYSDEP_FUNC(Setxattr, const char *path, const char *name, const void *val, size_t size, int flags);
++SYSDEP_FUNC(Lsetxattr, const char *path, const char *name, const void *val, size_t size, int flags);
++SYSDEP_FUNC(Fsetxattr, int fd, const char *name, const void *val, size_t size, int flags);
++SYSDEP_FUNC(Getxattr, const char *path, const char *name, void *val, size_t size, ssize_t *nread);
++SYSDEP_FUNC(Lgetxattr, const char *path, const char *name, void *val, size_t size, ssize_t *nread);
++SYSDEP_FUNC(Fgetxattr, int fd, const char *name, void *val, size_t size, ssize_t *nread);
++SYSDEP_FUNC(Listxattr, const char *path, char *list, size_t size, ssize_t *nread);
++SYSDEP_FUNC(Llistxattr, const char *path, char *list, size_t size, ssize_t *nread);
++SYSDEP_FUNC(Flistxattr, int fd, char *list, size_t size, ssize_t *nread);
++SYSDEP_FUNC(Removexattr, const char *path, const char *name);
++SYSDEP_FUNC(Lremovexattr, const char *path, const char *name);
++SYSDEP_FUNC(Fremovexattr, int fd, const char *name);
++
+ #if __MLIBC_LINUX_EPOLL_OPTION
+ SYSDEP_FUNC(EpollCreate, int flags, int *fd);
+ SYSDEP_FUNC(EpollCtl, int epfd, int mode, int fd, struct epoll_event *ev);

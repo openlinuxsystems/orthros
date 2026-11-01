@@ -23,11 +23,11 @@ sed -n "s|^		'include/abi-bits/\(.*\)',$|\1|p" "$PORT_SRC/sysdeps/radix/meson.bu
 		[ -e "$PORT_SRC/sysdeps/radix/include/abi-bits/$header" ] ||
 			ln -s "../../../../abis/linux/$header" "$PORT_SRC/sysdeps/radix/include/abi-bits/$header"
 	done
-# Two headers of the Linux option that other systems have too and that
-# need nothing of Linux's (patch 0023): getrandom's and the device number
-# macros'.
+# Headers of the Linux option that other systems have too and that need
+# nothing of Linux's: getrandom's and the device number macros' (patch
+# 0023), and the extended attribute calls' (0050, ADR 0256).
 mkdir -p "$PORT_SRC/sysdeps/radix/include/sys"
-for header in random.h sysmacros.h; do
+for header in random.h sysmacros.h xattr.h; do
 	ln -s "../../../../options/linux/include/sys/$header" "$PORT_SRC/sysdeps/radix/include/sys/$header"
 done
 # And malloc.h, of memalign (0035).

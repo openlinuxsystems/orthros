@@ -29,7 +29,7 @@ fn mount_rw(disk: &KArc<RamDisk>) -> KArc<BtrfsFs> {
 
 /// What `btrfs inspect-internal dump-tree` prints of the top subvolume's
 /// tree in `image`.
-fn dump(image: &[u8]) -> String {
+pub(super) fn dump(image: &[u8]) -> String {
     let path = scratch("dump");
     write_sparse(&path, image);
     let out = Command::new(tool("btrfs"))
@@ -59,7 +59,7 @@ fn inode_field(dump: &str, ino: u64, field: &str) -> u64 {
 
 /// How many items of kind `kind` inode `ino` has, as `dump-tree` prints
 /// them.
-fn items(dump: &str, ino: u64, kind: &str) -> usize {
+pub(super) fn items(dump: &str, ino: u64, kind: &str) -> usize {
     let key = format!("key ({ino} {kind} ");
     dump.lines()
         .filter(|line| line.trim_start().starts_with("item ") && line.contains(&key))

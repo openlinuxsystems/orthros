@@ -25,9 +25,10 @@ radix-microcode = { path = "../../kernel/lib/microcode" }
 radix-relocs = { path = "../../kernel/lib/relocs" }
 # The account files and Argon2id hashes, for `ob image --user` (ADR 0218).
 accounts = { path = "../../userspace/programs/accounts", features = ["hash"] }
-# The settings of service files, which `ob docs --check` compares with
-# service.toml(5).
-manifest = { path = "../../userspace/programs/manifest" }
+# The settings of service files and the fields and permissions of
+# bundle manifests, which `ob docs --check` compares with service.toml(5)
+# and manifest.json(5).
+manifest = { path = "../../userspace/programs/manifest", features = ["bundle"] }
 # The interface compiler, for the man(2) pages and C headers of abi/*.ridl.
 ridlc = { path = "../ridlc" }
 rustc-demangle = "0.1"

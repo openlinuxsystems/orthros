@@ -200,15 +200,19 @@ fn sign_in(name: String, password: Vec<u8>) -> Result<Result<(), String>, Fail> 
     Ok(Ok(()))
 }
 
-/// The administrators' names, as the account files list them.
+/// The administrators' names, as the account files list them, each
+/// disabled one marked so: resetting its password enables it too (ADR
+/// 0220).
 fn administrators() -> Vec<String> {
     let read = |path: &str| std::fs::read_to_string(path).unwrap_or_default();
     let users = accounts::users(&read(accounts::PASSWD));
     let groups = accounts::groups(&read(accounts::GROUP));
+    let passwords = accounts::passwords(&read(accounts::PASSWORDS));
+    let disabled = |name: &str| passwords.entries().any(|p| p.name == name && p.is_disabled());
     users
         .entries()
         .filter(|u| u.is_person() && accounts::is_admin(u, &groups))
-        .map(|u| u.name.clone())
+        .map(|u| if disabled(&u.name) { format!("{} (disabled)", u.name) } else { u.name.clone() })
         .collect()
 }
 

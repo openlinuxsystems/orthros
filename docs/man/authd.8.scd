@@ -91,9 +91,45 @@ closes the connection, but for a session (below):
 	*startup-trouble* (*dukovo-boot*(7)); an account that is not an
 	administrator's is refused, as an administrator changes its
 	password with *elevate passwd*. The wrong passwords given for
-	_name_ are forgotten, so the new one opens the account at once. It
-	is a security event, and each administrator is told at their next
-	sign-in (see SESSIONS).
+	_name_ are forgotten, so the new one opens the account at once, and
+	a disabled account is enabled. It is a security event, and each
+	administrator is told at their next sign-in (see SESSIONS).
+
+*disable* _name_
+	Disables the person's account _name_ (ADR 0220): marks it with *!*
+	before its hash, as Linux's *usermod -L*, keeping the password;
+	ends the commands authd started for it through *elevate*(8) and
+	forgets the panes unlocked for it; and has the kernel end the user
+	(*radix-names*(2)'s *end*), again until no process of it is left.
+	Its sessions and everything it runs end, and a directory it handed
+	to another program opens nothing more. Answers *ok* and how many of
+	its processes ended. Only root may. A disabled account's right
+	password is answered *no the account* _name_ *is disabled*, which
+	only someone who knows it learns; a wrong one as any wrong one.
+
+*enable* _name_
+	Takes the mark away: the account signs in again with the password
+	it had. Only root may.
+
+*remove* _name_
+	Disables and ends the account as *disable* does, adds its number to
+	the retired ones, which no account gets again, and takes its user,
+	its own group and its name in other groups out of the account files.
+	Answers *ok* and its home, which authd leaves as it is: *user*(8)
+	keeps, archives or deletes it. Only root may.
+
+*rename* _name_ _new_
+	Renames the account, its own group, its name in other groups, its
+	hash's line and its notices, and moves its home if it is
+	_/users/_*name*. Refused while any process acts for it, as
+	_/processes_ shows. Only root may.
+
+*set* _name_ [*full-name* _text_] [*admin* *yes*|*no*]
+	Changes the account's full name, or whether it is an
+	administrator's. Root changes either; anyone changes their own full
+	name, as Linux's chfn lets them. Someone made no longer an
+	administrator keeps nothing of the admin set: their elevated
+	commands end and their panes lock.
 
 *session* _name_ _password_ _term_
 	Starts _name_'s session, if _password_ is theirs, on the terminal
@@ -167,15 +203,41 @@ service holds:
   session's root, so that the session mounts and unmounts nothing;
 - it opens _/system/commands/login_ through that root, so that it is a
   program the user may run;
+- unless the user is root, it builds a view (ADR 0215) acting for them,
+  as the session's root in place of that copy: each name of the root at
+  its place, with the user's own _/tmp_ at _tmp_ (see below);
 - it makes a process, names it for the user and their groups, and gives
-  it that root, the random source, the log, and the terminal as its
-  descriptors 0, 1 and 2, and nothing else of authd's: not its root,
-  not the names capability, not the bypass right;
+  it that root, the random source, the log, the terminal as its
+  descriptors 0, 1 and 2, and the network (see below), and nothing else
+  of authd's: not its root, not the names capability, not the bypass
+  right;
 - it runs *login --session* in it, with the environment *HOME*,
   *SHELL*, *USER*, *LOGNAME*, *PATH=/system/commands*, *TERM*,
   *LANG=C.UTF-8* and *EDITOR=nano*; login makes the terminal the
   controlling terminal of a new session and runs the user's shell in
   their home.
+
+Each person has a _/tmp_ of their own (ADR 0255),
+_/system/live/authd/tmp/_*number*, theirs and mode 1777, which authd
+makes at their first sign-in; their sessions share it, so tmux and
+screen find their servers from any of them, and no one else's view
+holds it. It lasts until the computer stops, and removing the account
+removes it. Each place of the view is attached without the bypass
+right and without control, so the owners and modes of the files decide
+as they would without it, and nothing is mounted or attached in it. A
+name added to the root after a session started is not in its view
+until the next sign-in. Root's sessions, and commands run with
+*elevate*(8), keep the whole tree and the system's _/tmp_; root finds a
+person's at its real path.
+
+The network comes from the capabilities that authd's service file asks
+Spark for (*network.outbound*, *network.listen* and *admin.network*,
+ADR 0257). A session connects out, and listens on the ports from 1024,
+as anyone may on Linux, but sets up no interface and listens on no port
+below 1024: binding one fails with *EACCES*, as on Linux. Root's
+sessions, and commands run with *elevate*(8), get the network as authd
+holds it, so *ip*(8) sets the interfaces up and a server listens on
+port 80.
 
 The groups are the account's own and each group of
 _/system/settings/group_ that lists its name, up to 32. A session
@@ -195,10 +257,18 @@ of authd ends the sessions it started.
 Without the names capability authd logs *no names capability: sign-in
 cannot start sessions* when it starts, and refuses *session*.
 
-Before a session's programs start, authd writes on its terminal what
-the person is to be told since they last signed in, and forgets it once
-the session starts: today, that a password was reset from the
-startup-trouble menu, which every administrator is told:
+Before a session's programs start, authd writes on its terminal when
+the person last signed in, and the wrong passwords typed for them since
+(see SIGN-IN RECORDS), as Linux's pam_lastlog does:
+
+```
+Last sign-in: Sat Oct 31 12:40 2026 on pts/0
+Since then, 1 wrong password was typed for bob, the last on Sat Oct 31 12:44 2026 on pts/1.
+```
+
+Then what the person is to be told since they last signed in, which
+authd forgets once the session starts: today, that a password was reset
+from the startup-trouble menu, which every administrator is told:
 
 ```
 authd: the password of alice was reset from the startup-trouble menu, by process 61 (user 0)
@@ -208,6 +278,41 @@ authd: the password of alice was reset from the startup-trouble menu, by process
 Your password was reset from the startup-trouble menu on Sat Oct 31 12:40 2026.
 The password of alice was reset from the startup-trouble menu on Sat Oct 31 12:40 2026.
 ```
+
+# SIGN-IN RECORDS
+
+authd records the sign-ins in _/system/state/sign-ins_, for *last*(1),
+*lastb*(1) and *lastlog*(8) (ADR 0254), a line of text each: the time
+in seconds since the epoch, what happened, and its fields, *-* for
+none:
+
+```
+1793440000 boot 0.13.0
+1793440100 in alice pts/0 - 61
+1793440200 failed bob pts/1 -
+1793440300 out alice pts/0 - 61
+1793440400 down
+```
+
+- *boot*: the computer started, with the kernel's release. authd
+  records it as it starts, once for each start of the computer, with
+  the kernel's time of the start.
+- *down*: authd was asked to end, as Spark asks each service when the
+  computer stops. The sessions end with it.
+- *in* and *out*: someone signed in, or their session's first process
+  ended, with the terminal, where from (*-* at the computer itself),
+  and that process, which pairs them.
+- *failed*: a wrong password was typed at a sign-in, with the name
+  typed.
+
+The starts and stops are in _system_, which everyone reads. Each
+account's sign-ins, sign-outs and wrong passwords are in a file named
+by its number, root's and the account's own group's, mode 0640, so the
+person and root read it. The wrong passwords typed for names that are
+no account's are in _unknown_, root's alone. The directory is 0711, so
+no one but root lists it. A file that grew past 512 KiB keeps its
+newest 4096 lines, and its newest sign-in with its sign-out and its
+newest start if they are older.
 
 # ELEVATE
 
@@ -226,8 +331,9 @@ authd:
 - makes a process, its own child, acting for root as authd does, and
   gives it authd's root, which passes the owners and modes of files
   (the bypass right), the random source, the log, the platform
-  capability that its service file's *admin.hardware* gives it, and the
-  three descriptors as its 0, 1 and 2: the admin set;
+  capability that its service file's *admin.hardware* gives it, its
+  network capabilities, and the three descriptors as its 0, 1 and 2:
+  the admin set;
 - runs *elevate --started* in it, which makes the first terminal among
   them its controlling terminal in a new session, goes to the
   directory and runs the command, with the environment *elevate*(8)
@@ -288,7 +394,8 @@ goes away, *ask* is answered as *none* is.
 
 An account's name is 1 to 32 lowercase letters, digits, *\_*, *-* and
 *.*, starting with a letter or *\_*, as Debian's adduser takes them. It
-gets the lowest number from 1000 that no user or group has, a group of
+gets the lowest number from 1000 that no user or group has and no
+removed account had, a group of
 its own of that name and number, the shell *nukesh*(1) and the home
 _/users/_*name*, of mode 0700, with _documents_, _downloads_, _desktop_,
 _development_, _music_, _pictures_, _videos_ and _applications_, of mode
@@ -304,9 +411,9 @@ was made without *--user*, the first sign-in makes the owner's
 still root's, and gives the home to its user last, so that a user
 already running cannot put a link where a folder is to go.
 
-Each account made, each password changed and each wrong password is a
-security event in the audit log (*logd*(8)), with the process and user
-that asked. A name a request gave is shown as at most 64 characters,
+Each account made, disabled, enabled, removed, renamed or changed, each
+password changed and each wrong password is a security event in the
+audit log (*logd*(8)), with the process and user that asked. A name a request gave is shown as at most 64 characters,
 with *?* for each control character, so that it cannot start a line of
 its own:
 
@@ -324,14 +431,24 @@ _/system/settings/group_
 	The groups.
 
 _/system/state/authd/passwords_
-	The passwords' hashes.
+	The passwords' hashes, a disabled account's with *!* in front.
+
+_/system/state/authd/retired_
+	The numbers of removed accounts, which no account gets again: a
+	line _number_:_name_:_date_ each.
 
 _/system/state/authd/notices_
 	What each person is told at their next sign-in: a line
 	_name_<tab>_text_ each.
 
+_/system/state/sign-ins_
+	The sign-in records (see SIGN-IN RECORDS).
+
 _/system/live/authd/socket_
 	The socket authd answers at.
+
+_/system/live/authd/tmp/_*number*
+	Each person's own _/tmp_, which only root lists.
 
 _/users/_*name*
 	Each account's home.
@@ -343,6 +460,7 @@ exits with 1 if it cannot start.
 
 # SEE ALSO
 
-*login*(1), *elevate*(8), *sudo*(8), *user*(8), *passwd*(1), *id*(1), *consoled*(8), *service*(8),
+*login*(1), *elevate*(8), *sudo*(8), *user*(8), *passwd*(1), *id*(1), *last*(1),
+*lastlog*(8), *consoled*(8), *service*(8),
 *service.toml*(5), *spark*(8), *logd*(8), *radix-names*(2), *radix-posix*(7),
 *systools*(1)

@@ -7,8 +7,9 @@
 // as it comes back from swap; forks, and has the child check half of it
 // and change a quarter while the parent's stays as it was; checks that
 // swapoff(8) cannot turn the area off while more is out on it than memory
-// has room for; then keeps the first 16 MiB, and turns the area off while
-// some of those are still out on it, and checks them once more. On the way it
+// has room for; then keeps the first 16 MiB, or as much of them as half
+// the memory left free has room for, and turns the area off while some of
+// those are still out on it, and checks them once more. On the way it
 // checks that the area cannot be turned on twice, that the device
 // refuses writes while it is on, and what /processes says of it.
 
@@ -22,7 +23,7 @@
 
 #define PAGE 4096
 #define WORDS (PAGE / sizeof(unsigned long))
-// The pages kept for swapoff(8) to bring back: 16 MiB.
+// The pages kept for swapoff(8) to bring back: at most 16 MiB.
 #define KEPT (16 * 256)
 
 // The value of word `word` of page `page` of the memory, as a fill made
@@ -123,9 +124,21 @@ int main(int argc, char **argv) {
 	CHECK(field("/processes/meminfo", "swap_total: ") == total);
 
 	// What is let go of frees its slots; what is kept comes back when
-	// the area is turned off with pages on it.
+	// the area is turned off with pages on it. The boot archive takes
+	// most of a small machine's memory, and more as programs are added
+	// to it, so as much is kept as half the memory left free has room
+	// for, and the rest is let go of too.
 	size_t kept = pages < KEPT ? pages : KEPT;
 	CHECK(munmap(memory + kept * WORDS, (pages - kept) * PAGE) == 0);
+	long long free_kib = field("/processes/meminfo", "\nfree: ");
+	CHECK(free_kib > 0);
+	size_t fits = free_kib > 0 ? (size_t)free_kib / 4 / 2 : 0;
+	if(fits < kept) {
+		CHECK(fits > 0);
+		CHECK(munmap(memory + fits * WORDS, (kept - fits) * PAGE) == 0);
+		kept = fits;
+	}
+	printf("swaptest: kept %zu KiB\n", kept * 4);
 	CHECK(field("/processes/meminfo", "swap_free: ") < total);
 	STATUS(0, "/bin/swapoff", device);
 	CHECK(field("/processes/meminfo", "swap_total: ") == 0);

@@ -196,7 +196,7 @@ const BACKLOG_MAX: u64 = 4096;
 const SOCKET_NAME_MAX: u64 = 107;
 
 /// A file.
-interface file = 0x000c version 8 {
+interface file = 0x000c version 9 {
     kind = file;
     /// Reads from byte `offset` into `buffer`; returns how many bytes it
     /// read, fewer than asked at the end of the file. Needs the read right.
@@ -313,8 +313,11 @@ interface file = 0x000c version 8 {
     /// Takes a connection that waits at a listening socket, waiting for
     /// one unless the description is non_blocking, and puts a
     /// description of its end in slot `to` with `flags`: a socket of its
-    /// own, connected, with the listening socket's name. A socket that
-    /// does not listen fails with invalid_argument. Needs the read right.
+    /// own, connected, with the listening socket's name. Slot `to` must
+    /// be empty, else occupied; a connection that cannot go in it, as
+    /// another thread filled it while the call waited, goes back to the
+    /// front of those that wait, so none is lost. A socket that does not
+    /// listen fails with invalid_argument. Needs the read right.
     method accept = 16 (to: slot, flags: PipeFlags) -> ()
         raises [no_such_slot, empty_slot, missing_rights, occupied, invalid_argument,
                 no_memory, not_socket, would_block, interrupted];
@@ -427,4 +430,33 @@ interface file = 0x000c version 8 {
     method set_access = 26 (owner: u32, group: u32, mode: u32) -> ()
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, not_permitted,
                 read_only, no_space, quota_exceeded, io, corrupt];
+    /// Copies the value of the file's extended attribute `name` to
+    /// `buffer`, as radix-directory(2)'s `get_attribute` does, and
+    /// returns its length. Pipes and sockets keep none (not_supported).
+    /// Needs no right, as fgetxattr(2) needs none.
+    method get_attribute = 27 (name: in bytes, buffer: out bytes) -> (len: u64)
+        raises [no_such_slot, empty_slot, invalid_argument, no_memory, bad_address, denied,
+                no_attribute, out_of_range, not_supported, io, corrupt];
+    /// Sets the file's extended attribute `name` to `value`, as
+    /// radix-directory(2)'s `set_attribute` does with its `flags` but
+    /// no_follow. Needs the write right.
+    method set_attribute = 28 (name: in bytes, value: in bytes, flags: AttributeFlags)
+        -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, denied, not_permitted, exists, no_attribute, out_of_range,
+                arguments_too_long, not_supported, read_only, no_space, quota_exceeded, io,
+                corrupt];
+    /// Copies the names of the file's extended attributes to `buffer`, as
+    /// radix-directory(2)'s `list_attributes` does, and returns their
+    /// length. Needs no right.
+    method list_attributes = 29 (buffer: out bytes) -> (len: u64)
+        raises [no_such_slot, empty_slot, invalid_argument, no_memory, bad_address, out_of_range,
+                not_supported, io, corrupt];
+    /// Removes the file's extended attribute `name`, as
+    /// radix-directory(2)'s `remove_attribute` does. Needs the write
+    /// right.
+    method remove_attribute = 30 (name: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, denied, not_permitted, no_attribute, out_of_range, not_supported,
+                read_only, no_space, io, corrupt];
 }

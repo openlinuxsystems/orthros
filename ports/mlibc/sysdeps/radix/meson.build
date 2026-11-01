@@ -26,10 +26,12 @@ radix_sources = files(
 rtld_dso_sources += radix_sources
 
 libc_sources += radix_sources + files(
-	# The Linux option's getrandom (patch 0023) and memalign (0035),
-	# which need nothing of Linux's.
+	# The Linux option's getrandom (patch 0023), memalign (0035) and
+	# extended attribute calls (0050, ADR 0256), which need nothing of
+	# Linux's.
 	'../../options/linux/generic/malloc.cpp',
 	'../../options/linux/generic/sys-random.cpp',
+	'../../options/linux/generic/sys-xattr.cpp',
 	'generic/entry.cpp',
 	'generic/interfaces.cpp',
 	'generic/poll.cpp',
@@ -117,6 +119,7 @@ if not no_headers
 	install_headers(
 		'include/sys/random.h',
 		'include/sys/sysmacros.h',
+		'include/sys/xattr.h',
 		subdir: 'sys',
 		follow_symlinks: true,
 	)

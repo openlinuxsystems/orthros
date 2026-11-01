@@ -236,7 +236,8 @@ fn check_title(ctx: &Ctx, page: &Page) -> Result<Vec<String>> {
 }
 
 /// Every `ob` command, boot test, dukovo.toml key, kernel flag, kdb
-/// command and self-test must be documented, in bold, in its man page.
+/// command and self-test, service file setting, and bundle manifest field
+/// and permission must be documented, in bold, in its man page.
 fn check_coverage(ctx: &Ctx) -> Result<Vec<String>> {
     let ob_commands: Vec<&str> = COMMANDS.iter().map(|&(name, _)| name).collect();
     // The tests in test/cases are described by their files instead.
@@ -245,11 +246,16 @@ fn check_coverage(ctx: &Ctx) -> Result<Vec<String>> {
         test::all_cases().map(|case| case.name).filter(|name| !own.contains(name)).collect();
     let kernel_flags: Vec<&str> = radix_hal::cmdline::FLAGS.iter().map(|f| f.name).collect();
     let kdb_commands: Vec<&str> = radix_kdb::COMMANDS.iter().map(|c| c.name).collect();
-    let lists: [(&str, &str, &[&str]); 7] = [
+    let permissions: Vec<&str> =
+        manifest::bundle::permissions::LIST.iter().map(|p| p.name).collect();
+    let lists: [(&str, &str, &[&str]); 10] = [
         ("docs/man/ob.1.scd", "command", &ob_commands),
         ("docs/man/ob.1.scd", "boot test", &boot_tests),
         ("docs/man/dukovo.toml.5.scd", "key", config::KEYS),
         ("docs/man/service.toml.5.scd", "setting", manifest::service::KEYS),
+        ("docs/man/manifest.json.5.scd", "field", manifest::bundle::KEYS),
+        ("docs/man/manifest.json.5.scd", "reserved field", manifest::bundle::RESERVED),
+        ("docs/man/manifest.json.5.scd", "permission", &permissions),
         ("docs/man/dukovo-boot.7.scd", "kernel flag", &kernel_flags),
         ("docs/man/radix-debug.7.scd", "kdb command", &kdb_commands),
         ("docs/man/radix-debug.7.scd", "self-test", radix_hal::cmdline::SELFTESTS),

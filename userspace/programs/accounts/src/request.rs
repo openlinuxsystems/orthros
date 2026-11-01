@@ -16,6 +16,11 @@
 //! owner\0chase\0Chase\0her secret\0
 //! session\0alice\0secret\0linux\0
 //! reset\0alice\0new secret\0
+//! disable\0bob\0
+//! enable\0bob\0
+//! remove\0bob\0
+//! rename\0bob\0robert\0
+//! set\0bob\0full-name\0Bob Smith\0admin\0no\0
 //! elevate\0command\0ask\0\0linux\0/users/alice\0LANG=C.UTF-8\0--\0dmesg\0-w\0
 //! unlock\0password\0secret\0
 //! forget\0
@@ -120,6 +125,45 @@ pub enum Request {
         name: String,
         /// Their new password, which may be empty.
         password: Vec<u8>,
+    },
+    /// Disable account `name` (ADR 0220): everything that acts for it
+    /// ends at once, and nothing signs in to it until it is enabled
+    /// again, with the password it had. Root's to ask; the answer is `ok`
+    /// and how many of its processes ended.
+    Disable {
+        /// The account.
+        name: String,
+    },
+    /// Enable account `name` again. Root's to ask.
+    Enable {
+        /// The account.
+        name: String,
+    },
+    /// Remove account `name`: what acts for it ends, as with `Disable`,
+    /// its lines go from the account files, and its number is never given
+    /// again. Root's to ask; the answer is `ok` and its home, which the
+    /// asker keeps, archives or deletes.
+    Remove {
+        /// The account.
+        name: String,
+    },
+    /// Rename account `name` to `new`, with its own group and its home in
+    /// `/users`, while nothing acts for it. Root's to ask.
+    Rename {
+        /// The account.
+        name: String,
+        /// Its new name.
+        new: String,
+    },
+    /// Change account `name`'s settings, those given. Root's to ask, but
+    /// anyone may change their own full name, as with chfn(1).
+    Set {
+        /// The account.
+        name: String,
+        /// Its new full name, which may be empty.
+        full_name: Option<String>,
+        /// Whether it is to be an administrator's.
+        admin: Option<bool>,
     },
     /// Run a command as an administrator, with the admin set (ADR 0219):
     /// an administrator's to ask, and after their password unless their
@@ -262,6 +306,20 @@ impl Request {
                 vec![b"session", name.as_bytes(), password, term.as_bytes()]
             }
             Request::Reset { name, password } => vec![b"reset", name.as_bytes(), password],
+            Request::Disable { name } => vec![b"disable", name.as_bytes()],
+            Request::Enable { name } => vec![b"enable", name.as_bytes()],
+            Request::Remove { name } => vec![b"remove", name.as_bytes()],
+            Request::Rename { name, new } => vec![b"rename", name.as_bytes(), new.as_bytes()],
+            Request::Set { name, full_name, admin } => {
+                let mut fields: Vec<&[u8]> = vec![b"set", name.as_bytes()];
+                if let Some(full_name) = full_name {
+                    fields.extend([b"full-name".as_slice(), full_name.as_bytes()]);
+                }
+                if let Some(admin) = admin {
+                    fields.extend([b"admin".as_slice(), if *admin { b"yes" } else { b"no" }]);
+                }
+                fields
+            }
             Request::Elevate { mode, password, ask, term, directory, language, command } => {
                 let mut fields: Vec<&[u8]> = vec![b"elevate", mode.word()];
                 fields.extend(password_fields(password, *ask));
@@ -322,6 +380,29 @@ impl Request {
             [b"needs-owner"] => Ok(Request::NeedsOwner),
             [b"reset", name, password] => {
                 Ok(Request::Reset { name: text(name)?, password: password.to_vec() })
+            }
+            [b"disable", name] => Ok(Request::Disable { name: text(name)? }),
+            [b"enable", name] => Ok(Request::Enable { name: text(name)? }),
+            [b"remove", name] => Ok(Request::Remove { name: text(name)? }),
+            [b"rename", name, new] => Ok(Request::Rename { name: text(name)?, new: text(new)? }),
+            [b"set", name, ref settings @ ..] => {
+                let (mut full_name, mut admin) = (None, None);
+                let (pairs, rest) = settings.as_chunks::<2>();
+                if !rest.is_empty() || pairs.is_empty() {
+                    return Err(malformed());
+                }
+                for [key, value] in pairs {
+                    match (*key, *value) {
+                        (b"full-name", value) if full_name.is_none() => {
+                            full_name = Some(text(value)?);
+                        }
+                        (b"admin", value @ (b"yes" | b"no")) if admin.is_none() => {
+                            admin = Some(value == b"yes");
+                        }
+                        _ => return Err(malformed()),
+                    }
+                }
+                Ok(Request::Set { name: text(name)?, full_name, admin })
             }
             [b"owner", name, full_name, password] => Ok(Request::Owner {
                 name: text(name)?,
@@ -395,8 +476,15 @@ impl Request {
                 }
             }
             Request::Prompted { typed: Prompted::Password(password), .. } => wipe(password),
-            Request::NeedsOwner | Request::Forget | Request::Prompts | Request::Prompted { .. } => {
-            }
+            Request::NeedsOwner
+            | Request::Forget
+            | Request::Prompts
+            | Request::Prompted { .. }
+            | Request::Disable { .. }
+            | Request::Enable { .. }
+            | Request::Remove { .. }
+            | Request::Rename { .. }
+            | Request::Set { .. } => {}
         }
     }
 }
@@ -417,6 +505,15 @@ impl std::fmt::Debug for Request {
             }
             Request::NeedsOwner => write!(f, "NeedsOwner"),
             Request::Reset { name, .. } => write!(f, "Reset {{ name: {name:?} }}"),
+            Request::Disable { name } => write!(f, "Disable {{ name: {name:?} }}"),
+            Request::Enable { name } => write!(f, "Enable {{ name: {name:?} }}"),
+            Request::Remove { name } => write!(f, "Remove {{ name: {name:?} }}"),
+            Request::Rename { name, new } => {
+                write!(f, "Rename {{ name: {name:?}, new: {new:?} }}")
+            }
+            Request::Set { name, full_name, admin } => {
+                write!(f, "Set {{ name: {name:?}, full_name: {full_name:?}, admin: {admin:?} }}")
+            }
             Request::Owner { name, full_name, .. } => {
                 write!(f, "Owner {{ name: {name:?}, full_name: {full_name:?} }}")
             }

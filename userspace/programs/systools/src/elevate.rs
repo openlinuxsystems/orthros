@@ -241,8 +241,8 @@ pub fn root_account(users: impl Iterator<Item = User>) -> User {
 
 /// Starts an elevated process for authd: its child, acting for root as
 /// authd does, with authd's root, which has the bypass right, the random
-/// source, the log, the platform capability if authd holds one, and
-/// `fds` as its descriptors 0 to 2. It runs [`HELPER`], which makes the
+/// source, the log, the platform capability if authd holds one, authd's
+/// network capabilities, and `fds` as its descriptors 0 to 2. It runs [`HELPER`], which makes the
 /// command's terminal its own and runs `plan`'s program. Returns the
 /// process's number.
 pub fn start(fds: &[OwnedFd], plan: &Plan, env: &[String]) -> Result<u64, String> {
@@ -250,8 +250,8 @@ pub fn start(fds: &[OwnedFd], plan: &Plan, env: &[String]) -> Result<u64, String
         move |status: Status| format!("cannot elevate: {what}: {}", sys::status_name(status.0))
     };
     let spares =
-        signin::Spares::new(2).map_err(|err| format!("cannot elevate: no slots: {err}"))?;
-    let [program, child] = [0, 1].map(|i| spares.slot(i));
+        signin::Spares::new(3).map_err(|err| format!("cannot elevate: no slots: {err}"))?;
+    let [program, child, scratch] = [0, 1, 2].map(|i| spares.slot(i));
     let helper = HELPER.trim_start_matches('/');
     directory::open(
         &SYS,
@@ -281,6 +281,9 @@ pub fn start(fds: &[OwnedFd], plan: &Plan, env: &[String]) -> Result<u64, String
         process::share(&SYS, child, from, to, Rights::ALL, 0)
             .map_err(failed("giving it the admin set"))?;
     }
+    // The network as root has it: to listen on any port and set up the
+    // interfaces with ip(8) (ADR 0257).
+    signin::give_network(child, scratch, true).map_err(failed("giving it the network"))?;
     let mut args: Vec<&[u8]> = vec![b"elevate", STARTED.as_bytes(), &plan.directory, &plan.program];
     args.extend(plan.argv.iter().map(Vec::as_slice));
     let block = signin::exec_block(HELPER.as_bytes(), &args, env);

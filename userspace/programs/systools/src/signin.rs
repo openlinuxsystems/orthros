@@ -14,15 +14,24 @@
 //! --session`, as the user: it makes the terminal its session's and
 //! runs their shell. Nothing of authd's own passes to it: not its root,
 //! not the names capability, not the bypass right.
+//!
+//! A person's session has a view of its own for its root (ADRs 0215 and
+//! 0255): every name of the root, each at its place, but `/tmp`, which
+//! is the person's own, [`TMP`]`/NUMBER`, shared by their sessions and by
+//! no one else's. Root's sessions keep the whole tree, as pam_namespace
+//! leaves root out.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 
 use radix_abi::capability::{self, ObjectKind, Rights};
 use radix_abi::directory::{self, OpenFlags};
-use radix_abi::{Status, names, process, startup};
+use radix_abi::{Status, names, network, process, startup};
 
 use accounts::User;
 
@@ -34,6 +43,71 @@ pub const FIRST_PROGRAM: &str = "/system/commands/login";
 
 /// The slots a session's process has, as a POSIX program Spark starts.
 pub const SLOTS: u32 = 128;
+
+/// Where each person's own `/tmp` is (ADR 0255): a folder for each
+/// account, named by its number, which only root lists.
+pub const TMP: &str = "/system/live/authd/tmp";
+
+/// The rights of what a session's view holds: to read and change, and to
+/// copy and pass on, as `fork` and `exec` need; never the bypass right,
+/// and never control, so nothing is attached to it or mounted in it.
+const GIVEN: Rights = Rights(
+    Rights::READ.bits() | Rights::WRITE.bits() | Rights::COPY.bits() | Rights::TRANSFER.bits(),
+);
+
+/// `user`'s own `/tmp`: theirs, mode 1777 as `/tmp` is, made if it is not
+/// there, in [`TMP`], which is root's, mode 0700.
+pub fn own_tmp(user: &User) -> io::Result<String> {
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(TMP)?;
+    fs::set_permissions(TMP, fs::Permissions::from_mode(0o700))?;
+    let path = format!("{TMP}/{}", user.uid);
+    match fs::DirBuilder::new().mode(0o700).create(&path) {
+        Err(err) if err.kind() != io::ErrorKind::AlreadyExists => return Err(err),
+        _ => {}
+    }
+    std::os::unix::fs::chown(&path, Some(user.uid), Some(user.gid))?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o1777))?;
+    Ok(path)
+}
+
+/// Builds a session's view in `view`, acting for `root`'s name without
+/// the bypass right: each name of the root at its place, but `tmp`, which
+/// is `tmp` of the root, the person's own. Each place is opened through
+/// `stamped`, with the bypass right, into `scratch`, and given without
+/// it, so the owners and modes of its files decide, as without the view.
+fn build_view(root: u32, stamped: u32, view: u32, scratch: u32, tmp: &str) -> Result<(), String> {
+    let failed =
+        |what: String| move |status: Status| format!("{what}: {}", sys::status_name(status.0));
+    directory::make_view(&SYS, root, view).map_err(failed("making its view".into()))?;
+    // Opens `path` of the root and attaches it at `at` in the view.
+    let attach = |path: &str, at: &str, flags: OpenFlags| -> Result<(), String> {
+        directory::open(&SYS, stamped, path.as_bytes(), flags, GIVEN, scratch, 0)
+            .map_err(failed(format!("opening /{path}")))?;
+        let attached = directory::attach(&SYS, view, at.as_bytes(), scratch);
+        let _ = capability::delete(&SYS, scratch);
+        attached.map_err(failed(format!("attaching /{at}")))
+    };
+    let entries = fs::read_dir("/").map_err(|err| format!("listing /: {err}"))?;
+    for entry in entries.flatten() {
+        // A name is no path: one that is not UTF-8 is passed over.
+        let Ok(name) = entry.file_name().into_string() else { continue };
+        if name == "tmp" {
+            continue;
+        }
+        let path = Path::new("/").join(&name);
+        let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+        if meta.file_type().is_symlink() {
+            let target = fs::read_link(&path).map_err(|err| format!("reading /{name}: {err}"))?;
+            directory::attach_link(&SYS, view, name.as_bytes(), target.as_os_str().as_bytes())
+                .map_err(failed(format!("attaching /{name}")))?;
+        } else if meta.is_dir() {
+            attach(&name, &name, OpenFlags::DIRECTORY)?;
+        } else if meta.is_file() {
+            attach(&name, &name, OpenFlags::NONE)?;
+        }
+    }
+    attach(tmp.trim_start_matches('/'), "tmp", OpenFlags::DIRECTORY)
+}
 
 /// The environment variable that says which descriptor holds the names
 /// capability Spark gave authd (service.toml(5), `names`).
@@ -226,8 +300,9 @@ pub fn start(
         }
     };
     let spares =
-        Spares::new(4).map_err(|err| format!("cannot start the session: no slots: {err}"))?;
-    let [stamped, root, program, child] = [0, 1, 2, 3].map(|i| spares.slot(i));
+        Spares::new(8).map_err(|err| format!("cannot start the session: no slots: {err}"))?;
+    let [stamped, root, program, child, view, given, scratch, network] =
+        [0, 1, 2, 3, 4, 5, 6, 7].map(|i| spares.slot(i));
     let others: Vec<u8> = groups.iter().flat_map(|g| g.to_le_bytes()).collect();
     names::stamp(&SYS, names, startup::SLOT_ROOT, stamped, user.uid, user.gid, &others)
         .map_err(failed("stamping its root"))?;
@@ -246,9 +321,20 @@ pub fn start(
         .map_err(failed("making its process"))?;
     names::name_process(&SYS, names, child, user.uid, user.gid, &others)
         .map_err(failed("naming its process"))?;
+    // A person's root is a view with their own /tmp; root's, the tree.
+    let session_root = if user.uid == 0 {
+        root
+    } else {
+        let tmp =
+            own_tmp(user).map_err(|err| format!("cannot start the session: its /tmp: {err}"))?;
+        build_view(root, stamped, view, scratch, &tmp)
+            .map_err(|why| format!("cannot start the session: {why}"))?;
+        capability::derive(&SYS, view, given, GIVEN, 0).map_err(failed("its view"))?;
+        given
+    };
     let tty = sys::slot_of(terminal.as_raw_fd());
     let shares = [
-        (root, startup::SLOT_ROOT),
+        (session_root, startup::SLOT_ROOT),
         (startup::SLOT_RANDOM, startup::SLOT_RANDOM),
         (startup::SLOT_LOG, startup::SLOT_LOG),
         (tty, startup::SLOT_FD_BASE),
@@ -259,12 +345,57 @@ pub fn start(
         process::share(&SYS, child, from, to, Rights::ALL, 0)
             .map_err(failed("giving it its capabilities"))?;
     }
+    give_network(child, network, user.uid == 0).map_err(failed("giving it the network"))?;
     let block =
         exec_block(FIRST_PROGRAM.as_bytes(), &[b"login", b"--session"], &environment(user, term));
     process::exec(&SYS, child, program, &block).map_err(failed("starting login"))?;
     // The child stays in the tree after its capability goes, for wait.
     let number = process::info(&SYS, child).map_err(failed("its number"))?.number;
     Ok(number)
+}
+
+/// The first port everyone may listen on, as Linux's
+/// `net.ipv4.ip_unprivileged_port_start`: below it, only root's session
+/// and elevated commands listen (ADR 0257).
+pub const FIRST_OPEN_PORT: u32 = 1024;
+
+/// Gives `child` the network, from authd's network capabilities in the
+/// NETWORK_SLOTS slots from SLOT_NETWORK into its own from SLOT_NETWORK
+/// (ADR 0257). With `everything`, for root's session and elevated
+/// commands, each goes as authd holds it, setting up the interfaces
+/// included. Otherwise the child connects out, and listens on the ports
+/// from [`FIRST_OPEN_PORT`], but sets up nothing, as anyone may on Linux.
+/// `scratch` is an empty slot to restrict through.
+pub fn give_network(child: u32, scratch: u32, everything: bool) -> Result<(), Status> {
+    // Kept through fork and exec, as Spark gives them (ADR 0184).
+    let kept = Rights::COPY.union(Rights::TRANSFER);
+    let end = startup::SLOT_NETWORK + startup::NETWORK_SLOTS;
+    let mut to = startup::SLOT_NETWORK;
+    for from in startup::SLOT_NETWORK..end {
+        let Ok(info) = capability::info(&SYS, from) else { continue };
+        if info.kind != ObjectKind::Network {
+            continue;
+        }
+        if everything {
+            process::share(&SYS, child, from, to, Rights::ALL, 0)?;
+            to += 1;
+            continue;
+        }
+        let ports = network::ports(&SYS, from)?;
+        let past = ports.first.saturating_add(ports.count);
+        for (right, lowest) in [(Rights::SEND, 0), (Rights::RECEIVE, FIRST_OPEN_PORT)] {
+            let first = ports.first.max(lowest);
+            if info.rights.bits() & right.bits() == 0 || first >= past || to >= end {
+                continue;
+            }
+            network::restrict(&SYS, from, scratch, first, past - first, right.union(kept))?;
+            let shared = process::share(&SYS, child, scratch, to, Rights::ALL, 0);
+            let _ = capability::delete(&SYS, scratch);
+            shared?;
+            to += 1;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

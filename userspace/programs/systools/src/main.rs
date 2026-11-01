@@ -18,13 +18,15 @@
 //! and `notifications` lists them (ADR 0212).
 //! `authd` keeps the accounts, which `user` and `passwd` change, `login`
 //! signs people in through it, and `elevate`, and `sudo` in front of it,
-//! run a command as an administrator (ADRs 0218, 0250 and 0219).
+//! run a command as an administrator (ADRs 0218, 0250 and 0219); `last`,
+//! `lastb` and `lastlog` show the sign-ins it records (ADR 0254).
 
 mod account;
 mod args;
 mod authd;
 mod balance;
 mod blkid;
+mod bundles;
 mod column;
 mod device;
 mod df;
@@ -34,6 +36,7 @@ mod dmesg;
 mod ectool;
 mod eject;
 mod elevate;
+mod facl;
 mod findmnt;
 mod fstrim;
 mod hexdump;
@@ -41,6 +44,7 @@ mod hwinfo;
 mod iostat;
 mod ip;
 mod keymaps;
+mod last;
 mod log;
 mod logd;
 mod logger;
@@ -104,6 +108,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("authd", authd::main),
     ("balance", balance::main),
     ("blkid", blkid::main),
+    ("bundle", bundles::main),
     ("chgrp", modes::chgrp),
     ("chmod", modes::chmod),
     ("chown", modes::chown),
@@ -118,6 +123,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("findmnt", findmnt::main),
     ("fstrim", fstrim::main),
     ("free", memory::free),
+    ("getfacl", facl::getfacl),
     ("halt", power::halt),
     ("hd", hexdump::hd),
     ("hexdump", hexdump::main),
@@ -128,6 +134,9 @@ const TOOLS: &[(&str, Tool)] = &[
     ("journalctl", log::journalctl),
     ("keymap", keymaps::main),
     ("kill", signals::kill),
+    ("last", last::last),
+    ("lastb", last::lastb),
+    ("lastlog", last::lastlog),
     ("log", log::main),
     ("logd", logd::main),
     ("logger", logger::main),
@@ -161,6 +170,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("scrub", scrub::main),
     ("sensors", sensors::main),
     ("service", power::service),
+    ("setfacl", facl::setfacl),
     ("shutdown", power::shutdown),
     ("ss", ss::main),
     ("subvolume", subvolume::main),
@@ -185,7 +195,7 @@ const TOOLS: &[(&str, Tool)] = &[
 
 /// The tools whose Linux versions exit with 2, not 1, for a mistake in
 /// the command line: procps-ng's pgrep and pkill, and which.
-const USAGE_TWO: &[&str] = &["pgrep", "pkill", "which"];
+const USAGE_TWO: &[&str] = &["getfacl", "pgrep", "pkill", "setfacl", "which"];
 
 /// The tool named `name`.
 fn tool(name: &str) -> Option<Tool> {

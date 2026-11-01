@@ -17,7 +17,8 @@
 //! - [`tree`]: reading and checking tree blocks, and searching trees.
 //! - [`volume::Volume`]: an opened device, its chunks and its trees.
 //! - [`inode`], [`dir`] and [`extent`]: the items a subvolume's tree
-//!   keeps for its files, directories and data.
+//!   keeps for its files, directories and data, and `xattr` its files'
+//!   extended attributes.
 //! - [`inflate`], [`lzo`] and [`zstd`]: the three compressions of data,
 //!   decoded from their specifications (RFC 1950 and 1951, the LZO1X
 //!   format Linux documents, RFC 8878), and [`unpack`], which uncompresses
@@ -70,6 +71,7 @@ pub mod tree;
 mod trim;
 pub mod unpack;
 pub mod volume;
+mod xattr;
 pub mod zstd;
 
 #[cfg(test)]

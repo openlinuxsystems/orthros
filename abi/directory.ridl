@@ -164,6 +164,23 @@ flags PathFlags: u32 {
     no_follow = 0;
 }
 
+/// How `set_attribute` and file's `set_attribute` (radix-file(2)) set an
+/// extended attribute, as setxattr(2)'s flags.
+flags AttributeFlags: u32 {
+    /// A symbolic link that is the last name is taken itself, as
+    /// lsetxattr(2) has it; radix-file(2)'s `set_attribute` takes none.
+    no_follow = 0;
+    /// Fail with exists if it is there (XATTR_CREATE).
+    create = 1;
+    /// Fail with no_attribute if it is not there (XATTR_REPLACE).
+    replace = 2;
+}
+
+/// The longest name of an extended attribute, in bytes.
+const ATTRIBUTE_NAME_MAX: u64 = 255;
+/// The longest value of an extended attribute, in bytes.
+const ATTRIBUTE_VALUE_MAX: u64 = 65536;
+
 /// How `link` takes its path.
 flags LinkFlags: u32 {
     /// A symbolic link that is the last name is followed, as
@@ -323,7 +340,7 @@ struct ScrubProgress {
 }
 
 /// A directory.
-interface directory = 0x000b version 8 {
+interface directory = 0x000b version 9 {
     kind = directory;
     /// Opens the file or directory at `path` (`.` for this one) and puts
     /// a capability to it with `rights` in slot `to`. Returns what it is.
@@ -723,4 +740,63 @@ interface directory = 0x000b version 8 {
         raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
                 bad_address, exists, not_directory, no_space, name_too_long, bad_name, in_use,
                 not_supported];
+    /// Copies the value of the extended attribute `name` of the file or
+    /// directory at `path` (ADR 0256) to `buffer`, and returns its length;
+    /// an empty `buffer` asks for the length alone, and one too short
+    /// fails with out_of_range. A name starts with its namespace, as on
+    /// Linux: `user.` names are read with read permission on a file or
+    /// directory (no_attribute on anything else); `trusted.` ones with the
+    /// bypass right (no_attribute without it); `security.` ones and the
+    /// access lists `system.posix_acl_access` and
+    /// `system.posix_acl_default` by anyone. Any other fails with
+    /// not_supported, as does a filesystem that keeps no attributes, and
+    /// a name that is empty or longer than ATTRIBUTE_NAME_MAX with
+    /// out_of_range. An access list is given in Linux's
+    /// `posix_acl_xattr` form, with the mode's entries. Fails with
+    /// no_attribute if the file has none of that name. Needs the read
+    /// right.
+    method get_attribute = 36 (path: in bytes, flags: PathFlags, name: in bytes, buffer: out bytes)
+        -> (len: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside,
+                too_many_links, denied, no_attribute, out_of_range, not_supported, io, corrupt];
+    /// Sets the extended attribute `name` of the file or directory at
+    /// `path` to `value`, as `flags` says. `user.` names are changed with
+    /// write permission on a file or directory, and in a directory with
+    /// the sticky bit only by its owner or with the bypass right
+    /// (not_permitted otherwise); `trusted.` and `security.` ones with the
+    /// bypass right; the access lists by the file's owner or with the
+    /// bypass right, never on a symbolic link (not_supported). An access
+    /// list is checked (invalid_argument) and sets the mode's permission
+    /// bits from its entries for the owner, the mask and the others; one
+    /// a mode says all of is not kept, and one with no entries takes the
+    /// attribute away. A default list is a directory's alone (denied). A
+    /// value longer than ATTRIBUTE_VALUE_MAX fails with
+    /// arguments_too_long, and one the filesystem has no room for with
+    /// no_space. Needs the write right.
+    method set_attribute = 37 (path: in bytes, flags: AttributeFlags, name: in bytes,
+        value: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside,
+                too_many_links, denied, not_permitted, exists, no_attribute, out_of_range,
+                arguments_too_long, not_supported, read_only, no_space, quota_exceeded, io,
+                corrupt];
+    /// Copies the names of the extended attributes of the file or
+    /// directory at `path` to `buffer`, each with a NUL after it, and
+    /// returns their length, as `get_attribute` does: `trusted.` names
+    /// only with the bypass right. Needs the read right.
+    method list_attributes = 38 (path: in bytes, flags: PathFlags, buffer: out bytes)
+        -> (len: u64)
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside,
+                too_many_links, denied, out_of_range, not_supported, io, corrupt];
+    /// Removes the extended attribute `name` of the file or directory at
+    /// `path`, as `set_attribute` changes it: an access list goes and
+    /// leaves the mode as it is. Fails with no_attribute if there is
+    /// none. Needs the write right.
+    method remove_attribute = 39 (path: in bytes, flags: PathFlags, name: in bytes) -> ()
+        raises [no_such_slot, empty_slot, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside,
+                too_many_links, denied, not_permitted, no_attribute, out_of_range,
+                not_supported, read_only, no_space, io, corrupt];
 }

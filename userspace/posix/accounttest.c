@@ -13,8 +13,13 @@
 // starts itself as alice, with a root that acts for her and has no bypass
 // right: she changes her own password, given hers, but not bob's, makes
 // no account, checks no password but hers, and cannot read the hashes or
-// change the account files.
+// change the account files. Last, root changes accounts (ADR 0220): their
+// settings; disabling bob ends what runs for him at once, and enabling
+// him opens his account again; renaming waits until nothing runs for it,
+// and moves its home; removing it retires its number, and keeps,
+// archives or deletes its home as asked.
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <grp.h>
 #include <pwd.h>
@@ -33,6 +38,9 @@
 #define PASSWD "/system/commands/passwd"
 #define ID "/system/commands/id"
 #define PASSWORDS "/system/state/authd/passwords"
+#define RETIRED "/system/state/authd/retired"
+// Where bob says he is ready.
+#define BOB_READY "/users/bob/ready"
 #define ALICE 1000
 #define BOB 1001
 #define ADMINS 10
@@ -180,9 +188,11 @@ static void reading(void) {
 	CONTAINS("uid=1001(bob) gid=1001(bob) groups=1001(bob)", ID, "bob");
 	char expected[512];
 	snprintf(expected, sizeof(expected),
-			"%-16s %6s  %-13s  %-20s %s\n%-16s %6d  %-13s  %-20s %s\n%-16s %6d  %-13s  %s\n",
-			"NAME", "NUMBER", "KIND", "HOME", "FULL NAME", "alice", ALICE, "administrator",
-			"/users/alice", "Alice Liddell", "bob", BOB, "user", "/users/bob");
+			"%-16s %6s  %-13s  %-8s  %-20s %s\n%-16s %6d  %-13s  %-8s  %-20s %s\n"
+			"%-16s %6d  %-13s  %-8s  %s\n",
+			"NAME", "NUMBER", "KIND", "STATE", "HOME", "FULL NAME", "alice", ALICE,
+			"administrator", "enabled", "/users/alice", "Alice Liddell", "bob", BOB, "user",
+			"enabled", "/users/bob");
 	ACCOUNT(0, "", expected, "", USER, "list");
 }
 
@@ -254,9 +264,130 @@ static int alice(void) {
 	return check_end();
 }
 
+// As bob: he makes a child, says he is ready, and waits with it.
+static int bob(void) {
+	pid_t child = fork();
+	CHECK(child >= 0);
+	if(child == 0)
+		for(;;)
+			pause();
+	int fd = open(BOB_READY, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
+	CHECK(fd >= 0);
+	close(fd);
+	for(;;)
+		pause();
+}
+
+// The name of the archive of carol's home in /users/.removed, in `path`.
+static int carol_archive(char *path, size_t size) {
+	DIR *dir = opendir("/users/.removed");
+	if(!dir)
+		return 0;
+	struct dirent *entry;
+	int found = 0;
+	while(!found && (entry = readdir(dir))) {
+		size_t len = strlen(entry->d_name);
+		if(!strncmp(entry->d_name, "carol-", 6) && len > 8 &&
+				!strcmp(entry->d_name + len - 8, ".tar.zst"))
+			found = snprintf(path, size, "/users/.removed/%s", entry->d_name) < (int)size;
+	}
+	closedir(dir);
+	return found;
+}
+
+// Accounts changed, disabled, renamed and removed (ADR 0220).
+static void lifecycle(void) {
+	// Settings: the full name, and being an administrator, but not
+	// taking away the last one's without a yes.
+	OUTPUT("", "bob is changed: full name \"Bob Smith\".\n", USER, "set", "--full-name",
+			"Bob Smith", "bob");
+	CHECK(holds("/system/settings/passwd", "\nbob:x:1001:1001:Bob Smith:/users/bob:"));
+	OUTPUT("", "bob is changed: an administrator.\n", USER, "set", "--admin", "bob");
+	CHECK(holds("/system/settings/group", "\nadmins:x:10:alice,bob\n"));
+	OUTPUT("", "bob is changed: not an administrator.\n", USER, "set", "--no-admin", "bob");
+	CHECK(holds("/system/settings/group", "\nadmins:x:10:alice\n"));
+	ACCOUNT(1, "", "", "user: nothing changed: say --yes to go on", USER, "set", "--no-admin",
+			"alice");
+	ACCOUNT(1, "", "", "alice is the last administrator who can sign in.", USER, "disable",
+			"alice");
+	ACCOUNT(1, "", "", "user: root is not a person's account", USER, "disable", "root");
+
+	// While bob runs something, his account is not renamed; disabled, it
+	// all ends at once, and nothing signs in to it until it is enabled.
+	char *const bob_args[] = {"accounttest", "bob", NULL};
+	pid_t pid = start_as(PROGRAM, BOB, BOB, NULL, 0, bob_args);
+	for(int i = 0; i < 1000 && access(BOB_READY, F_OK) != 0; i++)
+		check_sleep_ms(10);
+	CHECK(access(BOB_READY, F_OK) == 0);
+	ACCOUNT(1, "", "", "user: bob is running 2 processes: rename the account once bob has", USER,
+			"rename", "bob", "robert");
+	OUTPUT("", "bob is disabled: 2 of its processes ended. user enable bob enables it again.\n",
+			USER, "disable", "bob");
+	int status = 0;
+	CHECK(waitpid(pid, &status, 0) == pid && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+	CHECK(holds(PASSWORDS, "\nbob:!:\n"));
+	ASKS("check\0bob\0\0",
+			"no the account bob is disabled: an administrator enables it with elevate user "
+			"enable bob\n",
+			0);
+	char line[256];
+	snprintf(line, sizeof(line), "%-16s %6d  %-13s  %-8s  %-20s %s\n", "bob", BOB, "user",
+			"disabled", "/users/bob", "Bob Smith");
+	CONTAINS(line, USER, "list");
+	OUTPUT("", "bob is enabled again.\n", USER, "enable", "bob");
+	OUTPUT("", "bob was not disabled.\n", USER, "enable", "bob");
+	ASKS("check\0bob\0\0", "ok\n", 0);
+
+	// Renamed, with his group and his home.
+	OUTPUT("", "Renamed bob to robert, home /users/robert.\n", USER, "rename", "bob", "robert");
+	CHECK(holds("/system/settings/passwd", "\nrobert:x:1001:1001:Bob Smith:/users/robert:"));
+	CHECK(holds("/system/settings/group", "\nrobert:x:1001:\n"));
+	CHECK(holds(PASSWORDS, "\nrobert::\n"));
+	OWNED("/users/robert", 0700, BOB);
+	CHECK_ERROR(access("/users/bob", F_OK), ENOENT);
+	ASKS("check\0robert\0\0", "ok\n", 0);
+
+	// Removed: its number is never given again, and its home goes as
+	// asked, which a script must say.
+	ACCOUNT(1, "", "", "say what becomes of its home", USER, "remove", "robert");
+	OUTPUT("", "robert is removed: its home, /users/robert, is deleted.\n", USER, "remove",
+			"--delete-home", "robert");
+	CHECK(!holds("/system/settings/passwd", "robert") && !holds(PASSWORDS, "robert"));
+	CHECK(!holds("/system/settings/group", "robert"));
+	CHECK(holds(RETIRED, "1001:robert:"));
+	OWNED(RETIRED, 0600, 0);
+	CHECK_ERROR(access("/users/robert", F_OK), ENOENT);
+	ACCOUNT(0, "\n", "Made carol, number 1002, home /users/carol\n", "With no password", USER,
+			"add", "carol");
+	CONTAINS("carol is removed: its home is archived in /users/.removed/carol-", USER, "remove",
+			"--archive-home", "carol");
+	OWNED("/users/.removed", 0700, 0);
+	char archive[256];
+	CHECK(carol_archive(archive, sizeof(archive)));
+	OWNED(archive, 0600, 0);
+	CONTAINS("carol/documents/", "/system/commands/tar", "-tf", archive);
+	CHECK_ERROR(access("/users/carol", F_OK), ENOENT);
+	// A home kept is still the removed account's, and a new account of
+	// the same name is told so.
+	ACCOUNT(0, "\n", "Made dave, number 1003, home /users/dave\n", "", USER, "add", "dave");
+	OUTPUT("",
+			"dave is removed: its home, /users/dave, is kept, its files still number 1003's, "
+			"which no account gets again.\n",
+			USER, "remove", "--keep-home", "dave");
+	OWNED("/users/dave", 0700, 1003);
+	ACCOUNT(0, "\n",
+			"Made dave, number 1004, home /users/dave; its home was there already, and is user "
+			"1003's: `elevate chown -R dave: /users/dave` gives it to dave\n",
+			"", USER, "add", "dave");
+}
+
 int main(int argc, char **argv) {
 	if(argc == 2 && !strcmp(argv[1], "alice"))
 		return alice();
+	if(argc == 2 && !strcmp(argv[1], "bob")) {
+		check_start("accounttest (bob)");
+		return bob();
+	}
 	check_start("accounttest");
 	authd_answers();
 	RUN(making);
@@ -274,5 +405,6 @@ int main(int argc, char **argv) {
 	CHECK_CHILD(pid);
 	// What she set opens her account.
 	ASKS("check\0alice\0queen of hearts\0", "ok\n", 0);
+	RUN(lifecycle);
 	return check_end();
 }

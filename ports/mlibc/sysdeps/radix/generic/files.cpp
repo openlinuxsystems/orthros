@@ -28,6 +28,7 @@
 #include <sys/statvfs.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #include "radix.hpp"
@@ -1429,5 +1430,218 @@ int Sysdeps<Fadvise>::operator()(int fd, off_t offset, off_t length, int advice)
 	struct stat st;
 	return stat_fd(fd, &st);
 }
+
+
+#ifndef MLIBC_BUILDING_RTLD
+// Extended attributes and access lists (ADR 0256): radix-directory(2)'s
+// and radix-file(2)'s attribute methods, which keep Linux's names,
+// limits and errors. A descriptor's go to the file's methods, which a
+// directory's capability takes too.
+
+namespace {
+
+// The kernel's AttributeFlags for setxattr's `flags`: EINVAL for others.
+int attribute_flags(int flags, uint32_t *out) {
+	if(flags & ~(XATTR_CREATE | XATTR_REPLACE))
+		return EINVAL;
+	*out = 0;
+	if(flags & XATTR_CREATE)
+		*out |= RADIX_ATTRIBUTE_FLAGS_CREATE;
+	if(flags & XATTR_REPLACE)
+		*out |= RADIX_ATTRIBUTE_FLAGS_REPLACE;
+	return 0;
+}
+
+// The length of an attribute's name, which the kernel bounds (ERANGE);
+// none is EFAULT, as Linux's copy of it.
+int name_len(const char *name, size_t *len) {
+	if(!name)
+		return EFAULT;
+	*len = strlen(name);
+	return 0;
+}
+
+// Resolves `path` for an attribute call: a name in /devices/fd gives its
+// descriptor in `fd` instead (named_fd), and -1 there otherwise.
+int attribute_path(const char *path, radix::Path *resolved, int *fd) {
+	if(int e = radix::resolve(AT_FDCWD, path, resolved); e)
+		return e;
+	*fd = named_fd(*resolved);
+	return 0;
+}
+
+int get_fd(int fd, const char *name, void *val, size_t size, ssize_t *nread) {
+	uint32_t slot = radix::slot_of(fd);
+	if(slot == radix::NO_SLOT)
+		return EBADF;
+	size_t len;
+	if(int e = name_len(name, &len); e)
+		return e;
+	struct radix_file_get_attribute_results r;
+	if(uint64_t status = radix_file_get_attribute(slot, name, len, val, size, &r); status)
+		return radix::to_errno(status);
+	*nread = r.len;
+	return 0;
+}
+
+int get_path(const char *path, int flags, const char *name, void *val, size_t size,
+		ssize_t *nread) {
+	radix::Path resolved;
+	int fd;
+	if(int e = attribute_path(path, &resolved, &fd); e)
+		return e;
+	if(fd >= 0)
+		return get_fd(fd, name, val, size, nread);
+	size_t len;
+	if(int e = name_len(name, &len); e)
+		return e;
+	struct radix_directory_get_attribute_results r;
+	if(uint64_t status = radix_directory_get_attribute(resolved.dir, resolved.text,
+			resolved.len, path_flags(flags), name, len, val, size, &r); status)
+		return radix::to_errno(status);
+	*nread = r.len;
+	return 0;
+}
+
+int set_fd(int fd, const char *name, const void *val, size_t size, int flags) {
+	uint32_t slot = radix::slot_of(fd);
+	if(slot == radix::NO_SLOT)
+		return EBADF;
+	uint32_t how;
+	if(int e = attribute_flags(flags, &how); e)
+		return e;
+	size_t len;
+	if(int e = name_len(name, &len); e)
+		return e;
+	return radix::to_errno(radix_file_set_attribute(slot, name, len, val, size, how));
+}
+
+int set_path(const char *path, int at_flags, const char *name, const void *val, size_t size,
+		int flags) {
+	radix::Path resolved;
+	int fd;
+	if(int e = attribute_path(path, &resolved, &fd); e)
+		return e;
+	if(fd >= 0)
+		return set_fd(fd, name, val, size, flags);
+	uint32_t how;
+	if(int e = attribute_flags(flags, &how); e)
+		return e;
+	if(at_flags & AT_SYMLINK_NOFOLLOW)
+		how |= RADIX_ATTRIBUTE_FLAGS_NO_FOLLOW;
+	size_t len;
+	if(int e = name_len(name, &len); e)
+		return e;
+	return radix::to_errno(radix_directory_set_attribute(resolved.dir, resolved.text,
+			resolved.len, how, name, len, val, size));
+}
+
+int list_fd(int fd, char *list, size_t size, ssize_t *nread) {
+	uint32_t slot = radix::slot_of(fd);
+	if(slot == radix::NO_SLOT)
+		return EBADF;
+	struct radix_file_list_attributes_results r;
+	if(uint64_t status = radix_file_list_attributes(slot, list, size, &r); status)
+		return radix::to_errno(status);
+	*nread = r.len;
+	return 0;
+}
+
+int list_path(const char *path, int flags, char *list, size_t size, ssize_t *nread) {
+	radix::Path resolved;
+	int fd;
+	if(int e = attribute_path(path, &resolved, &fd); e)
+		return e;
+	if(fd >= 0)
+		return list_fd(fd, list, size, nread);
+	struct radix_directory_list_attributes_results r;
+	if(uint64_t status = radix_directory_list_attributes(resolved.dir, resolved.text,
+			resolved.len, path_flags(flags), list, size, &r); status)
+		return radix::to_errno(status);
+	*nread = r.len;
+	return 0;
+}
+
+int remove_fd(int fd, const char *name) {
+	uint32_t slot = radix::slot_of(fd);
+	if(slot == radix::NO_SLOT)
+		return EBADF;
+	size_t len;
+	if(int e = name_len(name, &len); e)
+		return e;
+	return radix::to_errno(radix_file_remove_attribute(slot, name, len));
+}
+
+int remove_path(const char *path, int flags, const char *name) {
+	radix::Path resolved;
+	int fd;
+	if(int e = attribute_path(path, &resolved, &fd); e)
+		return e;
+	if(fd >= 0)
+		return remove_fd(fd, name);
+	size_t len;
+	if(int e = name_len(name, &len); e)
+		return e;
+	return radix::to_errno(radix_directory_remove_attribute(resolved.dir, resolved.text,
+			resolved.len, path_flags(flags), name, len));
+}
+
+} // namespace
+
+int Sysdeps<Setxattr>::operator()(const char *path, const char *name, const void *val,
+		size_t size, int flags) {
+	return set_path(path, 0, name, val, size, flags);
+}
+
+int Sysdeps<Lsetxattr>::operator()(const char *path, const char *name, const void *val,
+		size_t size, int flags) {
+	return set_path(path, AT_SYMLINK_NOFOLLOW, name, val, size, flags);
+}
+
+int Sysdeps<Fsetxattr>::operator()(int fd, const char *name, const void *val, size_t size,
+		int flags) {
+	return set_fd(fd, name, val, size, flags);
+}
+
+int Sysdeps<Getxattr>::operator()(const char *path, const char *name, void *val, size_t size,
+		ssize_t *nread) {
+	return get_path(path, 0, name, val, size, nread);
+}
+
+int Sysdeps<Lgetxattr>::operator()(const char *path, const char *name, void *val, size_t size,
+		ssize_t *nread) {
+	return get_path(path, AT_SYMLINK_NOFOLLOW, name, val, size, nread);
+}
+
+int Sysdeps<Fgetxattr>::operator()(int fd, const char *name, void *val, size_t size,
+		ssize_t *nread) {
+	return get_fd(fd, name, val, size, nread);
+}
+
+int Sysdeps<Listxattr>::operator()(const char *path, char *list, size_t size, ssize_t *nread) {
+	return list_path(path, 0, list, size, nread);
+}
+
+int Sysdeps<Llistxattr>::operator()(const char *path, char *list, size_t size,
+		ssize_t *nread) {
+	return list_path(path, AT_SYMLINK_NOFOLLOW, list, size, nread);
+}
+
+int Sysdeps<Flistxattr>::operator()(int fd, char *list, size_t size, ssize_t *nread) {
+	return list_fd(fd, list, size, nread);
+}
+
+int Sysdeps<Removexattr>::operator()(const char *path, const char *name) {
+	return remove_path(path, 0, name);
+}
+
+int Sysdeps<Lremovexattr>::operator()(const char *path, const char *name) {
+	return remove_path(path, AT_SYMLINK_NOFOLLOW, name);
+}
+
+int Sysdeps<Fremovexattr>::operator()(int fd, const char *name) {
+	return remove_fd(fd, name);
+}
+#endif // !MLIBC_BUILDING_RTLD
 
 } // namespace mlibc

@@ -13,6 +13,9 @@
 // execute bit, or signal, trace or read more than the status of bob's
 // processes. Then root, whose root has the bypass right, checks that it
 // reaches everything, and that a capability stamped for bob acts for bob.
+// Last, root ends carol (ADR 0220), as authd ends a disabled account:
+// her processes end, and a capability stamped for her before fails the
+// gate, while one stamped after works.
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -33,6 +36,9 @@
 #define PROGRAM "system/tests/posix/principals"
 #define ALICE 1000
 #define BOB 1001
+#define CAROL 1002
+// Where carol says she is ready.
+#define CAROL_READY TREE "/carol/ready"
 // A group alice is in besides her own.
 #define STAFF 100
 
@@ -378,12 +384,71 @@ static void root_reaches(void) {
 		radix_capability_delete(s[i]);
 }
 
+// Carol makes a child, says she is ready, and waits with it until root
+// ends her.
+static int carol(void) {
+	pid_t child = fork();
+	CHECK(child >= 0);
+	if(child == 0)
+		for(;;)
+			pause();
+	int fd = open(CAROL_READY, O_CREAT | O_EXCL | O_WRONLY, 0644);
+	CHECK(fd >= 0);
+	close(fd);
+	fflush(stdout);
+	for(;;)
+		pause();
+}
+
+// Ending carol ends her and her child, both acting for her; a capability
+// stamped for her before fails the gate, even with the bypass right, and
+// one stamped after works. Root is never ended.
+static void root_ends(void) {
+	make_dir(TREE "/carol", 0700, CAROL, CAROL);
+	char *carol_args[] = {"principals", "carol", NULL};
+	uint32_t s[3];
+	spare(s, 3);
+	uint32_t before = s[0], after = s[1], file = s[2];
+	CHECK(radix_names_stamp(NAMES, RADIX_STARTUP_SLOT_ROOT, before, CAROL, CAROL, NULL, 0) == 0);
+	pid_t carol_pid = start_as(PROGRAM, CAROL, CAROL, NULL, 0, carol_args);
+	for(int i = 0; i < 1000 && access(CAROL_READY, F_OK) != 0; i++)
+		check_sleep_ms(10);
+	CHECK(access(CAROL_READY, F_OK) == 0);
+	const char *made = TREE "/made";
+	struct radix_directory_open_results opened;
+	CHECK(radix_directory_open(before, made + 1, strlen(made + 1), 0, RADIX_RIGHTS_READ, file, 0,
+				  &opened) == 0);
+	radix_capability_delete(file);
+
+	struct radix_names_end_results ended;
+	CHECK(radix_names_end(NAMES, CAROL, &ended) == 0);
+	CHECK(ended.ended == 2);
+	CHECK(radix_names_end(NAMES, CAROL, &ended) == 0 && ended.ended == 0);
+	int status = 0;
+	CHECK(waitpid(carol_pid, &status, 0) == carol_pid);
+	CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+	CHECK_STATUS(radix_directory_open(before, made + 1, strlen(made + 1), 0, RADIX_RIGHTS_READ,
+						 file, 0, &opened),
+			EACCES);
+	CHECK(radix_names_stamp(NAMES, RADIX_STARTUP_SLOT_ROOT, after, CAROL, CAROL, NULL, 0) == 0);
+	CHECK(radix_directory_open(after, made + 1, strlen(made + 1), 0, RADIX_RIGHTS_READ, file, 0,
+				  &opened) == 0);
+	radix_capability_delete(file);
+	// Root's names, and bob's, are as they were.
+	CHECK(access(made, R_OK) == 0);
+	CHECK_STATUS(radix_names_end(NAMES, 0, &ended), EINVAL);
+	for(int i = 0; i < 3; i++)
+		radix_capability_delete(s[i]);
+}
+
 int main(int argc, char **argv) {
 	check_start("principals");
 	if(argc == 4 && strcmp(argv[1], "alice") == 0)
 		return alice((pid_t)atoi(argv[2]), (pid_t)atoi(argv[3]));
 	if(argc == 2 && strcmp(argv[1], "bob") == 0)
 		return bob();
+	if(argc == 2 && strcmp(argv[1], "carol") == 0)
+		return carol();
 	struct radix_capability_info_results info;
 	if(radix_capability_info(NAMES, &info) != 0 || info.kind != RADIX_OBJECT_KIND_NAMES) {
 		printf("principals: FAILED: descriptor 3 is not the names capability (spark --names)\n");
@@ -425,5 +490,6 @@ int main(int argc, char **argv) {
 	CHECK_CHILD(bob_pid);
 
 	RUN(root_reaches);
+	RUN(root_ends);
 	return check_end();
 }

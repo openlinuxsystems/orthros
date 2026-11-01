@@ -45,4 +45,5 @@ waited 4
 none left
 [1]   Exit 1                  false
 [2]+  Done                    true
+a command substitution's pipeline: the shell's group
 status=0
