@@ -845,6 +845,8 @@ pub enum Known {
     Ena,
     /// Google's virtual network card (`radix-gve`).
     Gve,
+    /// One of Realtek's (`radix-realtek-net`).
+    Realtek(radix_realtek_net::Model),
 }
 
 impl Known {
@@ -852,6 +854,7 @@ impl Known {
     fn msi(self) -> bool {
         match self {
             Known::Intel(model) => model.msi(),
+            Known::Realtek(model) => model.msi(),
             Known::Vmxnet3 | Known::Ena | Known::Gve => true,
         }
     }
@@ -865,7 +868,7 @@ impl Known {
     fn article(self) -> &'static str {
         match self {
             Known::Intel(_) | Known::Ena => "an",
-            Known::Vmxnet3 | Known::Gve => "a",
+            Known::Vmxnet3 | Known::Gve | Known::Realtek(_) => "a",
         }
     }
 }
@@ -878,6 +881,7 @@ impl fmt::Display for Known {
             Known::Vmxnet3 => f.write_str("VMware VMXNET3"),
             Known::Ena => f.write_str("Amazon ENA"),
             Known::Gve => f.write_str("Google gVNIC"),
+            Known::Realtek(model) => write!(f, "Realtek {}", model.name),
         }
     }
 }
@@ -894,6 +898,9 @@ pub fn identify(function: &Function) -> Option<Known> {
     }
     if (vendor, device) == (radix_gve::VENDOR, radix_gve::DEVICE) {
         return Some(Known::Gve);
+    }
+    if let Some(model) = radix_realtek_net::identify(vendor, device, function.subsystem_id()) {
+        return Some(Known::Realtek(model));
     }
     radix_intel_net::identify(vendor, device).map(Known::Intel)
 }
@@ -936,7 +943,8 @@ fn leaves(card: Known) -> bool {
 /// down until a driver attaches it (`program`).
 fn leave_card(function: &Function, card: Known, index: usize) -> Result<(), Failure> {
     let left = crate::user::device::leave(function, index).ok_or("too many cards are left")?;
-    let interface = add_interface(index, Card::Program(program::Program::new(left, fallback_mac())))?;
+    let interface =
+        add_interface(index, Card::Program(program::Program::new(left, fallback_mac())))?;
     info!(
         "Net: {} is {} {card} network card at {}, left for a driver program (e1000=program)",
         interface.name,
@@ -1055,13 +1063,22 @@ fn map_registers(function: &Function, bar: usize) -> Result<Mmio, Failure> {
 
 fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Failure> {
     function.enable_memory_and_dma();
-    let regs = map_registers(function, 0)?;
+    // Realtek's registers are in their first memory BAR, after one of
+    // I/O ports: the second on the PCI RTL8169, the third on the PCI
+    // Express chips.
+    let first = match card {
+        Known::Realtek(_) => (0..6)
+            .find(|&bar| matches!(function.bar(bar), Some(Bar::Memory { .. })))
+            .ok_or("its registers are not in memory")?,
+        _ => 0,
+    };
+    let regs = map_registers(function, first)?;
     // VMXNET3's commands are in a second BAR, and gVNIC's doorbells in
     // its third.
     let more = match card {
         Known::Vmxnet3 => Some(map_registers(function, 1)?),
         Known::Gve => Some(map_registers(function, 2)?),
-        Known::Intel(_) | Known::Ena => None,
+        Known::Intel(_) | Known::Ena | Known::Realtek(_) => None,
     };
     let source = function.address();
     // One interrupt, for everything, if the card should have one and it
@@ -1076,7 +1093,9 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
             Some(vector)
         })
     };
-    let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(source, pages, false);
+    // The older Realtek chips reach only the first 4 GiB.
+    let below_4g = matches!(card, Known::Realtek(_));
+    let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(source, pages, below_4g);
     let mut delay = delay;
     let how = match interrupt {
         Some(_) => radix_nic::Interrupt::Msi,
@@ -1111,6 +1130,15 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
                 )
             })
             .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
+        Known::Realtek(_) => radix_realtek_net::start(
+            function.device_id(),
+            regs,
+            how,
+            fallback_mac(),
+            &mut alloc,
+            &mut delay,
+        )
+        .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
     };
     let nic = started.map_err(|err| {
         if let Some(vector) = interrupt {
@@ -1121,7 +1149,11 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
     // From here a failure drops the card, which stops it.
     let info = nic.info();
     let mut about = About::new(info.mac, info.receive_slots, info.transmit_slots);
-    let _ = write!(about.what, "{} {card} network card", card.article());
+    // A Realtek card is named by its chip, which only its registers say.
+    let _ = match card {
+        Known::Realtek(_) => write!(about.what, "a Realtek {} network card", info.model),
+        _ => write!(about.what, "{} {card} network card", card.article()),
+    };
     let kind = if card.msix() { "MSI-X" } else { "MSI" };
     let _ = match interrupt {
         Some(vector) => write!(about.how, "{kind} vector {vector:#x}"),

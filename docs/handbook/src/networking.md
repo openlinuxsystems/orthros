@@ -28,6 +28,26 @@ IPv6, the firewall and WireGuard. This page grows with each.
   `network-cards` boot test runs; the others are checked against
   models of the cards, and the first boot on each kind of machine is
   their real test.
+- **Realtek's chips**: the RTL8169, RTL8168 and RTL8111 at 1 Gb/s and
+  the RTL810x at 100 Mb/s, the onboard Ethernet of most boards that is
+  not Intel's (re(4)). No emulator has them: a model of the chips tests
+  the driver, and the Dell Inspiron 15 5570 the real thing.
+- **A card's driver can run as a program**: with `e1000=program`, which
+  the images `ob image` builds have, the kernel leaves the e1000 and
+  e1000e cards an IOMMU confines to e1000d(8), which drives them with
+  the same driver in a process of its own; when it ends, the kernel
+  stops the card and Spark starts it again
+  ([ADR 0198](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0198-a-card-s-driver-can-run-as-a-program-on-a-device-capability.md)).
+  The `userspace-e1000` boot test kills it halfway through 2 MiB of
+  traffic, which comes back whole.
+- **USB Ethernet adapters**: CDC-ECM and CDC-NCM on an xHCI
+  controller, the protocols of most USB-C docks and of Realtek's RTL8153
+  in its class configuration (cdc_ether(4)). An adapter gets its
+  interface when it is plugged in, after the PCI cards', and the same
+  one back when it is plugged in again
+  ([ADR 0199](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0199-usb-ethernet-adapters-share-the-driver-program-link.md)).
+  The `usb-ethernet` boot test runs QEMU's `usb-net` through DHCP, 2 MiB
+  of traffic, and an unplug.
 - **The TCP/IP stack runs in the kernel**, built on
   [smoltcp](https://github.com/smoltcp-rs/smoltcp) in safe Rust
   ([ADR 0180](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0180-the-tcp-ip-stack-runs-in-the-kernel-on-smoltcp.md)).

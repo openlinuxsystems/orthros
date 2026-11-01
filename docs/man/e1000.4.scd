@@ -44,7 +44,7 @@ e1000d attaches it; a card the IOMMU cannot confine, alone or with
 another function that shares its requests' ID, stays the kernel's:
 
 ```
-Net: net0 is an e1000 network card at 0000:00:03.0, left for a driver program (e1000=program)
+Net: net0 is an Intel 82540EM network card at 0000:00:03.0, left for a driver program (e1000=program)
 ```
 
 # SEE ALSO

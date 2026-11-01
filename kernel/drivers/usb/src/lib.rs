@@ -25,6 +25,8 @@
 //! - [`host`]: what the kernel asks of the USB 2 and USB 1.1 host
 //!   controllers (EHCI, OHCI and UHCI), whose devices it addresses itself
 //!   (Phase 11g, ADR 0243).
+//! - [`net`]: Ethernet adapters, of CDC's Ethernet and Network Control
+//!   Models (Phase 12, ADR 0199).
 //! - [`serial`]: serial ports, of the Abstract Control Model of CDC and
 //!   of FTDI's chips (Phase 11g, ADR 0246).
 //! - [`storage`]: mass storage interfaces, the Bulk-Only Transport that
@@ -42,6 +44,7 @@ use core::fmt;
 pub mod hid;
 pub mod host;
 pub mod hub;
+pub mod net;
 pub mod serial;
 pub mod storage;
 #[cfg(test)]

@@ -311,7 +311,8 @@ impl Driver {
             return None;
         }
         let index = slot(self.sending);
-        let len = (memory.load(at::SENDING_LENGTHS + 4 * index) as usize).min(SLOT).min(frame.len());
+        let len =
+            (memory.load(at::SENDING_LENGTHS + 4 * index) as usize).min(SLOT).min(frame.len());
         memory.read(SENDING + index * SLOT, &mut frame[..len]);
         self.sending = self.sending.wrapping_add(1);
         memory.store(at::SENDING_HEAD, self.sending);

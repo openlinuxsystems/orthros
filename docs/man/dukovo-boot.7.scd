@@ -1108,14 +1108,14 @@ behind QEMU's VT-d unit:
 
 With *e1000=program*, an e1000 or e1000e card behind the IOMMU gets its
 interface at boot, down, and is left for *e1000d*(8). Its bus mastering
-stays off until e1000d opens it; then e1000d runs the kernel's own
+stays off until Spark opens it for e1000d; then e1000d runs the kernel's own
 driver for it, and the card's frames go through a link the two share
 (*radix-device*(2)). If e1000d ends, the kernel stops the card before
 it frees the card's memory, and the interface is down until Spark has
 started e1000d again:
 
-	Net: net1 is an e1000 network card at 0000:00:04.0, left for a driver program (e1000=program)
-	Device: 0000:00:04.0 is open for e1000d
+	Net: net1 is an Intel 82540EM network card at 0000:00:04.0, left for a driver program (e1000=program)
+	Device: 0000:00:04.0 is open for spark
 	Net: net1 is attached to its driver, e1000d, MAC 52:54:00:12:34:57
 
 # REAL HARDWARE

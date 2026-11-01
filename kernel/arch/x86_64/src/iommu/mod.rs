@@ -452,7 +452,9 @@ pub fn isolate(source: Address) -> bool {
     }
     let _adding = ADDING.lock_irq();
     let shared = DEVICES.iter().map_while(Once::get).any(|other| {
-        other.source != source && other.remapper == Some(index) && other.requester == device.requester
+        other.source != source
+            && other.remapper == Some(index)
+            && other.requester == device.requester
     });
     if shared {
         return false;

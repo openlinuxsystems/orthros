@@ -136,7 +136,8 @@ fn a_driver_that_runs_its_tail_past_the_ring_breaks_the_link() {
     let shared = Shared::new();
     let mut stack = Stack::new();
     shared.store(at::RECEIVED_TAIL, ENTRIES + 1);
-    shared.store(at::LINK, UP | FULL_DUPLEX | 1000);
+    let mbps: u32 = 1000;
+    shared.store(at::LINK, UP | FULL_DUPLEX | mbps);
     let mut buffer = [0u8; SLOT];
     assert_eq!(stack.receive(&shared, &mut buffer), None);
     assert!(stack.broken());

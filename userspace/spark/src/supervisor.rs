@@ -55,6 +55,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use libradix::abi::capability::{self, ObjectKind, Rights};
+use libradix::abi::device::{self, DeviceInfo};
 use libradix::abi::directory::{FileKind, OpenFlags};
 use libradix::abi::file::{self as file_abi, DescriptionFlags};
 use libradix::abi::notification::WaitFlags;
@@ -62,10 +63,9 @@ use libradix::abi::process::{
     self, ChildWaitFlags, ClockKind, PipeFlags, PollEntry, PollEvents, PollFlags,
 };
 use libradix::abi::resource_domain::{self, NO_LIMIT};
-use libradix::abi::device::{self, DeviceInfo};
 use libradix::abi::startup::{
-    DEVICE_SLOTS, SLOT_CLOCK, SLOT_DEVICE, SLOT_FD_BASE, SLOT_FIRST_EXTRA, SLOT_LOG,
-    SLOT_NETWORK, SLOT_PLATFORM, SLOT_PROCESS, SLOT_RANDOM, SLOT_ROOT,
+    DEVICE_SLOTS, SLOT_CLOCK, SLOT_DEVICE, SLOT_FD_BASE, SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_NETWORK,
+    SLOT_PLATFORM, SLOT_PROCESS, SLOT_RANDOM, SLOT_ROOT,
 };
 use libradix::abi::{network, power, signal, syscalls};
 use radix_rt::fs::{Dir, File};
@@ -244,7 +244,9 @@ fn cards(devices: u32) -> Vec<Card> {
     let Ok(listed) = device::list(&SYS, devices, &mut buffer) else { return Vec::new() };
     let count = (listed.count as usize).min(device::DEVICES_MAX as usize);
     buffer
-        .chunks_exact(DeviceInfo::SIZE)
+        .as_chunks::<{ DeviceInfo::SIZE }>()
+        .0
+        .iter()
         .take(count)
         .map(|info| {
             let u16_at = |at: usize| u16::from_le_bytes([info[at], info[at + 1]]);

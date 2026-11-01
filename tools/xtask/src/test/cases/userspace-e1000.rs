@@ -1,18 +1,18 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The e1000 and e1000e driven by a program, e1000d(8) (ADR 0198), with
-//! `e1000=program`, behind QEMU's Intel IOMMU with interrupt remapping,
-//! beside a virtio card the kernel drives, each card on a user network of
-//! its own. The kernel must leave the two Intel cards for a program and
-//! keep the virtio card; Spark must give both to e1000d, which must start
-//! them and attach them to their interfaces; and netd must set every card
-//! up by DHCP. Then userspace/posix/nics.c sends 2 MiB through each card
-//! to QEMU's `cat`, and kills e1000d with SIGKILL halfway through the
-//! e1000's: the kernel must stop the card and put its interface down,
-//! Spark must start e1000d again, the card must come back up, and every
-//! byte must come back in order, through both Intel cards and the virtio
-//! card alike.
+//! The e1000 and e1000e driven by a program, e1000d(8) (ADR 0198), with the
+//! kernel told `e1000=program`, behind QEMU's Intel IOMMU with interrupt
+//! remapping, beside a virtio card the kernel drives, each card on a user
+//! network of its own. The kernel must leave the two Intel cards for a
+//! program and keep the virtio card; Spark must give both to e1000d, which
+//! must start them and attach them to their interfaces; and netd must set
+//! every card up by DHCP. Then userspace/posix/nics.c sends 2 MiB through
+//! each card to QEMU's `cat`, and kills e1000d with SIGKILL halfway through
+//! the e1000's: the kernel must stop the card and put its interface down,
+//! Spark must start e1000d again, the card must come back up, and every byte
+//! must come back in order, through both Intel cards and the virtio card
+//! alike.
 
 use super::super::*;
 
@@ -21,7 +21,7 @@ pub const CASE: Case = Case {
     about: "e1000=program: e1000d drives QEMU's e1000 and e1000e behind its IOMMU beside a virtio card the kernel drives; nics kills e1000d mid-traffic, and the card, DHCP and the 2 MiB echo come back (ADR 0198)",
     firmware: Firmware::Uefi,
     media: Media::Usb,
-    cmdline: "lockdep e1000=program -- --service-dir /system/tests/services/e1000d --posix --network /system/tests/posix/nics --kill e1000d net1 10.0.3 net2 10.0.4 net0 10.0.2",
+    cmdline: "lockdep e1000=program -- --service-dir /system/tests/services/e1000d --posix --network /system/tests/posix/nics -k e1000d net1 10.0.3 net2 10.0.4 net0 10.0.2",
     cpus: 2,
     memory: "1G",
     reboot: false,
@@ -87,7 +87,7 @@ fn userspace_e1000(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("spark: 2 services in /system/tests/services/e1000d, 2 enabled")?;
     // e1000d, netd and nics run at once: their lines are read ahead.
     for ((name, _, model, mac, how, net), address) in DRIVEN.iter().zip(&addresses) {
-        vm.expect_ahead(&format!("Device: {address} is open for e1000d"))?;
+        vm.expect_ahead(&format!("Device: {address} is open for spark"))?;
         vm.expect_ahead(&format!("e1000d: {name} is the {model} at {address}, MAC {mac}, {how}"))?;
         vm.expect_ahead(&format!("Net: {name} is attached to its driver, e1000d, MAC {mac}"))?;
         vm.expect_ahead(&format!(
@@ -109,7 +109,7 @@ fn userspace_e1000(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect_ahead(" was ended by signal 9")?;
     vm.expect_ahead("spark: starting e1000d again in ")?;
     for ((name, _, _, mac, ..), address) in DRIVEN.iter().zip(&addresses) {
-        vm.expect_ahead(&format!("Device: {address} is open for e1000d"))?;
+        vm.expect_ahead(&format!("Device: {address} is open for spark"))?;
         vm.expect_ahead(&format!("Net: {name} is attached to its driver, e1000d, MAC {mac}"))?;
     }
     for (name, net) in [("net1", "10.0.3"), ("net2", "10.0.4"), ("net0", "10.0.2")] {

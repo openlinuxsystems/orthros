@@ -30,6 +30,7 @@ members = [
     "drivers/intel",
     "drivers/nic",
     "drivers/nvme",
+    "drivers/realtek",
     "drivers/scsi",
     "drivers/sdhci",
     "drivers/smbus",

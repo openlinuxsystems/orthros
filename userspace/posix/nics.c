@@ -11,7 +11,7 @@
 // and the stack never have had a frame to send without a slot for it.
 // Spark gives it the whole network (--network).
 //
-// The userspace-e1000 boot test runs it with `--kill e1000d` first (ADR
+// The userspace-e1000 boot test runs it with `-k e1000d` first (ADR
 // 0198): halfway through the first card's 2 MiB it kills the driver
 // program with SIGKILL, and the bytes must still all come back, once
 // Spark has started the driver again and the card is back up; the
@@ -88,7 +88,7 @@ static int wait_for_address(const char *card, const char *want) {
 
 static uint8_t out[CHUNK], back[CHUNK];
 
-// The program --kill names, until it is killed.
+// The program -k names, until it is killed.
 static const char *to_kill;
 
 // The number of a running process called `name`, from /processes, or 0.
@@ -225,7 +225,7 @@ static void card(const char *card, const char *net, uint32_t seed) {
 int main(int argc, char **argv) {
 	check_start("nics");
 	int first = 1;
-	if(argc >= 3 && !strcmp(argv[1], "--kill")) {
+	if(argc >= 3 && !strcmp(argv[1], "-k")) {
 		to_kill = argv[2];
 		first = 3;
 	}

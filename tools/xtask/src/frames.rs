@@ -38,7 +38,14 @@ const ALLOWED: &[(&str, &str)] = &[
     ("radix_ena::start", "sets up an ENA card for radix::net::bind_card, at boot"),
     (
         "radix::net::add_interface",
-        "builds a network card's stack at boot, on the boot CPU's 64 KiB stack",
+        "builds a network card's stack at boot, on the boot CPU's 64 KiB stack, or a USB \
+         Ethernet adapter's on its xHCI controller's thread, whose stack is 48 KiB \
+         (radix::usb::XHCI_STACK_PAGES)",
+    ),
+    (
+        "radix::net::program::attach_usb",
+        "gives a USB Ethernet adapter its interface on its xHCI controller's thread, whose stack \
+         is 48 KiB (radix::usb::XHCI_STACK_PAGES)",
     ),
     (
         "radix::net::start_loopback",

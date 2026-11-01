@@ -120,7 +120,11 @@ impl Memory for Mapped {
         // SAFETY: as in `read`; the kernel reads the slot only after the
         // release store of this side's index that follows.
         unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), (self.base + offset) as *mut u8, data.len());
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                (self.base + offset) as *mut u8,
+                data.len(),
+            );
         }
     }
 }
@@ -180,8 +184,9 @@ fn start(slot: u32, address: u32, model: Model) -> Result<Running, String> {
         Some(unsafe { Dma::new(given.at as usize, given.device_address, pages * PAGE, 0, keep) })
     };
     let mut delay = |us: u32| thread::sleep(Duration::from_micros(us.into()));
-    let card = radix_intel_net::start(model, regs, interrupt, fallback_mac(), &mut alloc, &mut delay)
-        .map_err(|err| format!("{err}"))?;
+    let card =
+        radix_intel_net::start(model, regs, interrupt, fallback_mac(), &mut alloc, &mut delay)
+            .map_err(|err| format!("{err}"))?;
     let mac = card.info().mac;
     let attached = device::attach_network(&SYS, slot, SLOT_SPACE, 0, &mac)
         .map_err(fails("attaching it to its interface"))?;
@@ -283,7 +288,8 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
             .ok_or_else(|| {
                 util::fail(format!("{at} ({vendor:04x}:{device:04x}) is no e1000 or e1000e card"))
             })?;
-        let running = start(slot, address, model).map_err(|why| util::fail(format!("{at}: {why}")))?;
+        let running =
+            start(slot, address, model).map_err(|why| util::fail(format!("{at}: {why}")))?;
         cards.push(running);
     }
     if cards.is_empty() {

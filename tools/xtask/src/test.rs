@@ -120,6 +120,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-posix",
     "radix-pstate",
     "radix-random",
+    "radix-realtek-net",
     "radix-relocs",
     "radix-sched",
     "radix-scsi",

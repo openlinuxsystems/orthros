@@ -31,8 +31,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use radix_abi::device::{
     self as abi, AttachNetworkArgs, AttachNetworkResults, DMA_PAGES_MAX, DeviceInfo,
     EVENT_INTERRUPT, INTERRUPT_MSI, INTERRUPT_NONE, InfoArgs, InterruptArgs, InterruptResults,
-    LIST, ListArgs, ListResults, MapDmaArgs, MapDmaResults, MapRegistersArgs,
-    MapRegistersResults, NO_INTERFACE, OpenArgs, WaitArgs, WaitResults, WakeArgs,
+    LIST, ListArgs, ListResults, MapDmaArgs, MapDmaResults, MapRegistersArgs, MapRegistersResults,
+    NO_INTERFACE, OpenArgs, WaitArgs, WaitResults, WakeArgs,
 };
 use radix_abi::errors::Kernel;
 use radix_cap::{ObjectKind, Rights, SlotRef};
@@ -241,7 +241,7 @@ impl DeviceObject {
 
     /// Charges `pages` pages to the caller's domain, the one its memory is
     /// charged to from its first page on.
-    fn charge(&self, state: &mut State, pages: u64) -> Result<()> {
+    fn charge(state: &mut State, pages: u64) -> Result<()> {
         let domain = match &state.domain {
             Some(domain) => domain.clone(),
             None => sched::current().map(|me| me.domain().clone()).ok_or(error(Kernel::Gone))?,
@@ -339,7 +339,7 @@ fn object(found: &Found) -> Result<&Object> {
 }
 
 /// The card `found` designates, and its rights checked.
-fn card<'a>(found: &'a Found, rights: Rights) -> Result<&'a DeviceRef> {
+fn card(found: &Found, rights: Rights) -> Result<&DeviceRef> {
     found.cap.check(ObjectKind::Device, rights).map_err(cap_error)?;
     match object(found)? {
         Object::Device(device) => Ok(device),
@@ -353,7 +353,9 @@ fn card<'a>(found: &'a Found, rights: Rights) -> Result<&'a DeviceRef> {
 fn space_for(user: &UserRef, state: &mut State, slot: u32) -> Result<SpaceRef> {
     let (_, space) = objects::space(user.cspace, slot, Rights::CONTROL)?;
     match state.space.as_ref().and_then(Weak::upgrade) {
-        Some(mapped) if !Arc::ptr_eq(&mapped, &space) => return Err(error(Kernel::InvalidArgument)),
+        Some(mapped) if !Arc::ptr_eq(&mapped, &space) => {
+            return Err(error(Kernel::InvalidArgument));
+        }
         Some(_) => {}
         None => state.space = Some(Arc::downgrade(&space)),
     }
@@ -419,9 +421,8 @@ fn open(user: &UserRef, address: u32, to: u32) -> Result<()> {
     let (at, left) = left_at(address).ok_or(radix_abi::errors::File::NotFound.status(0))?;
     // One whose last capability went a moment ago may still be stopping.
     let deadline = sched::now_ns().saturating_add(CLOSING_WAIT_NS);
-    let closing = || {
-        left.open.lock().as_ref().is_some_and(|device| device.closed.load(Ordering::Acquire))
-    };
+    let closing =
+        || left.open.lock().as_ref().is_some_and(|device| device.closed.load(Ordering::Acquire));
     while left.held.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
         if !closing() {
             return Err(error(Kernel::Busy));
@@ -483,7 +484,8 @@ fn map_registers(user: &UserRef, device: &DeviceRef, a: &MapRegistersArgs) -> Re
         return Err(error(Kernel::Gone));
     }
     let space = space_for(user, &mut state, a.space)?;
-    let backing = Backing::Device(DevicePages { device: device.clone(), part: Part::Registers(phys) });
+    let backing =
+        Backing::Device(DevicePages { device: device.clone(), part: Part::Registers(phys) });
     let at = space.map_placed(a.address, pages, &backing, 0, UserAccess::ReadWrite)?;
     Ok((at, size))
 }
@@ -502,7 +504,7 @@ fn map_dma(user: &UserRef, device: &DeviceRef, a: &MapDmaArgs) -> Result<(u64, u
     }
     let space = space_for(user, &mut state, a.space)?;
     state.dma.try_reserve(1).map_err(|_| error(Kernel::NoMemory))?;
-    device.charge(&mut state, pages)?;
+    DeviceObject::charge(&mut state, pages)?;
     let source = device.left().function.address();
     let Some(dma) = <Arch as Devices>::alloc_dma(source, pages as usize, false) else {
         DeviceObject::uncharge(&mut state, pages);
@@ -571,8 +573,9 @@ fn attach_network(user: &UserRef, device: &DeviceRef, a: &AttachNetworkArgs) -> 
         return Err(error(Kernel::Already));
     }
     let space = space_for(user, &mut state, a.space)?;
-    device.charge(&mut state, pages)?;
-    let made = Pages::new().and_then(|link| Arc::try_new_in(link, HEAP.with(Flags::MAY_SLEEP)).ok());
+    DeviceObject::charge(&mut state, pages)?;
+    let made =
+        Pages::new().and_then(|link| Arc::try_new_in(link, HEAP.with(Flags::MAY_SLEEP)).ok());
     let Some(link) = made else {
         DeviceObject::uncharge(&mut state, pages);
         return Err(error(Kernel::NoMemory));

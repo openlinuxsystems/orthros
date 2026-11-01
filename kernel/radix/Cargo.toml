@@ -59,6 +59,7 @@ radix-net = { path = "../net" }
 radix-nic = { path = "../drivers/nic" }
 radix-posix = { path = "../lib/posix" }
 radix-pstate = { path = "../lib/pstate" }
+radix-realtek-net = { path = "../drivers/realtek" }
 radix-random = { path = "../lib/random" }
 radix-sched = { path = "../sched" }
 radix-scsi = { path = "../drivers/scsi" }

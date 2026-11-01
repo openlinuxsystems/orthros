@@ -288,6 +288,7 @@ dependencies = [
  "radix-posix",
  "radix-pstate",
  "radix-random",
+ "radix-realtek-net",
  "radix-sched",
  "radix-scsi",
  "radix-sdhci",
@@ -674,6 +675,14 @@ version = "0.11.0"
 dependencies = [
  "proptest",
  "radix-sync",
+]
+
+[[package]]
+name = "radix-realtek-net"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
 ]
 
 [[package]]

@@ -23,3 +23,8 @@ Section: Specifications and papers
   admin queue by address on revision 1
   ([ADR 0197](docs/adr/0197-network-cards-share-one-driver-interface-and-copy-frames-through-slots.md)).
   No code is taken from any of them.
+- FreeBSD's `re(4)` and its `if_rlreg.h` (BSD-4-Clause, Copyright Bill
+  Paul), the reference for the registers, descriptors, chip revisions
+  and their quirks, and the start and stop sequences from which
+  `radix-realtek-net` drives Realtek's RTL8169, RTL8168 and RTL810x
+  chips. No code is taken from it.
