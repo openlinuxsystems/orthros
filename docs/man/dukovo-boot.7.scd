@@ -177,7 +177,7 @@ seconds since the kernel started; messages before timer calibration show
 [    0.254500] Time: TSC at 2807.603 MHz (measured against the HPET); APIC timer input 1004.640 MHz; tick 100 Hz
 [    0.383220] Scheduler: EEVDF fair class (3 ms slices) and FIFO and round-robin real-time classes; timer APIC one-shot, idle with HLT; extended state XSAVEOPT on every switch: x87, SSE, AVX, PKRU; 2696-byte areas
 [    0.419834] Lock checker: off (the lockdep flag turns it on)
-[    0.445393] Capabilities: ready; 21 object kinds, 13 rights, spaces of up to 65536 slots, derivations up to 64 deep
+[    0.445393] Capabilities: ready; 22 object kinds, 13 rights, spaces of up to 65536 slots, derivations up to 64 deep
 [    0.469304] User mode: SYSCALL/SYSRET entry, user half 0x10000-0x7ffffffff000; SMEP on, SMAP on (lifted for user copies only)
 [    0.494239] Files: the root is a tmpfs; Spark mounts the rest
 [    0.520196] User: the usertests image is 183 KiB
@@ -549,6 +549,13 @@ them to *init*, and the kernel does not read them.
 	boot tests that type commands at a console use it. It opens nothing
 	that the command line could not open already: the words after *--*
 	start any program as root.
+
+*netlog*=_host_[:_port_]
+	Read by *netlog*(8), not the kernel: send the log over UDP to this
+	computer as it is written, to port 6666 when no port is given, as
+	Linux's *netconsole=* does, for one boot of a machine whose screen
+	shows nothing (ADR 0196). An IPv6 address goes in brackets when it
+	has a port. It names the target in place of *netlog*(5)'s.
 
 *startup-trouble*
 	Read by *login*(1) and *authd*(8), not the kernel: the sign-in at

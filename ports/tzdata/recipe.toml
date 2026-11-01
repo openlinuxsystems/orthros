@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# The IANA time zone database (ADR 0194): every time zone's offsets from
+# UTC and daylight saving rules, as governments set them since 1970,
+# compiled by its own zic into the TZif files the C library reads, in
+# /system/resources/zoneinfo, which /usr/share/zoneinfo leads to. TZ
+# names a zone, as TZ=Europe/Berlin, and /etc/localtime, the link
+# timedatectl(1) sets, the computer's; it leads to UTC until it is set.
+#
+# Only data reaches the image: zic is built with the build host's C
+# compiler and runs only there. The code and the data are in the public
+# domain (its LICENSE), which SPDX has no identifier for.
+name = "tzdata"
+version = "2026f"
+summary = "the IANA time zone database"
+license = "LicenseRef-tz-public-domain"
+homepage = "https://www.iana.org/time-zones"
+image = ["system/resources/zoneinfo/"]
+
+# The time zone database's own repository, by Paul Eggert, which IANA's
+# releases are made from.
+[source]
+git = "https://github.com/eggert/tz.git"
+commit = "a6cb1a1cebcc96269a02b25323c1a9424e3349a8"
+tag = "2026f"

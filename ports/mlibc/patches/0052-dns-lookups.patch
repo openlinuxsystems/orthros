@@ -1,0 +1,1158 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Looks names up in DNS as glibc and musl do (ADR 0193). mlibc's lookups
+found the DNS port in /etc/services, failing without it, sent each query
+with the identifier 123, took the first datagram that came as the
+answer, failing the lookup if its identifier was another, read answers
+without checking their offsets against their end, into 512 bytes, or
+256 for addresses' names, and asked for an address's name as
+1.0.0.127.in-addr.arpa's reverse. Now:
+  - queries go to port 53, with a random identifier and EDNS(0)'s
+    1232 bytes, and only an answer from the server asked, with that
+    identifier and the question asked, is taken: anything else is
+    ignored;
+  - an answer cut short is asked for again over TCP;
+  - every name and record is read with its offsets checked, and
+    compression pointers that loop are refused;
+  - CNAME chains are followed to the records under their end, sixteen
+    at most, for addresses' names too (RFC 2317);
+  - the nameservers of /etc/resolv.conf, three at most, are asked in
+    turn while one does not answer or fails, and its search list and
+    ndots option are used as glibc uses them;
+  - addresses' names are asked under in-addr.arpa with the address's
+    bytes reversed, and under ip6.arpa for IPv6;
+  - getnameinfo gives the address when DNS fails, as glibc's does;
+  - a missing /etc/hosts finds nothing rather than failing the lookup,
+    and the hosts file's reader closes it, matches whole addresses and
+    reads lines to their end only.
+Meant for upstream.
+
+--- a/options/posix/generic/lookup.cpp
++++ b/options/posix/generic/lookup.cpp
+@@ -1,12 +1,13 @@
+ #include <mlibc/lookup.hpp>
+ #include <mlibc/resolv_conf.hpp>
+ #include <mlibc/debug.hpp>
+-#include <mlibc/services.hpp>
+ #include <bits/ensure.h>
+ 
+ #include <frg/string.hpp>
++#include <frg/vector.hpp>
+ #include <mlibc/allocator.hpp>
+ #include <string.h>
++#include <strings.h>
+ #include <sys/socket.h>
+ #include <errno.h>
+ #include <arpa/inet.h>
+@@ -20,380 +21,538 @@
+ 
+ namespace mlibc {
+ 
++// Names are looked up in DNS by asking each nameserver of /etc/resolv.conf
++// in turn, over UDP to port 53 with EDNS(0), and over TCP when the answer
++// is cut short. An answer is taken only from the server asked, with the
++// query's random identifier and its question, and read with every offset
++// checked against its end.
+ namespace {
+-	constexpr unsigned short RETURN_NOERROR [[maybe_unused]] = 0x0;
+-	constexpr unsigned short RETURN_NXDOMAIN = 0x3;
++	constexpr uint16_t DNS_PORT = 53;
++	// The UDP payload queries offer (EDNS(0), RFC 6891): the DNS flag day
++	// 2020's size, which no path's MTU cuts.
++	constexpr size_t UDP_SIZE = 1232;
++	// How long each nameserver has to answer, as glibc's default.
++	constexpr int64_t TIMEOUT_MS = 5000;
+ 
+-	constexpr unsigned int RECORD_A = 1;
+-	constexpr unsigned int RECORD_CNAME = 5;
+-	constexpr unsigned int RECORD_PTR = 12;
+-	constexpr unsigned int RECORD_AAAA = 28;
+-
+-	int get_poll_timeout(struct timespec *original_time) {
+-		struct timespec current_time;
+-		if (int e = mlibc::sysdep<ClockGet>(CLOCK_MONOTONIC, &current_time.tv_sec, &current_time.tv_nsec); e)
+-			mlibc::panicLogger() << "mlibc: sys_clock_get() failed with error code: " << e << frg::endlog;
++	constexpr uint16_t FLAG_QR = 0x8000;
++	constexpr uint16_t FLAG_TC = 0x0200;
++	constexpr uint16_t FLAG_RD = 0x0100;
+ 
+-		current_time.tv_sec -= original_time->tv_sec;
+-		current_time.tv_nsec -= original_time->tv_nsec;
+-		if (current_time.tv_nsec < 0) {
+-			--current_time.tv_sec;
+-			current_time.tv_nsec = 1000000000 + current_time.tv_nsec;
+-		}
++	constexpr unsigned RCODE_NOERROR = 0;
++	constexpr unsigned RCODE_SERVFAIL = 2;
++	constexpr unsigned RCODE_NXDOMAIN = 3;
+ 
+-		// poll timeout unit is msec
+-		// default timeout is 5 seconds
+-		// TODO resolv.conf can specify a timeout and we ignore it currently.
+-		return frg::max(5000l - (current_time.tv_sec * 1000 + current_time.tv_nsec / 1000000), time_t{0});
+-	}
+-} // namespace
++	constexpr uint16_t RECORD_A = 1;
++	constexpr uint16_t RECORD_CNAME = 5;
++	constexpr uint16_t RECORD_PTR = 12;
++	constexpr uint16_t RECORD_AAAA = 28;
++	constexpr uint16_t RECORD_OPT = 41;
++	constexpr uint16_t CLASS_IN = 1;
+ 
+-static frg::string<MemoryAllocator> read_dns_name(char *buf, char *&it) {
+-	frg::string<MemoryAllocator> res{getAllocator()};
+-	while (true) {
+-		char code = *it++;
+-		if ((code & 0xC0) == 0xC0) {
+-			// pointer
+-			uint16_t offset = (static_cast<uint8_t>(code & 0x3F) << 8) | static_cast<uint8_t>(*it++);
+-			auto offset_it = buf + offset;
+-			return res + read_dns_name(buf, offset_it);
+-		} else if (!(code & 0xC0)) {
+-			if (!code)
+-				break;
++	// The longest CNAME chain followed, as glibc's.
++	constexpr int MAX_CNAMES = 16;
+ 
+-			for (int i = 0; i < code; i++)
+-				res += (*it++);
++	constexpr size_t HEADER_SIZE = 12;
+ 
+-			if (*it)
+-				res += '.';
+-		} else {
+-			break;
+-		}
+-	}
++	using bytes = frg::vector<uint8_t, MemoryAllocator>;
++	using string = frg::string<MemoryAllocator>;
+ 
+-	return res;
+-}
++	uint16_t get16(const uint8_t *p) {
++		return static_cast<uint16_t>((p[0] << 8) | p[1]);
++	}
+ 
+-int lookup_name_dns(struct lookup_result &buf, const char *name,
+-		frg::string<MemoryAllocator> &canon_name, int family) {
+-	frg::string<MemoryAllocator> request{getAllocator()};
++	void put16(bytes &out, uint16_t value) {
++		out.push(static_cast<uint8_t>(value >> 8));
++		out.push(static_cast<uint8_t>(value));
++	}
+ 
+-	int num_q = 1;
+-	struct dns_header header;
+-	header.identification = htons(123);
+-	header.flags = htons(0x100);
+-	header.no_q = htons(num_q);
+-	header.no_ans = htons(0);
+-	header.no_auths = htons(0);
+-	header.no_additional = htons(0);
+-
+-	request.resize(sizeof(header));
+-	memcpy(request.data(), &header, sizeof(header));
+-
+-	const char *end = name;
+-	while (*end != '\0') {
+-		end = strchrnul(name, '.');
+-		size_t length = end - name;
+-		frg::string_view substring{name, length};
+-		name += length + 1;
+-		request += char(length);
+-		request += substring;
+-	}
+-
+-	request += char(0);
+-	// set question type to fetch A or AAAA records
+-	uint16_t qtype = RECORD_A;
+-	if (family == AF_INET6)
+-		qtype = RECORD_AAAA;
+-
+-	request += qtype >> 8;
+-	request += qtype & 0xFF;
+-	// set CLASS to IN
+-	request += 0;
+-	request += 1;
+-
+-	mlibc::service_result serv_buf{getAllocator()};
+-	int serv_count = mlibc::lookup_serv_by_name(serv_buf, "domain", IPPROTO_UDP, SOCK_DGRAM, 0);
+-	if (serv_count < 0) {
+-		mlibc::infoLogger() << "mlibc: could not resolve DNS service" << frg::endlog;
+-		return -EAI_SERVICE;
+-	}
+-
+-	struct sockaddr_in sin = {};
+-	sin.sin_family = AF_INET;
+-	sin.sin_port = htons(serv_buf[0].port);
+-
+-	auto nameserver = get_nameserver();
+-	if (!inet_aton(nameserver ? nameserver->name.data() : "127.0.0.1", &sin.sin_addr)) {
+-		mlibc::infoLogger() << "lookup_name_dns(): inet_aton() failed!" << frg::endlog;
+-		return -EAI_SYSTEM;
+-	}
+-
+-	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+-	if (fd < 0) {
+-		mlibc::infoLogger() << "lookup_name_dns(): socket() failed" << frg::endlog;
+-		return -EAI_SYSTEM;
++	unsigned rcode(const bytes &msg) {
++		return get16(msg.data() + 2) & 0xF;
+ 	}
+ 
+-	frg::scope_exit close_fd{[&] {
+-		close(fd);
+-	}};
++	int64_t now_ms() {
++		struct timespec now;
++		if (int e = mlibc::sysdep<ClockGet>(CLOCK_MONOTONIC, &now.tv_sec, &now.tv_nsec); e)
++			mlibc::panicLogger() << "mlibc: sys_clock_get() failed with error code: " << e << frg::endlog;
++		return int64_t(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
++	}
+ 
+-	size_t sent = sendto(fd, request.data(), request.size(), 0,
+-			(struct sockaddr*)&sin, sizeof(sin));
+-	if (sent != request.size()) {
+-		mlibc::infoLogger() << "lookup_name_dns(): sendto() failed to send everything" << frg::endlog;
+-		return -EAI_SYSTEM;
+-	}
+-
+-	char response[512];
+-	int num_ans = 0;
+-	int fds_ready;
+-	struct timespec start_time;
+-
+-	struct pollfd pollfd;
+-	pollfd.fd = fd;
+-	pollfd.events = POLLIN;
+-
+-	if (int e = mlibc::sysdep<ClockGet>(CLOCK_MONOTONIC, &start_time.tv_sec, &start_time.tv_nsec); e)
+-		mlibc::panicLogger() << "mlibc: sys_clock_get() failed with error code: " << e << frg::endlog;
+-
+-	while ((fds_ready = poll(&pollfd, 1, get_poll_timeout(&start_time))) > 0) {
+-		ssize_t rlen = recvfrom(fd, response, sizeof(response), 0, nullptr, nullptr);
+-		if (rlen < 0) {
+-			mlibc::infoLogger() << "lookup_name_dns(): recvfrom() failed" << frg::endlog;
+-			return -EAI_SYSTEM;
++	// Waits until fd has one of events, or an error, before deadline:
++	// false if the deadline passed first.
++	bool wait_for(int fd, short events, int64_t deadline) {
++		while (true) {
++			int64_t left = deadline - now_ms();
++			if (left <= 0)
++				return false;
++			struct pollfd pfd = {fd, events, 0};
++			int ready = poll(&pfd, 1, static_cast<int>(left));
++			if (ready > 0)
++				return true;
++			if (ready < 0 && errno != EINTR)
++				return false;
+ 		}
++	}
+ 
+-		if ((size_t)rlen < sizeof(struct dns_header))
+-			continue;
+-
+-		auto response_header = reinterpret_cast<struct dns_header*>(response);
+-		if (response_header->identification != header.identification)
+-			return -EAI_FAIL;
+-
+-		if ((ntohs(response_header->flags) & 0xF) == RETURN_NXDOMAIN)
+-			return -EAI_NONAME;
++	bool same_name(const string &a, const string &b) {
++		return a.size() == b.size() && !strncasecmp(a.data(), b.data(), a.size());
++	}
++
++	// Appends name in DNS's form, ending with the root's empty label:
++	// false if a label is empty or longer than 63 bytes, or the whole
++	// longer than 255. A dot at the end, of a name that is absolute, is
++	// left out.
++	bool put_name(bytes &out, const char *name, size_t length) {
++		if (length && name[length - 1] == '.')
++			length--;
++		if (!length)
++			return false;
++		size_t start = out.size();
++		const char *label = name, *end = name + length;
++		while (true) {
++			auto dot = static_cast<const char *>(memchr(label, '.', end - label));
++			const char *label_end = dot ? dot : end;
++			size_t size = label_end - label;
++			if (!size || size > 63)
++				return false;
++			out.push(static_cast<uint8_t>(size));
++			for (const char *c = label; c < label_end; c++)
++				out.push(static_cast<uint8_t>(*c));
++			if (!dot)
++				break;
++			label = dot + 1;
++		}
++		out.push(0);
++		return out.size() - start <= 255;
++	}
+ 
+-		auto it = response + sizeof(struct dns_header);
+-		for (int i = 0; i < ntohs(response_header->no_q); i++) {
+-			auto dns_name = read_dns_name(response, it);
+-			(void) dns_name;
+-			it += 4;
+-		}
+-
+-		for (int i = 0; i < ntohs(response_header->no_ans); i++) {
+-			struct dns_addr_buf buffer;
+-			auto dns_name = read_dns_name(response, it);
+-
+-			uint16_t rr_type = (static_cast<uint8_t>(it[0]) << 8) | static_cast<uint8_t>(it[1]);
+-			uint16_t rr_class = (static_cast<uint8_t>(it[2]) << 8) | static_cast<uint8_t>(it[3]);
+-			uint16_t rr_length = (static_cast<uint8_t>(it[8]) << 8) | static_cast<uint8_t>(it[9]);
+-			it += 10;
+-			(void)rr_class;
+-
+-			switch (rr_type) {
+-				case RECORD_A:
+-					if (family != AF_UNSPEC && family != AF_INET) {
+-						it += rr_length;
+-						continue;
+-					}
+-
+-					memcpy(buffer.addr, it, rr_length);
+-					it += rr_length;
+-					buffer.family = AF_INET;
+-					buffer.name = std::move(dns_name);
+-					buf.buf.push(std::move(buffer));
+-					break;
+-				case RECORD_AAAA:
+-					if (family != AF_UNSPEC && family != AF_INET6) {
+-						it += rr_length;
+-						continue;
+-					}
+-
+-					memcpy(buffer.addr, it, rr_length);
+-					it += rr_length;
+-					buffer.family = AF_INET6;
+-					buffer.name = std::move(dns_name);
+-					buf.buf.push(std::move(buffer));
+-					break;
+-				case RECORD_CNAME:
+-					canon_name = read_dns_name(response, it);
+-					buf.aliases.push(std::move(dns_name));
+-					break;
+-				default:
+-					mlibc::infoLogger() << "lookup_name_dns: unknown rr type "
+-						<< rr_type << frg::endlog;
+-					it += rr_length;
+-					break;
++	// Reads the name at `at` in msg, following its compression pointers,
++	// into out (if not null) as text without the root's dot, and moves
++	// `at` past it: false if it runs past the message's end, points in a
++	// loop, is longer than 255 bytes, or has a label holding a dot or a
++	// NUL, which no host's name has.
++	bool get_name(const uint8_t *msg, size_t size, size_t &at, string *out) {
++		if (out)
++			*out = string{getAllocator()};
++		size_t pos = at, wire = 0;
++		bool jumped = false;
++		for (int jumps = 0;;) {
++			if (pos >= size)
++				return false;
++			uint8_t length = msg[pos];
++			if ((length & 0xC0) == 0xC0) {
++				if (pos + 1 >= size || ++jumps > 127)
++					return false;
++				if (!jumped)
++					at = pos + 2;
++				jumped = true;
++				pos = ((length & 0x3F) << 8) | msg[pos + 1];
++				continue;
++			}
++			if (length & 0xC0)
++				return false;
++			wire += length + 1;
++			if (wire > 255)
++				return false;
++			if (!length) {
++				if (!jumped)
++					at = pos + 1;
++				return true;
++			}
++			if (pos + 1 + length > size)
++				return false;
++			for (size_t i = 0; i < length; i++) {
++				char c = static_cast<char>(msg[pos + 1 + i]);
++				if (c == '.' || !c)
++					return false;
+ 			}
++			if (out) {
++				if (out->size())
++					*out += '.';
++				*out += frg::string_view{reinterpret_cast<const char *>(msg + pos + 1), length};
++			}
++			pos += 1 + length;
+ 		}
+-		num_ans += ntohs(response_header->no_ans);
+-
+-		if (num_ans >= num_q)
+-			break;
+ 	}
+ 
+-	if (fds_ready == 0)
+-		return -EAI_AGAIN;
+-
+-	return buf.buf.size();
+-}
+-
+-int lookup_addr_dns(frg::span<char> name, frg::array<uint8_t, 16> &addr, int family) {
+-	frg::string<MemoryAllocator> request{getAllocator()};
+-
+-	int num_q = 1;
+-	struct dns_header header;
+-	header.identification = htons(123);
+-	header.flags = htons(0x100);
+-	header.no_q = htons(num_q);
+-	header.no_ans = htons(0);
+-	header.no_auths = htons(0);
+-	header.no_additional = htons(0);
+-
+-	request.resize(sizeof(header));
+-	memcpy(request.data(), &header, sizeof(header));
+-
+-	char addr_str[64];
+-	if(!inet_ntop(family, addr.data(), addr_str, sizeof(addr_str))) {
+-		switch(errno) {
+-			case EAFNOSUPPORT:
+-				return -EAI_FAMILY;
+-			case ENOSPC:
+-				return -EAI_OVERFLOW;
+-			default:
+-				return -EAI_FAIL;
++	// A query for name's records of type, with a random identifier, asking
++	// for recursion, and EDNS(0)'s OPT record offering UDP_SIZE bytes:
++	// false if DNS cannot carry the name.
++	bool make_query(bytes &out, const char *name, size_t length, uint16_t type) {
++		uint16_t id;
++		if (mlibc::sysdep_or_enosys<GetEntropy>(&id, sizeof(id)))
++			id = static_cast<uint16_t>((now_ms() * 2654435761u) >> 16);
++		put16(out, id);
++		put16(out, FLAG_RD);
++		put16(out, 1); // one question
++		put16(out, 0);
++		put16(out, 0);
++		put16(out, 1); // and the OPT record
++		if (!put_name(out, name, length))
++			return false;
++		put16(out, type);
++		put16(out, CLASS_IN);
++		out.push(0); // the root's name
++		put16(out, RECORD_OPT);
++		put16(out, UDP_SIZE);
++		put16(out, 0); // extended RCODE and version
++		put16(out, 0); // no DNSSEC
++		put16(out, 0); // no options
++		return true;
++	}
++
++	// Whether msg answers query: a response with its identifier, and its
++	// question but for the name's case. An error may come without the
++	// question, as some servers send it.
++	bool answers(const bytes &query, const uint8_t *msg, size_t size) {
++		if (size < HEADER_SIZE || get16(msg) != get16(query.data()) || !(get16(msg + 2) & FLAG_QR))
++			return false;
++		uint16_t questions = get16(msg + 4);
++		if (!questions)
++			return (get16(msg + 2) & 0xF) != RCODE_NOERROR;
++		if (questions != 1)
++			return false;
++		string asked{getAllocator()}, answered{getAllocator()};
++		size_t query_at = HEADER_SIZE, msg_at = HEADER_SIZE;
++		if (!get_name(query.data(), query.size(), query_at, &asked)
++				|| !get_name(msg, size, msg_at, &answered) || msg_at + 4 > size)
++			return false;
++		return same_name(asked, answered) && !memcmp(query.data() + query_at, msg + msg_at, 4);
++	}
++
++	bool send_all(int fd, const uint8_t *data, size_t size, int64_t deadline) {
++		while (size) {
++			if (!wait_for(fd, POLLOUT, deadline))
++				return false;
++			ssize_t sent = send(fd, data, size, MSG_NOSIGNAL);
++			if (sent < 0) {
++				if (errno == EINTR || errno == EAGAIN)
++					continue;
++				return false;
++			}
++			data += sent;
++			size -= sent;
+ 		}
++		return true;
+ 	}
+-	frg::string<MemoryAllocator> req_str{getAllocator(), addr_str};
+-	req_str += ".in-addr.arpa";
+ 
+-	frg::string_view req_view{req_str.data(), req_str.size()};
+-	size_t ptr = 0;
+-	do {
+-		size_t next = req_view.find_first('.', ptr);
+-		size_t length = next != (size_t)-1 ? next - ptr : req_view.size() - ptr;
+-		frg::string_view substring = req_view.sub_string(ptr, length);
+-		request += char(length);
+-		request += substring;
+-		ptr = next + 1;
+-	} while(ptr != 0);
+-
+-	request += char(0);
+-	// set question type to fetch PTR records
+-	request += 0;
+-	request += 12;
+-	// set CLASS to IN
+-	request += 0;
+-	request += 1;
+-
+-	mlibc::service_result serv_buf{getAllocator()};
+-	int serv_count = mlibc::lookup_serv_by_name(serv_buf, "domain", IPPROTO_UDP, SOCK_DGRAM, 0);
+-	if (serv_count < 0) {
+-		mlibc::infoLogger() << "mlibc: could not resolve DNS service" << frg::endlog;
+-		return -EAI_SERVICE;
+-	}
+-
+-	struct sockaddr_in sin = {};
+-	sin.sin_family = AF_INET;
+-	sin.sin_port = htons(serv_buf[0].port);
+-
+-	auto nameserver = get_nameserver();
+-	if (!inet_aton(nameserver ? nameserver->name.data() : "127.0.0.1", &sin.sin_addr)) {
+-		mlibc::infoLogger() << "lookup_name_dns(): inet_aton() failed!" << frg::endlog;
+-		return -EAI_SYSTEM;
+-	}
+-
+-	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+-	if (fd < 0) {
+-		mlibc::infoLogger() << "lookup_name_dns(): socket() failed" << frg::endlog;
+-		return -EAI_SYSTEM;
++	bool receive_all(int fd, uint8_t *data, size_t size, int64_t deadline) {
++		while (size) {
++			if (!wait_for(fd, POLLIN, deadline))
++				return false;
++			ssize_t got = recv(fd, data, size, 0);
++			if (got < 0) {
++				if (errno == EINTR || errno == EAGAIN)
++					continue;
++				return false;
++			}
++			if (!got)
++				return false;
++			data += got;
++			size -= got;
++		}
++		return true;
+ 	}
+ 
+-	frg::scope_exit close_fd{[&] {
+-		close(fd);
+-	}};
+-
+-	size_t sent = sendto(fd, request.data(), request.size(), 0,
+-			(struct sockaddr*)&sin, sizeof(sin));
+-
+-	if (sent != request.size()) {
+-		mlibc::infoLogger() << "lookup_name_dns(): sendto() failed to send everything" << frg::endlog;
+-		return -EAI_SYSTEM;
+-	}
+-
+-	char response[256];
+-	int num_ans = 0;
+-	int fds_ready;
+-	struct timespec start_time;
+-
+-	struct pollfd pollfd;
+-	pollfd.fd = fd;
+-	pollfd.events = POLLIN;
+-
+-	if (int e = mlibc::sysdep<ClockGet>(CLOCK_MONOTONIC, &start_time.tv_sec, &start_time.tv_nsec); e)
+-		mlibc::panicLogger() << "mlibc: sys_clock_get() failed with error code: " << e << frg::endlog;
+-
+-	while ((fds_ready = poll(&pollfd, 1, get_poll_timeout(&start_time))) > 0) {
+-		ssize_t rlen = recvfrom(fd, response, 256, 0, nullptr, nullptr);
+-		if (rlen < 0) {
+-			mlibc::infoLogger() << "lookup_name_dns(): recvfrom() failed" << frg::endlog;
++	// Asks server over TCP (RFC 7766), for an answer too long for UDP.
++	int exchange_tcp(const struct sockaddr_in &server, const bytes &query, bytes &out,
++			int64_t deadline) {
++		int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
++		if (fd < 0)
++			return -EAI_SYSTEM;
++		frg::scope_exit close_fd{[&] {
++			close(fd);
++		}};
++
++		if (connect(fd, reinterpret_cast<const struct sockaddr *>(&server), sizeof(server)) < 0) {
++			if (errno != EINPROGRESS || !wait_for(fd, POLLOUT, deadline))
++				return -EAI_AGAIN;
++			int error = 0;
++			socklen_t error_size = sizeof(error);
++			if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &error_size) < 0 || error)
++				return -EAI_AGAIN;
++		}
++
++		bytes framed{getAllocator()};
++		put16(framed, static_cast<uint16_t>(query.size()));
++		for (size_t i = 0; i < query.size(); i++)
++			framed.push(query[i]);
++		uint8_t length[2];
++		if (!send_all(fd, framed.data(), framed.size(), deadline)
++				|| !receive_all(fd, length, 2, deadline))
++			return -EAI_AGAIN;
++		out.resize(get16(length));
++		if (!receive_all(fd, out.data(), out.size(), deadline)
++				|| !answers(query, out.data(), out.size()))
++			return -EAI_AGAIN;
++		return 0;
++	}
++
++	// Asks server, over UDP and then over TCP if the answer is cut short:
++	// 0 with the answer in out, or -EAI_AGAIN if it does not answer in
++	// time, or -EAI_SYSTEM.
++	int exchange(const struct sockaddr_in &server, const bytes &query, bytes &out) {
++		int64_t deadline = now_ms() + TIMEOUT_MS;
++		int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
++		if (fd < 0)
+ 			return -EAI_SYSTEM;
++		frg::scope_exit close_fd{[&] {
++			close(fd);
++		}};
++
++		if (sendto(fd, query.data(), query.size(), 0,
++				reinterpret_cast<const struct sockaddr *>(&server), sizeof(server))
++				!= static_cast<ssize_t>(query.size()))
++			return -EAI_AGAIN;
++
++		out.resize(UDP_SIZE);
++		while (wait_for(fd, POLLIN, deadline)) {
++			struct sockaddr_in from = {};
++			socklen_t from_size = sizeof(from);
++			ssize_t got = recvfrom(fd, out.data(), out.size(), 0,
++					reinterpret_cast<struct sockaddr *>(&from), &from_size);
++			if (got < 0) {
++				if (errno == EINTR || errno == EAGAIN)
++					continue;
++				return -EAI_AGAIN;
++			}
++			// Only the server asked answers, with the query's identifier
++			// and question; anything else is ignored, not taken as its
++			// answer or as a failure.
++			if (from_size < sizeof(from) || from.sin_family != AF_INET
++					|| from.sin_port != server.sin_port
++					|| from.sin_addr.s_addr != server.sin_addr.s_addr
++					|| !answers(query, out.data(), got))
++				continue;
++			if (get16(out.data() + 2) & FLAG_TC)
++				return exchange_tcp(server, query, out, deadline);
++			out.resize(got);
++			return 0;
+ 		}
++		return -EAI_AGAIN;
++	}
+ 
+-		if ((size_t)rlen < sizeof(struct dns_header))
+-			continue;
++	// Asks the nameservers of /etc/resolv.conf in turn for name's records
++	// of type, until one answers or says the name is not there: 0 with the
++	// answer in out, or -EAI_NONAME for a name DNS cannot carry, or
++	// -EAI_AGAIN or -EAI_FAIL from the last server asked.
++	int query(const resolv_conf &conf, const char *name, size_t length, uint16_t type, bytes &out) {
++		bytes question{getAllocator()};
++		if (!make_query(question, name, length, type))
++			return -EAI_NONAME;
++		int result = -EAI_AGAIN;
++		for (auto &nameserver : conf.nameservers) {
++			struct sockaddr_in server = {};
++			server.sin_family = AF_INET;
++			server.sin_port = htons(DNS_PORT);
++			// IPv6 nameservers wait for IPv6.
++			if (inet_pton(AF_INET, nameserver.data(), &server.sin_addr) != 1)
++				continue;
++			if ((result = exchange(server, question, out)))
++				continue;
++			unsigned code = rcode(out);
++			if (code == RCODE_NOERROR || code == RCODE_NXDOMAIN)
++				return 0;
++			result = code == RCODE_SERVFAIL ? -EAI_AGAIN : -EAI_FAIL;
++		}
++		return result;
++	}
++
++	// Calls each(type, owner, data offset, data length) for each answer
++	// record of class IN in msg, which answers() took: false if one runs
++	// past its end.
++	template<typename F>
++	bool for_each_answer(const bytes &msg, F each) {
++		const uint8_t *m = msg.data();
++		size_t size = msg.size(), at = HEADER_SIZE;
++		for (uint16_t i = get16(m + 4); i; i--) {
++			if (!get_name(m, size, at, nullptr) || at + 4 > size)
++				return false;
++			at += 4;
++		}
++		string owner{getAllocator()};
++		for (uint16_t i = get16(m + 6); i; i--) {
++			if (!get_name(m, size, at, &owner) || at + 10 > size)
++				return false;
++			uint16_t type = get16(m + at), record_class = get16(m + at + 2);
++			uint16_t length = get16(m + at + 8);
++			at += 10;
++			if (at + length > size)
++				return false;
++			if (record_class == CLASS_IN)
++				each(type, owner, at, length);
++			at += length;
++		}
++		return true;
++	}
++
++	// Reads a name that is a record's whole data.
++	bool get_data_name(const bytes &msg, size_t at, uint16_t length, string &out) {
++		size_t end = at;
++		return get_name(msg.data(), msg.size(), end, &out) && end == at + length;
++	}
++
++	// Moves name along the CNAME chain the answer holds from it, to the
++	// name its records are under, putting each name it leaves in aliases
++	// (if not null): false if the chain is longer than MAX_CNAMES or a
++	// record cannot be read.
++	bool follow_cnames(const bytes &msg, string &name,
++			frg::vector<string, MemoryAllocator> *aliases) {
++		for (int i = 0; i <= MAX_CNAMES; i++) {
++			bool moved = false, readable = true;
++			string target{getAllocator()};
++			bool whole = for_each_answer(msg, [&] (uint16_t type, const string &owner,
++					size_t at, uint16_t length) {
++				if (moved || type != RECORD_CNAME || !same_name(owner, name))
++					return;
++				moved = readable = get_data_name(msg, at, length, target);
++			});
++			if (!whole || !readable)
++				return false;
++			if (!moved)
++				return true;
++			if (aliases)
++				aliases->push(name);
++			name = target;
++		}
++		return false;
++	}
++
++	// Looks one name up, as it is: the number of addresses found, 0 for
++	// none, or -EAI_NONAME if it is not there, or another -EAI_*.
++	int lookup_one(const resolv_conf &conf, struct lookup_result &buf, const char *name,
++			size_t length, string &canon_name, int family) {
++		uint16_t type = family == AF_INET6 ? RECORD_AAAA : RECORD_A;
++		bytes msg{getAllocator()};
++		if (int e = query(conf, name, length, type, msg); e)
++			return e;
++		if (rcode(msg) == RCODE_NXDOMAIN)
++			return -EAI_NONAME;
+ 
+-		auto response_header = reinterpret_cast<struct dns_header*>(response);
+-		if (response_header->identification != header.identification)
++		if (length && name[length - 1] == '.')
++			length--;
++		string owner{name, length, getAllocator()};
++		frg::vector<string, MemoryAllocator> aliases{getAllocator()};
++		if (!follow_cnames(msg, owner, &aliases))
+ 			return -EAI_FAIL;
+ 
+-		auto it = response + sizeof(struct dns_header);
+-		for (int i = 0; i < ntohs(response_header->no_q); i++) {
+-			auto dns_name = read_dns_name(response, it);
+-			(void) dns_name;
+-			it += 4;
+-		}
+-
+-		for (int i = 0; i < ntohs(response_header->no_ans); i++) {
+-			struct dns_addr_buf buffer;
+-			auto dns_name = read_dns_name(response, it);
+-
+-			uint16_t rr_type = (static_cast<uint8_t>(it[0]) << 8) | static_cast<uint8_t>(it[1]);
+-			uint16_t rr_class = (static_cast<uint8_t>(it[2]) << 8) | static_cast<uint8_t>(it[3]);
+-			uint16_t rr_length = (static_cast<uint8_t>(it[8]) << 8) | static_cast<uint8_t>(it[9]);
+-			it += 10;
+-			(void)rr_class;
+-
+-			(void)dns_name;
+-
+-			switch (rr_type) {
+-				case RECORD_PTR: {
+-					auto ptr_name = read_dns_name(response, it);
+-					if (ptr_name.size() >= name.size())
+-						return -EAI_OVERFLOW;
+-					std::copy(ptr_name.begin(), ptr_name.end(), name.data());
+-					name.data()[ptr_name.size()] = '\0';
+-					return 1;
+-				}
+-				default:
+-					mlibc::infoLogger() << "lookup_addr_dns: unknown rr type "
+-						<< rr_type << frg::endlog;
+-					it += rr_length;
+-					break;
+-			}
+-			num_ans += ntohs(response_header->no_ans);
+-
+-			if (num_ans >= num_q)
+-				break;
++		size_t before = buf.buf.size();
++		bool whole = for_each_answer(msg, [&] (uint16_t record_type, const string &record_owner,
++				size_t at, uint16_t record_length) {
++			if (!same_name(record_owner, owner))
++				return;
++			struct dns_addr_buf address;
++			if (record_type == RECORD_A && record_length == 4
++					&& (family == AF_UNSPEC || family == AF_INET))
++				address.family = AF_INET;
++			else if (record_type == RECORD_AAAA && record_length == 16
++					&& (family == AF_UNSPEC || family == AF_INET6))
++				address.family = AF_INET6;
++			else
++				return;
++			memcpy(address.addr, msg.data() + at, record_length);
++			address.name = owner;
++			buf.buf.push(std::move(address));
++		});
++		if (!whole) {
++			buf.buf.resize(before);
++			return -EAI_FAIL;
++		}
++		if (buf.buf.size() == before)
++			return 0;
++		if (aliases.size()) {
++			canon_name = owner;
++			for (auto &alias : aliases)
++				buf.aliases.push(std::move(alias));
+ 		}
++		return buf.buf.size() - before;
+ 	}
++} // namespace
+ 
+-	if (fds_ready == 0)
+-		return -EAI_AGAIN;
++// Looks name up with the search list, as glibc does: a name with fewer
++// dots than ndots (1) is tried under each search domain first and then as
++// it is, a name with more as it is first. Only addresses of the family
++// asked are taken, IPv4 ones for AF_UNSPEC.
++int lookup_name_dns(struct lookup_result &buf, const char *name,
++		frg::string<MemoryAllocator> &canon_name, int family) {
++	auto conf = read_resolv_conf();
++	size_t length = strlen(name);
++	if (length && name[length - 1] == '.')
++		return lookup_one(conf, buf, name, length, canon_name, family);
++
++	int dots = 0;
++	for (const char *c = name; *c; c++)
++		dots += *c == '.';
++	int result = -EAI_NONAME;
++	auto found = [&] (int e) {
++		if (e < 0 && e != -EAI_NONAME) {
++			result = e;
++			return true;
++		}
++		if (e > 0 || result == -EAI_NONAME)
++			result = e;
++		return e > 0;
++	};
++
++	if (dots >= conf.ndots && found(lookup_one(conf, buf, name, length, canon_name, family)))
++		return result;
++	for (auto &domain : conf.search) {
++		string full{name, length, getAllocator()};
++		full += '.';
++		full += frg::string_view{domain.data(), domain.size()};
++		if (found(lookup_one(conf, buf, full.data(), full.size(), canon_name, family)))
++			return result;
++	}
++	if (dots < conf.ndots)
++		found(lookup_one(conf, buf, name, length, canon_name, family));
++	return result;
++}
+ 
+-	return 0;
++// Looks the address's name up in DNS, under in-addr.arpa or ip6.arpa:
++// 1 with the name in name, or 0 if it has none or the lookup failed, for
++// getnameinfo to give the address instead, as glibc's does, or
++// -EAI_OVERFLOW.
++int lookup_addr_dns(frg::span<char> name, frg::array<uint8_t, 16> &addr, int family) {
++	char reverse[sizeof("x.x.") * 16 + sizeof("ip6.arpa")];
++	if (family == AF_INET) {
++		snprintf(reverse, sizeof(reverse), "%u.%u.%u.%u.in-addr.arpa",
++				addr[3], addr[2], addr[1], addr[0]);
++	} else if (family == AF_INET6) {
++		const char hex[] = "0123456789abcdef";
++		char *p = reverse;
++		for (int i = 15; i >= 0; i--) {
++			*p++ = hex[addr[i] & 0xF];
++			*p++ = '.';
++			*p++ = hex[addr[i] >> 4];
++			*p++ = '.';
++		}
++		strcpy(p, "ip6.arpa");
++	} else {
++		return -EAI_FAMILY;
++	}
++
++	auto conf = read_resolv_conf();
++	bytes msg{getAllocator()};
++	if (query(conf, reverse, strlen(reverse), RECORD_PTR, msg) || rcode(msg) != RCODE_NOERROR)
++		return 0;
++	// Classless delegations (RFC 2317) lead to the name through a CNAME.
++	string owner{reverse, getAllocator()};
++	if (!follow_cnames(msg, owner, nullptr))
++		return 0;
++
++	string host{getAllocator()};
++	bool found = false;
++	for_each_answer(msg, [&] (uint16_t type, const string &record_owner,
++			size_t at, uint16_t length) {
++		if (!found && type == RECORD_PTR && same_name(record_owner, owner))
++			found = get_data_name(msg, at, length, host);
++	});
++	if (!found)
++		return 0;
++	if (host.size() >= name.size())
++		return -EAI_OVERFLOW;
++	memcpy(name.data(), host.data(), host.size());
++	name.data()[host.size()] = '\0';
++	return 1;
+ }
+ 
+ int lookup_name_hosts(struct lookup_result &buf, const char *name,
+@@ -404,15 +563,15 @@
+ 			case ENOENT:
+ 			case ENOTDIR:
+ 			case EACCES:
+-				return -EAI_SERVICE;
++				return 0;
+ 			default:
+ 				return -EAI_SYSTEM;
+ 		}
+ 	}
+ 
+-	char line[128];
++	char line[512];
+ 	int name_length = strlen(name);
+-	while (fgets(line, 128, file)) {
++	while (fgets(line, sizeof(line), file)) {
+ 		char *pos;
+ 		// same way to deal with comments as in services.cpp
+ 		if ((pos = strchr(line, '#'))) {
+@@ -421,7 +580,7 @@
+ 		}
+ 
+ 		for(pos = line + 1; (pos = strstr(pos, name)) &&
+-				(!isspace(pos[-1]) || !isspace(pos[name_length])); pos++);
++				(!isspace(pos[-1]) || (pos[name_length] && !isspace(pos[name_length]))); pos++);
+ 		if (!pos)
+ 			continue;
+ 
+@@ -449,9 +608,10 @@
+ 
+ 		buf.buf.push(std::move(buffer));
+ 
+-		pos = end;
+-		while (pos[1]) {
++		for (pos = end;;) {
+ 			for (; *pos && isspace(*pos); pos++);
++			if (!*pos)
++				break;
+ 			for (end = pos; *end && !isspace(*end); end++);
+ 			auto name = frg::string<MemoryAllocator>{pos,
+ 				static_cast<size_t>(end - pos), getAllocator()};
+@@ -471,11 +631,14 @@
+ 			case ENOENT:
+ 			case ENOTDIR:
+ 			case EACCES:
+-				return -EAI_SERVICE;
++				return 0;
+ 			default:
+ 				return -EAI_SYSTEM;
+ 		}
+ 	}
++	frg::scope_exit close_file{[&] {
++		fclose(file);
++	}};
+ 
+ 	// Buffer to hold ASCII version of address
+ 	char addr_str[64];
+@@ -491,21 +654,23 @@
+ 	}
+ 	int addr_str_len = strlen(addr_str);
+ 
+-	char line[128];
+-	while (fgets(line, 128, file)) {
++	char line[512];
++	while (fgets(line, sizeof(line), file)) {
+ 		char *pos;
+ 		// same way to deal with comments as in services.cpp
+ 		if ((pos = strchr(line, '#'))) {
+ 			*pos++ = '\n';
+ 			*pos = '\0';
+ 		}
+-		if (strncmp(line, addr_str, addr_str_len))
++		if (strncmp(line, addr_str, addr_str_len) || !isspace(line[addr_str_len]))
+ 			continue;
+ 
+-		for (pos = line + addr_str_len + 1; isspace(*pos); pos++);
++		for (pos = line + addr_str_len; isspace(*pos); pos++);
+ 		char *begin = pos;
+-		for (; !isspace(*pos); pos++);
++		for (; *pos && !isspace(*pos); pos++);
+ 		char *end = pos;
++		if (begin == end)
++			continue;
+ 
+ 		size_t size = end - begin;
+ 		if (size >= name.size())
+--- a/options/posix/generic/resolv_conf.cpp
++++ b/options/posix/generic/resolv_conf.cpp
+@@ -1,42 +1,80 @@
+ #include <mlibc/resolv_conf.hpp>
+ #include <mlibc/allocator.hpp>
+ #include <stdio.h>
++#include <string.h>
+ #include <ctype.h>
++#include <frg/scope_exit.hpp>
+ 
+ namespace mlibc {
+ 
+-frg::optional<struct nameserver_data> get_nameserver() {
+-	auto file = fopen("/etc/resolv.conf", "r");
+-	if (!file)
+-		return frg::null_opt;
+-
+-	char line[128];
+-	struct nameserver_data ret;
+-	while (fgets(line, 128, file)) {
+-		char *pos;
+-		if (!strchr(line, '\n') && !feof(file)) {
+-			// skip truncated lines
+-			for (int c = getc(file); c != '\n' && c != EOF; c = getc(file));
+-			continue;
+-		}
++namespace {
++	constexpr size_t MAX_NAMESERVERS = 3;
++	constexpr size_t MAX_SEARCH = 6;
++	constexpr int MAX_NDOTS = 15;
++	constexpr int MAX_WORDS = 8;
++} // namespace
+ 
+-		// TODO(geert): resolv.conf can actually have multiple nameservers
+-		// but we just pick the first one for now
+-		if (!strncmp(line, "nameserver", 10) && isspace(line[10])) {
+-			char *end;
+-			for (pos = line + 11; isspace(*pos); pos++);
+-			for (end = pos; *end && !isspace(*end); end++);
+-			*end = '\0';
+-			ret.name = frg::string<MemoryAllocator>(
+-					pos, end - pos, getAllocator());
+-			break;
++resolv_conf read_resolv_conf() {
++	resolv_conf conf;
++	auto file = fopen("/etc/resolv.conf", "r");
++	if (file) {
++		frg::scope_exit close_file{[&] {
++			fclose(file);
++		}};
++
++		char line[512];
++		while (fgets(line, sizeof(line), file)) {
++			if (!strchr(line, '\n') && !feof(file)) {
++				// skip lines too long to be glibc's
++				for (int c = getc(file); c != '\n' && c != EOF; c = getc(file));
++				continue;
++			}
++
++			char *words[MAX_WORDS];
++			int count = 0;
++			for (char *pos = line; count < MAX_WORDS;) {
++				while (*pos && isspace(static_cast<unsigned char>(*pos)))
++					pos++;
++				if (!*pos || *pos == '#' || *pos == ';')
++					break;
++				words[count++] = pos;
++				while (*pos && !isspace(static_cast<unsigned char>(*pos)))
++					pos++;
++				if (*pos)
++					*pos++ = '\0';
++			}
++			if (count < 2)
++				continue;
++
++			if (!strcmp(words[0], "nameserver")) {
++				if (conf.nameservers.size() < MAX_NAMESERVERS)
++					conf.nameservers.push(frg::string<MemoryAllocator>{words[1], getAllocator()});
++			} else if (!strcmp(words[0], "search") || !strcmp(words[0], "domain")) {
++				conf.search.clear();
++				for (int i = 1; i < count && conf.search.size() < MAX_SEARCH; i++) {
++					size_t length = strlen(words[i]);
++					if (length && words[i][length - 1] == '.')
++						length--;
++					if (length)
++						conf.search.push(frg::string<MemoryAllocator>{words[i], length, getAllocator()});
++				}
++			} else if (!strcmp(words[0], "options")) {
++				for (int i = 1; i < count; i++) {
++					if (strncmp(words[i], "ndots:", 6))
++						continue;
++					int ndots = 0;
++					for (const char *digit = words[i] + 6; isdigit(static_cast<unsigned char>(*digit))
++							&& ndots <= MAX_NDOTS; digit++)
++						ndots = ndots * 10 + (*digit - '0');
++					conf.ndots = ndots < MAX_NDOTS ? ndots : MAX_NDOTS;
++				}
++			}
+ 		}
+ 	}
+ 
+-	fclose(file);
+-	if(ret.name.empty())
+-		return frg::null_opt;
+-	return ret;
++	if (conf.nameservers.empty())
++		conf.nameservers.push(frg::string<MemoryAllocator>{"127.0.0.1", getAllocator()});
++	return conf;
+ }
+ 
+ } // namespace mlibc
+--- a/options/posix/include/mlibc/resolv_conf.hpp
++++ b/options/posix/include/mlibc/resolv_conf.hpp
+@@ -2,19 +2,26 @@
+ #define _MLIBC_RESOLV_CONF
+ 
+ #include <frg/string.hpp>
+-#include <frg/optional.hpp>
++#include <frg/vector.hpp>
+ #include <mlibc/allocator.hpp>
+ 
+ namespace mlibc {
+ 
+-struct nameserver_data {
+-	nameserver_data()
+-	: name(getAllocator()) {}
+-	frg::string<MemoryAllocator> name;
+-	// for in the future we can also store options here
++// What /etc/resolv.conf says, as glibc reads it.
++struct resolv_conf {
++	resolv_conf()
++	: nameservers(getAllocator()), search(getAllocator()) {}
++	// The nameserver lines' addresses, three at most (MAXNS), or
++	// 127.0.0.1 if the file names none.
++	frg::vector<frg::string<MemoryAllocator>, MemoryAllocator> nameservers;
++	// The last search or domain line's domains, six at most.
++	frg::vector<frg::string<MemoryAllocator>, MemoryAllocator> search;
++	// options ndots:N: how many dots a name needs to be tried as it is
++	// before the search list, 15 at most.
++	int ndots = 1;
+ };
+ 
+-frg::optional<struct nameserver_data> get_nameserver();
++resolv_conf read_resolv_conf();
+ 
+ } // namespace mlibc
+ 

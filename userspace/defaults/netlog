@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Where netlog(8) sends the log, over UDP as it is written, to debug a
+# machine whose screen shows nothing (netlog(5), ADR 0196). With no
+# target it sends nothing. `service netlog reload` reads this file
+# again; netlog=HOST:PORT on the kernel command line names a target for
+# one boot instead.
+#
+# The computer to send to, with a port when it is not 6666; on it,
+# `nc -klu 6666` or a syslog server shows what comes:
+#
+#   target = 192.168.1.20:6666
+#
+# Only records this urgent or more, by syslog(3)'s numbers: 3 errors, 4
+# warnings, 6 information (the default sends all of them, to 7):
+#
+#   level = 6

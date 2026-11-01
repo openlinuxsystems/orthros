@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 # 0073. Programs start in C.UTF-8, compiled from glibc's locale data; named locales wait for Phase 12
 
-- Status: Accepted; the locales are in `/system/libraries/locale` since [0114](0114-plain-names-inside-system.md)
+- Status: Accepted; the locales are in `/system/libraries/locale` since [0114](0114-plain-names-inside-system.md), and English's named locales, from glibc's data too, came with [0194](0194-the-clock-is-a-capability-and-timed-sets-it-over-nts.md)
 - Date: 2026-10-22
 
 ## Context

@@ -230,9 +230,33 @@ impl Timer for Arch {
     }
 
     fn wall_clock_ns() -> Option<u64> {
+        WALL_CLOCK.read(Self::now_ns())
+    }
+
+    fn set_wall_clock_ns(ns: u64) {
+        WALL_CLOCK.set(Self::now_ns(), ns);
+    }
+
+    fn slew_wall_clock(delta_ns: i64) -> Option<i64> {
+        WALL_CLOCK.slew(Self::now_ns(), delta_ns)
+    }
+
+    fn wall_clock_slew_ns() -> i64 {
+        WALL_CLOCK.slew_left(Self::now_ns())
+    }
+
+    fn rtc_seconds() -> Option<u64> {
         None
     }
+
+    fn write_rtc(_seconds: u64) -> bool {
+        false
+    }
 }
+
+/// The time of day, which only setting it gives here: the kernel reads no
+/// real-time clock on this architecture yet.
+static WALL_CLOCK: radix_hal::clock::WallClock = radix_hal::clock::WallClock::new();
 
 impl Devices for Arch {
     fn pci_segments(_found: &mut dyn FnMut(PciSegment)) {}

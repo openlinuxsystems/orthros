@@ -114,10 +114,19 @@ rights listed, plus *copy* and *transfer*, which every kind has.
 	keeps: its fans' duties and curves, its LEDs and its ARGB header
 	(see *radix-platform*(2)). Rights: *read*, to ask what they are;
 	*control*, to change them.
+
 *names*
 	The authority to give processes and capabilities the names they act
 	for, which only Spark holds (see *radix-names*(2)). Rights:
 	*control*.
+
+*clock*
+	The system's clock and the real-time clock, which Spark gives the
+	services with *admin.time* and root's shells at the consoles, as
+	Linux's *CAP_SYS_TIME* (ADR 0194). Rights: *read*, to ask the
+	clock's time, its slew and the real-time clock's time; *control*,
+	to set the clock, slew it by up to 128 ms, and write the real-time
+	clock. Every program reads the time without it.
 
 # RIGHTS
 
@@ -262,7 +271,7 @@ Operations on capabilities fail with one of these, and change nothing:
 At boot the kernel reports its store:
 
 ```
-Capabilities: ready; 21 object kinds, 13 rights, spaces of up to 65536 slots, derivations up to 64 deep
+Capabilities: ready; 22 object kinds, 13 rights, spaces of up to 65536 slots, derivations up to 64 deep
 ```
 
 The *kdb* command *caps* counts the spaces, capabilities and objects by

@@ -1,8 +1,164 @@
 // SPDX-FileCopyrightText: 2026 The Dukovo contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Calendar arithmetic for the wall clock, and the fixed-point scale that
-//! turns a counter's ticks into nanoseconds.
+//! Calendar arithmetic for the wall clock, the time of day kept on the
+//! kernel's monotonic clock ([`WallClock`]), and the fixed-point scale
+//! that turns a counter's ticks into nanoseconds.
+
+use core::hint;
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering, fence};
+
+/// How far a slew moves the time of day each second, in nanoseconds:
+/// 500 µs, as Linux's adjtime(3) (radix-clock(2)'s SLEW_RATE_NS).
+pub const SLEW_RATE_NS: u64 = 500_000;
+
+/// The time of day, as the kernel keeps it (ADR 0194): an offset from the
+/// kernel's monotonic clock, set from the real-time clock at boot and by
+/// [`WallClock::set`], and a slew, which runs it faster or slower by
+/// [`SLEW_RATE_NS`] a second until it has moved as far as asked, so that
+/// small corrections neither jump nor run it backwards.
+///
+/// Readers never wait for writers, as they read it on every
+/// `clock_gettime`: a sequence count, odd while a writer changes the
+/// fields, sends a reader that overlapped one round again (a seqlock).
+/// Writers are rare, timed(8) every few minutes, and take turns through
+/// `writing`.
+pub struct WallClock {
+    sequence: AtomicU64,
+    writing: AtomicBool,
+    /// Whether the time of day is known at all.
+    known: AtomicBool,
+    /// Nanoseconds since 1970 when the monotonic clock read 0, before the
+    /// slew.
+    offset: AtomicI64,
+    /// When the slew started, on the monotonic clock.
+    slew_start: AtomicU64,
+    /// How far the slew moves the time of day in all, in nanoseconds.
+    slew: AtomicI64,
+}
+
+/// The fields, as one reading of them saw them.
+#[derive(Clone, Copy)]
+struct Fields {
+    known: bool,
+    offset: i64,
+    slew_start: u64,
+    slew: i64,
+}
+
+impl Fields {
+    /// How much of the slew has been applied at `now`.
+    fn applied(self, now: u64) -> i64 {
+        let most = now.saturating_sub(self.slew_start) / (1_000_000_000 / SLEW_RATE_NS);
+        let most = i64::try_from(most).unwrap_or(i64::MAX);
+        self.slew.clamp(-most, most)
+    }
+}
+
+impl WallClock {
+    /// A clock that knows no time of day.
+    pub const fn new() -> WallClock {
+        WallClock {
+            sequence: AtomicU64::new(0),
+            writing: AtomicBool::new(false),
+            known: AtomicBool::new(false),
+            offset: AtomicI64::new(0),
+            slew_start: AtomicU64::new(0),
+            slew: AtomicI64::new(0),
+        }
+    }
+
+    fn fields(&self) -> Fields {
+        loop {
+            let before = self.sequence.load(Ordering::Acquire);
+            if before & 1 == 0 {
+                let fields = Fields {
+                    known: self.known.load(Ordering::Relaxed),
+                    offset: self.offset.load(Ordering::Relaxed),
+                    slew_start: self.slew_start.load(Ordering::Relaxed),
+                    slew: self.slew.load(Ordering::Relaxed),
+                };
+                fence(Ordering::Acquire);
+                if self.sequence.load(Ordering::Relaxed) == before {
+                    return fields;
+                }
+            }
+            hint::spin_loop();
+        }
+    }
+
+    /// Changes the fields with `change`, which gets them as they are.
+    fn write(&self, change: impl FnOnce(Fields) -> Fields) {
+        while self
+            .writing
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            hint::spin_loop();
+        }
+        let new = change(self.fields());
+        self.sequence.fetch_add(1, Ordering::Relaxed);
+        fence(Ordering::Release);
+        self.known.store(new.known, Ordering::Relaxed);
+        self.offset.store(new.offset, Ordering::Relaxed);
+        self.slew_start.store(new.slew_start, Ordering::Relaxed);
+        self.slew.store(new.slew, Ordering::Relaxed);
+        self.sequence.fetch_add(1, Ordering::Release);
+        self.writing.store(false, Ordering::Release);
+    }
+
+    /// The time of day when the monotonic clock reads `now`: nanoseconds
+    /// since 1970, if it is known.
+    pub fn read(&self, now: u64) -> Option<u64> {
+        let fields = self.fields();
+        if !fields.known {
+            return None;
+        }
+        let at = i128::from(fields.offset) + i128::from(now) + i128::from(fields.applied(now));
+        Some(u64::try_from(at.max(0)).unwrap_or(u64::MAX))
+    }
+
+    /// Sets the time of day to `ns` when the monotonic clock reads `now`,
+    /// ending any slew.
+    pub fn set(&self, now: u64, ns: u64) {
+        let offset = i128::from(ns) - i128::from(now);
+        let offset = i64::try_from(offset).unwrap_or(if offset < 0 { i64::MIN } else { i64::MAX });
+        self.write(|_| Fields { known: true, offset, slew_start: now, slew: 0 });
+    }
+
+    /// Starts a slew of `delta` nanoseconds at `now`, in place of any
+    /// under way: returns what was left of that one, or `None`, changing
+    /// nothing, while the time of day is not known.
+    pub fn slew(&self, now: u64, delta: i64) -> Option<i64> {
+        let mut left = None;
+        self.write(|fields| {
+            if !fields.known {
+                return fields;
+            }
+            let applied = fields.applied(now);
+            left = Some(fields.slew - applied);
+            Fields {
+                known: true,
+                offset: fields.offset.saturating_add(applied),
+                slew_start: now,
+                slew: delta,
+            }
+        });
+        left
+    }
+
+    /// The slew still to come at `now`, in nanoseconds.
+    pub fn slew_left(&self, now: u64) -> i64 {
+        let fields = self.fields();
+        fields.slew - fields.applied(now)
+    }
+}
+
+impl Default for WallClock {
+    fn default() -> WallClock {
+        WallClock::new()
+    }
+}
 
 /// Days from 1970-01-01 to `year`-`month`-`day` in the proleptic Gregorian
 /// calendar (negative before 1970), by Howard Hinnant's `days_from_civil`
@@ -93,6 +249,51 @@ pub fn first_tick_at(ns: u64, ns_per_tick: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wall_clock_set_and_read() {
+        let clock = WallClock::new();
+        assert_eq!(clock.read(5), None);
+        assert_eq!(clock.slew(5, 1000), None);
+        clock.set(1_000, 1_700_000_000_000_000_000);
+        assert_eq!(clock.read(1_000), Some(1_700_000_000_000_000_000));
+        assert_eq!(clock.read(3_000), Some(1_700_000_000_000_002_000));
+        // Before 1970 reads as 1970.
+        clock.set(10_000_000_000, 5);
+        assert_eq!(clock.read(0), Some(0));
+    }
+
+    #[test]
+    fn wall_clock_slews_at_its_rate() {
+        let clock = WallClock::new();
+        let second = 1_000_000_000;
+        clock.set(0, 100 * second);
+        // 1 ms forward takes two seconds.
+        assert_eq!(clock.slew(0, 1_000_000), Some(0));
+        assert_eq!(clock.read(second), Some(101 * second + 500_000));
+        assert_eq!(clock.slew_left(second), 500_000);
+        assert_eq!(clock.read(2 * second), Some(102 * second + 1_000_000));
+        assert_eq!(clock.read(10 * second), Some(110 * second + 1_000_000));
+        assert_eq!(clock.slew_left(10 * second), 0);
+        // Backwards, it still never runs back.
+        assert_eq!(clock.slew(10 * second, -1_000_000), Some(0));
+        let mut last = 0;
+        for tenth in 100..150 {
+            let now = clock.read(tenth * second / 10).unwrap();
+            assert!(now > last);
+            last = now;
+        }
+        assert_eq!(clock.read(20 * second), Some(120 * second));
+        // A new slew takes the place of the one under way, and says what
+        // was left of it; setting ends it.
+        assert_eq!(clock.slew(20 * second, 2_000_000), Some(0));
+        assert_eq!(clock.slew(21 * second, 0), Some(1_500_000));
+        assert_eq!(clock.read(30 * second), Some(130 * second + 500_000));
+        clock.slew(30 * second, 4_000);
+        clock.set(30 * second, 7);
+        assert_eq!(clock.slew_left(30 * second), 0);
+        assert_eq!(clock.read(31 * second), Some(second + 7));
+    }
 
     #[test]
     fn known_dates() {

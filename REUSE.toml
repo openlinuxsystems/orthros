@@ -143,3 +143,14 @@ path = [
 ]
 SPDX-FileCopyrightText = "2026 The Dukovo contributors"
 SPDX-License-Identifier = "Apache-2.0 OR MIT"
+
+# The certificates and key OpenSSL made for netservices-test's servers
+# (testdata/make.sh), which it serves DNS over TLS, HTTPS and NTS with
+# (ADRs 0193 and 0194).
+[[annotations]]
+path = [
+    "userspace/programs/netservices-test/testdata/*.pem",
+    "userspace/programs/netservices-test/testdata/*.key",
+]
+SPDX-FileCopyrightText = "2026 The Dukovo contributors"
+SPDX-License-Identifier = "Apache-2.0 OR MIT"

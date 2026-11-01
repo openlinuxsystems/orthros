@@ -55,8 +55,8 @@ use libradix::abi::process::{
 };
 use libradix::abi::resource_domain::{self, NO_LIMIT};
 use libradix::abi::startup::{
-    SLOT_FD_BASE, SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_NETWORK, SLOT_PLATFORM, SLOT_PROCESS,
-    SLOT_RANDOM, SLOT_ROOT,
+    SLOT_CLOCK, SLOT_FD_BASE, SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_NETWORK, SLOT_PLATFORM,
+    SLOT_PROCESS, SLOT_RANDOM, SLOT_ROOT,
 };
 use libradix::abi::{network, power, signal, syscalls};
 use radix_rt::fs::{Dir, File};
@@ -206,6 +206,19 @@ fn grant_platform(platform: Option<u32>, spec: &Spec, child: u32) -> Result<(), 
         .map_err(|status| format!("giving it the platform failed: {:#x}", status.0))
 }
 
+/// Gives `child` the clock capability in SLOT_CLOCK if `spec` asks for
+/// admin.time, with the read and control rights, and the copy and
+/// transfer rights so that it lasts through `fork` (ADR 0194).
+fn grant_clock(clock: Option<u32>, spec: &Spec, child: u32) -> Result<(), String> {
+    if !spec.time {
+        return Ok(());
+    }
+    let clock = clock.ok_or("Spark has no clock capability to give")?;
+    let rights = Rights::READ.union(Rights::CONTROL).union(Rights::COPY).union(Rights::TRANSFER);
+    process::share(&SYS, child, clock, SLOT_CLOCK, rights, 0)
+        .map_err(|status| format!("giving it the clock failed: {:#x}", status.0))
+}
+
 /// Where a service is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
@@ -343,13 +356,14 @@ macro_rules! audit {
 pub struct Supervisor {
     root: Dir,
     /// The `services` domain, the power capability, the network
-    /// capability, the platform capability and the names capability,
-    /// from the kernel.
+    /// capability, the platform capability, the names capability and
+    /// the clock capability, from the kernel.
     services_domain: Option<u32>,
     power: Option<u32>,
     network: Option<u32>,
     platform: Option<u32>,
     names: Option<u32>,
+    clock: Option<u32>,
     /// The notification the kernel signals when a child changes.
     children: Option<u32>,
     /// The notification the kernel signals when the power button is
@@ -382,6 +396,7 @@ impl Supervisor {
         let network = SLOT_FIRST_EXTRA + 3;
         let platform = SLOT_FIRST_EXTRA + 4;
         let names = SLOT_FIRST_EXTRA + 5;
+        let clock = SLOT_FIRST_EXTRA + 6;
         let children = slots::take().filter(|&slot| {
             process::create(&SYS, SLOT_PROCESS, ObjectKind::Notification, 0, slot).is_ok()
                 && process::notify_children(&SYS, SLOT_PROCESS, slot).is_ok()
@@ -405,6 +420,7 @@ impl Supervisor {
             network: holds(network, ObjectKind::Network).then_some(network),
             platform: holds(platform, ObjectKind::Platform).then_some(platform),
             names: holds(names, ObjectKind::Names).then_some(names),
+            clock: holds(clock, ObjectKind::Clock).then_some(clock),
             children,
             button,
             listener: None,
@@ -760,6 +776,7 @@ impl Supervisor {
             })
             .and_then(|()| grant_network(self.network, spec, child))
             .and_then(|()| grant_platform(self.platform, spec, child))
+            .and_then(|()| grant_clock(self.clock, spec, child))
             .and_then(|()| {
                 let block = exec_block(&spec.program, &args, &environment);
                 process::exec(&SYS, child, program.slot(), &block)

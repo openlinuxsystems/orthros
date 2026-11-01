@@ -19,7 +19,8 @@ elevate - run a command as an administrator
 
 *elevate* runs one command, or root's shell, with the admin set: as
 root, past the owners and modes of every file, with the platform
-capability that *ectool*(8) uses (ADR 0219), and with the network as
+capability that *ectool*(8) uses (ADR 0219), the clock capability that
+*date*(1)'s *--set* uses (ADR 0194), and with the network as
 root has it, every port and the interfaces' setup (ADR 0257). It is how
 an administrator, a member of the *admins* group, does what only root
 may: make accounts with *user*(8), read the hashes' file or another

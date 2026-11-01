@@ -43,6 +43,12 @@ static const char *const ELSEWHERE[][2] = {
 		{"getfacl", "the signin boot test's: it shows the list a file took of its folder"},
 		{"netd", "the dhcp boot test's service: it sets a card up by DHCP, which only QEMU's network answers"},
 		{"bundled", "the bundles and bundle-run boot tests' service: it installs, seals and removes bundles"},
+		{"resolved", "the network-services boot test's service: it asks that test's DNS servers on lo"},
+		{"resolvectl", "the network-services boot test's: it shows resolved's servers and looks names up through it"},
+		{"timed", "the network-services boot test's service: it sets the clock from that test's NTS server"},
+		{"timedatectl", "the network-services boot test's: it shows the clock and sets the time zone"},
+		{"netlog", "the network-services boot test's service: it sends the log to that test's listener"},
+		{"curl", "the network-services boot test's: it fetches a page from that test's HTTPS server"},
 };
 
 enum { ELSEWHERE_COUNT = sizeof(ELSEWHERE) / sizeof(ELSEWHERE[0]) };

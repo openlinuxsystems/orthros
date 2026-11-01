@@ -67,6 +67,7 @@ pub const KEYS: &[&str] = &[
     "runs-with-your-access",
     "admin.network",
     "admin.hardware",
+    "admin.time",
     "names",
 ];
 
@@ -201,7 +202,8 @@ impl Permissions {
     }
 }
 
-/// The administration group: `admin.network` and `admin.hardware`.
+/// The administration group: `admin.network`, `admin.hardware` and
+/// `admin.time`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Admin {
@@ -214,6 +216,10 @@ pub struct Admin {
     /// fans, LEDs and ARGB header (ADR 0208).
     #[serde(default)]
     pub hardware: bool,
+    /// Whether it gets the clock capability, which sets and slews the
+    /// time of day and writes the real-time clock (ADR 0194).
+    #[serde(default)]
+    pub time: bool,
 }
 
 /// The files group: the places of the tree a service's view holds, each
@@ -250,8 +256,10 @@ pub struct Place {
 /// What every service's view holds without asking (ADR 0217): the
 /// system's programs, libraries, resources and settings, the processes'
 /// and the kernel's files, read-only; the devices every program uses;
-/// notifyd's folder, as notifications are always allowed; and netd's,
-/// whose resolv.conf `/etc/resolv.conf` leads to (ADR 0191). Its program,
+/// notifyd's folder, as notifications are always allowed; and resolved's,
+/// whose resolv.conf `/etc/resolv.conf` leads to (ADR 0193), and netd's,
+/// which an `/etc/resolv.conf` from before resolved leads to (ADR 0191).
+/// Its program,
 /// its own `/tmp`, the root's links and its secrets come on top. A place
 /// a file names that is one of these takes its place.
 pub const ALWAYS: &[(&str, bool)] = &[
@@ -260,6 +268,7 @@ pub const ALWAYS: &[(&str, bool)] = &[
     ("/system/resources", false),
     ("/system/settings", false),
     ("/system/live/notify", false),
+    ("/system/live/resolved", false),
     ("/system/live/netd", false),
     ("/processes", false),
     ("/kernel", false),
@@ -441,7 +450,8 @@ oom = "service"
 
 # What it may do beyond running: connect out to the network, listen on
 # ports and ranges of ports, such as 80 or "8000-8009", set the network
-# interfaces up, and set the machine's fans, LEDs and ARGB header.
+# interfaces up, set the machine's fans, LEDs and ARGB header, and set
+# its clock.
 [permissions]
 network.outbound = false
 network.listen = []
@@ -461,6 +471,9 @@ runs-with-your-access = false
 admin.network = false
 # Whether it may set the machine's fans, LEDs and ARGB header.
 admin.hardware = false
+# Whether it may set the time of day and the real-time clock, as timed(8)
+# does.
+admin.time = false
 # Giving processes and files another user's name: only for authd, which
 # signs people in.
 names = false

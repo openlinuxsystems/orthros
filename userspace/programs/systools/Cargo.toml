@@ -17,6 +17,9 @@ accounts = { path = "../accounts", features = ["hash"] }
 # keymap(1)'s layouts and their setting (ADR 0149).
 keymap = { path = "../keymap" }
 libc = "0.2.191"
+# resolved(8)'s DNS messages (ADR 0193), and timed(8)'s NTP and Network
+# Time Security (ADR 0194).
+netproto = { path = "../netproto" }
 # service(8)'s check, new and edit read service files as Spark does
 # (ADR 0216); bundle(1) reads bundle manifests and prints their schema
 # (ADR 0221).
@@ -37,6 +40,11 @@ radix-bitlocker = { path = "../../../kernel/fs/bitlocker", features = ["keys"] }
 # (ADR 0231).
 radix-smbios = { path = "../../../kernel/lib/smbios" }
 radix-spd = { path = "../../../kernel/lib/spd" }
+# TLS for resolved(8)'s DNS over TLS and HTTPS (ADR 0193), rustls on
+# ring, which ob patches in from the rust-crates port (ADR 0192), and for
+# timed's NTS key establishment; ring's random numbers for both.
+ring = "0.17.14"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 # logd(8)'s records and requests, as lines of JSON (ADR 0210).
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.140"

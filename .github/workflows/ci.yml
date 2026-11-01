@@ -51,7 +51,7 @@ jobs:
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
             xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g dislocker libbde-utils scdoc mandoc \
             udftools udfclient genisoimage qemu-system-misc \
-            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison
+            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison pkgconf
 
       - name: Install mdBook
         run: |
@@ -154,7 +154,7 @@ jobs:
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
             xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g dislocker libbde-utils scdoc mandoc \
             udftools udfclient genisoimage \
-            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison
+            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison pkgconf
 
       # ./ob setup runs ./ob doctor, which asks for mdBook too.
       - name: Install mdBook
@@ -249,7 +249,7 @@ jobs:
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
             xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g dislocker libbde-utils scdoc mandoc \
             udftools udfclient genisoimage \
-            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison
+            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison pkgconf
 
       # ./ob setup runs ./ob doctor, which asks for mdBook too.
       - name: Install mdBook
@@ -321,7 +321,7 @@ jobs:
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
             xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g dislocker libbde-utils scdoc mandoc \
             udftools udfclient genisoimage \
-            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison
+            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison pkgconf
 
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install

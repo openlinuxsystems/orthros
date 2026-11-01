@@ -522,6 +522,18 @@ fn requirements() -> Vec<Requirement> {
             fallback: None,
         },
         Requirement {
+            name: "pkg-config",
+            purpose: "finds the libraries of the sysroot the ports build against, such as \
+                      rustls-ffi for curl's port",
+            found: |_| program_version("pkg-config", "--version"),
+            packages: Packages {
+                apt: Some("pkgconf"),
+                dnf: Some("pkgconf-pkg-config"),
+                pacman: Some("pkgconf"),
+            },
+            fallback: None,
+        },
+        Requirement {
             name: "make",
             purpose: "runs the ports' makefiles",
             found: |_| program_version("make", "--version"),

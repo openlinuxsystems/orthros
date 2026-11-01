@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# Where timed(8) gets the time (timed(5), ADR 0194). With nothing here it
+# asks Cloudflare's, Netnod's and PTB's servers over Network Time
+# Security, which authenticates every answer, and pool.ntp.org over
+# plain NTP only while none of them answers. `service timed reload`
+# reads this file again.
+#
+# NTS servers, by the name of their key establishment server, with a
+# port when it is not 4460, asked in turn:
+#
+#   servers = time.cloudflare.com nts.netnod.se ptbtime1.ptb.de
+#
+# Plain NTP servers, asked only while no NTS server answers; nothing
+# after the '=' asks none, so the time is only ever authenticated:
+#
+#   fallback = pool.ntp.org

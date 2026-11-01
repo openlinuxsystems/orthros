@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# curl and libcurl (ADR 0195): transfers over HTTP, HTTPS, FTP and the
+# other protocols curl speaks, with TLS by rustls on ring through
+# rustls-ffi, and the root certificates the system trusts. The image
+# holds curl and its manual page; libcurl's static library, its headers
+# and libcurl.pc go into the sysroot, for the ports built on it, such as
+# git.
+name = "curl"
+version = "8.23.0"
+summary = "curl, the transfer tool, and libcurl"
+license = "curl"
+homepage = "https://curl.se"
+depends = ["mlibc", "rustls-ffi", "zlib", "zstd"]
+image = ["system/commands/curl", "system/resources/man/man1/curl.1"]
+
+# The release archive, which has configure: its sources match the
+# curl-8_23_0 tag's.
+[source]
+url = "https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz"
+sha256 = "8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5"

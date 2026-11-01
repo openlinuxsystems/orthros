@@ -16,6 +16,11 @@
 //! and 0211), and `logger` writes a line to it; `notifyd` passes
 //! notifications from `notify-send` and other programs to the console,
 //! and `notifications` lists them (ADR 0212).
+//! `netd` sets the network cards up (ADR 0191), and `resolved` answers
+//! every program's DNS queries, which `resolvectl` shows (ADR 0193);
+//! `timed` keeps the clock right from the network over NTS, and
+//! `timedatectl` shows it and sets the time zone (ADR 0194); `netlog`
+//! sends the log to another computer as it is written (ADR 0196).
 //! `authd` keeps the accounts, which `user` and `passwd` change, `login`
 //! signs people in through it, and `elevate`, and `sudo` in front of it,
 //! run a command as an administrator (ADRs 0218, 0250 and 0219); `last`,
@@ -64,6 +69,7 @@ mod lsusb;
 mod memory;
 mod modes;
 mod netd;
+mod netlog;
 mod notifyd;
 mod nvme;
 mod pidstat;
@@ -76,6 +82,8 @@ mod ps;
 mod quota;
 mod remount;
 mod replace;
+mod resolvectl;
+mod resolved;
 mod rtrace;
 mod script;
 mod scrub;
@@ -88,6 +96,9 @@ mod ss;
 mod subvolume;
 mod swap;
 mod sys;
+mod timed;
+mod timedatectl;
+mod tls;
 mod top;
 mod tree;
 mod unlock;
@@ -157,6 +168,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("lsusb", lsusb::main),
     ("mkswap", swap::mkswap),
     ("netd", netd::main),
+    ("netlog", netlog::main),
     ("notifications", notifyd::notifications),
     ("notify-send", notifyd::notify_send),
     ("notifyd", notifyd::main),
@@ -172,6 +184,8 @@ const TOOLS: &[(&str, Tool)] = &[
     ("remount", remount::main),
     ("renice", priority::renice),
     ("replace", replace::main),
+    ("resolvectl", resolvectl::main),
+    ("resolved", resolved::main),
     ("rtrace", rtrace::main),
     ("script", script::main),
     ("scrub", scrub::main),
@@ -185,6 +199,8 @@ const TOOLS: &[(&str, Tool)] = &[
     ("swapoff", swap::swapoff),
     ("swapon", swap::swapon),
     ("taskset", priority::taskset),
+    ("timed", timed::main),
+    ("timedatectl", timedatectl::main),
     ("top", top::main),
     ("tree", tree::main),
     ("unlock", unlock::main),

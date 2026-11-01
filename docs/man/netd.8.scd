@@ -51,9 +51,8 @@ the address it had, and for any if no server answers.
 
 netd writes the DNS servers, three at most, the settings' first, and
 the leases' domain names as *search*, into
-_/system/live/netd/resolv.conf_. _/etc/resolv.conf_, which is
-_/system/settings/resolv.conf_, is a symbolic link to it; to use servers
-of your own, make it a file in its place.
+_/system/live/netd/resolv.conf_, for *resolved*(8), which every program
+asks, to forward queries to unless its own settings name servers.
 
 Its service holds only its leases and that folder beyond what every
 service reads (*service.toml*(5)): it cannot change the settings.
@@ -90,7 +89,7 @@ _/system/state/netd/_*52-54-00-12-34-56.lease*
 	to renew and rebind it, a *key = value* a line.
 
 _/system/live/netd/resolv.conf_
-	The DNS servers, which _/etc/resolv.conf_ leads to.
+	The DNS servers, which *resolved*(8) asks.
 
 _/system/settings/spark/services/netd.toml_
 	Its service (*service.toml*(5)).

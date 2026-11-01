@@ -78,6 +78,8 @@ pub enum Object {
     Platform,
     /// The authority to give names (radix-names(2)).
     Names,
+    /// The time of day and the real-time clock (radix-clock(2)).
+    Clock,
 }
 
 impl Object {
@@ -98,6 +100,7 @@ impl Object {
             Object::Power => ObjectKind::Power,
             Object::Platform => ObjectKind::Platform,
             Object::Names => ObjectKind::Names,
+            Object::Clock => ObjectKind::Clock,
         }
     }
 }
@@ -271,6 +274,7 @@ enum Kept {
     Power,
     Platform,
     Names,
+    Clock,
 }
 
 impl Kept {
@@ -290,6 +294,7 @@ impl Kept {
             Object::Power => Kept::Power,
             Object::Platform => Kept::Platform,
             Object::Names => Kept::Names,
+            Object::Clock => Kept::Clock,
         }
     }
 
@@ -310,6 +315,7 @@ impl Kept {
             Kept::Power => Object::Power,
             Kept::Platform => Object::Platform,
             Kept::Names => Object::Names,
+            Kept::Clock => Object::Clock,
         })
     }
 }
@@ -607,7 +613,8 @@ pub fn released(registry: &mut Registry, released: &Released) {
         | Object::KernelLog
         | Object::Power
         | Object::Platform
-        | Object::Names => {}
+        | Object::Names
+        | Object::Clock => {}
     }
     // What it was charged is given back once it has closed.
     drop(charge);

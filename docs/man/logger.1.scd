@@ -54,7 +54,9 @@ message is always one record.
 	(*user*, *daemon*, *auth*, *authpriv*, *local0* to *local7* and
 	the rest) but the kernel's own, *kern*; the levels are *emerg*,
 	*alert*, *crit*, *err*, *warning*, *notice*, *info* and *debug*.
-	A program's record of the auth or authpriv facility is not a
+	The kernel keeps four of them: *emerg* to *err* as *err*, and
+	*notice* as *info*, which is how *dmesg*(1) and *netlog*(8) give
+	them back. A program's record of the auth or authpriv facility is not a
 	security event, which only the kernel and Spark write (*logd*(8)).
 
 *-s*, *--stderr*

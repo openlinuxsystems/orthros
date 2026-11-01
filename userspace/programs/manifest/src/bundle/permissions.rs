@@ -128,6 +128,7 @@ pub const LIST: &[Permission] = &[
     defined("admin.power", "Shut down and restart the computer", Admin, Nothing),
     defined("admin.printers", "Administer printers", Admin, Nothing),
     defined("admin.hardware", "Drive the computer's fans, LEDs and lights", Admin, Nothing),
+    defined("admin.time", "Set the computer's clock", Admin, Nothing),
     defined("admin.users-files", "Reach every person's files", Admin, Nothing),
     reserved("devices.usb", "Use a USB device directly", FirstUse, "1.6"),
     reserved("devices.camera", "Use a camera", FirstUse, "1.6.6"),

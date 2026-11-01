@@ -5,7 +5,8 @@
 // service Spark starts: a virtio network card that starts with no
 // address gets one from QEMU's DHCP server through netd. The card has
 // the address, the router and the DNS server QEMU gives, in ip(8) and in
-// resolv.conf, and netd keeps the lease; a connection goes through it.
+// the resolv.conf netd writes for resolved(8), and netd keeps the lease;
+// a connection goes through it.
 // Sockets on other cards may share netd's port 68, one a card. netd
 // started again goes on with the lease, and the connection with it; an
 // administrator's address stays through what netd changes; the settings
@@ -23,7 +24,7 @@
 
 #define NET0 "/kernel/class/net/net0/"
 #define LEASE "/system/state/netd/52-54-00-12-34-56.lease"
-#define RESOLV "/etc/resolv.conf"
+#define RESOLV "/system/live/netd/resolv.conf"
 #define SETTINGS "/system/settings/network"
 
 // QEMU's user network: its router and DHCP server, its DNS server, the
@@ -95,10 +96,11 @@ static void leased(void) {
 	CONTAINS("default via " ROUTER " dev net0 \n", "/bin/ip", "route");
 	CHECK(wait_file(RESOLV, "nameserver " DNS "\n", 10));
 	CONTAINS("# Written by netd(8)", "/bin/head", "-n", "1", RESOLV);
-	// /etc/resolv.conf is a link Spark copied from the defaults.
+	// /etc/resolv.conf is a link Spark copied from the defaults, to the
+	// file resolved writes, which names it (ADR 0193).
 	char target[64] = {0};
 	CHECK(readlink("/system/settings/resolv.conf", target, sizeof(target) - 1) > 0);
-	CHECK(!strcmp(target, "/system/live/netd/resolv.conf"));
+	CHECK(!strcmp(target, "/system/live/resolved/resolv.conf"));
 	CONTAINS("address = " OFFERED "/24\n", "/bin/cat", LEASE);
 	CONTAINS("server = " ROUTER "\n", "/bin/cat", LEASE);
 	connection = connect_echo();
