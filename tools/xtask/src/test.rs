@@ -8424,8 +8424,12 @@ fn answer_prompt(vm: &mut Vm, prompt: &str, text: &str) -> Result<(), String> {
     loop {
         let screen = vm.screen()?;
         // The cursor's block, after the prompt, reads as no character: `?`.
+        // Nukesh's right prompt (how long the last command took, the
+        // jobs) sits after a wide gap at the line's end: it is not the
+        // prompt's end.
         let shown = |line: &str| {
             let line = line.trim_end();
+            let line = line.split("      ").next().unwrap_or(line).trim_end();
             line.strip_suffix('?').unwrap_or(line).trim_end().to_string()
         };
         let last = screen.iter().rev().map(|line| shown(line)).find(|line| !line.is_empty());
