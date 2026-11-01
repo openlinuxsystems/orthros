@@ -184,7 +184,10 @@ Windows down fully (hold Shift as you choose Shut down) and Dukovo
 writes it. When Windows cannot be started any more, `remount -w
 --discard-hibernation /volumes/`*name* writes a hibernated NTFS anyway,
 after a warning: what Windows left open is lost, and Windows checks the
-disk at its next start. Anything else is left alone.
+disk at its next start. A disc image written to a USB stick or kept on a
+disk, ISO 9660 (with Rock Ridge's or Joliet's long names) or UDF (DVDs,
+Blu-ray discs and Windows' installation media), mounts read-only, as a
+disc is. Anything else is left alone.
 
 Changes reach a FAT, exFAT or ext4 disk within five seconds, and a Btrfs
 disk within 30 seconds, as on Linux, or at once when a program asks for

@@ -570,8 +570,8 @@ pub struct Flags {
 }
 
 /// Makes a filesystem of the kind named `kind` for `mount`: `fat`,
-/// `exfat`, `btrfs`, `ext4` and `ntfs` on the block device `source` stands
-/// for, the others from nothing, mounted as `flags` say. A Btrfs that
+/// `exfat`, `btrfs`, `ext4`, `ntfs`, `udf` and `iso9660` on the block device
+/// `source` stands for, the others from nothing, mounted as `flags` say. A Btrfs that
 /// Radix cannot write yet, an exFAT with two tables, an ext4 with features
 /// Radix only reads, or an NTFS that Windows left dirty, hibernated or
 /// with a log to replay, fails a writable mount with `NotSupported` (ADRs
@@ -586,7 +586,7 @@ pub fn make(kind: &str, source: Option<&NodeRef>, flags: Flags) -> radix_vfs::Re
             let max = FRAMES.managed_pages() * PAGE_SIZE as u64 / 2;
             fs_ref(tmpfs(max, TMPFS_MODE)?)?
         }
-        "fat" | "exfat" | "btrfs" | "ext4" | "ntfs" => {
+        "fat" | "exfat" | "btrfs" | "ext4" | "ntfs" | "iso9660" | "udf" => {
             let node = source.ok_or(Error::NotBlockDevice)?;
             let device = node.block_device().ok_or(Error::NotBlockDevice)?;
             if radix_block::swap::is_on(&*device) {
@@ -601,6 +601,8 @@ pub fn make(kind: &str, source: Option<&NodeRef>, flags: Flags) -> radix_vfs::Re
                 "exfat" => mount_exfat(device, read_only)?,
                 "ext4" => mount_ext4(device, read_only)?,
                 "ntfs" => mount_ntfs(device, name.as_str(), read_only, discard_hibernation)?,
+                "iso9660" => mount_iso9660(device, read_only)?,
+                "udf" => mount_udf(device, read_only)?,
                 _ => mount_btrfs(device, name.as_str(), read_only, compress)?,
             }
         }
@@ -634,6 +636,19 @@ fn mount_exfat(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Re
 #[inline(never)]
 fn mount_ext4(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Result<FsRef> {
     fs_ref(radix_ext4::Ext4Fs::mount(device, read_only)?)
+}
+
+/// Mounts the ISO 9660 filesystem on `device` ([`mount_fat`]): read-only,
+/// a writable mount failing with `ReadOnly` (ADR 0245).
+#[inline(never)]
+fn mount_iso9660(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Result<FsRef> {
+    fs_ref(radix_iso9660::IsoFs::mount(device, read_only)?)
+}
+
+/// Mounts the UDF filesystem on `device` ([`mount_iso9660`]).
+#[inline(never)]
+fn mount_udf(device: radix_block::DeviceRef, read_only: bool) -> radix_vfs::Result<FsRef> {
+    fs_ref(radix_udf::UdfFs::mount(device, read_only)?)
 }
 
 /// Mounts the NTFS filesystem on `device`, the disk `name` ([`mount_fat`]),

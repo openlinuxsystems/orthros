@@ -6,7 +6,9 @@
 //! [`init`] walks every PCI segment the firmware describes (`radix_hw::pci`),
 //! logs each function it finds, and binds the disks' controllers: virtio
 //! block devices ([`virtio`], named `vda`, `vdb` and on), AHCI controllers
-//! ([`ahci`], whose disks are named `sda`, `sdb` and on), NVMe
+//! ([`ahci`], whose disks are named `sda`, `sdb` and on), IDE controllers
+//! and SATA controllers in IDE mode ([`ide`], whose disks are named the
+//! same way), NVMe
 //! controllers ([`nvme`], whose namespaces are named `nvme0n1` and on),
 //! and xHCI controllers (`crate::usb`), whose sticks and USB disks
 //! ([`usb`]) are named `sda` and on too: each `sd` disk takes the first
@@ -39,6 +41,7 @@ use radix_virtio::device_type;
 use crate::Arch;
 
 mod ahci;
+mod ide;
 mod nvme;
 mod queue;
 pub mod usb;
@@ -225,6 +228,7 @@ pub fn init() {
     let mut functions = 0;
     let mut disks = 0;
     let mut sata = 0;
+    let mut ide = 0;
     let mut controllers = 0;
     for segment in segments.iter().flatten() {
         let PciSegment { base, segment: number, first_bus, last_bus } = *segment;
@@ -249,6 +253,13 @@ pub fn init() {
                         function.address()
                     );
                 }
+            } else if is_ide(&function) {
+                if let Err(why) = ide::bind(&function, &mut ide) {
+                    warn!(
+                        "Disk: could not set up the IDE controller at {}: {why}",
+                        function.address()
+                    );
+                }
             } else if function.class() == radix_nvme::PCI_CLASS {
                 nvme::bind(&function, &mut controllers);
             } else if crate::i2c::designware::is_lpss(&function) {
@@ -260,8 +271,13 @@ pub fn init() {
     }
     crate::usb::bind_found();
     let plural = |n: usize, one: &'static str, many: &'static str| if n == 1 { one } else { many };
+    let mut on_ide = TextBuf::<24>::new();
+    if ide > 0 {
+        let _ = write!(on_ide, ", {ide} IDE {}", plural(ide, "disk", "disks"));
+    }
     info!(
-        "PCI: {functions} {} on {count} {}; {disks} virtio {}, {sata} SATA {}, {controllers} NVMe {}",
+        "PCI: {functions} {} on {count} {}; {disks} virtio {}, {sata} SATA {}, {controllers} NVMe \
+         {}{on_ide}",
         plural(functions, "function", "functions"),
         plural(count, "segment", "segments"),
         plural(disks, "disk", "disks"),
@@ -269,6 +285,13 @@ pub fn init() {
         plural(controllers, "controller", "controllers")
     );
     SCANNED.store(true, Ordering::Release);
+}
+
+/// Whether `function` is an IDE controller, or a SATA controller in IDE
+/// mode, which shows itself as one.
+fn is_ide(function: &Function) -> bool {
+    let (class, subclass, _) = function.class();
+    (class, subclass) == radix_ide::PCI_CLASS
 }
 
 /// Logs a function: where it is, its IDs and what its class says it is.

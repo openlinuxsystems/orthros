@@ -23,8 +23,10 @@ _/volumes/_*name*, its name in _/devices_, as Spark mounts the disks
 there at boot; one whose label another volume has is mounted at
 _/volumes/_*label*-*name*. A label's slashes become underscores.
 
-It mounts FAT, exFAT, NTFS, Btrfs and ext4 as Spark does at boot
-(*spark*(8)): FAT, exFAT and NTFS are tried first, and a filesystem the
+It mounts FAT, exFAT, NTFS, Btrfs, ext4, UDF and ISO 9660 as Spark does
+at boot (*spark*(8)): FAT, exFAT and NTFS are tried first, UDF and ISO
+9660 (discs, and the images of them on USB sticks) last, and a
+filesystem the
 disk or Radix cannot write (such as an NTFS that Windows hibernated
 with) is mounted read-only. A disk with partitions has each of them
 mounted, and an EFI system partition is left alone, as Windows, macOS

@@ -204,8 +204,10 @@ dependencies = [
  "radix-hid",
  "radix-hw",
  "radix-i2c",
+ "radix-ide",
  "radix-input",
  "radix-ipc",
+ "radix-iso9660",
  "radix-kdb",
  "radix-klog",
  "radix-ksyms",
@@ -226,6 +228,7 @@ dependencies = [
  "radix-sync",
  "radix-tty",
  "radix-uacpi",
+ "radix-udf",
  "radix-usb",
  "radix-usbhc",
  "radix-vfs",
@@ -421,6 +424,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-ide"
+version = "0.10.4"
+dependencies = [
+ "radix-ahci",
+ "radix-hw",
+]
+
+[[package]]
 name = "radix-input"
 version = "0.10.4"
 dependencies = [
@@ -440,6 +451,16 @@ version = "0.10.4"
 dependencies = [
  "proptest",
  "radix-abi",
+]
+
+[[package]]
+name = "radix-iso9660"
+version = "0.10.4"
+dependencies = [
+ "radix-block",
+ "radix-hw",
+ "radix-sync",
+ "radix-vfs",
 ]
 
 [[package]]
@@ -586,6 +607,16 @@ name = "radix-uacpi"
 version = "0.10.4"
 dependencies = [
  "radix-sync",
+]
+
+[[package]]
+name = "radix-udf"
+version = "0.10.4"
+dependencies = [
+ "radix-block",
+ "radix-hw",
+ "radix-sync",
+ "radix-vfs",
 ]
 
 [[package]]

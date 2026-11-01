@@ -265,7 +265,7 @@ fn requirements() -> Vec<Requirement> {
         },
         Requirement {
             name: "xorriso",
-            purpose: "writes the ISO 9660 part of the image",
+            purpose: "writes the ISO 9660 part of the image, and the discs the ISO 9660 tests read",
             found: |_| program_version("xorriso", "-version"),
             packages: Packages {
                 apt: Some("xorriso"),
@@ -353,6 +353,35 @@ fn requirements() -> Vec<Requirement> {
                 dnf: Some("ntfsprogs"),
                 pacman: Some("ntfs-3g"),
             },
+            fallback: None,
+        },
+        Requirement {
+            name: "udftools",
+            purpose: "makes the UDF volumes of each kind of partition the UDF tests read",
+            // `mkudffs` in /usr/sbin, as dosfstools is.
+            found: |_| {
+                ["/usr/sbin/mkudffs", "/sbin/mkudffs"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|path| path.exists())
+                    .or_else(|| process::find_program("mkudffs"))
+                    .map(|path| path.display().to_string())
+            },
+            packages: all("udftools"),
+            fallback: None,
+        },
+        Requirement {
+            name: "UDFclient",
+            purpose: "writes files into the UDF volumes the UDF tests read",
+            found: |_| process::find_program("udfclient").map(|path| path.display().to_string()),
+            packages: Packages { apt: Some("udfclient"), dnf: None, pacman: None },
+            fallback: Some("build it from https://www.13thmonkey.org/udfclient/".into()),
+        },
+        Requirement {
+            name: "genisoimage",
+            purpose: "makes the UDF disc with an ISO 9660 bridge the UDF tests and the discs boot test read",
+            found: |_| process::find_program("genisoimage").map(|path| path.display().to_string()),
+            packages: Packages { apt: Some("genisoimage"), dnf: Some("genisoimage"), pacman: None },
             fallback: None,
         },
         Requirement {
