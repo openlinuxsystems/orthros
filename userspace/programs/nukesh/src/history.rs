@@ -49,6 +49,12 @@ pub struct History {
 
 impl History {
     /// The number the next entry gets (`HISTCMD`, `\!`).
+    /// The entries not yet in the file; none for a shell that never
+    /// writes it.
+    pub fn unsaved(&self) -> &[Entry] {
+        if self.disabled { &[] } else { &self.entries[self.saved.min(self.entries.len())..] }
+    }
+
     pub fn count(&self) -> usize {
         self.base + self.entries.len() + 1
     }
@@ -110,7 +116,7 @@ fn is_time_line(line: &str) -> bool {
     line.len() > 1 && line.starts_with('#') && line[1..].chars().all(|c| c.is_ascii_digit())
 }
 
-fn format_entries(entries: &[Entry]) -> String {
+pub fn format_entries(entries: &[Entry]) -> String {
     let mut out = String::new();
     for entry in entries {
         out.push_str(&format!("#{}\n{}\n", entry.time, entry.line));
@@ -149,7 +155,7 @@ fn lock_file(path: &str) -> Option<std::fs::File> {
 
 impl Shell {
     /// The history file, if history is kept in one.
-    fn history_file(&self) -> Option<String> {
+    pub fn history_file(&self) -> Option<String> {
         self.get("HISTFILE").filter(|f| !f.is_empty())
     }
 
@@ -191,6 +197,10 @@ impl Shell {
             control.split(':').any(|c| c == word || (c == "ignoreboth" && word != "erasedups"))
         };
         if has("ignorespace") && line.starts_with(' ') {
+            return;
+        }
+        // settings.toml's [history] skip-secrets (ADR 0281).
+        if self.settings.skip_secrets && crate::explain::holds_secret(line) {
             return;
         }
         if has("ignoredups") && self.history.entries.last().is_some_and(|e| e.line == line) {
@@ -245,7 +255,7 @@ impl Shell {
     /// Writes the new entries to the history file, as an interactive
     /// shell does when it exits.
     pub fn save_history(&mut self) {
-        if self.history.disabled || !self.interactive {
+        if self.history.disabled || !self.interactive || self.private {
             return;
         }
         let Some(path) = self.history_file() else { return };

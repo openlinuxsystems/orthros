@@ -12,6 +12,8 @@ publish.workspace = true
 
 [dependencies]
 indexmap = "2"
+# The key events of the line editor, for Ctrl-X Ctrl-E (MIT).
+crossterm = { version = "0.29.0", default-features = false }
 libc = "0.2.191"
 # Its styles, which reedline paints with (MIT).
 nu-ansi-term = "0.50.3"

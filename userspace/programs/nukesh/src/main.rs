@@ -16,7 +16,9 @@
 //! nukesh --colors [--check] [file...]
 //! ```
 
+mod abbr;
 mod arith;
+mod assist;
 mod ast;
 mod brace;
 mod builtins;
@@ -27,18 +29,27 @@ mod coproc;
 mod editor;
 mod exec;
 mod expand;
+mod explain;
+mod fix;
+mod folders;
 #[cfg(test)]
 mod fuzz;
 mod glob;
+mod hangup;
 mod highlight;
 mod history;
 mod interactive;
 mod jobs;
+mod nebix;
+mod notify;
 mod parse;
 mod pattern;
+mod project;
 mod prompt;
+mod record;
 mod redir;
 mod script;
+mod settings;
 mod shell;
 mod show;
 mod suggest;
@@ -66,6 +77,8 @@ struct Invocation {
     posix: bool,
     norc: bool,
     noprofile: bool,
+    /// `--private`: nothing of the session is kept (ADR 0267).
+    private: bool,
     rcfile: Option<String>,
     /// `set -o` options in the order given, with `-` (true) or `+`.
     options: Vec<(String, bool)>,
@@ -74,7 +87,8 @@ struct Invocation {
     operands: Vec<String>,
 }
 
-const USAGE: &str = "usage: nukesh [--posix] [--login] [--norc] [--noprofile] [--rcfile file]
+const USAGE: &str =
+    "usage: nukesh [--posix] [--login] [--norc] [--noprofile] [--private] [--rcfile file]
               [-abefhimnprstuvxBCEHPT] [-o option] [-O shopt]
               [-c command [name [argument...]] | -s [argument...] | [script [argument...]]]
        nukesh --colors [--check] [file...]
@@ -191,6 +205,18 @@ fn run(args: &[String]) -> i32 {
         }
         shell.colors = Rc::new(colors);
         colors::color_the_tools(&mut shell);
+        let (settings, problems) = settings::Settings::load(shell.get("HOME").as_deref());
+        for problem in &problems {
+            shell.error(&format!("{}: {}", problem.file, problem.message));
+        }
+        shell.settings = Rc::new(settings);
+        settings::apply_to(&mut shell);
+        // The command record every shell of the person's shares (ADR 0262).
+        // Not in a private session, which keeps nothing.
+        shell.private = invocation.private;
+        if !shell.private {
+            shell.records = Some(record::Records::new(shell.get("HOME").as_deref()));
+        }
     }
     for (option, on) in &invocation.options {
         if builtins::set_option(&mut shell, option, *on).is_err() {
@@ -256,6 +282,7 @@ fn parse_args(args: &[String], invocation: &mut Invocation) -> Result<(), String
             "--login" => invocation.login = true,
             "--norc" => invocation.norc = true,
             "--noprofile" => invocation.noprofile = true,
+            "--private" => invocation.private = true,
             "--restricted" => invocation.restricted = true,
             "--noediting" => {}
             "--verbose" => invocation.options.push(("verbose".into(), true)),

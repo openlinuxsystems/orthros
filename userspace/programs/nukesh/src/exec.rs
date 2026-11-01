@@ -1510,7 +1510,24 @@ impl Shell {
                                 "{printable}: command not found. Did you mean {likely}?"
                             ));
                         }
-                        None => self.error(&format!("{printable}: command not found")),
+                        None => match (self.interactive && self.frames.is_empty())
+                            .then(|| crate::fix::offer(self, name))
+                            .flatten()
+                        {
+                            // A bundle has it (ADR 0285): its install
+                            // command is the next line's hint.
+                            Some((id, about)) => {
+                                let about = if about.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" ({about})")
+                                };
+                                self.error(&format!(
+                                    "{printable}: command not found. The bundle {id}{about} has it: → puts its install command in the line"
+                                ));
+                            }
+                            None => self.error(&format!("{printable}: command not found")),
+                        },
                     }
                     self.restore(saved);
                 }

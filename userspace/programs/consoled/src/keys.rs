@@ -6,8 +6,9 @@
 //! where it has them, control characters with Ctrl, ESC before them with
 //! Alt, and the escape sequences of terminfo's `linux` entry for the
 //! cursor, editing, function and keypad keys. The keys consoled keeps for
-//! itself: Alt+F1 to Alt+F6 (with or without Ctrl) and Alt+Left and
-//! Alt+Right switch consoles, Shift+Page Up and Shift+Page Down look back,
+//! itself: Alt+F1 to Alt+F6 (with or without Ctrl) switch consoles (Alt+Left
+//! and Alt+Right are the programs', which xterm's way sends, for the
+//! shell's folder history: ADR 0262), Shift+Page Up and Shift+Page Down look back,
 //! and Ctrl+Alt+Delete is the secure attention key (ADR 0251).
 
 use keymap::{Dead, Keymap, Sym, compose};
@@ -24,8 +25,6 @@ pub enum Action {
     Send(Vec<u8>),
     /// Show console `n` (from 0).
     Switch(usize),
-    /// Show the next console (1) or the previous one (-1).
-    SwitchBy(isize),
     /// Look back half a screen (1) or forward (-1).
     Page(isize),
     /// Ctrl+Alt+Delete, the secure attention key: consoled's own prompt
@@ -234,8 +233,8 @@ impl Keyboard {
             KEY_TAB => send(b"\t"),
             KEY_UP => cursor(b'A'),
             KEY_DOWN => cursor(b'B'),
-            KEY_LEFT if alt => Action::SwitchBy(-1),
-            KEY_RIGHT if alt => Action::SwitchBy(1),
+            KEY_LEFT if alt => Action::Send(b"\x1b[1;3D".to_vec()),
+            KEY_RIGHT if alt => Action::Send(b"\x1b[1;3C".to_vec()),
             KEY_RIGHT => cursor(b'C'),
             KEY_LEFT => cursor(b'D'),
             KEY_HOME => send(b"\x1b[1~"),
@@ -387,7 +386,7 @@ mod tests {
         keyboard.key(KEY_LEFTALT, PRESSED, PLAIN);
         assert_eq!(bytes(&typed(&mut keyboard, &[KEY_B])[0]), b"\x1bb");
         assert_eq!(typed(&mut keyboard, &[KEY_F2])[0], Action::Switch(1));
-        assert_eq!(typed(&mut keyboard, &[KEY_LEFT])[0], Action::SwitchBy(-1));
+        assert_eq!(bytes(&typed(&mut keyboard, &[KEY_LEFT])[0]), b"\x1b[1;3D");
         keyboard.key(KEY_LEFTCTRL, PRESSED, PLAIN);
         assert_eq!(typed(&mut keyboard, &[KEY_DELETE])[0], Action::Attention);
         assert_eq!(typed(&mut keyboard, &[KEY_F3])[0], Action::Switch(2));

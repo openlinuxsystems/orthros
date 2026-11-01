@@ -71,6 +71,8 @@ pub fn spans(line: &str, known: &mut dyn FnMut(&str) -> bool) -> Vec<(Role, Stri
     let mut at_command = true;
     // `for`, `case` and `select` take a name, then `in`.
     let mut wants_in = false;
+    // Inside `[[ ]]`: `(`, `<` and `||` are its own, and no command starts.
+    let mut in_cond = false;
     while i < chars.len() {
         let c = chars[i];
         if c == '\n' {
@@ -97,6 +99,9 @@ pub fn spans(line: &str, known: &mut dyn FnMut(&str) -> bool) -> Vec<(Role, Stri
             let redirect = text.contains('<') || text.contains('>');
             push(Role::Operator, text.clone());
             i += len;
+            if in_cond {
+                continue;
+            }
             if !redirect {
                 at_command = !matches!(text.as_str(), ")" | "))");
                 wants_in = false;
@@ -117,6 +122,28 @@ pub fn spans(line: &str, known: &mut dyn FnMut(&str) -> bool) -> Vec<(Role, Stri
         // A word.
         let end = word_end(&chars, i);
         let word: String = chars[i..end].iter().collect();
+        if in_cond && word == "]]" {
+            push(Role::Keyword, word);
+            in_cond = false;
+            i = end;
+            continue;
+        }
+        // An array, `a=(red green)` or `declare -A m=([k]=v)`: its words
+        // are values.
+        if word.ends_with('=')
+            && chars.get(end) == Some(&'(')
+            && assignment_name_len(&word).is_some()
+        {
+            push(Role::Variable, word);
+            let close = close_paren(&chars, end + 1).min(chars.len());
+            push(Role::Operator, "(".into());
+            pieces_of_word(&chars[end + 1..close], &mut push);
+            if close < chars.len() {
+                push(Role::Operator, ")".into());
+            }
+            i = (close + 1).min(chars.len());
+            continue;
+        }
         if at_command {
             if let Some(eq) = assignment_name_len(&word) {
                 push(Role::Variable, chars[i..=i + eq].iter().collect());
@@ -131,10 +158,15 @@ pub fn spans(line: &str, known: &mut dyn FnMut(&str) -> bool) -> Vec<(Role, Stri
                 if word == "function" {
                     at_command = false;
                 }
+                if word == "[[" {
+                    in_cond = true;
+                }
                 i = end;
                 continue;
             }
-            let plain_name = !word.contains(['\'', '"', '$', '`', '\\']);
+            // History expansion, `!!`, `!$`, `^old^new`, runs what it names.
+            let history = (word.starts_with('!') && word.len() > 1) || word.starts_with('^');
+            let plain_name = !history && !word.contains(['\'', '"', '$', '`', '\\']);
             let role = if !plain_name || known(&word) { Role::Command } else { Role::Unknown };
             push(role, word);
             at_command = false;
@@ -448,5 +480,21 @@ mod tests {
         // A redirection's file is not a command.
         let spans = roles("> nosuch ls");
         assert!(!spans.iter().any(|(r, _)| *r == Role::Unknown));
+    }
+
+    #[test]
+    fn arrays_conditions_and_history_are_not_commands() {
+        for line in [
+            "a=(red green blue); echo ${a[1]}",
+            "echo -A port=([http]=80)",
+            "[[ dukovo-0.10 =~ ([a-z]+)-([0-9.]+) ]] && echo ok",
+            "!!",
+            "^two^three",
+        ] {
+            let spans = roles(line);
+            assert!(!spans.iter().any(|(r, _)| *r == Role::Unknown), "{line}: {spans:?}");
+            assert_eq!(joined(line), line);
+        }
+        assert!(roles("[[ -n x ]] && grp")[..].contains(&(Role::Unknown, "grp".into())));
     }
 }

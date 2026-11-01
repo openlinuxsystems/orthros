@@ -21,9 +21,17 @@
 # terminal, and everywhere with:
 enabled = true
 
+# Where the keys below start from: "default", "high-contrast" (bright
+# and bold, nothing faded), "light" (for a light background) or
+# "colorblind" (blue and yellow in place of green and red). The keys you
+# set change the theme's, one by one.
+theme = "default"
+
 # The prompt: name@host folder $, with a ✗ badge and the code after a
-# failed command, and an admin badge while you are root. The prompt is
-# drawn this way while PS1 is left at its default.
+# failed command, and an admin badge while you are root. On the right:
+# how long the last command took, once it took took-after seconds or
+# more, how many jobs you have, and the folder's git branch. The prompt
+# is drawn this way while PS1 is left at its default.
 [prompt]
 enabled = true
 user = "green"
@@ -33,6 +41,11 @@ path = "bold blue"
 symbol = "magenta"
 error = "bold bright-white on red"
 admin = "bold bright-white on yellow"
+private = "bold bright-white on blue"
+took = "yellow"
+jobs = "cyan"
+branch = "magenta"
+took-after = 3
 
 # The command line as you type it. An unknown command is underlined as
 # well as red, so that it shows without colour too.
@@ -49,10 +62,12 @@ comment = "bright-black"
 hint = "bright-black"
 
 # Suggestions: faded text from your history after the cursor (→ or End
-# takes it), and "Did you mean ...?" after "command not found".
+# takes it), "Did you mean ...?" after "command not found", and what an
+# option does, faded after it as you type it.
 [suggest]
 history = true
 did-you-mean = true
+options = true
 
 # ls (LS_COLORS). `enabled = false` leaves ls without colour.
 [ls]

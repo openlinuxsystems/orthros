@@ -305,6 +305,27 @@ pub struct Shell {
     pub history: crate::history::History,
     /// colors.toml(5), read when the shell is interactive (ADR 0258).
     pub colors: Rc<crate::colors::Colors>,
+    /// `--private`: no command record, folder counts or history file.
+    pub private: bool,
+    /// settings.toml(5), read when the shell is interactive.
+    pub settings: Rc<crate::settings::Settings>,
+    /// The command record every interactive shell shares (ADR 0262).
+    pub records: Option<crate::record::Records>,
+    /// How long the last command line took, for the prompt.
+    pub last_millis: u64,
+    /// The last command typed, for Alt+E on an empty line.
+    pub last_command: String,
+    /// What the folder file in use set (ADR 0286), and the files told
+    /// about this session.
+    pub project: Option<crate::project::Applied>,
+    pub project_warned: std::collections::HashSet<String>,
+    /// The folders `cd` left, for Alt+Left, and those Alt+Left left, for
+    /// Alt+Right; and the folder at the last prompt (ADR 0262).
+    pub dirs_back: Vec<String>,
+    pub dirs_forward: Vec<String>,
+    pub last_dir: String,
+    /// Abbreviations, `abbr` (ADR 0262).
+    pub abbrs: IndexMap<String, String>,
     /// The terminal the shell controls, with job control.
     pub tty: Option<i32>,
     pub shell_pgid: i32,
@@ -343,6 +364,9 @@ pub struct Shell {
     pub hash_hits: HashMap<String, u32>,
     /// A completion function asked to be tried again (status 124).
     pub completions_retry: bool,
+    /// Tab found nothing that starts with the word: file and command
+    /// names match ignoring case, then with a typo (ADR 0283).
+    pub completions_loose: bool,
     /// Running a script file, whose functions see `main` at the bottom of
     /// `FUNCNAME`.
     pub in_script: bool,
@@ -404,6 +428,17 @@ impl Shell {
             completions: crate::complete::Specs::default(),
             history: crate::history::History::default(),
             colors: Rc::default(),
+            private: false,
+            settings: Rc::default(),
+            records: None,
+            last_millis: 0,
+            last_command: String::new(),
+            project: None,
+            project_warned: std::collections::HashSet::new(),
+            dirs_back: Vec::new(),
+            dirs_forward: Vec::new(),
+            last_dir: String::new(),
+            abbrs: IndexMap::new(),
             tty: None,
             shell_pgid: 0,
             tty_modes: None,
@@ -422,6 +457,7 @@ impl Shell {
             expansion_failed: false,
             hash_hits: HashMap::new(),
             completions_retry: false,
+            completions_loose: false,
             in_script: false,
         };
         shell.import_environment();

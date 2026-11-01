@@ -1358,7 +1358,7 @@ _target/userspace/_).
 		Fail a boot test that has not finished after this long. The
 		default is 300.
 
-*bench* [*--gate*] [*--linux-kernel* _file_] [*--runs* _n_] [*--no-linux*] [*--instructions*] [*--from* _file_] [*--summary* _file_] [*--debug* | *--release*]
+*bench* [*--gate*] [*--linux-kernel* _file_] [*--runs* _n_] [*--no-linux*] [*--instructions*] [*--shell*] [*--from* _file_] [*--summary* _file_] [*--debug* | *--release*]
 	Measure what system calls, IPC round trips, context switches, fresh
 	pages, TLB shootdowns, memory copies, files and POSIX calls cost on
 	Radix, next to Linux.
@@ -1445,6 +1445,14 @@ _target/userspace/_).
 		*ob bench --instructions --gate* on every pull request and every
 		merge, so a longer hot path fails there even when the timings are
 		noisy.
+
+	*--shell*
+		Boot nothing: time *nukesh*(1) next to bash on this machine
+		(ADR 0266). Each runs interactively under *script*(1) with an
+		empty home, and the report gives the fastest of 20 starts to the
+		first prompt and of 100 round trips of *true* and Enter to the
+		next prompt, with their ratio, in _out/bench/shell.md_ and
+		*--summary*'s file. It is a report, not part of *--gate*.
 
 	*--from* _file_
 		Measure nothing, and report the numbers of a real machine

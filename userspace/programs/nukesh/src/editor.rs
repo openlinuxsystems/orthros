@@ -27,8 +27,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use reedline::{
-    Color, ColumnarMenu, Completer, CompletionResult, DefaultHinter, EditCommand, Emacs,
-    Highlighter, HistoryItem, KeyCode, KeyModifiers, Keybindings, MenuBuilder, Prompt,
+    Color, ColumnarMenu, Completer, CompletionResult, DescriptionPosition, EditCommand, Emacs,
+    Highlighter, HistoryItem, KeyCode, KeyModifiers, Keybindings, ListMenu, MenuBuilder, Prompt,
     PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline, ReedlineEvent,
     ReedlineMenu, Signal, Span, StyledText, Suggestion, ValidationResult, Validator, Vi,
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
@@ -58,23 +58,21 @@ pub enum Input {
     Signal,
 }
 
-/// The shell, as reedline's completer and validator hold it.
-#[derive(Clone)]
-struct Handle(Rc<RefCell<Shell>>);
-
-// SAFETY: reedline asks for a completer and a validator that are Send, so
-// that it could move them to another thread; it calls them only from
-// `read_line`, on the thread that runs the shell, and never moves them.
-// The editor that owns them stays on that thread as well.
-unsafe impl Send for Handle {}
+/// The shell, as reedline's completer and validator hold it. reedline
+/// asks for parts that are Send, so that it could move them to another
+/// thread; it calls them only from `read_line`, on the thread that runs
+/// the shell, and never moves them.
+use crate::assist::Handle;
 
 /// The line editor for an interactive shell.
 pub struct Editor {
     shell: Rc<RefCell<Shell>>,
     /// reedline, at a terminal that can take it.
     line: Option<Reedline>,
-    /// Whether `line` has vi keys.
+    /// Whether `line` has vi keys, and Space for abbreviations.
     vi: bool,
+    /// The abbreviations reedline grows at Space (ADR 0262).
+    abbrs: indexmap::IndexMap<String, String>,
     /// Whether `line` wakes each second to look at the clock and at
     /// signals: only for `TMOUT` and traps, so that an idle prompt costs
     /// nothing otherwise.
@@ -97,6 +95,7 @@ impl Editor {
             shell,
             line: None,
             vi: false,
+            abbrs: indexmap::IndexMap::new(),
             wakes: false,
             wake: Arc::new(AtomicBool::new(false)),
             deadline: Arc::new(AtomicU64::new(0)),
@@ -111,12 +110,22 @@ impl Editor {
 
     /// Makes reedline for the shell's settings now.
     fn build(&mut self) {
-        let (vi, colors, wakes, palette) = {
+        let (vi, abbrs, colors, wakes, palette) = {
             let shell = self.shell.borrow();
-            (shell.opts.vi, colors(&shell), needs_wakes(&shell), shell.colors.clone())
+            let abbrs = shell.abbrs.clone();
+            (shell.opts.vi, abbrs, colors(&shell), needs_wakes(&shell), shell.colors.clone())
         };
         let handle = Handle(self.shell.clone());
-        let mut line = new_reedline(vi, colors);
+        let (editor, file) = buffer_editor(&self.shell.borrow());
+        let grown = abbrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut line =
+            new_reedline(vi, colors).with_buffer_editor(editor, file).with_abbreviations(grown);
+        // OSC 133 marks around the prompt and the line typed, so that
+        // terminals can jump between commands (ADR 0282); the marks of a
+        // command's output are written around it (interactive.rs).
+        if self.shell.borrow().settings.marks {
+            line = line.with_semantic_markers(Some(reedline::Osc133Markers::boxed()));
+        }
         if colors && palette.on("line") {
             line = line.with_highlighter(Box::new(ShellHighlighter {
                 shell: handle.clone(),
@@ -126,16 +135,32 @@ impl Editor {
         }
         // A hint shows only in its colour: without colours it would look
         // typed.
-        if colors && palette.history_hints {
+        if colors && (palette.history_hints || palette.option_help) {
             let style = palette.style("line.hint").to_reedline();
-            line = line.with_hinter(Box::new(DefaultHinter::default().with_style(style)));
+            line = line.with_hinter(Box::new(crate::assist::ShellHinter::new(
+                handle.clone(),
+                style,
+                palette.history_hints,
+                palette.option_help,
+            )));
         }
         let mut line = line
             .with_completer(Box::new(ShellCompleter(handle.clone())))
-            .with_validator(Box::new(ShellValidator(handle)))
+            .with_validator(Box::new(ShellValidator(handle.clone())))
             .with_menu(ReedlineMenu::EngineCompleter(Box::new(
                 ColumnarMenu::default().with_name(MENU),
             )))
+            .with_menu(ReedlineMenu::WithCompleter {
+                menu: Box::new(
+                    ListMenu::default()
+                        .with_name(PICKER)
+                        .with_marker("search: ")
+                        .with_only_buffer_difference(false)
+                        .with_page_size(8)
+                        .with_description_position(DescriptionPosition::After),
+                ),
+                completer: Box::new(crate::assist::Picker(handle.clone())),
+            })
             .with_quick_completions(true)
             .with_partial_completions(true);
         if wakes {
@@ -153,6 +178,7 @@ impl Editor {
         }
         self.line = Some(line);
         self.vi = vi;
+        self.abbrs = abbrs;
         self.wakes = wakes;
         // The new editor's history is empty.
         self.synced = None;
@@ -160,6 +186,70 @@ impl Editor {
 
     /// Shows the prompt (`PS1` expanded) and reads the next command.
     pub fn read_command(&mut self) -> Input {
+        loop {
+            match self.read_once() {
+                Ok(input) => return input,
+                Err(key) => self.host_key(&key),
+            }
+        }
+    }
+
+    /// One of the keys the shell handles itself (ADR 0262): Space after
+    /// an abbreviation, and Alt+Left and Alt+Right on an empty line.
+    fn host_key(&mut self, key: &str) {
+        let Some(line) = self.line.as_mut() else { return };
+        let buffer = line.current_buffer_contents().to_string();
+        let cursor = line.current_insertion_point();
+        match key {
+            KEY_ELEVATE => {
+                // Alt+S: elevate(1) before the line, or off it again, as
+                // fish's Alt+S does with sudo; the cursor stays on its text.
+                let (text, at) = match buffer.strip_prefix("elevate ") {
+                    Some(rest) => (rest.to_string(), cursor.saturating_sub(8)),
+                    None => (format!("elevate {buffer}"), cursor + 8),
+                };
+                line.run_edit_commands(&[
+                    EditCommand::Clear,
+                    EditCommand::InsertString(text),
+                    EditCommand::MoveToPosition { position: at, select: false },
+                ]);
+            }
+            KEY_EXPLAIN => {
+                // Alt+E: what the line does, under it; with an empty
+                // line, why the last command failed (ADR 0268). The line
+                // is kept, and the prompt is drawn again below.
+                let mut shell = self.shell.borrow_mut();
+                let paint = colors(&shell);
+                let text = crate::explain::for_prompt(&mut shell, &buffer, paint);
+                let text = if text.is_empty() {
+                    "Type a command, then Alt+E says what it does.\n".to_string()
+                } else {
+                    text
+                };
+                let shown = format!("\n{}", text).replace('\n', "\r\n");
+                let _ = sys::write_all(1, shown.as_bytes());
+            }
+            KEY_BACK | KEY_FORWARD if !buffer.is_empty() => {
+                let command = if key == KEY_BACK {
+                    EditCommand::MoveWordLeft { select: false }
+                } else {
+                    EditCommand::MoveWordRight { select: false }
+                };
+                line.run_edit_commands(&[command]);
+            }
+            KEY_BACK | KEY_FORWARD => {
+                let mut shell = self.shell.borrow_mut();
+                if crate::folders::step(&mut shell, key == KEY_BACK) {
+                    shell.status = 0;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Reads once: a command, or a key the shell handles, with the line
+    /// kept for the next read.
+    fn read_once(&mut self) -> Result<Input, String> {
         let (ps1, ps2, vi, wakes, timeout) = {
             let mut shell = self.shell.borrow_mut();
             let ps1 = shell.get("PS1").unwrap_or_default();
@@ -169,13 +259,22 @@ impl Editor {
             (ps1, ps2, shell.opts.vi, needs_wakes(&shell), timeout(&shell))
         };
         if self.line.is_none() {
-            return self.read_plain(&ps1, timeout);
+            return Ok(self.read_plain(&ps1, timeout));
         }
-        let ps1 = {
+        let (ps1, right, abbrs) = {
             let mut shell = self.shell.borrow_mut();
-            rich_prompt(&mut shell).unwrap_or(ps1)
+            if let Some(records) = shell.records.as_mut() {
+                records.refresh();
+            }
+            let rich = rich_prompt(&mut shell);
+            let right = if rich.is_some() && !shell.settings.screen_reader {
+                crate::assist::right_prompt(&shell, colors(&shell))
+            } else {
+                String::new()
+            };
+            (rich.unwrap_or(ps1), right, shell.abbrs.clone())
         };
-        if wakes != self.wakes {
+        if wakes != self.wakes || abbrs != self.abbrs {
             self.build();
         } else if vi != self.vi {
             self.vi = vi;
@@ -185,9 +284,13 @@ impl Editor {
         self.sync_history();
         let due = timeout.map_or(0, |t| now_millis() + t.as_millis() as u64);
         self.deadline.store(due, Ordering::Relaxed);
-        let prompt = ShellPrompt { left: ps1, more: ps2 };
-        let Some(line) = self.line.as_mut() else { return Input::Eof };
-        match line.read_line(&prompt) {
+        let prompt = ShellPrompt { left: ps1, right, more: ps2 };
+        let Some(line) = self.line.as_mut() else { return Ok(Input::Eof) };
+        crate::hangup::enter_prompt(&self.shell.borrow());
+        let read = line.read_line(&prompt);
+        crate::hangup::leave_prompt();
+        Ok(match read {
+            Ok(Signal::HostCommand(key)) => return Err(key),
             Ok(Signal::Success(text)) => {
                 self.submitted = Some(text.clone());
                 Input::Command(text)
@@ -213,7 +316,7 @@ impl Editor {
                 );
                 Input::Eof
             }
-        }
+        })
     }
 
     /// Reads a command without reedline: a line, and more while the
@@ -298,6 +401,15 @@ impl Editor {
 /// The completion menu's name, which Tab opens.
 const MENU: &str = "completion_menu";
 
+/// The picker's, which Ctrl+R opens.
+const PICKER: &str = "command_picker";
+
+/// The keys the shell handles itself, as reedline hands them back.
+const KEY_BACK: &str = "nukesh:back";
+const KEY_FORWARD: &str = "nukesh:forward";
+const KEY_ELEVATE: &str = "nukesh:elevate";
+const KEY_EXPLAIN: &str = "nukesh:explain";
+
 /// Whether reedline can run: input and output at a terminal that is not
 /// dumb.
 fn can_edit(shell: &Shell) -> bool {
@@ -332,7 +444,9 @@ fn now_millis() -> u64 {
 /// colors.toml's `enabled = false`. The editor runs only at a terminal
 /// that is not dumb.
 fn colors(shell: &Shell) -> bool {
-    shell.get("NO_COLOR").is_none_or(|v| v.is_empty()) && shell.colors.enabled
+    shell.get("NO_COLOR").is_none_or(|v| v.is_empty())
+        && shell.colors.enabled
+        && !shell.settings.screen_reader
 }
 
 /// The prompt drawn while `PS1` is its default, `$ ` or `# ` (ADR 0258):
@@ -341,7 +455,13 @@ fn colors(shell: &Shell) -> bool {
 /// they may be used.
 fn rich_prompt(shell: &mut Shell) -> Option<String> {
     let ps1 = shell.get("PS1").unwrap_or_default();
-    if !matches!(ps1.as_str(), "$ " | "# ") || !shell.colors.enabled || !shell.colors.on("prompt") {
+    if !matches!(ps1.as_str(), "$ " | "# ") {
+        return None;
+    }
+    if shell.settings.screen_reader {
+        return Some(spoken_prompt(shell));
+    }
+    if !shell.colors.enabled || !shell.colors.on("prompt") {
         return None;
     }
     let palette = shell.colors.clone();
@@ -349,7 +469,9 @@ fn rich_prompt(shell: &mut Shell) -> Option<String> {
     let style = |key: &str, text: &str| {
         if paint { palette.style(&format!("prompt.{key}")).paint(text) } else { text.to_string() }
     };
-    let user = prompt::expand(shell, "\\u");
+    // The name, looked up once: it is the same at every prompt.
+    thread_local!(static USER: std::cell::OnceCell<String> = const { std::cell::OnceCell::new() });
+    let user = USER.with(|cell| cell.get_or_init(|| prompt::expand(shell, "\\u")).clone());
     let host = prompt::expand(shell, "\\h");
     let path = prompt::expand(shell, "\\w");
     let mut out = format!(
@@ -368,10 +490,32 @@ fn rich_prompt(shell: &mut Shell) -> Option<String> {
         out.push(' ');
         out.push_str(&style("admin", " admin "));
     }
+    if shell.private {
+        out.push(' ');
+        out.push_str(&style("private", " private "));
+    }
     out.push(' ');
     out.push_str(&style("symbol", if root { "#" } else { "$" }));
     out.push(' ');
     Some(out)
+}
+
+/// The prompt in screen-reader mode (ADR 0269): words a reader says
+/// well, and nothing drawn: `~/src, failed 1, admin # `.
+fn spoken_prompt(shell: &mut Shell) -> String {
+    let mut out = prompt::expand(shell, "\\w");
+    if shell.status != 0 {
+        out.push_str(&format!(", failed {}", shell.status));
+    }
+    let root = sys::geteuid() == 0;
+    if root {
+        out.push_str(", admin");
+    }
+    if shell.private {
+        out.push_str(", private");
+    }
+    out.push_str(if root { " # " } else { " $ " });
+    out
 }
 
 /// reedline with the keys for `vi` or Emacs, and no colouring of its own
@@ -384,9 +528,24 @@ fn new_reedline(vi: bool, colors: bool) -> Reedline {
         .use_bracketed_paste(true)
 }
 
-/// The keys: Emacs or vi, with Tab for completion.
+/// The keys: Emacs or vi, with Tab for completion, Ctrl+R for the
+/// picker, Alt+Left and Alt+Right for the folders, Alt+S for elevate and
+/// Alt+E to explain. Reedline grows abbreviations at Space itself.
 fn edit_mode(vi: bool) -> Box<dyn reedline::EditMode> {
     let complete = |keys: &mut Keybindings| {
+        keys.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('r'),
+            ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::Menu(PICKER.to_string()),
+                ReedlineEvent::MenuNext,
+            ]),
+        );
+        let host = |key: &str| ReedlineEvent::ExecuteHostCommand(key.to_string());
+        keys.add_binding(KeyModifiers::ALT, KeyCode::Left, host(KEY_BACK));
+        keys.add_binding(KeyModifiers::ALT, KeyCode::Right, host(KEY_FORWARD));
+        keys.add_binding(KeyModifiers::ALT, KeyCode::Char('s'), host(KEY_ELEVATE));
+        keys.add_binding(KeyModifiers::ALT, KeyCode::Char('e'), host(KEY_EXPLAIN));
         keys.add_binding(
             KeyModifiers::NONE,
             KeyCode::Tab,
@@ -404,14 +563,73 @@ fn edit_mode(vi: bool) -> Box<dyn reedline::EditMode> {
     } else {
         let mut keys = default_emacs_keybindings();
         complete(&mut keys);
-        Box::new(Emacs::new(keys))
+        // Ctrl-X Ctrl-E with Emacs keys, as bash has it; vi keys switch
+        // modes inside reedline, so they are left as they are.
+        Box::new(Chords { inner: Box::new(Emacs::new(keys)), after_ctrl_x: false })
     }
+}
+
+/// The Emacs keys, with bash's Ctrl-X Ctrl-E, which opens the line in an
+/// editor: reedline binds single keys only.
+struct Chords {
+    inner: Box<Emacs>,
+    after_ctrl_x: bool,
+}
+
+impl reedline::EditMode for Chords {
+    fn parse_event(&mut self, event: reedline::ReedlineRawEvent) -> ReedlineEvent {
+        use crossterm::event::{Event, KeyCode as Code, KeyEvent, KeyModifiers as Mods};
+        let raw: Event = event.into();
+        if let Event::Key(KeyEvent { code: Code::Char(c), modifiers, .. }) = &raw
+            && modifiers.contains(Mods::CONTROL)
+        {
+            let after = std::mem::take(&mut self.after_ctrl_x);
+            match c.to_ascii_lowercase() {
+                'e' if after => return ReedlineEvent::OpenEditor,
+                'x' if !after => {
+                    self.after_ctrl_x = true;
+                    return ReedlineEvent::None;
+                }
+                _ => {}
+            }
+        } else {
+            self.after_ctrl_x = false;
+        }
+        match reedline::ReedlineRawEvent::try_from(raw) {
+            Ok(event) => self.inner.parse_event(event),
+            Err(()) => ReedlineEvent::None,
+        }
+    }
+
+    fn edit_mode(&self) -> PromptEditMode {
+        self.inner.edit_mode()
+    }
+}
+
+/// The editor Ctrl-X Ctrl-E and Ctrl-O open the line in: `VISUAL`, else
+/// `EDITOR`, else nano; its words split as the shell would not need to.
+fn buffer_editor(shell: &Shell) -> (std::process::Command, std::path::PathBuf) {
+    let editor = ["VISUAL", "EDITOR"]
+        .iter()
+        .find_map(|name| shell.get(name).filter(|v| !v.trim().is_empty()))
+        .unwrap_or_else(|| "nano".into());
+    let mut words = editor.split_whitespace();
+    let mut command = std::process::Command::new(words.next().unwrap_or("nano"));
+    command.args(words);
+    let dir = shell.get("TMPDIR").filter(|d| d.starts_with('/')).unwrap_or_else(|| "/tmp".into());
+    let file = std::path::PathBuf::from(format!("{dir}/nukesh-line-{}.sh", std::process::id()));
+    (command, file)
 }
 
 /// The line as typed, without colours.
 struct Plain;
 
 impl Highlighter for Plain {
+    // Abbreviations grow only where a command goes (ADR 0262).
+    fn should_expand_abbr(&self, line: &str, start: usize, _: reedline::AbbrExpandContext) -> bool {
+        crate::abbr::command_position(line, start)
+    }
+
     // The style's type is nu-ansi-term's, which reedline does not export.
     #[allow(clippy::default_trait_access)]
     fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
@@ -477,9 +695,32 @@ impl ShellHighlighter {
 unsafe impl Send for ShellHighlighter {}
 
 impl Highlighter for ShellHighlighter {
+    fn should_expand_abbr(&self, line: &str, start: usize, _: reedline::AbbrExpandContext) -> bool {
+        crate::abbr::command_position(line, start)
+    }
+
     fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
         let mut styled = StyledText::default();
-        for (role, piece) in highlight::spans(line, &mut |name| self.known(name)) {
+        // A mistake the parser finds is shown before Enter (ADR 0284): the
+        // token it is near, as an unknown command is.
+        let options = self.shell.0.try_borrow().map_or_default(|shell| shell.parse_options());
+        let wrong = mistake(line, options.clone()).and_then(|(token, _)| token);
+        let spans = highlight::spans(line, &mut |name| self.known(name));
+        // The piece to mark: the first of the token's where the line up to
+        // it is already wrong (`ls | | wc`: the second `|`).
+        let mut marked = None;
+        if let Some(token) = &wrong {
+            let mut end = 0;
+            for (index, (_, piece)) in spans.iter().enumerate() {
+                end += piece.len();
+                if piece == token && mistake(&line[..end], options.clone()).is_some() {
+                    marked = Some(index);
+                    break;
+                }
+            }
+        }
+        for (index, (role, piece)) in spans.into_iter().enumerate() {
+            let role = if marked == Some(index) { highlight::Role::Unknown } else { role };
             let style = role.key().map_or_else(Default::default, |key| self.colors.style(key));
             styled.buffer.push((style.to_reedline(), piece));
         }
@@ -487,9 +728,29 @@ impl Highlighter for ShellHighlighter {
     }
 }
 
+/// The syntax mistake in `line`, if it is finished and wrong: the token
+/// it is near, when the message names one, and the message.
+pub fn mistake(line: &str, options: parse::Options) -> Option<(Option<String>, String)> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let mut whole = line.to_string();
+    whole.push('\n');
+    let mut parser = parse::Parser::new("", Rc::from("stdin"), 1, options);
+    parser.push_text(&whole);
+    let Err(parse::Error::Syntax { messages, .. }) = parser.parse() else { return None };
+    let message = messages.into_iter().next()?.1;
+    let token = message
+        .split_once("unexpected token `")
+        .and_then(|(_, rest)| rest.split_once('\'').map(|(t, _)| t.to_string()))
+        .filter(|t| t != "newline");
+    Some((token, message))
+}
+
 /// `PS1`, and `PS2` before each line after the first.
 struct ShellPrompt {
     left: String,
+    right: String,
     more: String,
 }
 
@@ -499,7 +760,7 @@ impl Prompt for ShellPrompt {
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        Cow::Borrowed("")
+        Cow::Borrowed(&self.right)
     }
 
     fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
@@ -638,7 +899,8 @@ pub fn read_line(shell: &mut Shell, prompt: &str, initial: &str) -> Option<Strin
     if !initial.is_empty() {
         line.run_edit_commands(&[EditCommand::InsertString(initial.to_string())]);
     }
-    let prompt = ShellPrompt { left: prompt.to_string(), more: String::new() };
+    let prompt =
+        ShellPrompt { left: prompt.to_string(), right: String::new(), more: String::new() };
     match line.read_line(&prompt) {
         Ok(Signal::Success(text)) => Some(text),
         Ok(Signal::CtrlC) => {

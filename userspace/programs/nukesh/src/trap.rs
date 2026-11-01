@@ -153,6 +153,9 @@ pub fn slot_name(slot: usize) -> String {
 }
 
 extern "C" fn note(signal: libc::c_int) {
+    if signal == libc::SIGHUP {
+        crate::hangup::at_prompt_hang_up();
+    }
     if let Some(flag) = CAUGHT.get(signal as usize) {
         flag.store(true, Ordering::SeqCst);
         ANY.store(true, Ordering::SeqCst);

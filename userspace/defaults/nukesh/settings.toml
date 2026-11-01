@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The interactive shell's settings that are not colours
+# (settings.toml(5)); the colours are in colors.toml.
+#
+# To change them for everyone, edit this file. To change them for
+# yourself, copy the keys you want into ~/.config/nukesh/settings.toml:
+# yours win, key by key. Changes show in the next shell you start.
+
+# Hidden files: names that start with a dot, and those a folder's
+# .hidden file lists (such as /etc and /dev in /). With show-hidden,
+# ls shows them (ls -A), * matches them (shopt -s dotglob), and Tab
+# completes them.
+[files]
+show-hidden = false
+
+# The prompt's right side shows the folder's git branch; with git-dirty,
+# a * after it when there are changes not committed (git status, given
+# 100 ms at most).
+[prompt]
+git-dirty = true
+
+# A command that runs for `after` seconds or more and ends while you are
+# on another console says so in a notice on the console you are on.
+[notify]
+enabled = true
+after = 30
+
+# After a command fails, the empty line offers Alt+E, which says what
+# went wrong. Nothing leaves this computer: Nebix runs on it.
+[nebix]
+offer = true
+
+# On an empty line, the command you usually run next here, faded, from
+# the command record. → takes it; nothing runs until you press Enter.
+[suggest]
+next = true
+
+# Screen-reader mode: no colours, no faded hints, no right prompt, no
+# redrawing; each prompt and result is a plain line a reader can say.
+[accessibility]
+screen-reader = false
+
+# Marks around each prompt and command output (OSC 133), so terminals
+# can jump between commands and select one's output; and paths in
+# messages as links (OSC 8) a terminal can open.
+[terminal]
+marks = true
+links = true
+
+# Commands holding a secret (--password X, TOKEN=..., user:pass@ in a
+# URL) are not kept in the history or the command record.
+[history]
+skip-secrets = true
+
+# A command that is not installed names the package that has it, and
+# puts the install command in the line for you to run or not.
+[commands]
+offer-install = true
+
+# project-files: a folder's .nukesh.toml sets variables and
+# abbreviations while you are in it, once you have trusted it with
+# `trust`. resume: a new shell on a console starts in the folder the
+# last one there was in.
+[folders]
+project-files = true
+resume = true

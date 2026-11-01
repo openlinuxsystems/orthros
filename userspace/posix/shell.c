@@ -10,10 +10,12 @@
 // history and the exit status.
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <termios.h>
 
 #include "check.h"
@@ -427,10 +429,93 @@ static void editor(void) {
 	free(s);
 }
 
+// What Nukesh adds at the prompt (ADRs 0262-0286): each feature once.
+static void features(void) {
+	CHECK(mkdir("/tmp/feat", 0755) == 0 || errno == EEXIST);
+	CHECK(mkdir("/tmp/feat/Documents", 0755) == 0 || errno == EEXIST);
+	CHECK(mkdir("/tmp/feat/proj", 0755) == 0 || errno == EEXIST);
+	int f = open("/tmp/feat/proj/.nukesh.toml", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	CHECK(f >= 0);
+	const char *toml = "[env]\nFEAT = \"on\"\n";
+	CHECK(write(f, toml, strlen(toml)) == (ssize_t)strlen(toml));
+	close(f);
+	struct session *s = calloc(1, sizeof(*s));
+	CHECK(start(s, "xterm") == 0);
+	EXPECT(s, PROMPT);
+	// explain, and Alt+E: what a line does, warnings first.
+	send(s, "explain rm -rf /tmp/nothing\r");
+	EXPECT(s, "Deletes files and whole folders");
+	EXPECT(s, PROMPT);
+	send(s, "chmod -R 700 /tmp/nothing");
+	pump(s, 200);
+	send(s, "\033e");
+	EXPECT(s, "Changes who may use every file");
+	send(s, "\025");
+	pump(s, 200);
+	// Tab forgives case, and ... climbs two folders.
+	send(s, "cd /tmp/feat/docu\t");
+	EXPECT(s, "Documents/");
+	send(s, "\r");
+	EXPECT(s, PROMPT);
+	send(s, "cd ...\t");
+	EXPECT(s, "../../");
+	send(s, "\recho at-$PWD\r");
+	EXPECT(s, "at-/tmp\r");
+	// z goes back to the folder by a word of its name.
+	send(s, "z docu\r");
+	EXPECT(s, PROMPT);
+	send(s, "echo z-$PWD\r");
+	EXPECT(s, "z-/tmp/feat/Documents");
+	// A syntax mistake shows before Enter.
+	send(s, "echo hi; fi");
+	EXPECT(s, "cannot go there");
+	send(s, "\025");
+	pump(s, 200);
+	// A typo is fixed on the next line: → takes it.
+	send(s, "ehco fixed-it\r");
+	EXPECT(s, "Did you mean echo");
+	EXPECT(s, PROMPT);
+	pump(s, 200);
+	send(s, "\033[C\r");
+	EXPECT(s, "\nfixed-it");
+	// Abbreviations grow when Enter comes.
+	send(s, "abbr gs echo grown-up\r");
+	EXPECT(s, PROMPT);
+	send(s, "gs\r");
+	EXPECT(s, "\ngrown-up");
+	// Alt+S puts elevate before the line.
+	send(s, "true");
+	pump(s, 200);
+	send(s, "\033s");
+	EXPECT(s, "elevate true");
+	send(s, "\025");
+	pump(s, 200);
+	// A folder file applies once trusted, and goes when the shell leaves.
+	send(s, "cd /tmp/feat/proj\r");
+	EXPECT(s, "run `trust`");
+	send(s, "trust\r");
+	EXPECT(s, "is trusted");
+	send(s, "echo feat-$FEAT.\r");
+	EXPECT(s, "feat-on.");
+	send(s, "cd /\r");
+	EXPECT(s, PROMPT);
+	send(s, "echo feat-$FEAT.\r");
+	EXPECT(s, "feat-.");
+	// A command holding a token is kept out of the history.
+	send(s, "export API_TOKEN=hush\r");
+	EXPECT(s, PROMPT);
+	send(s, "echo count-$(history | grep -c 'API_TOK[E]N=hush')\r");
+	EXPECT(s, "count-0");
+	send(s, "exit 3\r");
+	finish(s, 3);
+	free(s);
+}
+
 int main(void) {
 	check_start("shell");
 	RUN(scripts);
 	RUN(plain);
 	RUN(editor);
+	RUN(features);
 	return check_end();
 }

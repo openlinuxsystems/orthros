@@ -315,10 +315,6 @@ impl Consoled {
                 console.write(&bytes);
             }
             Action::Switch(index) => self.switch(index),
-            Action::SwitchBy(step) => {
-                let n = self.consoles.len() as isize;
-                self.switch((self.active as isize + step).rem_euclid(n) as usize);
-            }
             Action::Page(direction) => {
                 let half = (self.screen.rows() / 2).max(1) as isize;
                 self.consoles[self.active].term.scroll_view(direction * half);
@@ -397,7 +393,12 @@ impl Consoled {
             Some(Bar::Note(text)) => return Some(prompts::note_cells(cols, text)),
             None => {}
         }
-        self.notices.shown.as_ref().map(|shown| shown.cells(cols))
+        let here = self.consoles[self.active].terminal();
+        self.notices
+            .shown
+            .as_ref()
+            .filter(|shown| shown.terminal.is_none() || shown.terminal.as_deref() != here)
+            .map(|shown| shown.cells(cols))
     }
 
     /// Reaps the ended children and starts new sessions for them.

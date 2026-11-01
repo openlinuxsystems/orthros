@@ -112,6 +112,11 @@ pub struct Request {
     /// send: how many seconds to show it, 0 for until a key is pressed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds: Option<u32>,
+    /// send: the terminal the sender runs on, as `pts/3`: consoled does
+    /// not show the notification while that terminal's console is the one
+    /// shown (ADR 0263).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
     /// list: the newest this many of those kept; all if not given.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<usize>,
@@ -141,6 +146,9 @@ pub struct Notification {
     pub body: String,
     /// How long to show it in seconds; 0 for until a key is pressed.
     pub seconds: u32,
+    /// The terminal the sender said it runs on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
 }
 
 impl Notification {
@@ -213,6 +221,11 @@ pub fn notification(
         title,
         body: clean(&request.body, BODY_MAX, true),
         seconds,
+        terminal: request
+            .terminal
+            .as_deref()
+            .map(|t| clean(t, 32, false))
+            .filter(|t| !t.is_empty()),
     })
 }
 
@@ -544,6 +557,18 @@ pub fn main(args: &mut Args) -> Result<i32, Fail> {
     std::fs::create_dir_all(dir).map_err(|e| util::failed(&dir.display(), e))?;
     let _ = std::fs::remove_file(SOCKET);
     let listener = UnixListener::bind(SOCKET).map_err(|e| util::failed(&SOCKET, e))?;
+    // Every program may send, whoever runs it (the limiter keeps any one
+    // from flooding): the folder and the socket are open to all, as
+    // authd's is.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let open = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                .map_err(|e| util::failed(&path.display(), e))
+        };
+        open(dir, 0o755)?;
+        open(Path::new(SOCKET), 0o666)?;
+    }
     listener.set_nonblocking(true).map_err(|e| util::failed(&SOCKET, e))?;
     eprintln!("notifyd: taking notifications at {SOCKET}");
     let mut notifyd = Notifyd {
@@ -778,6 +803,7 @@ mod tests {
             title: "Disk full".into(),
             body: "/volumes/usb\nis full".into(),
             seconds: 0,
+            terminal: None,
         };
         assert_eq!(
             show(&notification),

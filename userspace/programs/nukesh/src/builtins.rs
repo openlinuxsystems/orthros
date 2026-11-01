@@ -48,6 +48,7 @@ table! {
     "." => source, ". filename [arguments]", "Run the commands of a file in this shell.";
     ":" => colon, ": [arguments]", "Do nothing, successfully.";
     "[" => crate::cond::test_builtin, "[ expression ]", "Evaluate a conditional expression.";
+    "abbr" => crate::abbr::abbr, "abbr [name [expansion ...]] or abbr -r name ...", "Set words that grow as you type.";
     "alias" => misc::alias, "alias [-p] [name[=value] ...]", "Define or show aliases.";
     "bg" => job::bg, "bg [job ...]", "Continue stopped jobs in the background.";
     "break" => break_, "break [n]", "Leave n enclosing loops.";
@@ -67,6 +68,7 @@ table! {
     "eval" => eval, "eval [argument ...]", "Run the arguments as shell commands.";
     "exec" => exec, "exec [-cl] [-a name] [command [argument ...]]", "Replace the shell with a program.";
     "exit" => exit, "exit [n]", "Leave the shell.";
+    "explain" => crate::explain::builtin, "explain [command ...]", "Say what a command does, from the manual.";
     "export" => declare::export, "export [-fn] [-p] [name[=value] ...]", "Put variables in the environment of programs.";
     "false" => false_, "false", "Fail.";
     "fc" => crate::history::fc, "fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]", "List, edit and run commands from the history.";
@@ -98,6 +100,7 @@ table! {
     "times" => misc::times, "times", "Show the CPU time the shell and its children used.";
     "trap" => misc::trap, "trap [-lp] [[action] signal ...]", "Run commands when signals come.";
     "true" => colon, "true", "Succeed.";
+    "trust" => crate::project::trust, "trust [-r] [file]", "Let a folder's .nukesh.toml apply, or stop it.";
     "type" => misc::type_, "type [-afptP] name ...", "Say what a name runs.";
     "typeset" => declare::declare, "typeset [-aAfFgiIlnrtux] [-p] [name[=value] ...]", "Set variables' values and attributes.";
     "ulimit" => misc::ulimit, "ulimit [-SHabcdefiklmnpqrstuvxPRT] [limit]", "Show or set resource limits.";
@@ -105,6 +108,12 @@ table! {
     "unalias" => misc::unalias, "unalias [-a] name ...", "Remove aliases.";
     "unset" => declare::unset, "unset [-f] [-v] [-n] [name ...]", "Remove variables or functions.";
     "wait" => job::wait, "wait [-fn] [-p var] [id ...]", "Wait for jobs to end.";
+    "z" => crate::folders::z, "z [-l] [word ...]", "Go to the most used folder that matches.";
+}
+
+/// `cd -- dir`, for `z` and the folder keys: whether it went.
+pub fn cd_to(shell: &mut Shell, dir: &str) -> bool {
+    matches!(dirs::cd(shell, &["cd".into(), "--".into(), dir.into()]), Ok(0))
 }
 
 /// POSIX's special builtins.

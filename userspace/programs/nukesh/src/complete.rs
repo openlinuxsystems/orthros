@@ -601,20 +601,20 @@ pub fn commands(shell: &mut Shell, word: &str) -> Vec<String> {
             .filter(|f| f.ends_with('/') || sys::executable(&shell.tilde_expand_word(f)))
             .collect();
     }
+    let loose = shell.completions_loose;
+    let fits = |name: &str| if loose { tier(word, name).is_some() } else { name.starts_with(word) };
     let mut names: BTreeSet<String> = BTreeSet::new();
-    names.extend(shell.aliases.keys().filter(|k| k.starts_with(word)).cloned());
-    names.extend(shell.functions.keys().filter(|k| k.starts_with(word)).cloned());
-    names.extend(TABLE.iter().filter(|b| b.name.starts_with(word)).map(|b| b.name.to_string()));
-    names.extend(
-        crate::builtins::KEYWORDS.iter().filter(|k| k.starts_with(word)).map(ToString::to_string),
-    );
+    names.extend(shell.aliases.keys().filter(|k| fits(k)).cloned());
+    names.extend(shell.functions.keys().filter(|k| fits(k)).cloned());
+    names.extend(TABLE.iter().filter(|b| fits(b.name)).map(|b| b.name.to_string()));
+    names.extend(crate::builtins::KEYWORDS.iter().filter(|k| fits(k)).map(ToString::to_string));
     let path = shell.get("PATH").unwrap_or_default();
     for dir in path.split(':') {
         let dir = if dir.is_empty() { "." } else { dir };
         let Ok(entries) = std::fs::read_dir(text::to_os(dir)) else { continue };
         for entry in entries.flatten() {
             let name = text::from_os(&entry.file_name());
-            if name.starts_with(word) && !names.contains(&name) {
+            if fits(&name) && !names.contains(&name) {
                 let full = format!("{dir}/{name}");
                 if std::fs::metadata(text::to_os(&full)).is_ok_and(|m| m.is_file())
                     && sys::executable(&full)
@@ -624,7 +624,59 @@ pub fn commands(shell: &mut Shell, word: &str) -> Vec<String> {
             }
         }
     }
-    names.into_iter().collect()
+    let names: Vec<String> = names.into_iter().collect();
+    if loose { best_tier(word, names) } else { names }
+}
+
+/// How loosely `name` matches `word` when nothing starts with it (ADR
+/// 0283): 1 if it starts with it ignoring case, 2 if its start is one
+/// typo away (two for words of seven letters or more); none for words
+/// under three letters, where a typo matches too much.
+pub fn tier(word: &str, name: &str) -> Option<u8> {
+    if name.starts_with(word) {
+        return Some(0);
+    }
+    let lower = word.to_lowercase();
+    if name.to_lowercase().starts_with(&lower) {
+        return Some(1);
+    }
+    let length = word.chars().count();
+    if length < 3 {
+        return None;
+    }
+    let most = if length >= 7 { 2 } else { 1 };
+    let name: Vec<char> = name.to_lowercase().chars().collect();
+    let close = (length.saturating_sub(1)..=length + 1).any(|n| {
+        n <= name.len()
+            && crate::suggest::distance(&lower, &name[..n].iter().collect::<String>()) <= most
+    });
+    close.then_some(2)
+}
+
+/// Of loose matches, those of the best tier.
+fn best_tier(word: &str, names: Vec<String>) -> Vec<String> {
+    let base = |n: &str| n.trim_end_matches('/').rsplit('/').next().unwrap_or(n).to_string();
+    let word = word.rsplit('/').next().unwrap_or(word);
+    let Some(best) = names.iter().filter_map(|n| tier(word, &base(n))).min() else { return names };
+    names.into_iter().filter(|n| tier(word, &base(n)) == Some(best)).collect()
+}
+
+/// `...` as `../..`, `....` as `../../..`, in each part of a path being
+/// completed (ADR 0283); `None` when there is none.
+pub fn expand_dots(word: &str) -> Option<String> {
+    let mut changed = false;
+    let parts: Vec<String> = word
+        .split('/')
+        .map(|part| {
+            if part.len() >= 3 && part.bytes().all(|b| b == b'.') {
+                changed = true;
+                vec![".."; part.len() - 1].join("/")
+            } else {
+                part.to_string()
+            }
+        })
+        .collect();
+    changed.then(|| parts.join("/"))
 }
 
 impl Shell {
@@ -668,13 +720,18 @@ pub fn files(shell: &Shell, word: &str, dirs_only: bool) -> Vec<String> {
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let name = text::from_os(&entry.file_name());
-        if !name.starts_with(&base) {
+        let fits = if shell.completions_loose {
+            tier(&base, &name).is_some()
+        } else {
+            name.starts_with(&base)
+        };
+        if !fits {
             continue;
         }
         if name.starts_with('.') && !base.starts_with('.') && !shell.shopt("dotglob") {
             continue;
         }
-        if name != base && hidden.contains(&name) {
+        if name != base && hidden.contains(&name) && !shell.settings.show_hidden {
             continue;
         }
         let full = format!("{}/{name}", dir.trim_end_matches('/'));
@@ -685,7 +742,7 @@ pub fn files(shell: &Shell, word: &str, dirs_only: bool) -> Vec<String> {
         out.push(format!("{shown_dir}{name}{}", if is_dir { "/" } else { "" }));
     }
     out.sort();
-    out
+    if shell.completions_loose { best_tier(&base, out) } else { out }
 }
 
 /// The names `dir/.hidden` lists, one a line, which ls(1) and the file
@@ -787,8 +844,42 @@ fn quote_completion(s: &str) -> String {
 impl Shell {
     /// Completes the word before byte `pos` of `line`: where the word
     /// starts, and the candidates.
+    /// Tab: the completions of the word before `pos`. `...` in it means
+    /// `../..`; when nothing starts with it, file and command names that
+    /// match ignoring case or with a typo are offered (ADR 0283).
     pub fn complete_line(&mut self, line: &str, pos: usize) -> (usize, Vec<Candidate>) {
         let pos = pos.min(line.len());
+        let (words, in_word) = split_line(&line[..pos]);
+        if in_word
+            && let Some((start, word)) = words.last().cloned()
+            && let Some(expanded) = expand_dots(&word)
+        {
+            if word.ends_with("...") || word.ends_with(".../") {
+                let text = format!("{}/", expanded.trim_end_matches('/'));
+                return (
+                    start,
+                    vec![Candidate {
+                        display: text.clone(),
+                        text,
+                        space: false,
+                        description: None,
+                    }],
+                );
+            }
+            let changed = format!("{}{expanded}{}", &line[..start], &line[pos..]);
+            return self.complete_line(&changed, start + expanded.len());
+        }
+        let found = self.complete_exactly(line, pos);
+        if !found.1.is_empty() || !in_word {
+            return found;
+        }
+        self.completions_loose = true;
+        let loose = self.complete_exactly(line, pos);
+        self.completions_loose = false;
+        loose
+    }
+
+    fn complete_exactly(&mut self, line: &str, pos: usize) -> (usize, Vec<Candidate>) {
         let before = &line[..pos];
         let (mut words, in_word) = split_line(before);
         if !in_word {
@@ -969,6 +1060,27 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_forgives_case_and_typos() {
+        assert_eq!(tier("Doc", "Documents"), Some(0));
+        assert_eq!(tier("doc", "Documents"), Some(1));
+        assert_eq!(tier("Dcou", "Documents"), Some(2));
+        assert_eq!(tier("ehco", "echo"), Some(2));
+        assert_eq!(tier("dw", "Downloads"), None);
+        assert_eq!(tier("xyz", "Documents"), None);
+        let names =
+            vec!["Desktop/".to_string(), "documents/".to_string(), "Dcouments/".to_string()];
+        assert_eq!(best_tier("Docu", names), ["documents/"]);
+    }
+
+    #[test]
+    fn dots_climb_folders() {
+        assert_eq!(expand_dots("...").as_deref(), Some("../.."));
+        assert_eq!(expand_dots("..../src").as_deref(), Some("../../../src"));
+        assert_eq!(expand_dots("../a"), None);
+        assert_eq!(expand_dots("a...b"), None);
+    }
 
     #[test]
     fn lines_split_at_the_cursor() {
