@@ -25,7 +25,7 @@
 //!
 //! An Ethernet interface's IPv6 addresses are its own work, in
 //! [`ipv6`]: its link-local address, those it makes from the prefixes
-//! routers advertise (ADR 0330), and the routes and DNS servers they
+//! routers advertise (ADR 0331), and the routes and DNS servers they
 //! advertise; smoltcp answers neighbour solicitations for them, and
 //! sends what they carry.
 //!

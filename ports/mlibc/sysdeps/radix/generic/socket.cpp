@@ -18,7 +18,8 @@
 // (radix-network(2)). Each such call tries them in turn until one allows
 // it; when none does, it fails with EACCES, as Linux's calls do when a
 // policy forbids them. A program given none cannot use the network.
-// AF_INET6 comes with IPv6 (Phase 12c).
+// AF_INET6 sockets (ADR 0332) are the same, with IPv6 addresses, and
+// IPv4 ones too, mapped (::ffff:10.0.2.2), unless IPV6_V6ONLY is set.
 
 #include <errno.h>
 #include <fcntl.h>
@@ -389,45 +390,80 @@ int inet_errno(uint64_t status) {
 
 // Makes `call(network)` with each network capability's slot in turn,
 // until one allows it: 0, or the errno of the first failure that is not
-// a refusal, or EACCES if every one refused.
+// a refusal, or EACCES if every one refused. The calls take an address,
+// and fail with not_supported for one of the other family, which is
+// EAFNOSUPPORT, as on Linux.
 template<typename F>
 int through_network(F call) {
 	for(uint32_t i = 0; i < RADIX_STARTUP_NETWORK_SLOTS; i++) {
 		uint64_t status = call(RADIX_STARTUP_SLOT_NETWORK + i);
 		if(!status)
 			return 0;
+		if(is(status, RADIX_KERNEL_NOT_SUPPORTED))
+			return EAFNOSUPPORT;
 		if(!not_allowed(status))
 			return inet_errno(status);
 	}
 	return EACCES;
 }
 
-// The kernel's address for `addr`, an AF_INET address of `length` bytes.
+// The kernel's address for `addr`, an AF_INET or AF_INET6 address of
+// `length` bytes. An AF_INET6 one may stop short of sin6_scope_id, as
+// RFC 2133's did, and as Linux takes it.
 int inet_address(const struct sockaddr *addr, socklen_t length, struct radix_address *out) {
-	if(!addr || length < sizeof(struct sockaddr_in))
+	if(!addr || length < sizeof(sa_family_t))
 		return EINVAL;
-	if(addr->sa_family != AF_INET)
-		return EAFNOSUPPORT;
-	auto in = reinterpret_cast<const struct sockaddr_in *>(addr);
 	memset(out, 0, sizeof(*out));
-	out->family = RADIX_ADDRESS_FAMILY_IPV4;
-	out->port = ntohs(in->sin_port);
-	memcpy(out->ip, &in->sin_addr, sizeof(in->sin_addr));
-	return 0;
+	if(addr->sa_family == AF_INET) {
+		if(length < sizeof(struct sockaddr_in))
+			return EINVAL;
+		auto in = reinterpret_cast<const struct sockaddr_in *>(addr);
+		out->family = RADIX_ADDRESS_FAMILY_IPV4;
+		out->port = ntohs(in->sin_port);
+		memcpy(out->ip, &in->sin_addr, sizeof(in->sin_addr));
+		return 0;
+	}
+	if(addr->sa_family == AF_INET6) {
+		if(length < offsetof(struct sockaddr_in6, sin6_scope_id))
+			return EINVAL;
+		struct sockaddr_in6 in6;
+		memset(&in6, 0, sizeof(in6));
+		memcpy(&in6, addr, length < sizeof(in6) ? length : sizeof(in6));
+		out->family = RADIX_ADDRESS_FAMILY_IPV6;
+		out->port = ntohs(in6.sin6_port);
+		memcpy(out->ip, &in6.sin6_addr, sizeof(in6.sin6_addr));
+		out->scope = in6.sin6_scope_id;
+		return 0;
+	}
+	return EAFNOSUPPORT;
 }
 
-// Copies the AF_INET address of the kernel's `address` to `addr`, at most
-// `max` bytes of it, and its length to `actual`.
+// Copies the kernel's `address` to `addr` as an AF_INET or AF_INET6
+// address, its family's, at most `max` bytes of it, and its length to
+// `actual`.
 void give_inet(const struct radix_address &address, struct sockaddr *addr, socklen_t max,
 		socklen_t *actual) {
-	struct sockaddr_in in;
-	memset(&in, 0, sizeof(in));
-	in.sin_family = AF_INET;
-	in.sin_port = htons(address.port);
-	memcpy(&in.sin_addr, address.ip, sizeof(in.sin_addr));
+	union {
+		struct sockaddr_in in;
+		struct sockaddr_in6 in6;
+	} name;
+	memset(&name, 0, sizeof(name));
+	socklen_t size;
+	if(address.family == RADIX_ADDRESS_FAMILY_IPV6) {
+		name.in6.sin6_family = AF_INET6;
+		name.in6.sin6_port = htons(address.port);
+		memcpy(&name.in6.sin6_addr, address.ip, sizeof(name.in6.sin6_addr));
+		name.in6.sin6_scope_id = address.scope;
+		size = sizeof(name.in6);
+	} else {
+		name.in.sin_family = AF_INET;
+		name.in.sin_port = htons(address.port);
+		memcpy(&name.in.sin_addr, address.ip, sizeof(name.in.sin_addr));
+		size = sizeof(name.in);
+	}
 	if(addr)
-		memcpy(addr, &in, max < sizeof(in) ? max : sizeof(in));
-	*actual = sizeof(in);
+		memcpy(addr, &name, max < size ? max : size);
+	*actual = size;
 }
 
 // The address of network socket `slot`, or with `peer` where it is
@@ -442,13 +478,14 @@ int inet_name(uint32_t slot, bool peer, struct sockaddr *addr, socklen_t max, so
 	return 0;
 }
 
-// Binds network socket `slot` to any address and a port the kernel picks,
-// through a network capability with the receive right, as Linux binds a
-// socket that listens unbound. EACCES if there is none.
-int bind_to_listen(uint32_t slot) {
+// Binds network socket `slot`, of `family` (an AddressFamily), to any
+// address and a port the kernel picks, through a network capability with
+// the receive right, as Linux binds a socket that listens unbound. EACCES
+// if there is none.
+int bind_to_listen(uint32_t slot, uint32_t family) {
 	struct radix_address any;
 	memset(&any, 0, sizeof(any));
-	any.family = RADIX_ADDRESS_FAMILY_IPV4;
+	any.family = family;
 	for(uint32_t i = 0; i < RADIX_STARTUP_NETWORK_SLOTS; i++) {
 		uint32_t network = RADIX_STARTUP_SLOT_NETWORK + i;
 		struct radix_capability_info_results info;
@@ -642,6 +679,14 @@ bool inet_option(int layer, int number, enum radix_socket_option *option, bool *
 		*option = RADIX_SOCKET_OPTION_TIME_TO_LIVE;
 		return true;
 	}
+	if(layer == IPPROTO_IPV6) {
+		switch(number) {
+		case IPV6_V6ONLY: *option = RADIX_SOCKET_OPTION_V6_ONLY; return true;
+		// The hop limit is IPv6's time to live, the socket's one for both.
+		case IPV6_UNICAST_HOPS: *option = RADIX_SOCKET_OPTION_TIME_TO_LIVE; return true;
+		default: return false;
+		}
+	}
 	return false;
 }
 
@@ -660,7 +705,11 @@ int inet_getsockopt(uint32_t slot, int type, int layer, int number, void *buffer
 			return inet_errno(status);
 		switch(number) {
 		case SO_TYPE: value = type; break;
-		case SO_DOMAIN: value = AF_INET; break;
+		case SO_DOMAIN:
+			if(int e = get_option(slot, RADIX_SOCKET_OPTION_FAMILY, &value); e)
+				return e;
+			value = value == RADIX_ADDRESS_FAMILY_IPV6 ? AF_INET6 : AF_INET;
+			break;
 		case SO_PROTOCOL: value = type == SOCK_DGRAM ? IPPROTO_UDP : IPPROTO_TCP; break;
 		default: value = state.listening; break;
 		}
@@ -714,7 +763,7 @@ int inet_setsockopt(uint32_t slot, int layer, int number, const void *buffer, so
 			return EINVAL;
 		memcpy(&as_int, buffer, sizeof(int));
 		switch(option) {
-		// A time to live of -1 is the default, as on Linux.
+		// A time to live or hop limit of -1 is the default, as on Linux.
 		case RADIX_SOCKET_OPTION_TIME_TO_LIVE:
 			if(as_int == -1)
 				as_int = 64;
@@ -735,7 +784,7 @@ namespace mlibc {
 
 int Sysdeps<Socket>::operator()(int family, int type_and_flags, int protocol, int *fd) {
 	int type = type_and_flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
-	if(family == AF_INET) {
+	if(family == AF_INET || family == AF_INET6) {
 		enum radix_socket_type kind;
 		switch(type) {
 		case SOCK_STREAM:
@@ -758,7 +807,9 @@ int Sysdeps<Socket>::operator()(int family, int type_and_flags, int protocol, in
 			bool refused = false;
 			int e = radix::place(0, fd, [&](uint32_t slot) {
 				uint64_t status = radix_network_socket(RADIX_STARTUP_SLOT_NETWORK + i, slot,
-						RADIX_ADDRESS_FAMILY_IPV4, kind, flags);
+						family == AF_INET6 ? RADIX_ADDRESS_FAMILY_IPV6
+								: RADIX_ADDRESS_FAMILY_IPV4,
+						kind, flags);
 				refused = not_allowed(status);
 				return status;
 			});
@@ -768,8 +819,6 @@ int Sysdeps<Socket>::operator()(int family, int type_and_flags, int protocol, in
 		}
 		return EACCES;
 	}
-	if(family == AF_INET6)
-		return EAFNOSUPPORT;
 	if(family != AF_UNIX)
 		return EAFNOSUPPORT;
 	switch(type) {
@@ -846,7 +895,7 @@ int Sysdeps<Listen>::operator()(int fd, int backlog) {
 			struct radix_address bound;
 			struct radix_file_socket_name_results r;
 			if(!radix_file_socket_name(slot, false, &bound, sizeof(bound), &r) && !bound.port) {
-				if(int e = bind_to_listen(slot); e)
+				if(int e = bind_to_listen(slot, bound.family); e)
 					return e;
 				status = radix_file_listen(slot, most);
 			}

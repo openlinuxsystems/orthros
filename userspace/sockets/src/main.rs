@@ -20,7 +20,11 @@
 //!   ports outside its range, binding without the receive right,
 //!   connecting or sending without the send right, listening on a port
 //!   bound without the receive right; and ports in use, addresses the
-//!   machine does not have, connections no one takes, and IPv6.
+//!   machine does not have, and connections no one takes.
+//! - IPv6 over the loopback interface (ADR 0332): a socket on any address
+//!   takes a connection to ::1 and one from an IPv4 socket, whose peer is
+//!   IPv4-mapped; datagrams go between ::1's ports; a v6-only socket
+//!   shares its port with an IPv4 one; and IPv4 addresses are refused.
 //! - With `virtio` as its argument, TCP through the virtio network card:
 //!   it connects to 10.0.2.100 port 7, where QEMU runs `cat`
 //!   (`guestfwd`), and what it sends comes back.
@@ -51,6 +55,10 @@ entry!(main);
 
 /// The loopback interface's address.
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+/// Its IPv6 address, ::1.
+const LOOPBACK6: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+/// Any IPv6 address, ::.
+const ANY6: [u8; 16] = [0; 16];
 /// Where QEMU runs `cat` for the virtio test (`guestfwd`).
 const ECHO: ([u8; 4], u16) = ([10, 0, 2, 100], 7);
 /// The ports the listening capability covers.
@@ -129,6 +137,35 @@ fn parse(bytes: &[u8; Address::SIZE]) -> ([u8; 4], u16) {
     ([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]], port)
 }
 
+/// An IPv6 address, as radix-network(2)'s Address.
+fn address6(ip: [u8; 16], port: u16) -> [u8; Address::SIZE] {
+    let mut bytes = [0; Address::SIZE];
+    let family = AddressFamily::Ipv6.raw().to_le_bytes();
+    bytes[Address::OFFSET_FAMILY..Address::OFFSET_FAMILY + 4].copy_from_slice(&family);
+    bytes[Address::OFFSET_PORT..Address::OFFSET_PORT + 2].copy_from_slice(&port.to_le_bytes());
+    bytes[Address::OFFSET_IP..Address::OFFSET_IP + 16].copy_from_slice(&ip);
+    bytes
+}
+
+/// The family, IPv6 address and port `bytes`, an Address, hold.
+fn parse6(bytes: &[u8; Address::SIZE]) -> (u32, [u8; 16], u16) {
+    let at = Address::OFFSET_IP;
+    let word = |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    let port = u16::from_le_bytes([bytes[Address::OFFSET_PORT], bytes[Address::OFFSET_PORT + 1]]);
+    let mut ip = [0; 16];
+    ip.copy_from_slice(&bytes[at..at + 16]);
+    (word(Address::OFFSET_FAMILY), ip, port)
+}
+
+/// `ip` as an IPv4-mapped IPv6 address, ::ffff:127.0.0.1.
+fn mapped(ip: [u8; 4]) -> [u8; 16] {
+    let mut v6 = [0; 16];
+    v6[10] = 0xff;
+    v6[11] = 0xff;
+    v6[12..].copy_from_slice(&ip);
+    v6
+}
+
 /// A socket, in a slot of its own, closed when it goes.
 struct Socket(u32);
 
@@ -136,8 +173,22 @@ impl Socket {
     /// A new socket of `kind`, made through the network capability in
     /// `network`.
     fn new(network: u32, kind: SocketType, flags: PipeFlags) -> Result<Socket, Status> {
+        Socket::of(AddressFamily::Ipv4, network, kind, flags)
+    }
+
+    /// A new IPv6 socket of `kind`, made through `network`.
+    fn new6(network: u32, kind: SocketType) -> Result<Socket, Status> {
+        Socket::of(AddressFamily::Ipv6, network, kind, PipeFlags::NONE)
+    }
+
+    fn of(
+        family: AddressFamily,
+        network: u32,
+        kind: SocketType,
+        flags: PipeFlags,
+    ) -> Result<Socket, Status> {
         let slot = slots::take().ok_or(Status(0))?;
-        match network::socket(&SYS, network, slot, AddressFamily::Ipv4, kind, flags) {
+        match network::socket(&SYS, network, slot, family, kind, flags) {
             Ok(()) => Ok(Socket(slot)),
             Err(status) => {
                 slots::give_back(slot);
@@ -223,6 +274,37 @@ impl Socket {
     fn option(&self, option: SocketOption) -> Result<u64, Status> {
         file::socket_option(&SYS, self.0, option, false, 0).map(|got| got.value)
     }
+
+    fn set_option(&self, option: SocketOption, value: u64) -> Result<u64, Status> {
+        file::socket_option(&SYS, self.0, option, true, value).map(|got| got.value)
+    }
+
+    fn bind6(&self, network: u32, ip: [u8; 16], port: u16) -> Result<(), Status> {
+        file::bind_address(&SYS, self.0, network, &address6(ip, port))
+    }
+
+    fn connect6(&self, network: u32, ip: [u8; 16], port: u16) -> Result<(), Status> {
+        file::connect_address(&SYS, self.0, network, &address6(ip, port))
+    }
+
+    fn send_to6(&self, network: u32, ip: [u8; 16], port: u16, data: &[u8]) -> Result<usize, Status> {
+        file::send_to(&SYS, self.0, network, &address6(ip, port), data, SocketFlags::NONE)
+            .map(|sent| sent.count as usize)
+    }
+
+    fn receive_from6(&self, buffer: &mut [u8]) -> Result<(usize, (u32, [u8; 16], u16)), Status> {
+        let mut from = [0; Address::SIZE];
+        let got = file::receive_from(&SYS, self.0, buffer, &mut from, SocketFlags::NONE)?;
+        Ok((got.count as usize, parse6(&from)))
+    }
+
+    /// Where an IPv6 socket is bound, or with `peer` where it is
+    /// connected: its family, address and port.
+    fn name6(&self, peer: bool) -> Result<(u32, [u8; 16], u16), Status> {
+        let mut bytes = [0; Address::SIZE];
+        file::socket_name(&SYS, self.0, peer, &mut bytes)?;
+        Ok(parse6(&bytes))
+    }
 }
 
 impl Drop for Socket {
@@ -278,6 +360,7 @@ fn main(_start: &Startup) -> u64 {
     tcp(&mut checks, out);
     udp(&mut checks, out);
     rights(&mut checks, out, listen);
+    ipv6(&mut checks, out);
     if virtio {
         through_virtio(&mut checks, out);
     }
@@ -538,15 +621,6 @@ fn rights(checks: &mut Checks, out: u32, listen: u32) {
         "connecting through a directory",
     );
     let slot = slots::take().unwrap_or(0);
-    let made = network::socket(
-        &SYS,
-        SLOT_NETWORK,
-        slot,
-        AddressFamily::Ipv6,
-        SocketType::Stream,
-        PipeFlags::NONE,
-    );
-    checks.refused(made, Kernel::NotSupported, "making an IPv6 socket");
     let wider = network::restrict(&SYS, listen, slot, 7000, 1, Rights::ALL);
     checks.refused(wider, Kernel::OutOfRange, "restricting to ports the capability does not have");
     let _ = capability::delete(&SYS, slot);
@@ -556,6 +630,112 @@ fn rights(checks: &mut Checks, out: u32, listen: u32) {
     println!(
         "sockets: rights: each method refused what its capability does not allow (process {number})"
     );
+}
+
+/// IPv6 over the loopback interface.
+fn ipv6(checks: &mut Checks, out: u32) {
+    let v6 = u64::from(AddressFamily::Ipv6.raw());
+    let made = Socket::new6(SLOT_NETWORK, SocketType::Stream);
+    let Some(server) = checks.worked(made, "making an IPv6 stream socket") else { return };
+    checks.check(server.option(SocketOption::Family) == Ok(v6), "the IPv6 socket's family");
+    checks.check(server.option(SocketOption::V6Only) == Ok(0), "an IPv6 socket takes IPv4 too");
+    checks.refused(
+        server.bind(SLOT_NETWORK, LOOPBACK, 7100),
+        Kernel::NotSupported,
+        "binding an IPv6 socket to an IPv4 address",
+    );
+    let bound = server.bind6(SLOT_NETWORK, ANY6, 7100).and_then(|()| server.listen());
+    if checks.worked(bound, "listening on [::] port 7100").is_none() {
+        return;
+    }
+
+    // From ::1.
+    let made = Socket::new6(out, SocketType::Stream);
+    let Some(client) = checks.worked(made, "making an IPv6 socket to connect") else { return };
+    if checks.worked(client.connect6(out, LOOPBACK6, 7100), "connecting to [::1]:7100").is_none() {
+        return;
+    }
+    let Some(accepted) = checks.worked(server.accept(), "taking the IPv6 connection") else {
+        return;
+    };
+    let near = client.name6(false);
+    checks.check(
+        near.is_ok_and(|(family, ip, port)| {
+            u64::from(family) == v6 && ip == LOOPBACK6 && u64::from(port) >= EPHEMERAL_FIRST
+        }),
+        &format!("the IPv6 connecting socket is bound to {near:?}"),
+    );
+    checks.check(accepted.name6(true) == near, "the taken IPv6 connection's peer");
+    checks.check(
+        accepted.name6(false).map(|(_, ip, port)| (ip, port)) == Ok((LOOPBACK6, 7100)),
+        "the taken IPv6 connection's name",
+    );
+    let line = b"hello over IPv6";
+    let sent = client.send_all(line).and_then(|()| accepted.receive_len(line.len()));
+    checks.check(sent.as_deref() == Ok(&line[..]), "a line over IPv6");
+    let sent = accepted.send_all(b"back").and_then(|()| client.receive_len(4));
+    checks.check(sent.as_deref() == Ok(&b"back"[..]), "a line back over IPv6");
+
+    // From 127.0.0.1, to the same socket: its peer is IPv4-mapped.
+    let made = Socket::new(out, SocketType::Stream, PipeFlags::NONE);
+    let Some(client4) = checks.worked(made, "making an IPv4 socket to connect") else { return };
+    checks.worked(client4.connect(out, LOOPBACK, 7100), "connecting to 127.0.0.1 port 7100");
+    if let Some(taken) = checks.worked(server.accept(), "taking the IPv4 connection") {
+        let peer = taken.name6(true).map(|(_, ip, port)| (ip, port));
+        let want = client4.name(false).map(|(ip, port)| (mapped(ip), port));
+        checks.check(peer == want, &format!("the IPv4 peer is {peer:?}, not {want:?}"));
+        let sent = client4.send_all(b"v4").and_then(|()| taken.receive_len(2));
+        checks.check(sent.as_deref() == Ok(&b"v4"[..]), "a line from IPv4 to the IPv6 socket");
+    }
+    println!("sockets: ipv6: a socket on [::] took connections from ::1 and from 127.0.0.1");
+
+    // Datagrams between ::1's ports.
+    let (Ok(bound), Ok(sender)) = (
+        Socket::new6(SLOT_NETWORK, SocketType::Datagram),
+        Socket::new6(out, SocketType::Datagram),
+    ) else {
+        checks.check(false, "making IPv6 datagram sockets");
+        return;
+    };
+    checks.worked(bound.bind6(SLOT_NETWORK, LOOPBACK6, 7101), "binding to [::1]:7101");
+    let sent = sender.send_to6(out, LOOPBACK6, 7101, b"datagram six");
+    checks.check(sent == Ok(12), "sending a datagram to [::1]:7101");
+    let mut buffer = [0u8; 64];
+    let got = bound.receive_from6(&mut buffer);
+    let port = sender.name6(false).map(|(.., port)| port).unwrap_or(0);
+    checks.check(
+        got == Ok((12, (v6 as u32, LOOPBACK6, port))) && &buffer[..12] == b"datagram six",
+        &format!("the IPv6 datagram came as {got:?}"),
+    );
+    println!("sockets: ipv6: a datagram went between ports of ::1");
+
+    // A v6-only socket shares its port with an IPv4 one, and reaches no
+    // IPv4 machine.
+    let (Ok(only), Ok(four)) = (
+        Socket::new6(SLOT_NETWORK, SocketType::Stream),
+        Socket::new(SLOT_NETWORK, SocketType::Stream, PipeFlags::NONE),
+    ) else {
+        checks.check(false, "making the sockets to share a port");
+        return;
+    };
+    checks.worked(only.set_option(SocketOption::V6Only, 1), "making a socket v6-only");
+    checks.worked(four.bind(SLOT_NETWORK, [0; 4], 7102), "binding an IPv4 socket to port 7102");
+    checks.worked(only.bind6(SLOT_NETWORK, ANY6, 7102), "binding a v6-only one to port 7102");
+    let made = Socket::new6(out, SocketType::Stream);
+    if let Some(socket) = checks.worked(made, "making a socket to stay v6-only") {
+        checks.worked(socket.set_option(SocketOption::V6Only, 1), "making it v6-only");
+        checks.refused(
+            socket.connect6(out, mapped(LOOPBACK), 7100),
+            Kernel::Unreachable,
+            "a v6-only socket connecting to an IPv4-mapped address",
+        );
+    }
+    checks.refused(
+        server.bind6(SLOT_NETWORK, ANY6, 7103),
+        Kernel::InvalidArgument,
+        "binding a listening socket again",
+    );
+    println!("sockets: ipv6: a v6-only socket shared its port with an IPv4 one");
 }
 
 /// TCP through the virtio card, to QEMU's `cat`.

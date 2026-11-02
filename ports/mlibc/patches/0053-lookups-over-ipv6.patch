@@ -1,0 +1,500 @@
+SPDX-FileCopyrightText: 2026 The Dukovo contributors
+SPDX-License-Identifier: Apache-2.0 OR MIT
+
+Looks names up over IPv6 as glibc does (ADR 0332). mlibc asked only IPv4
+nameservers, asked AF_UNSPEC lookups for A records alone, gave the
+addresses in the order found, failed AF_INET6 lookups that AI_V4MAPPED
+should have answered, and took AI_ADDRCONFIG's narrowing for the family
+asked even when one was. Now:
+  - nameservers may be IPv6 ones, on a link with their interface after
+    a %, as fe80::1%net0 or fe80::1%2 (RFC 4007);
+  - AF_UNSPEC asks for A and AAAA records, and gethostbyname for A ones;
+  - getaddrinfo orders what it found as RFC 6724's destination address
+    selection does (rules 1, 2, 5, 6, 8 and 9, with its default policy
+    table), when IPv6 addresses are among them, learning each one's
+    source address by connecting a UDP socket, as glibc and musl do;
+  - AF_INET6 with AI_V4MAPPED gives a name's IPv4 addresses, mapped,
+    when it has no IPv6 ones;
+  - AI_ADDRCONFIG narrows AF_UNSPEC to the family the machine has
+    addresses of, and fails AF_INET or AF_INET6 when it has none of
+    that family, as glibc does.
+Meant for upstream.
+
+--- a/options/posix/generic/lookup.cpp
++++ b/options/posix/generic/lookup.cpp
+@@ -11,6 +11,8 @@
+ #include <sys/socket.h>
+ #include <errno.h>
+ #include <arpa/inet.h>
++#include <net/if.h>
++#include <stdlib.h>
+ #include <unistd.h>
+ #include <stdio.h>
+ #include <ctype.h>
+@@ -22,8 +24,8 @@
+ namespace mlibc {
+ 
+ // Names are looked up in DNS by asking each nameserver of /etc/resolv.conf
+-// in turn, over UDP to port 53 with EDNS(0), and over TCP when the answer
+-// is cut short. An answer is taken only from the server asked, with the
++// in turn, IPv4 or IPv6 ones, over UDP to port 53 with EDNS(0), and over
++// TCP when the answer is cut short. An answer is taken only from the server asked, with the
+ // query's random identifier and its question, and read with every offset
+ // checked against its end.
+ namespace {
+@@ -219,6 +221,66 @@
+ 		return same_name(asked, answered) && !memcmp(query.data() + query_at, msg + msg_at, 4);
+ 	}
+ 
++	// A nameserver's address and port, IPv4 or IPv6.
++	struct server {
++		union {
++			struct sockaddr sa;
++			struct sockaddr_in in;
++			struct sockaddr_in6 in6;
++		} address;
++		socklen_t size;
++	};
++
++	// The nameserver text names, on DNS's port, into out: an IPv4 address,
++	// or an IPv6 one, which may name the interface it is on after a %, by
++	// its name or number, as fe80::1%net0 (RFC 4007). False if it is
++	// neither.
++	bool parse_server(const string &text, server &out) {
++		memset(&out, 0, sizeof(out));
++		if (inet_pton(AF_INET, text.data(), &out.address.in.sin_addr) == 1) {
++			out.address.in.sin_family = AF_INET;
++			out.address.in.sin_port = htons(DNS_PORT);
++			out.size = sizeof(out.address.in);
++			return true;
++		}
++		char ip[INET6_ADDRSTRLEN];
++		auto percent = static_cast<const char *>(memchr(text.data(), '%', text.size()));
++		size_t length = percent ? percent - text.data() : text.size();
++		if (length >= sizeof(ip))
++			return false;
++		memcpy(ip, text.data(), length);
++		ip[length] = 0;
++		if (inet_pton(AF_INET6, ip, &out.address.in6.sin6_addr) != 1)
++			return false;
++		if (percent) {
++			const char *scope = percent + 1;
++			char *end;
++			unsigned long number = strtoul(scope, &end, 10);
++			out.address.in6.sin6_scope_id = *scope && !*end ? number : if_nametoindex(scope);
++			if (!out.address.in6.sin6_scope_id)
++				return false;
++		}
++		out.address.in6.sin6_family = AF_INET6;
++		out.address.in6.sin6_port = htons(DNS_PORT);
++		out.size = sizeof(out.address.in6);
++		return true;
++	}
++
++	// Whether from, of size bytes, is server's address and port.
++	bool from_server(const server &server, const struct sockaddr_storage &from, socklen_t size) {
++		if (size < server.size || from.ss_family != server.address.sa.sa_family)
++			return false;
++		if (from.ss_family == AF_INET) {
++			auto in = reinterpret_cast<const struct sockaddr_in *>(&from);
++			return in->sin_port == server.address.in.sin_port
++					&& in->sin_addr.s_addr == server.address.in.sin_addr.s_addr;
++		}
++		auto in6 = reinterpret_cast<const struct sockaddr_in6 *>(&from);
++		return in6->sin6_port == server.address.in6.sin6_port
++				&& !memcmp(&in6->sin6_addr, &server.address.in6.sin6_addr,
++						sizeof(in6->sin6_addr));
++	}
++
+ 	bool send_all(int fd, const uint8_t *data, size_t size, int64_t deadline) {
+ 		while (size) {
+ 			if (!wait_for(fd, POLLOUT, deadline))
+@@ -254,16 +316,15 @@
+ 	}
+ 
+ 	// Asks server over TCP (RFC 7766), for an answer too long for UDP.
+-	int exchange_tcp(const struct sockaddr_in &server, const bytes &query, bytes &out,
+-			int64_t deadline) {
+-		int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
++	int exchange_tcp(const server &server, const bytes &query, bytes &out, int64_t deadline) {
++		int fd = socket(server.address.sa.sa_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+ 		if (fd < 0)
+ 			return -EAI_SYSTEM;
+ 		frg::scope_exit close_fd{[&] {
+ 			close(fd);
+ 		}};
+ 
+-		if (connect(fd, reinterpret_cast<const struct sockaddr *>(&server), sizeof(server)) < 0) {
++		if (connect(fd, &server.address.sa, server.size) < 0) {
+ 			if (errno != EINPROGRESS || !wait_for(fd, POLLOUT, deadline))
+ 				return -EAI_AGAIN;
+ 			int error = 0;
+@@ -290,23 +351,22 @@
+ 	// Asks server, over UDP and then over TCP if the answer is cut short:
+ 	// 0 with the answer in out, or -EAI_AGAIN if it does not answer in
+ 	// time, or -EAI_SYSTEM.
+-	int exchange(const struct sockaddr_in &server, const bytes &query, bytes &out) {
++	int exchange(const server &server, const bytes &query, bytes &out) {
+ 		int64_t deadline = now_ms() + TIMEOUT_MS;
+-		int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
++		int fd = socket(server.address.sa.sa_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+ 		if (fd < 0)
+ 			return -EAI_SYSTEM;
+ 		frg::scope_exit close_fd{[&] {
+ 			close(fd);
+ 		}};
+ 
+-		if (sendto(fd, query.data(), query.size(), 0,
+-				reinterpret_cast<const struct sockaddr *>(&server), sizeof(server))
++		if (sendto(fd, query.data(), query.size(), 0, &server.address.sa, server.size)
+ 				!= static_cast<ssize_t>(query.size()))
+ 			return -EAI_AGAIN;
+ 
+ 		out.resize(UDP_SIZE);
+ 		while (wait_for(fd, POLLIN, deadline)) {
+-			struct sockaddr_in from = {};
++			struct sockaddr_storage from = {};
+ 			socklen_t from_size = sizeof(from);
+ 			ssize_t got = recvfrom(fd, out.data(), out.size(), 0,
+ 					reinterpret_cast<struct sockaddr *>(&from), &from_size);
+@@ -318,10 +378,7 @@
+ 			// Only the server asked answers, with the query's identifier
+ 			// and question; anything else is ignored, not taken as its
+ 			// answer or as a failure.
+-			if (from_size < sizeof(from) || from.sin_family != AF_INET
+-					|| from.sin_port != server.sin_port
+-					|| from.sin_addr.s_addr != server.sin_addr.s_addr
+-					|| !answers(query, out.data(), got))
++			if (!from_server(server, from, from_size) || !answers(query, out.data(), got))
+ 				continue;
+ 			if (get16(out.data() + 2) & FLAG_TC)
+ 				return exchange_tcp(server, query, out, deadline);
+@@ -341,11 +398,8 @@
+ 			return -EAI_NONAME;
+ 		int result = -EAI_AGAIN;
+ 		for (auto &nameserver : conf.nameservers) {
+-			struct sockaddr_in server = {};
+-			server.sin_family = AF_INET;
+-			server.sin_port = htons(DNS_PORT);
+-			// IPv6 nameservers wait for IPv6.
+-			if (inet_pton(AF_INET, nameserver.data(), &server.sin_addr) != 1)
++			struct server server;
++			if (!parse_server(nameserver, server))
+ 				continue;
+ 			if ((result = exchange(server, question, out)))
+ 				continue;
+@@ -417,11 +471,11 @@
+ 		return false;
+ 	}
+ 
+-	// Looks one name up, as it is: the number of addresses found, 0 for
+-	// none, or -EAI_NONAME if it is not there, or another -EAI_*.
+-	int lookup_one(const resolv_conf &conf, struct lookup_result &buf, const char *name,
+-			size_t length, string &canon_name, int family) {
+-		uint16_t type = family == AF_INET6 ? RECORD_AAAA : RECORD_A;
++	// Looks one name's records of type (A or AAAA) up, as it is: the
++	// number of addresses found, 0 for none, or -EAI_NONAME if it is not
++	// there, or another -EAI_*.
++	int lookup_type(const resolv_conf &conf, struct lookup_result &buf, const char *name,
++			size_t length, string &canon_name, uint16_t type) {
+ 		bytes msg{getAllocator()};
+ 		if (int e = query(conf, name, length, type, msg); e)
+ 			return e;
+@@ -441,14 +495,9 @@
+ 			if (!same_name(record_owner, owner))
+ 				return;
+ 			struct dns_addr_buf address;
+-			if (record_type == RECORD_A && record_length == 4
+-					&& (family == AF_UNSPEC || family == AF_INET))
+-				address.family = AF_INET;
+-			else if (record_type == RECORD_AAAA && record_length == 16
+-					&& (family == AF_UNSPEC || family == AF_INET6))
+-				address.family = AF_INET6;
+-			else
++			if (record_type != type || record_length != (type == RECORD_A ? 4 : 16))
+ 				return;
++			address.family = type == RECORD_A ? AF_INET : AF_INET6;
+ 			memcpy(address.addr, msg.data() + at, record_length);
+ 			address.name = owner;
+ 			buf.buf.push(std::move(address));
+@@ -459,19 +508,207 @@
+ 		}
+ 		if (buf.buf.size() == before)
+ 			return 0;
+-		if (aliases.size()) {
++		// The aliases come once, though both an A and an AAAA query
++		// find them.
++		if (aliases.size() && !(canon_name == owner)) {
+ 			canon_name = owner;
+ 			for (auto &alias : aliases)
+ 				buf.aliases.push(std::move(alias));
+ 		}
+ 		return buf.buf.size() - before;
+ 	}
++
++	// Looks one name up, as it is, for its IPv4 addresses (AF_INET), its
++	// IPv6 ones (AF_INET6), or both (AF_UNSPEC), IPv4 ones first, as
++	// glibc asks: the number found, 0 for none, or -EAI_NONAME if it is
++	// not there, or another -EAI_* if no query found any.
++	int lookup_one(const resolv_conf &conf, struct lookup_result &buf, const char *name,
++			size_t length, string &canon_name, int family) {
++		if (family != AF_UNSPEC)
++			return lookup_type(conf, buf, name, length, canon_name,
++					family == AF_INET6 ? RECORD_AAAA : RECORD_A);
++		int v4 = lookup_type(conf, buf, name, length, canon_name, RECORD_A);
++		// Not there is not there for either.
++		if (v4 == -EAI_NONAME)
++			return v4;
++		int v6 = lookup_type(conf, buf, name, length, canon_name, RECORD_AAAA);
++		if (v4 > 0 || v6 > 0)
++			return (v4 > 0 ? v4 : 0) + (v6 > 0 ? v6 : 0);
++		if (!v4 || !v6)
++			return 0;
++		return v4;
++	}
++
++	// RFC 6724's default policy table, longest prefix first: an address's
++	// precedence and label are those of the longest prefix it is under.
++	// IPv4 addresses are taken as IPv4-mapped ones.
++	struct policy {
++		uint8_t prefix[16];
++		int length;
++		int precedence;
++		int label;
++	};
++	constexpr policy POLICIES[] = {
++		{{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 128, 50, 0},
++		{{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff}, 96, 35, 4},
++		{{}, 96, 1, 3},
++		{{0x20, 0x01, 0, 0}, 32, 5, 5},
++		{{0x20, 0x02}, 16, 30, 2},
++		{{0x3f, 0xfe}, 16, 1, 12},
++		{{0xfe, 0xc0}, 10, 1, 11},
++		{{0xfc}, 7, 3, 13},
++		{{}, 0, 40, 1},
++	};
++
++	// How many leading bits a and b share, up to most.
++	int common_bits(const uint8_t *a, const uint8_t *b, int most) {
++		int bits = 0;
++		while (bits < most && !((a[bits / 8] ^ b[bits / 8]) & (0x80 >> (bits % 8))))
++			bits++;
++		return bits;
++	}
++
++	const policy &policy_of(const uint8_t *address) {
++		for (auto &p : POLICIES)
++			if (common_bits(address, p.prefix, p.length) == p.length)
++				return p;
++		return POLICIES[sizeof(POLICIES) / sizeof(POLICIES[0]) - 1];
++	}
++
++	// An address's scope (RFC 6724 3.1 and 3.2): 2 for link-local and
++	// loopback ones, 5 for site-local, 14 for global, a multicast one's
++	// own.
++	int scope_of(const uint8_t *address) {
++		if (address[0] == 0xff)
++			return address[1] & 0xF;
++		if (address[0] == 0xfe && (address[1] & 0xc0) == 0x80)
++			return 2;
++		if (address[0] == 0xfe && (address[1] & 0xc0) == 0xc0)
++			return 5;
++		static const uint8_t mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
++		static const uint8_t loopback[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
++		if (!memcmp(address, loopback, 16))
++			return 2;
++		if (!memcmp(address, mapped, 12)
++				&& (address[12] == 127 || (address[12] == 169 && address[13] == 254)))
++			return 2;
++		return 14;
++	}
++
++	// An address as IPv6: an IPv4 one mapped.
++	void as_ipv6(const struct dns_addr_buf &address, uint8_t *out) {
++		if (address.family == AF_INET6) {
++			memcpy(out, address.addr, 16);
++			return;
++		}
++		memset(out, 0, 10);
++		out[10] = out[11] = 0xff;
++		memcpy(out + 12, address.addr, 4);
++	}
++
++	// Where the machine would send to address from, as IPv6, found by
++	// connecting a UDP socket, which sends nothing: false if it has no
++	// route there.
++	bool source_for(const struct dns_addr_buf &address, uint8_t *out) {
++		union {
++			struct sockaddr sa;
++			struct sockaddr_in in;
++			struct sockaddr_in6 in6;
++		} to, from;
++		memset(&to, 0, sizeof(to));
++		socklen_t size;
++		if (address.family == AF_INET6) {
++			to.in6.sin6_family = AF_INET6;
++			to.in6.sin6_port = htons(65535);
++			memcpy(&to.in6.sin6_addr, address.addr, 16);
++			size = sizeof(to.in6);
++		} else {
++			to.in.sin_family = AF_INET;
++			to.in.sin_port = htons(65535);
++			memcpy(&to.in.sin_addr, address.addr, 4);
++			size = sizeof(to.in);
++		}
++		int fd = socket(address.family, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
++		if (fd < 0)
++			return false;
++		socklen_t from_size = sizeof(from);
++		bool found = !connect(fd, &to.sa, size) && !getsockname(fd, &from.sa, &from_size);
++		close(fd);
++		if (!found)
++			return false;
++		struct dns_addr_buf source;
++		source.family = from.sa.sa_family;
++		if (source.family == AF_INET6)
++			memcpy(source.addr, &from.in6.sin6_addr, 16);
++		else
++			memcpy(source.addr, &from.in.sin_addr, 4);
++		as_ipv6(source, out);
++		return true;
++	}
+ } // namespace
+ 
++// Orders addresses as RFC 6724's destination address selection does, as
++// glibc and musl do, when IPv6 ones are among them: those the machine has
++// a route to first, then those whose scope and label match those of the
++// address it would send from, of higher precedence, of smaller scope, and
++// sharing more of its prefix with the source, else in the order found.
++// Whether an address is deprecated is not known here, nor are the other
++// rules, which are for mobile IPv6 and transition mechanisms.
++void sort_addresses(struct lookup_result &buf) {
++	constexpr size_t MOST = 64;
++	size_t count = buf.buf.size();
++	if (count < 2 || count > MOST)
++		return;
++	bool ipv6 = false;
++	for (auto &address : buf.buf)
++		ipv6 |= address.family == AF_INET6;
++	if (!ipv6)
++		return;
++
++	// Each address's key: the larger sorts first.
++	uint32_t keys[MOST];
++	size_t order[MOST];
++	for (size_t i = 0; i < count; i++) {
++		uint8_t to[16], from[16];
++		as_ipv6(buf.buf[i], to);
++		const policy &to_policy = policy_of(to);
++		int to_scope = scope_of(to);
++		uint32_t key = 0;
++		if (source_for(buf.buf[i], from)) {
++			int from_scope = scope_of(from);
++			key |= 1u << 30;
++			if (from_scope == to_scope)
++				key |= 1u << 29;
++			if (policy_of(from).label == to_policy.label)
++				key |= 1u << 28;
++			// RFC 6724 6, rule 9, for IPv6 alone, within the source's
++			// network, taken as a /64.
++			if (buf.buf[i].family == AF_INET6)
++				key |= common_bits(from, to, 64);
++		}
++		key |= static_cast<uint32_t>(to_policy.precedence) << 20;
++		key |= static_cast<uint32_t>(15 - to_scope) << 16;
++		keys[i] = key;
++		order[i] = i;
++	}
++	// A stable insertion sort, for the few there are.
++	for (size_t i = 1; i < count; i++) {
++		size_t at = order[i];
++		size_t j = i;
++		for (; j && keys[order[j - 1]] < keys[at]; j--)
++			order[j] = order[j - 1];
++		order[j] = at;
++	}
++	frg::vector<struct dns_addr_buf, MemoryAllocator> sorted{getAllocator()};
++	for (size_t i = 0; i < count; i++)
++		sorted.push(std::move(buf.buf[order[i]]));
++	buf.buf = std::move(sorted);
++}
++
+ // Looks name up with the search list, as glibc does: a name with fewer
+ // dots than ndots (1) is tried under each search domain first and then as
+ // it is, a name with more as it is first. Only addresses of the family
+-// asked are taken, IPv4 ones for AF_UNSPEC.
++// asked are taken, of both for AF_UNSPEC.
+ int lookup_name_dns(struct lookup_result &buf, const char *name,
+ 		frg::string<MemoryAllocator> &canon_name, int family) {
+ 	auto conf = read_resolv_conf();
+--- a/options/posix/generic/netdb.cpp
++++ b/options/posix/generic/netdb.cpp
+@@ -250,10 +250,14 @@
+ 				return EAI_SYSTEM;
+ 			}
+ 
+-			if (!ipv4 && !ipv6)
++			// As glibc: only the families the machine has addresses of
++			// (but for loopback ones), or either if it has none.
++			if (family == AF_UNSPEC) {
++				if (ipv4 != ipv6)
++					family = ipv4 ? AF_INET : AF_INET6;
++			} else if ((family == AF_INET && !ipv4) || (family == AF_INET6 && !ipv6)) {
+ 				return EAI_NONAME;
+-			else if (ipv4 != ipv6)
+-				family = ipv4 ? AF_INET : AF_INET6;
++			}
+ 		} else {
+ 			mlibc::infoLogger() << "mlibc: sys_inet_configured() not implemented, cannot handle getaddrinfo with AI_ADDRCONFIG" << frg::endlog;
+ 			errno = ENOSYS;
+@@ -275,6 +279,31 @@
+ 			       addr_count = -EAI_NONAME;
+ 			else if ((addr_count = mlibc::lookup_name_hosts(addr_buf, node, canon, family)) <= 0)
+ 				addr_count = mlibc::lookup_name_dns(addr_buf, node, canon, family);
++			// With AI_V4MAPPED, a name without IPv6 addresses has its
++			// IPv4 ones, mapped (::ffff:192.0.2.1), as glibc gives them.
++			if (family == AF_INET6 && (flags & AI_V4MAPPED) && addr_count <= 0
++					&& addr_count != -EAI_AGAIN && !(flags & AI_NUMERICHOST)) {
++				struct mlibc::lookup_result v4;
++				int found;
++				if ((found = mlibc::lookup_name_hosts(v4, node, canon, AF_INET)) <= 0)
++					found = mlibc::lookup_name_dns(v4, node, canon, AF_INET);
++				if (found > 0) {
++					for (auto &address : v4.buf) {
++						uint8_t ip[4];
++						memcpy(ip, address.addr, 4);
++						memset(address.addr, 0, 10);
++						address.addr[10] = address.addr[11] = 0xff;
++						memcpy(address.addr + 12, ip, 4);
++						address.family = AF_INET6;
++					}
++					addr_buf = std::move(v4);
++					addr_count = found;
++				}
++			}
++			if (addr_count > 1) {
++				mlibc::sort_addresses(addr_buf);
++				addr_count = addr_buf.buf.size();
++			}
+ 		}
+ 
+ 		if (addr_count < 0)
+@@ -446,7 +475,7 @@
+ 	int ret = 0;
+ 	if ((ret = mlibc::lookup_name_ip(buf, name, AF_INET)) <= 0)
+ 		if ((ret = mlibc::lookup_name_hosts(buf, name, canon, AF_UNSPEC)) <= 0)
+-			ret = mlibc::lookup_name_dns(buf, name, canon, AF_UNSPEC);
++			ret = mlibc::lookup_name_dns(buf, name, canon, AF_INET);
+ 	if (ret <= 0) {
+ 		h_errno = HOST_NOT_FOUND;
+ 		return nullptr;
+--- a/options/posix/include/mlibc/lookup.hpp
++++ b/options/posix/include/mlibc/lookup.hpp
+@@ -52,6 +52,7 @@
+ int lookup_addr_hosts(frg::span<char> name, frg::array<uint8_t, 16> &addr, int family);
+ int lookup_name_null(struct lookup_result &buf, int flags, int family);
+ int lookup_name_ip(struct lookup_result &buf, const char *name, int family);
++void sort_addresses(struct lookup_result &buf);
+ 
+ } // namespace mlibc
+ 

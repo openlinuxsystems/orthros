@@ -523,6 +523,8 @@ pub enum ConfigureError {
     NoInterface,
     /// It is `lo`, whose addresses are its own and the cards'.
     Loopback,
+    /// Its IPv6 is off, so it takes no IPv6 addresses.
+    Off,
 }
 
 /// Gives the interface numbered `index` `addresses`, the first its own,
@@ -564,7 +566,8 @@ pub fn configure(
 ///
 /// # Errors
 ///
-/// When there is no such interface, or it is `lo`.
+/// When there is no such interface, or it is `lo`, or its IPv6 is off
+/// and only the addresses it was given change.
 pub fn configure_ipv6(
     index: u32,
     change: Ipv6Change,
@@ -578,6 +581,9 @@ pub fn configure_ipv6(
     let (was, settings) = {
         let mut stack = interface.stack.lock();
         let was = stack.ipv6().settings();
+        if change == Ipv6Change::GivenOnly && was.is_none() {
+            return Err(ConfigureError::Off);
+        }
         match change {
             Ipv6Change::Settings(settings) => stack.configure_ipv6(settings, addresses, router),
             Ipv6Change::GivenOnly => stack.set_ipv6_given(addresses, router),

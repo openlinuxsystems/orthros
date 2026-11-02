@@ -3,7 +3,7 @@
 
 //! `/processes/net` (ADR 0190): the interfaces' counts, the routes and
 //! the sockets, in the formats of Linux's `/proc/net/dev`, `route`, `tcp`
-//! and `udp`, which ss(8) and ported tools read; and for IPv6 (ADR 0331)
+//! and `udp`, which ss(8) and ported tools read; and for IPv6 (ADR 0332)
 //! `if_inet6`, `ipv6_route`, `tcp6` and `udp6`.
 //!
 //! Addresses and ports are in hexadecimal as Linux writes them: an IPv4
@@ -149,7 +149,9 @@ pub fn if_inet6(text: &mut Text) -> fmt::Result {
     let now = crate::sched::now_ns();
     for interface in interfaces() {
         let stack = interface.stack.lock();
-        for address in stack.ipv6().addresses() {
+        // `lo` has the cards' addresses after its own: they are theirs.
+        let own = if interface.is_loopback() { 1 } else { usize::MAX };
+        for address in stack.ipv6().addresses().take(own) {
             let ip = address.cidr.address();
             let scope = if ip.is_loopback() {
                 SCOPE_HOST

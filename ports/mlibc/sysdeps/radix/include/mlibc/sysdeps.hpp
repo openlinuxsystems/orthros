@@ -89,6 +89,7 @@ struct RadixSysdepTags :
 	IfIndextoname,
 	IfNameindex,
 	IfNametoindex,
+	InetConfigured,
 	Ioctl,
 	Isatty,
 	Kill,

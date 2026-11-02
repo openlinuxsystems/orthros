@@ -5431,7 +5431,7 @@ fn sockets(vm: &mut Vm, case: &Case) -> Result<(), String> {
     // Both come during the PCI scan, among lines boot_report reads past.
     let log = vm.log();
     for needle in [
-        "Net: lo is the loopback interface, at 127.0.0.1/8, 127.0.0.53 and every card's address",
+        "Net: lo is the loopback interface, at 127.0.0.1/8, 127.0.0.53, ::1 and every card's address",
         "Net: net0 has the address 10.0.2.15/24, through the router 10.0.2.2",
     ] {
         if !log.contains(needle) {
@@ -5449,6 +5449,9 @@ fn sockets(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("sockets: tcp: a socket that does not wait connected, and said when it had")?;
     vm.expect("sockets: udp: datagrams went each way over lo, kept their bounds, and said where they came from")?;
     vm.expect("sockets: rights: each method refused what its capability does not allow")?;
+    vm.expect("sockets: ipv6: a socket on [::] took connections from ::1 and from 127.0.0.1")?;
+    vm.expect("sockets: ipv6: a datagram went between ports of ::1")?;
+    vm.expect("sockets: ipv6: a v6-only socket shared its port with an IPv4 one")?;
     vm.expect(
         "sockets: virtio: a connection to 10.0.2.100 port 7 echoed what went through the card",
     )?;

@@ -21,7 +21,7 @@ bench = false
 # sockets (ADR 0183), and TCP's congestion control is CUBIC, as Linux's
 # is, in the kernel patch's integer arithmetic. IPv6 without smoltcp's
 # SLAAC, which makes only addresses from the MAC address: the stack makes
-# its own (ADR 0330), 16 addresses at most, the kernel patch's.
+# its own (ADR 0331), 16 addresses at most, the kernel patch's.
 smoltcp = { version = "0.14.0", default-features = false, features = [
     "medium-ethernet",
     "medium-ip",

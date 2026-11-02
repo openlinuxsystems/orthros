@@ -15,7 +15,7 @@
 //! `carrier`; and in `statistics`, what it sent and received. And one of
 //! Radix's own, `ipv4`, its IPv4 addresses with their prefixes, a line
 //! each, the first the one it sends from, which Linux gives only through
-//! netlink; and `ipv6`, what its IPv6 has (ADR 0330), a line each: its
+//! netlink; and `ipv6`, what its IPv6 has (ADR 0331), a line each: its
 //! addresses, tested or not, with what each is and how many seconds it
 //! is preferred and valid for (`address 2001:db8::5/64 temporary
 //! preferred 86000 valid 172000`, `tentative` at the end while it is
@@ -119,7 +119,9 @@ fn write_ipv6(interface: &'static Interface, text: &mut Text) -> fmt::Result {
     let now = crate::sched::now_ns();
     let stack = interface.stack.lock();
     let ipv6 = stack.ipv6();
-    for address in ipv6.addresses() {
+    // `lo` has the cards' addresses after its own, as for IPv4.
+    let own = if interface.is_loopback() { 1 } else { usize::MAX };
+    for address in ipv6.addresses().take(own) {
         let kind = match address.kind {
             Ipv6Kind::LinkLocal => "link-local",
             Ipv6Kind::Stable => "stable",

@@ -25,7 +25,7 @@
 //! Its control right, whatever its ports, sets the interfaces up
 //! (`configure` and `configure_ipv6`): their addresses and their
 //! routers, which ip(8) and netd(8) do (ADR 0190), and how they make
-//! their IPv6 addresses (ADR 0330). Spark gives a service one with only
+//! their IPv6 addresses (ADR 0331). Spark gives a service one with only
 //! that right when its file asks for admin.network. The interfaces are numbered as
 //! Linux numbers them: `lo` is 1, and the cards from 2 in the order they
 //! were found, `net0` first; `/kernel/class/net` has a directory for
@@ -42,7 +42,7 @@ const EPHEMERAL_FIRST: u64 = 49152;
 enum AddressFamily: u32 {
     /// IPv4, POSIX's AF_INET.
     ipv4 = 4;
-    /// IPv6, POSIX's AF_INET6 (since Phase 12c, ADR 0331).
+    /// IPv6, POSIX's AF_INET6 (since Phase 12c, ADR 0332).
     ipv6 = 6;
 }
 
@@ -107,7 +107,7 @@ struct InterfaceAddressIpv6 {
     reserved: [u8; 7];
 }
 
-/// How an interface makes its IPv6 addresses (ADR 0330).
+/// How an interface makes its IPv6 addresses (ADR 0331).
 flags Ipv6Flags: u32 {
     /// It has IPv6: a link-local address, made from `secret`, and those
     /// it is given. Without it, it has none, and takes no IPv6 packets.
@@ -176,8 +176,9 @@ interface network = 0x000f version 3 {
     /// advertises one, or none if `router` is empty. Each address is
     /// tested first, as those it makes are, and given up if another
     /// machine has it. The addresses it made are made again, unless the
-    /// settings are given_only. Fails as
-    /// `configure` does. Needs the control right. (Since version 3.)
+    /// settings are given_only, which fail with not_supported while the
+    /// interface's IPv6 is off. Fails as `configure` does besides. Needs
+    /// the control right. (Since version 3.)
     method configure_ipv6 = 5 (interface: u32, settings: in bytes, addresses: in bytes,
                                router: in bytes) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,

@@ -95,7 +95,7 @@ Found by fuzzing the stack with frames changed at random (ADR 0189):
   unused bytes as its buffer had them, from a frame sent before; they
   are zero (RFC 792).
 
-For IPv6 (ADR 0331):
+For IPv6 (ADR 0332):
 
 - A TCP socket listening on any address, or a UDP socket bound to any,
   took packets over both versions of IP, so that an IPv4 socket's took
@@ -104,7 +104,7 @@ For IPv6 (ADR 0331):
   IPV6_V6ONLY, as on Linux.
 - `iface-max-addr-count-16`: an interface has its link-local address, a
   stable and two temporary ones for each of three prefixes, and its IPv4
-  ones (ADR 0330).
+  ones (ADR 0331).
 - A neighbour solicitation from the unspecified address, which tests
   whether an address is free (RFC 4862, 5.4.2), was dropped for its
   source, so that another machine took an address this one had; it is

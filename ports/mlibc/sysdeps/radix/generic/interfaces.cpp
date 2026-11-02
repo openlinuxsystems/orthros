@@ -5,7 +5,9 @@
 // if_nametoindex, if_indextoname and if_nameindex read /kernel/class/net,
 // where each interface is a directory of its name with its number in
 // `ifindex` (radix-sysfs(5)), as Linux's C libraries ask the kernel
-// through ioctl and netlink.
+// through ioctl and netlink. getaddrinfo's AI_ADDRCONFIG reads their
+// `ipv4` and `ipv6` files, for whether the machine has addresses of each
+// family (ADR 0332).
 
 #include <dirent.h>
 #include <errno.h>
@@ -77,9 +79,52 @@ int each_interface(F f) {
 	return 0;
 }
 
+// Whether the file at `path`, of an interface's directory, holds a line
+// that starts with `start` (`len` bytes, none for any line).
+bool has_line(const char *path, const char *start, size_t len) {
+	int fd;
+	if(mlibc::sysdep<Open>(path, O_RDONLY | O_CLOEXEC, 0, &fd))
+		return false;
+	char text[1024];
+	ssize_t got = 0;
+	int e = mlibc::sysdep<Read>(fd, text, sizeof(text) - 1, &got);
+	mlibc::sysdep<Close>(fd);
+	if(e || got <= 0)
+		return false;
+	text[got] = 0;
+	for(const char *line = text; *line;) {
+		if(*line != '\n' && !strncmp(line, start, len))
+			return true;
+		const char *end = strchr(line, '\n');
+		if(!end)
+			break;
+		line = end + 1;
+	}
+	return false;
+}
+
 } // namespace
 
 namespace mlibc {
+
+// As glibc counts them: any address but a loopback one, link-local IPv6
+// ones too. `lo` has the cards' IPv4 addresses after its own, and their
+// IPv6 ones, so only the cards are asked.
+int Sysdeps<InetConfigured>::operator()(bool *ipv4, bool *ipv6) {
+	*ipv4 = *ipv6 = false;
+	return each_interface([&](const char *name, size_t len) {
+		if(len == 2 && !memcmp(name, "lo", 2))
+			return true;
+		char path[sizeof(NET) + IFNAMSIZ + sizeof("/ipv4")];
+		memcpy(path, NET, sizeof(NET) - 1);
+		memcpy(path + sizeof(NET) - 1, name, len);
+		strcpy(path + sizeof(NET) - 1 + len, "/ipv4");
+		*ipv4 = *ipv4 || has_line(path, "", 0);
+		strcpy(path + sizeof(NET) - 1 + len, "/ipv6");
+		*ipv6 = *ipv6 || has_line(path, "address ", 8);
+		return !(*ipv4 && *ipv6);
+	});
+}
 
 int Sysdeps<IfNametoindex>::operator()(const char *name, unsigned int *ret) {
 	size_t len = strlen(name);

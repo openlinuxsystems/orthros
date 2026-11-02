@@ -15,7 +15,7 @@
 //! while any of them holds it, and a socket bound to no interface cannot
 //! take it meanwhile.
 //!
-//! IPv4 and IPv6 have ports of their own (ADR 0331): a socket of
+//! IPv4 and IPv6 have ports of their own (ADR 0332): a socket of
 //! AF_INET holds IPv4's, one of AF_INET6 that is IPV6_V6ONLY IPv6's, and
 //! one of AF_INET6 that takes both holds the port in both, as on Linux,
 //! so that a server may listen on port 22 over both through one socket

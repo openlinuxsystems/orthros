@@ -103,6 +103,7 @@ fn configure_error(err: ConfigureError) -> radix_abi::Status {
     match err {
         ConfigureError::NoInterface => File::NoDevice.status(0),
         ConfigureError::Loopback => error(Kernel::NotSupported),
+        ConfigureError::Off => Kernel::NotSupported.status(1),
     }
 }
 

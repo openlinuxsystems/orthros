@@ -8,7 +8,7 @@
 //! A socket is of one family, as POSIX's are: AF_INET's take IPv4 alone;
 //! AF_INET6's take IPv6, and IPv4 too unless they are IPV6_V6ONLY, its
 //! machines' addresses shown to them IPv4-mapped (::ffff:10.0.2.2), as on
-//! Linux (ADR 0331). A socket on any address is kept to its version of
+//! Linux (ADR 0332). A socket on any address is kept to its version of
 //! IP on each interface, so that one of IPv4's takes no IPv6 connection.
 //!
 //! A program makes one from a network capability (radix-network(2)'s
@@ -356,8 +356,9 @@ impl State {
     /// and for an IPv6 socket an IPv4-mapped address the IPv4 machine's,
     /// unless it is v6-only. All zeros is no address.
     fn endpoint(&self, given: Given) -> Result<(Endpoint, u32), Status> {
+        // An address of the other family, as Linux's EAFNOSUPPORT.
         if given.v6 != self.v6 {
-            return Err(status(Kernel::InvalidArgument));
+            return Err(status(Kernel::NotSupported));
         }
         let ip = match given.ip {
             IpAddress::Ipv6(ip) => match ip.to_ipv4_mapped() {
