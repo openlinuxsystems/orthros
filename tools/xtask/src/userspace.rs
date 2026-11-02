@@ -277,6 +277,7 @@ pub const STD_MANIFEST: &str = "userspace/programs/Cargo.toml";
 pub const HOST_TESTED: &[&str] = &[
     "accounts",
     "consoled",
+    "disk",
     "git-https-test",
     "keymap",
     "manifest",
