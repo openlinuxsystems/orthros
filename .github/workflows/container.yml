@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# Every unit and boot test inside the build container, built from nothing
+# with the container's toolchain, as `./ob --container test` runs them on a
+# contributor's machine (ADR 0330). CI's own "Build container" job only
+# builds the ports and the image there and boots a few cases; this runs the
+# rest every night on main, and on demand.
+name: Build container (full)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-full-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ./ob --container test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Allow QEMU to use KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+
+      # No ports cache: the night's run builds every port from nothing, so
+      # a stale file in a cached sysroot cannot hide a broken port.
+      - name: ./ob --container doctor
+        run: ./ob --container doctor
+
+      - name: ./ob --container test
+        run: ./ob --container test
