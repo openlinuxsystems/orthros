@@ -22,13 +22,15 @@
 //! set, so that the program's answer to it is told from the call's: it
 //! answers ENOSYS if it cannot stop requests, and is sent no more, or
 //! EAGAIN if it does not have the request yet, and is sent it again.
-//! A thread that is
-//! being stopped never waits for a program (a process that is killed, or
-//! that a signal ends): its request is taken back if the program has not
-//! read it, and abandoned if it has, its answer thrown away when it
-//! comes; an answer that names a node the kernel never took is forgotten
-//! at once, so that the program's count of the node's names stays right.
 //! This is how Linux's FUSE treats signals.
+//!
+//! A thread that is being stopped never waits for a program (a process
+//! that is killed, or that a signal ends), where Linux's waits on once
+//! the program has its request: its request is taken back if the program
+//! has not read it, and abandoned if it has, its answer thrown away when
+//! it comes; an answer that names a node the kernel never took is
+//! forgotten at once, so that the program's count of the node's names
+//! stays right.
 //!
 //! When the program's last description goes, the connection is lost:
 //! every waiting call fails as not connected (ENOTCONN), and so does each

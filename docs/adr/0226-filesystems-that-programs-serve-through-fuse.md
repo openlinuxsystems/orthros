@@ -62,8 +62,10 @@ programs and unmounts is one that a decade of programs already expect.
   `nodev`. It is never a way to run as another user: set-ID bits are
   never shown, as `nosuid`. The owners and modes the program gives are
   what the kernel checks, as `default_permissions`, so a program cannot
-  be asked about access it has not stated. These hold for every mount,
-  without options to turn them off.
+  be asked about access it has not stated. A name it lists that holds
+  a slash or a NUL fails the listing (EIO), as on Linux, so that a
+  program walking it never leaves the mount. These hold for every
+  mount, without options to turn them off.
 - **Signals and lost programs**, as Linux's FUSE: a signal that comes
   while a call waits sends `INTERRUPT` for its request, at once if the
   program has read it and as soon as it does if not, before the requests
@@ -74,15 +76,16 @@ programs and unmounts is one that a decade of programs already expect.
   lowest bit set, so that its own answer is told apart: ENOSYS says the
   program cannot stop requests, and none is sent again (fuser answers
   so), and EAGAIN that it does not have the request yet, and it is sent
-  again. A thread that is
-  being killed never waits: its request is taken back if the program has
-  not read it, and abandoned if it has; an answer that names a node the
-  kernel never took gets a `FORGET` at once, and a `RELEASE` for a handle
-  `CREATE` made. When the program's last description goes, every call
-  fails with ENOTCONN until the mount is unmounted. When the mount goes,
-  the program reads the requests left (the `FORGET`s) and then fails
-  with ENODEV, which tells it to end: a new error of files,
-  `unmounted` (26), maps to it.
+  again. A thread that is being killed never waits, where Linux's waits
+  on once the program has its request, so that a program that hangs
+  never holds a killed process: its request is taken back if the
+  program has not read it, and abandoned if it has; an answer that
+  names a node the kernel never took gets a `FORGET` at once, and a
+  `RELEASE` for a handle `CREATE` made. When the program's last
+  description goes, every call fails with ENOTCONN until the mount is
+  unmounted. When the mount goes, the program reads the requests left
+  (the `FORGET`s) and then fails with ENODEV, which tells it to end: a
+  new error of files, `unmounted` (26), maps to it.
 - **Extended attributes** go to the program; one that answers ENOSYS is
   not asked again.
 - **The crate.** `radix-fuse` (kernel/fs/fuse) holds the protocol, the
