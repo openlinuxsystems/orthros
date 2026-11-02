@@ -49,7 +49,7 @@ jobs:
             qemu-system-x86 ovmf grub-common grub-pc-bin grub-efi-amd64-bin \
             xorriso mtools dosfstools exfatprogs sleuthkit btrfs-progs e2fsprogs ntfs-3g dislocker libbde-utils scdoc mandoc \
             udftools udfclient genisoimage \
-            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison pkgconf autoconf
+            clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison pkgconf autoconf zlib1g-dev
 
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install

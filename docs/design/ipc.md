@@ -445,6 +445,17 @@ at `/volumes/vdb` on Radix (Spark's `--compress vdb`) and at `/mnt/vdb`
 on Linux (`compress=zstd:1`), whose init first loads the Btrfs modules
 of the runner's kernel, which `ob bench` puts in its initramfs.
 
+With `--git`, the path of a git, it makes a repository of 1,000 files of
+text in 10 folders under `/tmp`, adds and commits them, runs `git status`
+once to warm the caches, and then times `git status --porcelain` with
+nothing changed, 50 times (`posix_git_status`, ADR 0294). git reads no
+system or user settings there, so both sides do the same work. Radix
+runs its own git port, and Linux the same git release built static on
+glibc, which `ob bench` builds once from the port's source into
+`target/bench/linux-git` and puts in the initramfs at `/git`. The row is
+reported but not gated until Radix first reaches parity on it; from
+then on it is gated like the rest.
+
 A yield switches only when the other program may run first (EEVDF on
 both systems), so `context_switch` divides the time by the switches that
 happened: on Radix the kernel's count for the benchmark, which includes
@@ -543,6 +554,9 @@ whether to offer paravirtual EOI (ADR 0041).
   `process.create`. Queued messages, and the endpoints and notifications
   the self-tests' groups make, come from the kernel heap uncharged,
   bounded by the slots a program has.
+- `posix_git_status` is reported only, not held to the gate, until
+  Radix is first as fast as Linux on it (ADR 0294); then its row's
+  `gated` turns on for good.
 - The self-tests' programs are pinned to a CPU each, which the
   benchmarks need; Spark and the programs it starts are placed by the
   scheduler.

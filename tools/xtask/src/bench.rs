@@ -53,9 +53,11 @@ const CMDLINE: &str = "qemu-exit selftest=bench";
 /// program of [`POSIX_SOURCE`] from the boot archive, and nothing else,
 /// giving it a network capability for the loopback benchmarks, with the
 /// benchmarks' disks ([`disk_args`]), the Btrfs one where Spark
-/// mounts it, to compress what is written to it, as Linux mounts it.
+/// mounts it, to compress what is written to it, as Linux mounts it,
+/// and the image's git for the git benchmark.
 const POSIX_CMDLINE: &str = "-- --compress vdb --posix --network /system/tests/posix/bench --network \
-                             --disk /devices/vda --nvme /devices/nvme0n1 --btrfs /volumes/vdb";
+                             --disk /devices/vda --nvme /devices/nvme0n1 --btrfs /volumes/vdb \
+                             --git /bin/git";
 
 /// The size of each disk both systems' POSIX benchmarks read and write:
 /// the 32 MiB they go through, with room.
@@ -189,6 +191,10 @@ struct Row {
     radix: &'static str,
     what: &'static str,
     linux: Option<(&'static str, &'static str)>,
+    /// Whether the gate holds the row to [`GATE_RATIO`]. A row is
+    /// reported only, ungated, until Radix first reaches parity on it,
+    /// and then gated for good (ADR 0294).
+    gated: bool,
 }
 
 const fn row(
@@ -197,24 +203,34 @@ const fn row(
     linux: &'static str,
     how: &'static str,
 ) -> Row {
-    Row { radix, what, linux: Some((linux, how)) }
+    Row { radix, what, linux: Some((linux, how)), gated: true }
 }
 
 /// A row of the POSIX benchmarks, which have the same name on both.
 const fn posix(name: &'static str, what: &'static str) -> Row {
-    Row { radix: name, what, linux: Some((name, "the same C program, on glibc")) }
+    Row { radix: name, what, linux: Some((name, "the same C program, on glibc")), gated: true }
 }
 
 /// A row of the POSIX benchmarks' disk transfers: on Linux, of the same
 /// disk opened with `O_DIRECT`.
 const fn disk(name: &'static str, what: &'static str) -> Row {
-    Row { radix: name, what, linux: Some((name, "the same C program, on glibc, `O_DIRECT`")) }
+    Row {
+        radix: name,
+        what,
+        linux: Some((name, "the same C program, on glibc, `O_DIRECT`")),
+        gated: true,
+    }
 }
 
 /// A row of the POSIX benchmarks' files on the Btrfs disk: on Linux, on
 /// its own Btrfs, mounted with no options.
 const fn btrfs(name: &'static str, what: &'static str) -> Row {
-    Row { radix: name, what, linux: Some((name, "the same C program, on glibc, on Linux's Btrfs")) }
+    Row {
+        radix: name,
+        what,
+        linux: Some((name, "the same C program, on glibc, on Linux's Btrfs")),
+        gated: true,
+    }
 }
 
 /// The report's rows, in order.
@@ -418,6 +434,13 @@ const ROWS: &[Row] = &[
         "posix_btrfs_write_zstd_mib",
         "Btrfs: a 1 MiB file of text written, compressed (zstd) and synced with 31 others, per file",
     ),
+    Row {
+        radix: "posix_git_status",
+        what: "git: `git status` in a repository of 1,000 committed files, none changed",
+        linux: Some(("posix_git_status", "the same git release, built static on glibc")),
+        // Reported only until Radix reaches parity (Chase, 2026-11-01).
+        gated: false,
+    },
 ];
 
 /// `ob bench`.
@@ -476,6 +499,7 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
     }
     let runs = if kvm { runs } else { 1 };
     let posix_linux = if linux { Some(posix_for_linux(ctx, &dir)?) } else { None };
+    let git_linux = if linux { Some(git_for_linux(ctx)?) } else { None };
     let vm_kernel = match &posix_linux {
         Some(_) if !kvm => {
             eprintln!(
@@ -492,7 +516,14 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
                     (pinned.kernel, Some(pinned.modules))
                 }
             };
-            let initrd = linux_init(ctx, &dir, Some(posix), &kernel, modules.as_deref())?;
+            let initrd = linux_init(
+                ctx,
+                &dir,
+                Some(posix),
+                git_linux.as_deref(),
+                &kernel,
+                modules.as_deref(),
+            )?;
             Some((kernel, initrd))
         }
         None => None,
@@ -562,7 +593,7 @@ pub fn command(ctx: &Ctx, args: &mut Args) -> Result<()> {
         }
     }
     if let Some(posix) = &posix_linux {
-        numbers.linux_host = linux_numbers(ctx, posix)?;
+        numbers.linux_host = linux_numbers(ctx, posix, git_linux.as_deref())?;
     }
 
     let report = report(ctx, &numbers, kvm);
@@ -741,7 +772,7 @@ fn ratio(numbers: &Numbers, row: &Row) -> Option<f64> {
 /// The rows over the gate, each with its ratio (or that it is missing).
 fn over_gate(numbers: &Numbers) -> Vec<String> {
     let mut over = Vec::new();
-    for row in ROWS.iter().filter(|row| row.linux.is_some()) {
+    for row in ROWS.iter().filter(|row| row.linux.is_some() && row.gated) {
         match ratio(numbers, row) {
             Some(ratio) if ratio <= GATE_RATIO => {}
             Some(ratio) => over.push(format!("{} ({} times Linux)", row.what, shown(ratio))),
@@ -762,7 +793,7 @@ fn shown(ratio: f64) -> String {
     }
 }
 
-/// Fails unless every row has both numbers and Radix's is at most
+/// Fails unless every gated row has both numbers and Radix's is at most
 /// [`GATE_RATIO`] times Linux's.
 fn check_gate(numbers: &Numbers) -> Result<()> {
     if numbers.linux_vm.is_empty() {
@@ -905,7 +936,7 @@ fn machine_report(numbers: &Numbers, facts: &[String]) -> String {
             continue;
         }
         let ratio = match ratio(numbers, row) {
-            Some(ratio) if ratio > GATE_RATIO => {
+            Some(ratio) if ratio > GATE_RATIO && row.gated => {
                 over.push(format!("{} ({})", row.what, shown(ratio)));
                 format!("**{}**", shown(ratio))
             }
@@ -954,15 +985,68 @@ pub fn posix_for_linux(ctx: &Ctx, dir: &Path) -> Result<PathBuf> {
     Ok(program)
 }
 
+/// Builds git for Linux, static, from the git port's release archive,
+/// for the git benchmark (ADR 0294): the same release as Radix's, built
+/// without what Radix's is built without, with this machine's C library
+/// and the Clang that builds the ports (or else its C compiler), at the
+/// same optimisation. It is built once for each archive, in
+/// `target/bench/linux-git`.
+fn git_for_linux(ctx: &Ctx) -> Result<PathBuf> {
+    let source = crate::ports::archive_source(ctx, "git")?;
+    let work = ctx.target.join("bench/linux-git");
+    let program = work.join("git");
+    let stamp = work.join("built-from");
+    let from = source.display().to_string();
+    if program.exists() && std::fs::read_to_string(&stamp).ok().as_deref() == Some(from.as_str()) {
+        return Ok(program);
+    }
+    step("Building git for Linux as a static program, for the git benchmark");
+    if work.exists() {
+        std::fs::remove_dir_all(&work).context(|| format!("removing {}", work.display()))?;
+    }
+    let src = work.join("src");
+    crate::ports::copy_tree(ctx, &source, &src)?;
+    let compiler = crate::ports::find_clang()
+        .map(|(clang, _)| clang)
+        .or_else(|| process::find_program("cc"))
+        .ok_or_else(|| {
+            crate::Error::new("no C compiler is installed, for git on Linux")
+                .hint("run `./ob doctor`")
+        })?;
+    let jobs = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
+    let mut cmd = std::process::Command::new("make");
+    cmd.current_dir(&src).arg(format!("-j{jobs}")).arg(format!("CC={}", compiler.display())).args(
+        [
+            "CFLAGS=-O2",
+            "LDFLAGS=-static",
+            "NO_CURL=YesPlease",
+            "NO_EXPAT=YesPlease",
+            "NO_OPENSSL=YesPlease",
+            "NO_PERL=YesPlease",
+            "NO_PYTHON=YesPlease",
+            "NO_TCLTK=YesPlease",
+            "NO_GETTEXT=YesPlease",
+            "NO_ICONV=YesPlease",
+            "NO_RUST=YesPlease",
+            "git",
+        ],
+    );
+    process::run(ctx, &mut cmd)?;
+    process::copy(&src.join("git"), &program)?;
+    std::fs::write(&stamp, &from).context(|| format!("writing {}", stamp.display()))?;
+    Ok(program)
+}
+
 /// Builds `linux-bench` as a static program and writes the initramfs
 /// that makes it the Linux virtual machine's init process, with the
 /// POSIX benchmarks at `posix` beside it (an empty file without them),
-/// and the modules `kernel` needs to mount the Btrfs disk, from
+/// git at `git` for the git benchmark (likewise), and the modules `kernel` needs to mount the Btrfs disk, from
 /// `modules_dir` if given ([`linux_modules`]).
 pub(crate) fn linux_init(
     ctx: &Ctx,
     dir: &Path,
     posix: Option<&Path>,
+    git: Option<&Path>,
     kernel: &Path,
     modules_dir: Option<&Path>,
 ) -> Result<PathBuf> {
@@ -973,6 +1057,10 @@ pub(crate) fn linux_init(
         Some(posix) => std::fs::read(posix).context(|| format!("reading {}", posix.display()))?,
         None => Vec::new(),
     };
+    let git = match git {
+        Some(git) => std::fs::read(git).context(|| format!("reading {}", git.display()))?,
+        None => Vec::new(),
+    };
     let mut modules = Vec::new();
     for (i, path) in linux_modules(kernel, modules_dir)?.iter().enumerate() {
         let file = path.file_name().map_or_default(|name| name.to_string_lossy());
@@ -980,7 +1068,7 @@ pub(crate) fn linux_init(
         modules.push((format!("{i:02}-{file}"), bytes));
     }
     let initrd = dir.join("linux-bench.cpio");
-    std::fs::write(&initrd, initramfs(&init, &posix, &modules))
+    std::fs::write(&initrd, initramfs(&init, &posix, &git, &modules))
         .context(|| format!("writing {}", initrd.display()))?;
     Ok(initrd)
 }
@@ -1142,18 +1230,19 @@ fn linux_vm_numbers(
 
 /// An initramfs (a cpio archive in the "newc" format Linux reads) that
 /// holds `init`, the console device it writes to, the POSIX benchmarks it
-/// runs, `posix`, at `/posix-bench`, and `modules`, by name, in
-/// `/modules`.
-pub fn initramfs(init: &[u8], posix: &[u8], modules: &[(String, Vec<u8>)]) -> Vec<u8> {
+/// runs, `posix`, at `/posix-bench`, git for them at `/git`, and
+/// `modules`, by name, in `/modules`.
+pub fn initramfs(init: &[u8], posix: &[u8], git: &[u8], modules: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut out = Vec::new();
     newc_entry(&mut out, 1, "dev", 0o040_755, (0, 0), &[]);
     newc_entry(&mut out, 2, "dev/console", 0o020_600, (5, 1), &[]);
     newc_entry(&mut out, 3, "init", 0o100_755, (0, 0), init);
     newc_entry(&mut out, 4, "posix-bench", 0o100_755, (0, 0), posix);
+    newc_entry(&mut out, 5, "git", 0o100_755, (0, 0), git);
     if !modules.is_empty() {
-        newc_entry(&mut out, 5, "modules", 0o040_755, (0, 0), &[]);
+        newc_entry(&mut out, 6, "modules", 0o040_755, (0, 0), &[]);
     }
-    for (ino, (name, bytes)) in (6..).zip(modules) {
+    for (ino, (name, bytes)) in (7..).zip(modules) {
         newc_entry(&mut out, ino, &format!("modules/{name}"), 0o100_644, (0, 0), bytes);
     }
     newc_entry(&mut out, 0, "TRAILER!!!", 0, (0, 0), &[]);
@@ -1437,12 +1526,15 @@ fn text(n: usize, len: usize) -> Vec<u8> {
 }
 
 /// Builds and runs the Linux baseline on the host, with the POSIX
-/// benchmarks at `posix`.
-fn linux_numbers(ctx: &Ctx, posix: &Path) -> Result<Vec<Measurement>> {
+/// benchmarks at `posix` and git at `git`.
+fn linux_numbers(ctx: &Ctx, posix: &Path, git: Option<&Path>) -> Result<Vec<Measurement>> {
     step("Measuring the same operations on this machine's own Linux, for reference");
     let mut cmd = process::cargo(ctx);
     cmd.args(["run", "--quiet", "--release", "-p", "linux-bench", "--", "--posix-bench"])
         .arg(posix);
+    if let Some(git) = git {
+        cmd.arg("--git").arg(git);
+    }
     let output = process::output(ctx, &mut cmd)?;
     Ok(parse(&String::from_utf8_lossy(&output.stdout)))
 }
@@ -1579,7 +1671,8 @@ fn report(ctx: &Ctx, numbers: &Numbers, kvm: bool) -> String {
             None => (String::new(), String::new(), "none"),
         };
         let ratio = match ratio(numbers, row) {
-            Some(ratio) if ratio > GATE_RATIO => format!("**{}**", shown(ratio)),
+            Some(ratio) if ratio > GATE_RATIO && row.gated => format!("**{}**", shown(ratio)),
+            Some(ratio) if !row.gated => format!("{} (not gated yet)", shown(ratio)),
             Some(ratio) => shown(ratio),
             None => String::new(),
         };
@@ -1866,14 +1959,26 @@ mod tests {
         assert!(check_gate(&numbers(104.0, 100.0)).is_err());
         assert_eq!(
             over_gate(&numbers(100.1, 100.0)).len(),
-            ROWS.iter().filter(|r| r.linux.is_some()).count()
+            ROWS.iter().filter(|r| r.linux.is_some() && r.gated).count()
         );
         let mut missing = numbers(90.0, 100.0);
-        missing.radix.pop();
+        let gated = ROWS.iter().rposition(|r| r.gated).expect("a gated row");
+        missing.radix.remove(gated);
         assert!(check_gate(&missing).is_err());
         let mut no_vm = numbers(90.0, 100.0);
         no_vm.linux_vm.clear();
         assert!(check_gate(&no_vm).is_err());
+    }
+
+    #[test]
+    fn a_row_reported_only_never_fails_the_gate() {
+        let mut numbers = numbers(90.0, 100.0);
+        for row in ROWS.iter().filter(|r| !r.gated) {
+            let ours = numbers.radix.iter_mut().find(|m| m.name == row.radix).expect("measured");
+            ours.ns = 200.0;
+        }
+        assert!(check_gate(&numbers).is_ok());
+        assert!(ROWS.iter().any(|r| r.radix == "posix_git_status" && !r.gated));
     }
 
     #[test]
@@ -1963,7 +2068,7 @@ mod tests {
     #[test]
     fn initramfs_is_newc() {
         let modules = [("00-btrfs.ko.zst".to_string(), b"(\xb5/\xfd".to_vec())];
-        let archive = initramfs(b"\x7fELF", b"\x7fELF", &modules);
+        let archive = initramfs(b"\x7fELF", b"\x7fELF", b"\x7fELF", &modules);
         assert!(archive.starts_with(b"070701"));
         assert_eq!(archive.len() % 4, 0);
         let text = String::from_utf8_lossy(&archive);
@@ -1972,6 +2077,7 @@ mod tests {
             "dev/console\0",
             "init\0",
             "posix-bench\0",
+            "git\0",
             "modules\0",
             "modules/00-btrfs.ko.zst\0",
             "TRAILER!!!\0",
