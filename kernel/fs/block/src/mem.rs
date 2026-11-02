@@ -108,6 +108,24 @@ pub fn extend(v: &mut KVec<u8>, bytes: &[u8]) -> Result<(), NoMemory> {
     Ok(())
 }
 
+/// `len` zero bytes on the heap (the kernel's `alloc` has no `resize`,
+/// which cannot fail).
+#[cfg(not(kani))]
+pub fn zeroed(len: usize) -> Result<KVec<u8>, NoMemory> {
+    radix_mm::bytes::zeroed(len, alloc()).map_err(|_| NoMemory)
+}
+
+/// `len` zero bytes on the heap.
+#[cfg(kani)]
+pub fn zeroed(len: usize) -> Result<KVec<u8>, NoMemory> {
+    let mut v = vec_with_capacity(len)?;
+    for _ in 0..len {
+        // Room was made above.
+        let _ = v.push_within_capacity(0);
+    }
+    Ok(v)
+}
+
 /// `value` in a box.
 pub fn boxed<T>(value: T) -> Result<KBox<T>, NoMemory> {
     Box::try_new_in(value, alloc()).map_err(|_| NoMemory)

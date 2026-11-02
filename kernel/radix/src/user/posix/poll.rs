@@ -125,6 +125,8 @@ fn polled_by(object: &Object, each: &mut dyn FnMut(&Polled)) {
                 each(&crate::fs::keyboard::POLLED);
             } else if file.is_mouse() {
                 each(&crate::fs::mouse::POLLED);
+            } else if file.fuse_channel().is_some() {
+                each(&crate::fs::fuse::POLLED);
             }
         }
         Object::Notification(notification) => each(notification.polled()),
@@ -209,6 +211,8 @@ fn events_of(object: &Object) -> u16 {
                 crate::fs::keyboard::events(file)
             } else if file.is_mouse() {
                 crate::fs::mouse::events(file)
+            } else if file.fuse_channel().is_some() {
+                crate::fs::fuse::events(file)
             } else {
                 READABLE | WRITABLE
             }

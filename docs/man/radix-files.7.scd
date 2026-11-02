@@ -125,8 +125,10 @@ Opening one opens what it stands for, on a read-only mount too:
   (ENXIO). An open to read and write waits for nothing.
 - A device node opens the device in _/devices_ with Linux's number:
   _null_ 1:3, _zero_ 1:5, _random_ 1:8, _urandom_ 1:9, _kmsg_ 1:11,
-  _tty_ 5:0, _ptmx_ 5:2 and _fb0_ 29:0. Any other fails with
-  *no_device*.
+  _tty_ 5:0, _ptmx_ 5:2, _fb0_ 29:0 and _fuse_ 10:229. Any other fails
+  with *no_device*. On a filesystem a program serves (*fuse*, below)
+  every device node fails with *denied* (EACCES), as on a Linux mount
+  with *nodev*.
 - A socket's name is bound with *bind_socket* and connected through
   with *connect_socket* (*radix-directory*(2)), and fails with
   *no_device* when opened. On Btrfs it stays on the disk,
@@ -176,11 +178,30 @@ changed, kept by tmpfs and Btrfs; FAT and exFAT give *modified*.
 	USB is a terminal: _ttyACM_*N* for a CDC-ACM one (modems, boards
 	such as the Arduino), _ttyUSB_*N* for an FTDI chip's, numbered as
 	they are plugged in, their lines set by their termios settings, as
-	*stty*(1) sets them (ADR 0246).
+	*stty*(1) sets them (ADR 0246). From Phase 13f _fuse_ makes a
+	connection for a program that serves a filesystem (*fuse*, below).
 
 *bootfs*
 	The boot archive (*radix-processes*(7)), read-only, with the
 	symbolic links the archive holds.
+
+*fuse*
+	A filesystem a program serves, in Linux's FUSE protocol (ADR
+	0226), which *mount_fuse* mounts, not *mount*: the program opens
+	_/devices/fuse_, which makes a connection, and the call names the
+	connection's capability, open to read and write, and a source for
+	the mounts list. The program reads the kernel's requests from it and
+	writes its answers, as a program written for Linux's FUSE does, from
+	protocol version 7.12 to 7.31. The owners and modes it gives are
+	what the kernel checks, as Linux's *default_permissions*; set-ID bits
+	are never shown (*nosuid*) and device nodes never open (*nodev*).
+	A call waits for the program's answer: a signal sends the program
+	*INTERRUPT* for its request, and the call fails with EINTR if the
+	program answers so; a thread being killed never waits. Once the program's last
+	description goes, every call fails with *not_connected* (ENOTCONN)
+	until the mount is unmounted; once the mount goes, the program's
+	reads fail with *unmounted* (ENODEV). There is no page cache for these files yet:
+	each read and write goes to the program.
 
 *bind*
 	A directory of a filesystem already mounted, whose capability the
@@ -359,9 +380,9 @@ status word (*radix-errors*(2)): *not_found*, *exists*, *not_directory*,
 *is_directory*, *not_empty*, *read_only*, *no_space*, *name_too_long*,
 *bad_name*, *outside*, *cross_mount*, *in_use*, *io*, *corrupt*,
 *too_big*, *unknown_filesystem*, *not_block_device*, *no_device*,
-*too_many_links* (ELOOP), *not_link* (EINVAL) and *too_many_names*
-(EMLINK), each with the POSIX
-errno it maps to.
+*too_many_links* (ELOOP), *not_link* (EINVAL), *too_many_names*
+(EMLINK), *quota_exceeded*, *denied*, *no_attribute* and *unmounted*
+(ENODEV), each with the POSIX errno it maps to.
 
 The kernel logs each disk, partition and mount:
 

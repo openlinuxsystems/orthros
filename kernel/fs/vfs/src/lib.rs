@@ -147,6 +147,13 @@ pub enum Error {
     /// [`attributes::NAME_MAX`], or a value or list does not fit where it
     /// is to go. Linux's ERANGE.
     OutOfRange,
+    /// A filesystem's program stopped the call when a signal asked it
+    /// to, or the thread was stopped while it waited (ADR 0226). POSIX's
+    /// EINTR.
+    Interrupted,
+    /// The program that served the filesystem has gone, or its mount
+    /// has (ADR 0226). POSIX's ENOTCONN.
+    NotConnected,
 }
 
 impl fmt::Display for Error {
@@ -182,6 +189,8 @@ impl fmt::Display for Error {
             Error::NotPermitted => "operation not permitted",
             Error::NoAttribute => "no such attribute",
             Error::OutOfRange => "out of range",
+            Error::Interrupted => "interrupted",
+            Error::NotConnected => "the filesystem's program has gone",
         })
     }
 }
@@ -984,6 +993,9 @@ pub enum FsKind {
     /// Pipes and pseudo-terminals, which live outside the tree (Phase 8):
     /// their files are on a mount of their own ([`mount::Mount::detached`]).
     Pipe,
+    /// Served by a program through `/devices/fuse`, in Linux's FUSE
+    /// protocol (ADR 0226): a network share, for one.
+    Fuse,
 }
 
 impl FsKind {
@@ -1003,6 +1015,7 @@ impl FsKind {
             FsKind::Dev => "dev",
             FsKind::Boot => "bootfs",
             FsKind::Pipe => "pipefs",
+            FsKind::Fuse => "fuse",
         }
     }
 }
