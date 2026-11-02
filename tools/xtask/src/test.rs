@@ -95,6 +95,7 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-exfat",
     "radix-ext4",
     "radix-fat",
+    "radix-fuse",
     "radix-fbcon",
     "radix-gpio",
     "radix-gve",

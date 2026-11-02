@@ -205,4 +205,8 @@ errors file = 2 {
     denied = 24 => EACCES;
     /// The file has no extended attribute of that name (ADR 0256).
     no_attribute = 25 => ENODATA;
+    /// The filesystem a `/devices/fuse` connection served has been
+    /// unmounted: the program that served it reads this and ends
+    /// (ADR 0226).
+    unmounted = 26 => ENODEV;
 }

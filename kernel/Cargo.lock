@@ -266,6 +266,7 @@ dependencies = [
  "radix-ext4",
  "radix-fat",
  "radix-fbcon",
+ "radix-fuse",
  "radix-gpio",
  "radix-gve",
  "radix-hal",
@@ -509,6 +510,14 @@ version = "0.11.0"
 dependencies = [
  "radix-hal",
  "radix-klog",
+]
+
+[[package]]
+name = "radix-fuse"
+version = "0.11.0"
+dependencies = [
+ "radix-sync",
+ "radix-vfs",
 ]
 
 [[package]]

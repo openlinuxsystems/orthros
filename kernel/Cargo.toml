@@ -52,6 +52,7 @@ members = [
     "fs/exfat",
     "fs/ext4",
     "fs/fat",
+    "fs/fuse",
     "fs/iso9660",
     "fs/ntfs",
     "fs/udf",

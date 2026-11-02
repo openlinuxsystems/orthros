@@ -133,6 +133,9 @@ enum FilesystemKind: u8 {
     iso9660 = 11;
     /// UDF on a DVD, Blu-ray disc, disc image or disk, read-only: `udf`.
     udf = 12;
+    /// Served by a program through `/devices/fuse`, in Linux's FUSE
+    /// protocol (ADR 0226): `fuse`, which only `mount_fuse` mounts.
+    fuse = 13;
 }
 
 /// How `open` opens.
@@ -804,4 +807,20 @@ interface directory = 0x000b version 9 {
                 bad_address, not_found, not_directory, name_too_long, bad_name, outside,
                 too_many_links, denied, not_permitted, no_attribute, out_of_range,
                 not_supported, read_only, no_space, io, corrupt];
+    /// Mounts on the directory at `path` the filesystem a program serves
+    /// through the connection in slot `connection`: a file capability to
+    /// a description of `/devices/fuse`, with the read and write rights
+    /// (ADR 0226). `source` names it in the mount table, as Linux's
+    /// mount(2) takes a source: `//server/share`, for one. The kernel
+    /// queues FUSE's `INIT` and returns; calls of the mount wait for the
+    /// program's answer. A connection is mounted once: a second mount of
+    /// it fails with in_use, and one whose program has gone with
+    /// not_connected. Device nodes on it are denied, and its set-ID
+    /// bits are never shown. Needs the control right; beneath a view it
+    /// fails with not_supported.
+    method mount_fuse = 40 (path: in bytes, connection: u32, source: in bytes, flags: MountFlags)
+        -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument, no_memory,
+                bad_address, not_found, not_directory, name_too_long, bad_name, outside, in_use,
+                too_many_links, denied, not_supported, not_connected];
 }

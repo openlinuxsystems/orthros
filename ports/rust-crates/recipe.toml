@@ -34,6 +34,12 @@ sha256 = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
 license = "MIT OR Apache-2.0"
 
 [[crate]]
+name = "fuser"
+version = "0.16.0"
+sha256 = "0bb29a3ae32279fe3e79a958fe01899f5fb23eadccee919cf88e145b54ed9367"
+license = "MIT"
+
+[[crate]]
 name = "getrandom"
 version = "0.2.17"
 sha256 = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
