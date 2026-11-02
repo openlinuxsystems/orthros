@@ -9,9 +9,7 @@ mkfs-fat, mkfs.fat, mkfs.vfat - make a FAT filesystem
 
 # SYNOPSIS
 
-*mkfs-fat* [*-F* 12|16|32] [*-n* _label_] [*-i* _volume-id_] [*-s* _sectors_]
-[*-f* _tables_] [*-r* _entries_] [*-h* _hidden_] [*-S* _sector-size_] [*-I*]
-[*-C*] [*-v*] [*--invariant*] _device_ [_kib_]
+*mkfs-fat* [*-F* 12|16|32] [*-n* _label_] [*-i* _volume-id_] [*-s* _sectors_] [*-f* _tables_] [*-r* _entries_] [*-h* _hidden_] [*-S* _sector-size_] [*-I*] [*-C*] [*-v*] [*--invariant*] _device_ [_kib_]
 
 # DESCRIPTION
 

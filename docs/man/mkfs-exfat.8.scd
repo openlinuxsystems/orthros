@@ -9,8 +9,7 @@ mkfs-exfat, mkfs.exfat - make an exFAT filesystem
 
 # SYNOPSIS
 
-*mkfs-exfat* [*-L* _label_] [*-c* _cluster-size_] [*--volume-serial* _id_]
-[*--invariant*] [*-I*] [*-q*] _device_
+*mkfs-exfat* [*-L* _label_] [*-c* _cluster-size_] [*--volume-serial* _id_] [*--invariant*] [*-I*] [*-q*] _device_
 
 # DESCRIPTION
 

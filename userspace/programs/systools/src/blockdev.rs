@@ -206,3 +206,22 @@ pub fn partitions_of(name: &str) -> Vec<(u32, String)> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_uses_a_device_is_said_in_words() {
+        assert_eq!(
+            in_use("vda2", block::IN_USE_SWAP),
+            "vda2 is swap that is on (swapoff turns it off)"
+        );
+        assert_eq!(
+            in_use("sdb", block::IN_USE_BTRFS | block::IN_USE_UNLOCKED),
+            "sdb is a disk of a Btrfs mounted from another, and has its BitLocker volume unlocked \
+             as sdb-unlocked"
+        );
+        assert_eq!(in_use("vdc", 0), "vdc is in use");
+    }
+}
