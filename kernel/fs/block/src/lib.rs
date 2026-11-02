@@ -465,9 +465,10 @@ impl Slice {
 
     /// [`Error::Io`] once it is retired.
     fn live(&self) -> Result<(), Error> {
-        match self.retired.load(core::sync::atomic::Ordering::Acquire) {
-            true => Err(Error::Io),
-            false => Ok(()),
+        if self.retired.load(core::sync::atomic::Ordering::Acquire) {
+            Err(Error::Io)
+        } else {
+            Ok(())
         }
     }
 }
