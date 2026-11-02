@@ -87,10 +87,10 @@ pub fn method(
         abi::CONFIGURE_IPV6 => {
             let a = ConfigureIpv6Args::decode(args)?;
             cap.check(ObjectKind::Network, Rights::CONTROL).map_err(cap_error)?;
-            let settings = settings_in(a.settings.address, a.settings.len)?;
+            let change = settings_in(a.settings.address, a.settings.len)?;
             let (addresses, count) = addresses_ipv6_in(a.addresses.address, a.addresses.len)?;
             let router = router_ipv6_in(a.router.address, a.router.len)?;
-            net::configure_ipv6(a.interface, settings, &addresses[..count], router)
+            net::configure_ipv6(a.interface, change, &addresses[..count], router)
                 .map_err(configure_error)?;
             answer(label, 0, [0; 8])
         }
@@ -118,9 +118,17 @@ fn copy_in(bytes: &mut [u8], address: u64, len: u64) -> Result<()> {
     Ok(())
 }
 
-/// `configure_ipv6`'s settings, an Ipv6Settings structure: `None` for
-/// IPv6 off.
-fn settings_in(address: u64, len: u64) -> Result<Option<ipv6::Settings>> {
+/// What `configure_ipv6` changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ipv6Change {
+    /// How the interface makes its addresses: `None` for IPv6 off.
+    Settings(Option<ipv6::Settings>),
+    /// Only the addresses it was given and its router.
+    GivenOnly,
+}
+
+/// `configure_ipv6`'s settings, an Ipv6Settings structure.
+fn settings_in(address: u64, len: u64) -> Result<Ipv6Change> {
     let mut bytes = [0u8; Ipv6Settings::SIZE];
     copy_in(&mut bytes, address, len)?;
     let flags = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -128,16 +136,19 @@ fn settings_in(address: u64, len: u64) -> Result<Option<ipv6::Settings>> {
     if bytes[4..8] != [0; 4] {
         return Err(error(Kernel::InvalidArgument));
     }
+    if flags.contains(Ipv6Flags::GIVEN_ONLY) {
+        return Ok(Ipv6Change::GivenOnly);
+    }
     if !flags.contains(Ipv6Flags::ENABLED) {
-        return Ok(None);
+        return Ok(Ipv6Change::Settings(None));
     }
     let mut secret = [0u8; 16];
     secret.copy_from_slice(&bytes[8..24]);
-    Ok(Some(ipv6::Settings {
+    Ok(Ipv6Change::Settings(Some(ipv6::Settings {
         secret,
         autoconf: flags.contains(Ipv6Flags::AUTOCONF),
         temporary: flags.contains(Ipv6Flags::TEMPORARY),
-    }))
+    })))
 }
 
 /// The most IPv6 addresses `configure_ipv6` takes.

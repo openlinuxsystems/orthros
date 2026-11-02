@@ -528,6 +528,38 @@ impl Ipv6 {
         }
     }
 
+    /// Gives the interface `addresses` in place of those it was given
+    /// before, each tested first, and `router` as its default route while
+    /// no router advertises one, keeping how it makes its own and those it
+    /// made: what ip(8) changes. Nothing changes while IPv6 is off.
+    pub fn set_given(&mut self, addresses: &[Ipv6Cidr], router: Option<Ipv6Address>) {
+        if self.settings.is_none() {
+            return;
+        }
+        self.given_router = router;
+        for slot in &mut self.addresses {
+            if slot.is_some_and(|a| a.kind == Kind::Static && !addresses.contains(&a.cidr)) {
+                *slot = None;
+            }
+        }
+        for &cidr in addresses {
+            self.add(Address {
+                cidr,
+                kind: Kind::Static,
+                preferred_until: None,
+                valid_until: None,
+                tries: 0,
+                test: Test::Due,
+            });
+        }
+        self.changed = true;
+    }
+
+    /// The default router the interface was given, if one.
+    pub fn given_router(&self) -> Option<Ipv6Address> {
+        self.given_router
+    }
+
     /// Gives an interface that has no neighbours, the loopback one,
     /// `addresses` as its IPv6 addresses, with no test: they are its at
     /// once.

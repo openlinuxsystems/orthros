@@ -118,6 +118,10 @@ flags Ipv6Flags: u32 {
     /// It makes temporary addresses from them too (RFC 8981), and sends
     /// from those.
     temporary = 2;
+    /// Only the addresses it was given and its router change: how it
+    /// makes the others, and those it made, stay, and the other flags and
+    /// the secret are not looked at. What ip(8) changes.
+    given_only = 3;
 }
 
 /// What `configure_ipv6` sets besides the addresses.
@@ -171,7 +175,8 @@ interface network = 0x000f version 3 {
     /// and `router`, 16 bytes, as its default route while no router
     /// advertises one, or none if `router` is empty. Each address is
     /// tested first, as those it makes are, and given up if another
-    /// machine has it. The addresses it made are made again. Fails as
+    /// machine has it. The addresses it made are made again, unless the
+    /// settings are given_only. Fails as
     /// `configure` does. Needs the control right. (Since version 3.)
     method configure_ipv6 = 5 (interface: u32, settings: in bytes, addresses: in bytes,
                                router: in bytes) -> ()

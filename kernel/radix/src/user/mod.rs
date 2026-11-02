@@ -56,7 +56,7 @@ mod loader;
 pub(crate) mod memory;
 mod methods;
 pub mod names;
-mod network;
+pub mod network;
 mod notify;
 pub mod objects;
 mod platform;

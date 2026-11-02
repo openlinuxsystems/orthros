@@ -71,6 +71,7 @@ use radix_virtio::{NO_VECTOR, Transport};
 
 use crate::Arch;
 use crate::sched::{self, Options, Policy, ThreadRef, wait};
+use crate::user::network::Ipv6Change;
 use crate::user::posix::poll::Polled;
 
 /// The most network cards.
@@ -556,16 +557,17 @@ pub fn configure(
     Ok(())
 }
 
-/// Sets how the interface numbered `index` makes its IPv6 addresses,
-/// gives it `addresses` besides and `router` while no router advertises
-/// one: radix-network(2)'s `configure_ipv6`. `lo`'s are its own.
+/// Sets how the interface numbered `index` makes its IPv6 addresses, as
+/// `change` says, and gives it `addresses` besides and `router` while no
+/// router advertises one: radix-network(2)'s `configure_ipv6`. `lo`'s
+/// are its own.
 ///
 /// # Errors
 ///
 /// When there is no such interface, or it is `lo`.
 pub fn configure_ipv6(
     index: u32,
-    settings: Option<ipv6::Settings>,
+    change: Ipv6Change,
     addresses: &[Ipv6Cidr],
     router: Option<Ipv6Address>,
 ) -> Result<(), ConfigureError> {
@@ -573,13 +575,16 @@ pub fn configure_ipv6(
     if interface.is_loopback() {
         return Err(ConfigureError::Loopback);
     }
-    let was = {
+    let (was, settings) = {
         let mut stack = interface.stack.lock();
         let was = stack.ipv6().settings();
-        stack.configure_ipv6(settings, addresses, router);
-        was
+        match change {
+            Ipv6Change::Settings(settings) => stack.configure_ipv6(settings, addresses, router),
+            Ipv6Change::GivenOnly => stack.set_ipv6_given(addresses, router),
+        }
+        (was, stack.ipv6().settings())
     };
-    if was != settings || !addresses.is_empty() {
+    if was != settings {
         let how = match settings {
             None => "off",
             Some(ipv6::Settings { autoconf: false, .. }) => "on, with the addresses it is given",

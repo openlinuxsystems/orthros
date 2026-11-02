@@ -20,7 +20,8 @@
 //! is preferred and valid for (`address 2001:db8::5/64 temporary
 //! preferred 86000 valid 172000`, `tentative` at the end while it is
 //! tested), the routers that advertised themselves (`router fe80::1
-//! lifetime 1800`), the DNS servers they advertised (`dns 2001:db8::53
+//! lifetime 1800`) and the one it was given (`router fe80::1 given`),
+//! the DNS servers they advertised (`dns 2001:db8::53
 //! lifetime 600`), the MTU (`mtu 1500`) and whether DHCPv6 is to give
 //! addresses (`dhcp managed`) or other settings (`dhcp other`), which
 //! netd(8) reads.
@@ -136,6 +137,9 @@ fn write_ipv6(interface: &'static Interface, text: &mut Text) -> fmt::Result {
     }
     for router in ipv6.routers() {
         writeln!(text, "router {} lifetime {}", router.address, Left(Some(router.until), now))?;
+    }
+    if let Some(router) = ipv6.given_router() {
+        writeln!(text, "router {router} given")?;
     }
     for server in ipv6.dns() {
         writeln!(text, "dns {} lifetime {}", server.address, Left(Some(server.until), now))?;

@@ -537,6 +537,14 @@ impl<L: Link> Stack<L> {
         self.sync_ipv6();
     }
 
+    /// Gives the interface `addresses` in place of those it was given,
+    /// and `router`, keeping how it makes its own IPv6 addresses and those
+    /// it made (`configure_ipv6`'s given_only).
+    pub fn set_ipv6_given(&mut self, addresses: &[Ipv6Cidr], router: Option<Ipv6Address>) {
+        self.ipv6.set_given(addresses, router);
+        self.sync_ipv6();
+    }
+
     /// Gives an interface with no neighbours, the loopback one,
     /// `addresses` as its IPv6 addresses, as they are.
     pub fn set_ipv6_addresses(&mut self, addresses: &[Ipv6Cidr]) {
