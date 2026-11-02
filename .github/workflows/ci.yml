@@ -479,8 +479,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      # The container runs the same tests as the jobs above, with the
-      # container's toolchain. A pull request runs it only when it changes
+      # The container builds every port, the kernel, the programs and the
+      # image with its own toolchain, and boots a few of them (ADR 0330):
+      # what differs from the jobs above is the toolchain, not the code,
+      # and the ports are where it showed (OpenSSH needed Automake, #163).
+      # The whole of `ob --container test` runs every night instead
+      # (container.yml). A pull request runs this job only when it changes
       # that toolchain or what builds with it; main runs it on every merge.
       - name: Decide whether the container needs testing
         id: scope
@@ -529,9 +533,18 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         run: ./ob --container doctor
 
-      - name: ./ob --container test
+      # One case each for UEFI and BIOS, the C ports on mlibc, storage,
+      # TLS on ring, and the git, curl and OpenSSH ports: about 3 minutes.
+      - name: ./ob --container test boot (smoke cases)
         if: steps.scope.outputs.run == 'true'
-        run: ./ob --container test
+        run: >-
+          ./ob --container test boot
+          --case uefi-usb --case bios-cdrom --case posix --case storage
+          --case tls --case git-https --case ssh
+
+      - name: ./ob --container image
+        if: steps.scope.outputs.run == 'true'
+        run: ./ob --container image
 
       - name: Save the built ports
         if: github.event_name == 'push' && success()
