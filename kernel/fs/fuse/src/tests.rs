@@ -415,6 +415,22 @@ fn files_are_made_written_read_listed_and_removed() {
 }
 
 #[test]
+fn a_listed_name_that_is_a_path_fails_the_listing() {
+    let (fs, mem, server) = mounted(31, 4096);
+    fs.root().create("plain", Kind::File, RW).map(drop).unwrap();
+    assert_eq!(names(&fs.root()), [("plain".to_string(), Kind::File)]);
+    // The program lists a name that would lead a walker out of the mount.
+    {
+        let mut m = mem.lock().unwrap();
+        let id = m.nodes[&abi::ROOT].children[b"plain".as_slice()];
+        m.nodes.get_mut(&abi::ROOT).unwrap().children.insert(b"../out".to_vec(), id);
+    }
+    assert_eq!(fs.root().list(0, &mut |_, _, _| true).err(), Some(Error::Io));
+    drop(fs);
+    server.join().unwrap();
+}
+
+#[test]
 fn writes_are_split_as_init_says() {
     // A program of 7.19, as fuser is by default: no pages in its answer,
     // so 32 pages a request at most, and its own 16 KiB.

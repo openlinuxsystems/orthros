@@ -586,6 +586,9 @@ pub struct DirEntry<'a> {
 /// The entries of `READDIR`'s answer, each padded to 8 bytes.
 pub struct DirEntries<'a>(pub Reader<'a>);
 
+/// The longest name a listing takes, as Linux's `FUSE_NAME_MAX`.
+pub const NAME_MAX: usize = 1024;
+
 impl<'a> Iterator for DirEntries<'a> {
     type Item = Result<DirEntry<'a>>;
 
@@ -599,6 +602,11 @@ impl<'a> Iterator for DirEntries<'a> {
             let namelen = self.0.u32()? as usize;
             let entry_type = self.0.u32()?;
             let name = self.0.take(namelen)?;
+            // A name that is not one, as Linux refuses it: a path, which
+            // a program walking the listing would follow out of the mount.
+            if name.len() > NAME_MAX || name.contains(&b'/') || name.contains(&0) {
+                return Err(Error::Io);
+            }
             let pad = (24 + namelen).next_multiple_of(8) - (24 + namelen);
             // The last entry may stop short of its padding.
             let pad = pad.min(self.0.rest().len());
