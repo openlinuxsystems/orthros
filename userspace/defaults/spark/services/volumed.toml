@@ -17,7 +17,8 @@ order = 40
 restart = "always"
 
 # What it holds beyond what every service reads (service.toml(5)): the
-# disks, and /volumes, where it mounts them.
+# disks, /system/live/disk, where it keeps the links of /devices/disk,
+# and /volumes, where it mounts them.
 [permissions]
-files.read-write = ["/devices"]
+files.read-write = ["/devices", "/system/live/disk"]
 files.mount = ["/volumes"]

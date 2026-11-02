@@ -26,6 +26,9 @@
 //! signs people in through it, and `elevate`, and `sudo` in front of it,
 //! run a command as an administrator (ADRs 0218, 0250 and 0219); `last`,
 //! `lastb` and `lastlog` show the sign-ins it records (ADR 0254).
+//! `rdisk` partitions disks, `mkfs-fat` and `mkfs-exfat` make FAT and
+//! exFAT filesystems, and `fsck-fat` checks and mends FAT ones, with the
+//! disk engine (ADRs 0300 to 0302).
 //! `bundle` makes, signs, installs and runs bundles, which `bundled`
 //! installs, seals and removes (ADRs 0221 to 0223 and 0225); called by a
 //! name that is no tool's, through a link in a commands folder of
@@ -36,6 +39,7 @@ mod args;
 mod authd;
 mod balance;
 mod blkid;
+mod blockdev;
 mod bundled;
 mod bundles;
 mod column;
@@ -57,6 +61,7 @@ mod iostat;
 mod ip;
 mod keymaps;
 mod last;
+mod links;
 mod log;
 mod logd;
 mod logger;
@@ -69,6 +74,7 @@ mod lsof;
 mod lspci;
 mod lsusb;
 mod memory;
+mod mkfs;
 mod modes;
 mod netd;
 mod netlog;
@@ -82,6 +88,7 @@ mod proc;
 mod prompt;
 mod ps;
 mod quota;
+mod rdisk;
 mod remount;
 mod replace;
 mod resolvectl;
@@ -142,6 +149,9 @@ const TOOLS: &[(&str, Tool)] = &[
     ("eject", eject::main),
     ("elevate", elevate::main),
     ("findmnt", findmnt::main),
+    ("fsck-fat", mkfs::fsck_fat),
+    ("fsck.fat", mkfs::fsck_fat),
+    ("fsck.vfat", mkfs::fsck_fat),
     ("fstrim", fstrim::main),
     ("free", memory::free),
     ("getfacl", facl::getfacl),
@@ -169,6 +179,12 @@ const TOOLS: &[(&str, Tool)] = &[
     ("lsof", lsof::main),
     ("lspci", lspci::main),
     ("lsusb", lsusb::main),
+    ("mkfs", mkfs::mkfs),
+    ("mkfs-exfat", mkfs::mkfs_exfat),
+    ("mkfs-fat", mkfs::mkfs_fat),
+    ("mkfs.exfat", mkfs::mkfs_exfat),
+    ("mkfs.fat", mkfs::mkfs_fat),
+    ("mkfs.vfat", mkfs::mkfs_fat),
     ("mkswap", swap::mkswap),
     ("netd", netd::main),
     ("netlog", netlog::main),
@@ -183,6 +199,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("poweroff", power::poweroff),
     ("ps", ps::main),
     ("quota", quota::main),
+    ("rdisk", rdisk::main),
     ("reboot", power::reboot),
     ("remount", remount::main),
     ("renice", priority::renice),

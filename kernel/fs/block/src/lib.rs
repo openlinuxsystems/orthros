@@ -262,6 +262,13 @@ pub trait BlockDevice: Send + Sync {
     fn stats(&self) -> Option<Stats> {
         None
     }
+
+    /// Ends the device: a partition that left its disk's table when the
+    /// table was read again (ADR 0301). Its requests fail with
+    /// [`Error::Io`] from then on, as a disk's do once it is unplugged, so
+    /// that what still has it open cannot write where another partition
+    /// may be now. The default, a disk's, does nothing.
+    fn retire(&self) {}
 }
 
 /// What a disk has done ([`BlockDevice::stats`]): for each kind of
@@ -435,6 +442,8 @@ pub struct Slice {
     sectors: u64,
     /// The sectors of the device's logical blocks.
     unit: u64,
+    /// Whether it left its disk's table ([`BlockDevice::retire`]).
+    retired: core::sync::atomic::AtomicBool,
 }
 
 impl Slice {
@@ -450,7 +459,17 @@ impl Slice {
             first,
             sectors,
             unit,
+            retired: core::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// [`Error::Io`] once it is retired.
+    fn live(&self) -> Result<(), Error> {
+        if self.retired.load(core::sync::atomic::Ordering::Acquire) {
+            Err(Error::Io)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -460,28 +479,33 @@ impl BlockDevice for Slice {
     }
 
     fn read(&self, sector: u64, segments: &mut [SegmentMut<'_>]) -> Result<(), Error> {
+        self.live()?;
         let lengths = segments.iter().map(|s| (s.offset, s.len));
         check(self.sectors, self.unit, usize::MAX, sector, lengths)?;
         self.device.read(self.first + sector, segments)
     }
 
     fn write(&self, sector: u64, segments: &[Segment<'_>]) -> Result<(), Error> {
+        self.live()?;
         let lengths = segments.iter().map(|s| (s.offset, s.len));
         check(self.sectors, self.unit, usize::MAX, sector, lengths)?;
         self.device.write(self.first + sector, segments)
     }
 
     fn flush(&self) -> Result<(), Error> {
+        self.live()?;
         self.device.flush()
     }
 
     fn write_through(&self, sector: u64, segments: &[Segment<'_>]) -> Result<(), Error> {
+        self.live()?;
         let lengths = segments.iter().map(|s| (s.offset, s.len));
         check(self.sectors, self.unit, usize::MAX, sector, lengths)?;
         self.device.write_through(self.first + sector, segments)
     }
 
     fn write_all(&self, writes: &[Write<'_>]) -> Result<(), Error> {
+        self.live()?;
         let mut moved = mem::vec();
         moved.try_reserve(writes.len()).map_err(|_| Error::NoMemory)?;
         for write in writes {
@@ -495,22 +519,30 @@ impl BlockDevice for Slice {
     }
 
     fn read_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
+        self.live()?;
         check_frames(self.sectors, self.unit, sector, frames)?;
         self.device.read_frames(self.first + sector, frames)
     }
 
     fn write_frames(&self, sector: u64, frames: &[(u64, u32)]) -> Result<(), Error> {
+        self.live()?;
         check_frames(self.sectors, self.unit, sector, frames)?;
         self.device.write_frames(self.first + sector, frames)
     }
 
     fn discard(&self, sector: u64, count: u64) -> Result<(), Error> {
+        self.live()?;
         check_discard(self.sectors, self.unit, sector, count)?;
         self.device.discard(self.first + sector, count)
     }
 
     fn health(&self, page: &mut Page) -> Result<Health, Error> {
+        self.live()?;
         self.device.health(page)
+    }
+
+    fn retire(&self) {
+        self.retired.store(true, core::sync::atomic::Ordering::Release);
     }
 }
 

@@ -798,6 +798,42 @@ fn free_disk(
     Ok(name)
 }
 
+/// What uses `device`, as radix-block(2)'s GET_IN_USE has it: the
+/// IN_USE flags of a mount from it, its swap area on, a Btrfs mounted
+/// from another of its disks, and a BitLocker volume of it unlocked; 0 if
+/// nothing does. For rdisk(8), and for re-reading a partition table
+/// (ADR 0301), which leaves alone what is in use.
+pub fn uses(device: &radix_block::DeviceRef) -> u32 {
+    use radix_abi::block as request;
+    let mut uses = 0;
+    let name = disk::name_of(device);
+    let mut mounted = false;
+    if let (Some(name), Some(vfs)) = (&name, vfs()) {
+        vfs.mounts(|mount| mounted |= mount.source() == name.as_str());
+    }
+    if mounted {
+        uses |= request::IN_USE_MOUNTED;
+    }
+    if radix_block::swap::is_on(&**device) {
+        uses |= request::IN_USE_SWAP;
+    }
+    // Dropped once the lock is let go: the last reference unmounts.
+    let mut held = mem::vec();
+    let mut btrfs = false;
+    for fs in BTRFS.lock().iter().flatten().filter_map(|m| m.fs.upgrade()) {
+        btrfs |= fs.has_disk(device);
+        let _ = mem::push(&mut held, fs);
+    }
+    drop(held);
+    if btrfs && !mounted {
+        uses |= request::IN_USE_BTRFS;
+    }
+    if name.as_ref().is_some_and(|name| disk::is_unlocked(name.as_str())) {
+        uses |= request::IN_USE_UNLOCKED;
+    }
+    uses
+}
+
 /// Warns when the Btrfs `fs`, mounted from `name`, mounted with disks
 /// missing, or with disks that missed changes: in a frame of its own, off
 /// the mount's deep reads.

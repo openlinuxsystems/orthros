@@ -64,8 +64,8 @@ _target/userspace/_).
 *doctor*
 	Check every host tool the build needs: rustup, the pinned toolchain
 	with its sources and AArch64 target, QEMU, OVMF, GRUB for BIOS and
-	UEFI, xorriso, mtools, dosfstools, exfatprogs, The Sleuth Kit,
-	btrfs-progs, e2fsprogs, the tools that build
+	UEFI, xorriso, mtools, dosfstools, exfatprogs, gdisk, fdisk, The
+	Sleuth Kit, btrfs-progs, e2fsprogs, the tools that build
 	the ports (Clang 20 or later with compiler-rt's builtins, LLD, LLVM's
 	tools, Meson 1.3 or later, Ninja, *localedef*, git, curl and patch,
 	the last two of which the kernel's patched crates need too), scdoc,

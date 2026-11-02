@@ -354,6 +354,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "disk"
+version = "0.11.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1210,6 +1218,7 @@ version = "0.11.0"
 dependencies = [
  "accounts",
  "blake2",
+ "disk",
  "ed25519-compact",
  "keymap",
  "libc",

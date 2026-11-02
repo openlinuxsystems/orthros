@@ -253,6 +253,45 @@ much is there; the disk itself cannot be written or mounted then.
 Dukovo does not turn swap on at boot yet: the installer's swap partition
 (Phase 14) brings that.
 
+## Partitioning and formatting disks
+
+`rdisk` partitions a disk, GPT or MBR, with fdisk's commands: `p`
+prints the table, `n` adds a partition, `t` sets its type (`efi`,
+`swap`, `linux`, `dukovo-root`, `windows-data` and the rest `l` lists),
+`d` deletes one, and nothing is written until `w`. A disk with no table
+starts with a GPT. `rdisk -l` lists every disk's table, and `rdisk
+--script layout.json /devices/vdb` applies a layout file
+(rdisk-layout(5)), with `--dry-run` to see what it would write first:
+
+```
+# rdisk /devices/vdb
+Welcome to rdisk. Nothing is written to /devices/vdb until you write it with w.
+/devices/vdb has no partition table; rdisk starts a new GPT (o starts an MBR instead).
+
+Command (m for help): n
+Partition number (1-128, default 1):
+First sector (34-209715166, default 2048):
+Last sector, +/-sectors or +/-size{K,M,G,T,P} (2048-209715166, default 209715166): +512M
+Partition 1 is added: 'Linux filesystem', 512 MiB.
+Command (m for help): t
+Selected partition 1
+Partition type or alias (l lists them): efi
+Partition 1's type is now 'EFI System' (was 'Linux filesystem').
+Command (m for help): w
+The partition table is written.
+The kernel has read it; its partitions are in /devices.
+```
+
+rdisk refuses to change a partition that is mounted or swap that is on,
+or a disk in use as a whole; it adds partitions beside mounted ones,
+and the new ones appear in `/devices` at once. Then `mkfs -t fat`,
+`mkfs.fat` or `mkfs-fat` makes a FAT filesystem (FAT32 for an EFI
+system partition, `-F 32`), `mkfs.exfat` an exFAT one for a stick, and
+`mkswap` a swap area; `fsck.fat` checks a FAT volume and `fsck.fat -a`
+mends it. Each disk and partition is also named by what it holds, as
+on Linux: `/devices/disk/by-label/EFI`, `/devices/disk/by-uuid/…`,
+`by-partlabel` and `by-partuuid` (and `/dev/disk/…`, the same).
+
 ## Trying it in QEMU
 
 Make a FAT disk image with a file on it, on Linux Mint or Ubuntu:

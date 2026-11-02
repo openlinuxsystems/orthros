@@ -57,6 +57,33 @@ const DISCARD: u32 = 0x1277;
 /// (BLKFLSBUF). Needs the write right.
 const FLUSH: u32 = 0x1261;
 
+/// Reads the disk's partition table again, after rdisk(8) or another
+/// partitioner wrote it (Linux's BLKRRPART, ADR 0301): each partition the
+/// table has where it was, of the size it was, stays as it is, open and
+/// mounted; one it no longer has leaves `/devices` and `/kernel/block`,
+/// and what has it open has its requests fail with io from then on, as
+/// with a disk unplugged; one new to it comes. Needs the write right;
+/// fails with invalid_argument on a partition, in_use if a partition that
+/// would go or change is in use (GET_IN_USE), or the disk itself is, and
+/// changes nothing then, and corrupt if both copies of a GPT are damaged.
+const REREAD_PARTITIONS: u32 = 0x125f;
+
+/// What uses the device, written as a u32 of the IN_USE flags, 0 for
+/// nothing: Dukovo's own request, so that rdisk(8) and the mkfs tools can
+/// refuse a disk or partition in use before they write to it. A disk's
+/// own flags are its own: those of its partitions are asked of each.
+const GET_IN_USE: u32 = 0x80045205;
+/// GET_IN_USE's flag for a device a filesystem is mounted from.
+const IN_USE_MOUNTED: u32 = 1;
+/// GET_IN_USE's flag for a device whose swap area is on.
+const IN_USE_SWAP: u32 = 2;
+/// GET_IN_USE's flag for a disk of a Btrfs mounted from another of its
+/// disks.
+const IN_USE_BTRFS: u32 = 4;
+/// GET_IN_USE's flag for a device whose BitLocker volume is unlocked
+/// (UNLOCK).
+const IN_USE_UNLOCKED: u32 = 8;
+
 /// What the disk says of its health (diskhealth(8), ADR 0157): Dukovo's
 /// own request, as Linux leaves it to commands passed through raw. It
 /// writes HEALTH_SIZE bytes: a u32 kind, HEALTH_ATA or HEALTH_NVME; a u32

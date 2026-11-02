@@ -9,6 +9,10 @@
 //! Spark mounts the disks there at boot, each at `/volumes/<name>`;
 //! volumed takes those it finds at its start as done, and looks at
 //! `/kernel/block` every second for disks and partitions that come or go.
+//! A partition that comes on a disk that was there already was made by
+//! partitioning it (rdisk(8)), not plugged in, and is left unmounted for
+//! whoever made it. As disks come and go, volumed keeps the links of
+//! `/devices/disk` (ADR 0303).
 
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
@@ -22,11 +26,11 @@ use radix_abi::errors::{File as FileError, Kernel};
 use radix_abi::{Status, startup};
 
 use crate::args::{Arg, Args};
-use crate::df;
 use crate::probe::{self, BLOCKS};
 use crate::proc::{self, Mount};
 use crate::sys::{self, SYS};
 use crate::util::{self, Fail};
+use crate::{df, links};
 
 /// How often `/kernel/block` is looked at.
 const PERIOD: Duration = Duration::from_secs(1);
@@ -236,10 +240,20 @@ fn unmount_gone(gone: &BTreeSet<String>) -> Vec<String> {
     said
 }
 
+/// Whether `name`, which just came, is a partition of a disk that was
+/// there before, in `known`: one made by partitioning the disk again.
+fn repartitioned(name: &str, known: &BTreeSet<String>) -> bool {
+    let disk = probe::disk_of(name);
+    disk != name && known.contains(disk)
+}
+
 /// Watches `/kernel/block` for good.
 fn watch() -> Result<i32, Fail> {
     let mut known = present();
     let mut out = io::stdout().lock();
+    if let Err(err) = links::refresh() {
+        writeln!(out, "cannot make the links of /devices/disk: {}", util::strip_os_error(&err))?;
+    }
     writeln!(out, "watching for volumes; {} disks and partitions now", known.len())?;
     loop {
         std::thread::sleep(PERIOD);
@@ -249,7 +263,18 @@ fn watch() -> Result<i32, Fail> {
             writeln!(out, "{line}")?;
         }
         for name in now.difference(&known).filter(|name| is_volume(name, &now)) {
+            if repartitioned(name, &known) {
+                let disk = probe::disk_of(name);
+                writeln!(
+                    out,
+                    "{name} is new on {disk}, which was partitioned again; left unmounted"
+                )?;
+                continue;
+            }
             writeln!(out, "{}", mount(name))?;
+        }
+        if now != known {
+            links::refresh_quietly();
         }
         known = now;
     }
@@ -289,5 +314,14 @@ mod tests {
         assert_eq!(place_for(None, "sdb1", free), "sdb1");
         assert_eq!(place_for(Some(".."), "sdb1", free), "sdb1");
         assert_eq!(place_for(Some("DUKOVO"), "sdc", |at| at == "DUKOVO"), "DUKOVO-sdc");
+    }
+
+    #[test]
+    fn partitions_new_on_a_disk_there_before_are_repartitioned() {
+        let known: BTreeSet<String> = ["vda", "vda1", "nvme0n1"].map(String::from).into();
+        assert!(repartitioned("vda2", &known));
+        assert!(repartitioned("nvme0n1p1", &known));
+        assert!(!repartitioned("sdb1", &known));
+        assert!(!repartitioned("sdb", &known));
     }
 }

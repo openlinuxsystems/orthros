@@ -297,6 +297,41 @@ fn requirements() -> Vec<Requirement> {
             fallback: None,
         },
         Requirement {
+            name: "gdisk",
+            purpose: "checks the GPTs rdisk writes, in the disk tests and the rdisk boot test",
+            // `sgdisk` in /usr/sbin, as dosfstools is.
+            found: |_| {
+                ["/usr/sbin/sgdisk", "/sbin/sgdisk"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|path| path.exists())
+                    .or_else(|| process::find_program("sgdisk"))
+                    .map(|path| path.display().to_string())
+            },
+            packages: Packages { apt: Some("gdisk"), dnf: Some("gdisk"), pacman: Some("gptfdisk") },
+            fallback: None,
+        },
+        Requirement {
+            name: "fdisk",
+            purpose: "reads the tables rdisk writes, and writes tables it reads, in the disk tests",
+            // `sfdisk` in /sbin; Debian and Ubuntu have it apart from the
+            // rest of util-linux.
+            found: |_| {
+                ["/usr/sbin/sfdisk", "/sbin/sfdisk"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|path| path.exists())
+                    .or_else(|| process::find_program("sfdisk"))
+                    .map(|path| path.display().to_string())
+            },
+            packages: Packages {
+                apt: Some("fdisk"),
+                dnf: Some("util-linux"),
+                pacman: Some("util-linux"),
+            },
+            fallback: None,
+        },
+        Requirement {
             name: "btrfs-progs",
             purpose: "makes the image's Dukovo root and the Btrfs filesystems of the Btrfs tests",
             // In /usr/sbin too; `ob test` and `ob image` fetch a newer

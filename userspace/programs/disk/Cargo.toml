@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "disk"
+description = "Dukovo's disk tools' engine (ADR 0300): GPT and MBR partition tables, layout files, and the FAT and exFAT formats, for rdisk(8), mkfs-fat(8), fsck-fat(8) and mkfs-exfat(8) on Dukovo and for ./ob image on Linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Layout files (rdisk-layout(5)) are JSON (both MIT OR Apache-2.0).
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.140"
+
+[lints]
+workspace = true

@@ -10,7 +10,7 @@
 
 [workspace]
 resolver = "3"
-members = ["accounts", "consoled", "git-https-test", "keymap", "manifest", "netproto", "netservices-test", "nukesh", "std-test", "systools", "tls-test"]
+members = ["accounts", "consoled", "disk", "git-https-test", "keymap", "manifest", "netproto", "netservices-test", "nukesh", "std-test", "systools", "tls-test"]
 
 [workspace.package]
 # Keep in step with the root Cargo.toml (a unit test of ob checks it).
