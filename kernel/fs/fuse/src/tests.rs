@@ -20,6 +20,8 @@ thread_local! {
     /// What the next waits of this thread end with once the flag is set,
     /// as a signal or a stop would.
     static CUT: Cell<Option<(Wake, &'static AtomicBool)>> = const { Cell::new(None) };
+    /// A flag set once a wait of this thread has ended so.
+    static CUT_SEEN: Cell<Option<&'static AtomicBool>> = const { Cell::new(None) };
 }
 
 fn wait(_key: usize, ready: &dyn Fn() -> bool, signals: bool) -> Wake {
@@ -31,6 +33,9 @@ fn wait(_key: usize, ready: &dyn Fn() -> bool, signals: bool) -> Wake {
             && flag.load(Ordering::Acquire)
             && (how == Wake::Stop || signals)
         {
+            if let Some(seen) = CUT_SEEN.with(Cell::get) {
+                seen.store(true, Ordering::Release);
+            }
             return how;
         }
         thread::yield_now();
@@ -455,53 +460,99 @@ fn a_lost_program_fails_the_calls() {
     server.join().unwrap();
 }
 
-#[test]
-fn a_signal_sends_interrupt_once_the_request_is_read() {
+/// Reads the next request, waiting for it: its header.
+fn next(conn: &Connection, buf: &mut [u8]) -> (InHeader, usize) {
+    loop {
+        match conn.read(&mut SliceMut(buf), true) {
+            Ok(n) => break (InHeader::read(&mut Reader::new(&buf[..n])).unwrap(), n),
+            Err(DeviceError::WouldBlock) => thread::yield_now(),
+            Err(err) => panic!("{err:?}"),
+        }
+    }
+}
+
+/// A connection mounted, its `INIT` answered and nothing more read.
+fn initialized() -> (KArc<Connection>, KArc<FuseFs>, Vec<u8>) {
     setup();
-    static GATE: AtomicBool = AtomicBool::new(true);
     let conn = Connection::new().unwrap();
     let fs = FuseFs::mount(&conn, false).unwrap();
-    // INIT answered, then nothing read.
     let mut buf = vec![0u8; crate::max_request()];
-    let n = conn.read(&mut SliceMut(&mut buf), true).unwrap();
-    let h = InHeader::read(&mut Reader::new(&buf[..n])).unwrap();
-    let mut mem = Mem::new(31, 4096);
-    let answer = mem.answer(&h, &buf[abi::IN_HEADER..n]).unwrap();
+    let (h, n) = next(&conn, &mut buf);
+    let answer = Mem::new(31, 4096).answer(&h, &buf[abi::IN_HEADER..n]).unwrap();
     reply(&conn, h.unique, answer);
-    // A call with a signal for its thread: it waits on.
+    (conn, fs, buf)
+}
+
+/// Looks `name` up in a thread whose waits a signal ends once `gate` is
+/// set, which sets `seen` when one does.
+fn signalled_lookup(
+    fs: &KArc<FuseFs>,
+    name: &'static str,
+    gate: &'static AtomicBool,
+    seen: Option<&'static AtomicBool>,
+) -> thread::JoinHandle<Option<Error>> {
     let root = fs.root();
-    let asker = thread::spawn(move || {
-        CUT.with(|c| c.set(Some((Wake::Signal, &GATE))));
-        root.lookup("x").err()
-    });
-    // Its request, then INTERRUPT for it, which the program answers by
-    // stopping the call.
-    let n = loop {
-        match conn.read(&mut SliceMut(&mut buf), true) {
-            Ok(n) => break n,
-            Err(DeviceError::WouldBlock) => thread::yield_now(),
-            Err(err) => panic!("{err:?}"),
-        }
-    };
-    let call = InHeader::read(&mut Reader::new(&buf[..n])).unwrap();
+    thread::spawn(move || {
+        CUT.with(|c| c.set(Some((Wake::Signal, gate))));
+        CUT_SEEN.with(|c| c.set(seen));
+        root.lookup(name).err()
+    })
+}
+
+#[test]
+fn a_signal_sends_interrupt_once_the_request_is_read() {
+    static GATE: AtomicBool = AtomicBool::new(true);
+    let (conn, fs, mut buf) = initialized();
+    // A call with a signal for its thread: it waits on.
+    let asker = signalled_lookup(&fs, "x", &GATE, None);
+    // Its request, then INTERRUPT for it, numbered as it with the lowest
+    // bit set, which the program answers by stopping the call.
+    let (call, _) = next(&conn, &mut buf);
     assert_eq!(call.opcode, op::LOOKUP);
-    let n = loop {
-        match conn.read(&mut SliceMut(&mut buf), true) {
-            Ok(n) => break n,
-            Err(DeviceError::WouldBlock) => thread::yield_now(),
-            Err(err) => panic!("{err:?}"),
-        }
-    };
-    let mut r = Reader::new(&buf[..n]);
-    let interrupt = InHeader::read(&mut r).unwrap();
-    assert_eq!(interrupt.opcode, op::INTERRUPT);
-    assert_eq!(r.u64().unwrap(), call.unique);
+    assert_eq!(call.unique & 1, 0);
+    let (interrupt, n) = next(&conn, &mut buf);
+    assert_eq!((interrupt.opcode, interrupt.unique), (op::INTERRUPT, call.unique | 1));
+    assert_eq!((interrupt.uid, interrupt.gid, interrupt.pid), (0, 0, 0));
+    assert_eq!(Reader::new(&buf[abi::IN_HEADER..n]).u64().unwrap(), call.unique);
     assert!(!asker.is_finished());
     reply(&conn, call.unique, Err(errno::EINTR));
     assert_eq!(asker.join().unwrap(), Some(Error::Interrupted));
     assert_eq!(conn.read(&mut SliceMut(&mut buf), true), Err(DeviceError::WouldBlock));
     drop(fs);
     assert_eq!(conn.read(&mut SliceMut(&mut buf), true), Err(DeviceError::NoDevice));
+}
+
+#[test]
+fn interrupt_is_sent_again_or_no_more_as_the_program_answers() {
+    static GATE: AtomicBool = AtomicBool::new(true);
+    static SEEN: AtomicBool = AtomicBool::new(false);
+    let (conn, fs, mut buf) = initialized();
+    let first = signalled_lookup(&fs, "x", &GATE, None);
+    let (call, _) = next(&conn, &mut buf);
+    let (interrupt, _) = next(&conn, &mut buf);
+    assert_eq!(interrupt.unique, call.unique | 1);
+    // EAGAIN: the program does not have the request yet; sent again.
+    reply(&conn, interrupt.unique, Err(errno::EAGAIN));
+    let (again, _) = next(&conn, &mut buf);
+    assert_eq!((again.opcode, again.unique), (op::INTERRUPT, call.unique | 1));
+    // ENOSYS: it cannot stop requests; none is sent again.
+    reply(&conn, again.unique, Err(errno::ENOSYS));
+    reply(&conn, call.unique, Err(errno::ENOENT));
+    assert_eq!(first.join().unwrap(), Some(Error::NotFound));
+    // An answer to INTERRUPT for a call answered names nothing.
+    let mut w = Writer::with_capacity(abi::OUT_HEADER).unwrap();
+    OutHeader { len: abi::OUT_HEADER as u32, error: -errno::ENOSYS, unique: call.unique | 1 }
+        .write(&mut w)
+        .unwrap();
+    assert_eq!(conn.write(&Slice(&w.0)), Err(DeviceError::NotFound));
+    let second = signalled_lookup(&fs, "y", &GATE, Some(&SEEN));
+    let (call, _) = next(&conn, &mut buf);
+    while !SEEN.load(Ordering::Acquire) {
+        thread::yield_now();
+    }
+    reply(&conn, call.unique, Err(errno::ENOENT));
+    assert_eq!(second.join().unwrap(), Some(Error::NotFound));
+    assert_eq!(conn.read(&mut SliceMut(&mut buf), true), Err(DeviceError::WouldBlock));
 }
 
 #[test]

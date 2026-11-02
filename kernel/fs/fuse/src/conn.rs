@@ -17,7 +17,12 @@
 //! A signal that comes while a call waits sends `INTERRUPT` for its
 //! request, at once if the program has read it, or else as soon as it
 //! does, and the call waits on for the answer, which the program may make
-//! EINTR: only then does the call fail as interrupted. A thread that is
+//! EINTR: only then does the call fail as interrupted. Requests' numbers
+//! step by two, and an `INTERRUPT`'s is its call's with the lowest bit
+//! set, so that the program's answer to it is told from the call's: it
+//! answers ENOSYS if it cannot stop requests, and is sent no more, or
+//! EAGAIN if it does not have the request yet, and is sent it again.
+//! A thread that is
 //! being stopped never waits for a program (a process that is killed, or
 //! that a signal ends): its request is taken back if the program has not
 //! read it, and abandoned if it has, its answer thrown away when it
@@ -59,6 +64,10 @@ const MAX_REQUEST: usize = REQUEST_ROOM + MAX_DATA as usize;
 /// The longest answer taken: a read's data, a symbolic link's target or
 /// an extended attribute's value, and the header.
 const MAX_ANSWER: usize = abi::OUT_HEADER + MAX_DATA as usize + 4096;
+
+/// The bit an `INTERRUPT`'s number has set, the rest being its call's,
+/// as on Linux: the numbers of other requests step by two.
+const INTERRUPT_BIT: u64 = 1;
 
 /// What answering an operation's request makes of the answer.
 enum Answer {
@@ -125,7 +134,7 @@ struct State {
     queue: KVec<Queued>,
     /// The requests read, waiting for answers.
     sent: KVec<Sent>,
-    /// The next request's number.
+    /// The next request's number: even, as [`INTERRUPT_BIT`] needs.
     next_unique: u64,
 }
 
@@ -192,6 +201,9 @@ pub struct Connection {
     init: AtomicU8,
     /// Whether it has been mounted: once only.
     mounted: AtomicBool,
+    /// Whether the program answered `INTERRUPT` with ENOSYS: it cannot
+    /// stop a request, and is sent no more.
+    no_interrupt: AtomicBool,
     /// The protocol's minor version agreed.
     minor: AtomicU32,
     /// The most data one `WRITE` or `READ` carries.
@@ -202,11 +214,12 @@ impl Connection {
     /// A connection, which nothing has mounted yet.
     pub fn new() -> Result<KArc<Connection>> {
         Ok(mem::arc(Connection {
-            state: Mutex::new(State { queue: mem::vec(), sent: mem::vec(), next_unique: 1 }),
+            state: Mutex::new(State { queue: mem::vec(), sent: mem::vec(), next_unique: 2 }),
             queued: AtomicUsize::new(0),
             ended: AtomicU8::new(Ended::No as u8),
             init: AtomicU8::new(Init::Waiting as u8),
             mounted: AtomicBool::new(false),
+            no_interrupt: AtomicBool::new(false),
             minor: AtomicU32::new(abi::MINOR),
             max_data: AtomicU32::new(4096),
         })?)
@@ -262,7 +275,7 @@ impl Connection {
         // Read-ahead: none is made, but a program may want a number.
         w.u32(128 * 1024)?
             .u32(abi::init::BIG_WRITES | abi::init::DONT_MASK | abi::init::MAX_PAGES)?;
-        self.queue(w.0, Answer::Init, false).map(drop)
+        self.queue(w.0, Answer::Init, None).map(drop)
     }
 
     /// The mount went: the program's reads now fail with no device, and
@@ -321,21 +334,28 @@ impl Connection {
         (hooks().wake)(self.key());
     }
 
-    /// Queues a request, before the others if `urgent` (`INTERRUPT`, as
-    /// Linux reads them first): returns the number it was given, or fails
-    /// as not connected once the connection has ended.
-    fn queue(&self, mut bytes: KVec<u8>, answer: Answer, urgent: bool) -> Result<u64> {
+    /// Queues a request: returns the number it was given, or fails as not
+    /// connected once the connection has ended. `INTERRUPT` for the
+    /// request numbered `interrupting` goes before the others, as Linux
+    /// reads them first, numbered as that request with [`INTERRUPT_BIT`].
+    fn queue(&self, mut bytes: KVec<u8>, answer: Answer, interrupting: Option<u64>) -> Result<u64> {
         let unique = {
             let mut state = self.state.lock();
             if self.gone() {
                 return Err(Error::NotConnected);
             }
             state.queue.try_reserve(1).map_err(|_| Error::NoMemory)?;
-            let unique = state.next_unique;
-            state.next_unique += 1;
+            let unique = match interrupting {
+                Some(call) => call | INTERRUPT_BIT,
+                None => {
+                    let unique = state.next_unique;
+                    state.next_unique += 2;
+                    unique
+                }
+            };
             bytes[8..16].copy_from_slice(&unique.to_le_bytes());
             let _ = state.queue.push_within_capacity(Queued { unique, bytes, answer });
-            if urgent {
+            if interrupting.is_some() {
                 state.queue.rotate_right(1);
             }
             self.queued.store(state.queue.len(), Ordering::Release);
@@ -385,7 +405,7 @@ impl Connection {
             abandoned: AtomicBool::new(false),
             answer: Mutex::new(None),
         })?;
-        let unique = self.queue(bytes, Answer::To(slot.clone()), false)?;
+        let unique = self.queue(bytes, Answer::To(slot.clone()), None)?;
         let done = &slot.done;
         let ready = || done.load(Ordering::Acquire);
         let mut signals = true;
@@ -394,9 +414,10 @@ impl Connection {
                 Wake::Ready => break,
                 Wake::Signal => {
                     // Ask the program to stop, now if it has the request
-                    // or once it reads it, and wait on for its answer,
-                    // unless the thread is stopped.
-                    if self.interrupt_wanted(&slot) {
+                    // or once it reads it, unless it said it cannot, and
+                    // wait on for its answer, unless the thread is
+                    // stopped.
+                    if !self.no_interrupt.load(Ordering::Acquire) && self.interrupt_wanted(&slot) {
                         self.interrupt(unique);
                     }
                     signals = false;
@@ -448,10 +469,33 @@ impl Connection {
 
     /// Asks the program to stop working on request `unique`.
     fn interrupt(&self, unique: u64) {
-        let bytes = request(op::INTERRUPT, 0, Some((0, 0)), &[&unique.to_le_bytes()], None);
-        if let Ok(bytes) = bytes {
-            let _ = self.queue(bytes, Answer::None, true);
+        if let Ok(bytes) = kernel_request(op::INTERRUPT, 0, &[&unique.to_le_bytes()]) {
+            let _ = self.queue(bytes, Answer::None, Some(unique));
         }
+    }
+
+    /// The program answered `INTERRUPT` for request `call` with `error`,
+    /// as Linux takes it: ENOSYS says it cannot stop a request, and none
+    /// is sent again; EAGAIN that it does not have the request yet, and
+    /// it is sent again. The call's own answer is still to come.
+    fn interrupt_answered(
+        &self,
+        call: u64,
+        error: i32,
+        len: usize,
+    ) -> core::result::Result<usize, DeviceError> {
+        if !self.state.lock().sent.iter().any(|s| s.unique == call) {
+            return Err(DeviceError::NotFound);
+        }
+        if len != abi::OUT_HEADER {
+            return Err(DeviceError::Invalid);
+        }
+        match -error {
+            abi::errno::ENOSYS => self.no_interrupt.store(true, Ordering::Release),
+            abi::errno::EAGAIN => self.interrupt(call),
+            _ => {}
+        }
+        Ok(len)
     }
 
     /// An abandoned call's answer came: forgets the node it names, if it
@@ -479,8 +523,8 @@ impl Connection {
 
     /// Sends a request whose answer nobody waits for.
     fn post(&self, opcode: u32, nodeid: u64, parts: &[&[u8]], answer: Answer) -> Result<()> {
-        let bytes = request(opcode, nodeid, Some((0, 0)), parts, None)?;
-        self.queue(bytes, answer, false).map(drop)
+        let bytes = kernel_request(opcode, nodeid, parts)?;
+        self.queue(bytes, answer, None).map(drop)
     }
 
     /// Tells the program that the kernel has let go of `count` of the
@@ -598,6 +642,9 @@ impl Connection {
         if header.error > 0 || header.error < -4095 || header.error != 0 && len != abi::OUT_HEADER {
             return Err(DeviceError::Invalid);
         }
+        if header.unique & INTERRUPT_BIT != 0 {
+            return self.interrupt_answered(header.unique & !INTERRUPT_BIT, header.error, len);
+        }
         let mut body = mem::zeroed(len - abi::OUT_HEADER).map_err(|_| DeviceError::NoMemory)?;
         data.get(abi::OUT_HEADER, &mut body).map_err(|_| DeviceError::BadAddress)?;
         let answer = {
@@ -678,6 +725,15 @@ fn header(
 ) -> Result<()> {
     let len = u32::try_from(abi::IN_HEADER + body).map_err(|_| Error::TooBig)?;
     InHeader { len, opcode, unique: 0, nodeid, uid, gid, pid }.write(w)
+}
+
+/// A request the kernel makes of its own accord (`FORGET`, `RELEASE`,
+/// `INTERRUPT`): as root, and from no process, as Linux sends them.
+fn kernel_request(opcode: u32, nodeid: u64, parts: &[&[u8]]) -> Result<KVec<u8>> {
+    let mut bytes = request(opcode, nodeid, Some((0, 0)), parts, None)?;
+    // The header's process (its bytes 32 to 35).
+    bytes[32..36].fill(0);
+    Ok(bytes)
 }
 
 /// A request: its header, `parts` and `data`'s `len` bytes from `at`.

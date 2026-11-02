@@ -69,7 +69,12 @@ programs and unmounts is one that a decade of programs already expect.
   program has read it and as soon as it does if not, before the requests
   queued, and the call waits on for the answer. The program may answer
   EINTR, and the call fails with EINTR, not run again whatever SA_RESTART
-  says; a call waiting for `INIT` waits through signals. A thread that is
+  says; a call waiting for `INIT` waits through signals. Requests'
+  numbers step by two, and an `INTERRUPT`'s is its call's with the
+  lowest bit set, so that its own answer is told apart: ENOSYS says the
+  program cannot stop requests, and none is sent again (fuser answers
+  so), and EAGAIN that it does not have the request yet, and it is sent
+  again. A thread that is
   being killed never waits: its request is taken back if the program has
   not read it, and abandoned if it has; an answer that names a node the
   kernel never took gets a `FORGET` at once, and a `RELEASE` for a handle
@@ -84,8 +89,8 @@ programs and unmounts is one that a decade of programs already expect.
   connection and the filesystem, with no `unsafe` code, and builds for
   the host, where its tests serve a filesystem from a thread: written
   data split as INIT says, an old program refused, a lost program,
-  `INTERRUPT` for a signalled call and a node forgotten after a killed
-  call.
+  `INTERRUPT` for a signalled call, sent again or no more as the program
+  answers it, and a node forgotten after a killed call.
 - **fuser** 0.16.0 (MIT), from crates.io, is patched for Radix in the
   rust-crates port (ADR 0080): on nix 0.30, which the port has, Radix's
   errnos as Linux's, each answer gathered into one write, and no mount

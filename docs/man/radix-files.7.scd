@@ -196,8 +196,9 @@ changed, kept by tmpfs and Btrfs; FAT and exFAT give *modified*.
 	what the kernel checks, as Linux's *default_permissions*; set-ID bits
 	are never shown (*nosuid*) and device nodes never open (*nodev*).
 	A call waits for the program's answer: a signal sends the program
-	*INTERRUPT* for its request, and the call fails with EINTR if the
-	program answers so; a thread being killed never waits. Once the program's last
+	*INTERRUPT* for its request, unless it answered one with ENOSYS,
+	and the call fails with EINTR if the program answers so; a thread
+	being killed never waits. Once the program's last
 	description goes, every call fails with *not_connected* (ENOTCONN)
 	until the mount is unmounted; once the mount goes, the program's
 	reads fail with *unmounted* (ENODEV). There is no page cache for these files yet:
