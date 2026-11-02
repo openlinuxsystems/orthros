@@ -19,16 +19,16 @@ use crate::{
     PingError, PingMemory, Pinger, Stack, TcpMemory, UdpMemory, parse_cidr,
 };
 
-type Queue = Rc<RefCell<VecDeque<Vec<u8>>>>;
+pub(crate) type Queue = Rc<RefCell<VecDeque<Vec<u8>>>>;
 
 /// One end of the wire: frames sent go into `out`, frames received come
 /// from `inbox`.
-struct End {
-    mac: [u8; 6],
-    inbox: Queue,
+pub(crate) struct End {
+    pub(crate) mac: [u8; 6],
+    pub(crate) inbox: Queue,
     out: Queue,
     /// Every frame this end sent, for the tests to look at.
-    sent: Rc<RefCell<Vec<Vec<u8>>>>,
+    pub(crate) sent: Rc<RefCell<Vec<Vec<u8>>>>,
     flushes: usize,
     /// Whether the stack makes and checks checksums on it.
     checksums: bool,
@@ -87,7 +87,7 @@ fn ping_memory() -> PingMemory {
 }
 
 /// Two stacks on one wire, at 10.0.0.1 and 10.0.0.2, and what each sent.
-fn pair() -> (Stack<End>, Stack<End>) {
+pub(crate) fn pair() -> (Stack<End>, Stack<End>) {
     wire(true)
 }
 
@@ -274,11 +274,11 @@ fn reads_addresses_with_their_prefixes() {
     }
 }
 
-fn tcp_memory() -> TcpMemory {
+pub(crate) fn tcp_memory() -> TcpMemory {
     TcpMemory { receive: leak(0u8, 4096), transmit: leak(0u8, 4096) }
 }
 
-fn udp_memory() -> UdpMemory {
+pub(crate) fn udp_memory() -> UdpMemory {
     UdpMemory {
         receive_meta: leak(udp::PacketMetadata::EMPTY, 4),
         receive: leak(0u8, 2048),
@@ -303,10 +303,10 @@ fn makes_a_tcp_connection_and_gives_its_memory_back() {
     let memory = tcp_memory();
     let lent = tcp_places(&memory);
     let client = a.add_socket(memory.socket()).ok().unwrap();
-    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2).into(), 7), None, 49152).unwrap();
     // Connecting twice is refused while the first goes on.
     assert_eq!(
-        a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49153),
+        a.connect(client, (Ipv4Address::new(10, 0, 0, 2).into(), 7), None, 49153),
         Err(ConnectError::Open)
     );
     let mut now = 0;
@@ -327,7 +327,7 @@ fn makes_a_tcp_connection_and_gives_its_memory_back() {
     assert_eq!(tcp_places(&a.remove_tcp(client).unwrap()), lent);
     assert!(a.remove_tcp(client).is_none());
     assert_eq!(
-        a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152),
+        a.connect(client, (Ipv4Address::new(10, 0, 0, 2).into(), 7), None, 49152),
         Err(ConnectError::NotHere)
     );
 }
@@ -336,7 +336,7 @@ fn makes_a_tcp_connection_and_gives_its_memory_back() {
 fn a_connection_to_a_port_no_one_listens_on_is_reset() {
     let (mut a, mut b) = pair();
     let client = a.add_socket(tcp_memory().socket()).ok().unwrap();
-    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 9), None, 50000).unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2).into(), 9), None, 50000).unwrap();
     let mut now = 0;
     run(&mut a, &mut b, &mut now, 10);
     assert_eq!(a.socket_mut::<tcp::Socket<'static>>(client).unwrap().state(), tcp::State::Closed);
@@ -351,7 +351,7 @@ fn a_quiet_connection_stays_open_past_its_timeout() {
     let server = b.add_socket(tcp_memory().socket()).ok().unwrap();
     b.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(7).unwrap();
     let client = a.add_socket(tcp_memory().socket()).ok().unwrap();
-    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2).into(), 7), None, 49152).unwrap();
     let mut now = 0;
     run(&mut a, &mut b, &mut now, 10);
     for (stack, handle) in [(&mut a, client), (&mut b, server)] {
@@ -405,7 +405,10 @@ fn knows_its_addresses_and_routes() {
     assert!(!a.has_address(Ipv4Address::new(10, 0, 0, 2)));
     assert!(a.routes_to(Ipv4Address::new(10, 0, 0, 200)));
     assert!(!a.routes_to(Ipv4Address::new(192, 0, 2, 1)));
-    assert_eq!(a.source_for(Ipv4Address::new(10, 0, 0, 2)), Some(Ipv4Address::new(10, 0, 0, 1)));
+    assert_eq!(
+        a.source_for(Ipv4Address::new(10, 0, 0, 2).into()),
+        Some(Ipv4Address::new(10, 0, 0, 1).into())
+    );
     a.set_ipv4(
         Ipv4Cidr::new(Ipv4Address::new(10, 0, 0, 1), 24),
         Some(Ipv4Address::new(10, 0, 0, 254)),
@@ -419,7 +422,7 @@ fn knows_its_addresses_and_routes() {
     assert!(a.has_address(Ipv4Address::new(127, 0, 0, 1)) && a.has_address(own.address()));
     assert!(!a.routes_to(Ipv4Address::new(192, 0, 2, 1)));
     assert!(a.reaches(Ipv4Address::new(127, 3, 0, 1)) && a.reaches(own.address()));
-    assert_eq!(a.source_for(own.address()), Some(own.address()));
+    assert_eq!(a.source_for(own.address().into()), Some(own.address().into()));
     assert_eq!(a.ipv4(), Some(Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8)));
 }
 
@@ -597,7 +600,7 @@ fn tcp_and_udp_go_through_the_loopback_link_in_one_poll() {
     let server = lo.add_socket(tcp_memory().socket()).ok().unwrap();
     lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(80).unwrap();
     let client = lo.add_socket(tcp_memory().socket()).ok().unwrap();
-    lo.connect(client, (local, 80), None, 49152).unwrap();
+    lo.connect(client, (local.into(), 80), None, 49152).unwrap();
     assert_eq!(lo.poll_delay(0), Some(0));
     // The SYN, its answer and the last ACK of the handshake, in one call.
     lo.poll(1_000_000);
@@ -633,7 +636,7 @@ fn a_connection_on_the_loopback_link_ends_without_waiting() {
     let server = lo.add_socket(tcp_memory().socket()).ok().unwrap();
     lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(80).unwrap();
     let client = lo.add_socket(tcp_memory().socket()).ok().unwrap();
-    lo.connect(client, (local, 80), None, 49152).unwrap();
+    lo.connect(client, (local.into(), 80), None, 49152).unwrap();
     lo.poll(1_000_000);
     // The client closes first; the server sends its last bytes, which the
     // client's delayed-ACK timer waits to acknowledge, then closes. Its FIN
@@ -662,7 +665,7 @@ fn connected() -> (Stack<Loopback>, SocketHandle, SocketHandle) {
     let server = lo.add_socket(tcp_memory().socket()).ok().unwrap();
     lo.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(80).unwrap();
     let client = lo.add_socket(tcp_memory().socket()).ok().unwrap();
-    lo.connect(client, (local, 80), None, 49152).unwrap();
+    lo.connect(client, (local.into(), 80), None, 49152).unwrap();
     lo.poll(1_000_000);
     for handle in [client, server] {
         let state = lo.socket_mut::<tcp::Socket<'static>>(handle).unwrap().state();
@@ -897,7 +900,7 @@ fn grows_its_socket_slots_and_keeps_its_sockets() {
     let server = b.add_socket(tcp_memory().socket()).ok().unwrap();
     b.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(7).unwrap();
     let client = a.add_socket(tcp_memory().socket()).ok().unwrap();
-    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2).into(), 7), None, 49152).unwrap();
     let mut now = 0;
     run(&mut a, &mut b, &mut now, 10);
     for _ in 1..4 {
@@ -945,7 +948,7 @@ fn a_connection_in_time_wait_gives_its_memory_back_and_lasts() {
     let memory = tcp_memory();
     let lent = tcp_places(&memory);
     let client = a.add_socket(memory.socket()).ok().unwrap();
-    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2).into(), 7), None, 49152).unwrap();
     let mut now = 0;
     run(&mut a, &mut b, &mut now, 10);
     assert!(a.shed_tcp(client).is_none(), "only in TIME-WAIT");
@@ -978,7 +981,7 @@ fn a_new_connection_takes_the_place_of_one_in_time_wait() {
     let first = b.add_socket(timed_tcp_socket()).ok().unwrap();
     b.socket_mut::<tcp::Socket<'static>>(first).unwrap().listen(7).unwrap();
     let client = a.add_socket(timed_tcp_socket()).ok().unwrap();
-    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2).into(), 7), None, 49152).unwrap();
     let mut now = 0;
     run(&mut a, &mut b, &mut now, 10);
     assert_eq!(
@@ -997,7 +1000,7 @@ fn a_new_connection_takes_the_place_of_one_in_time_wait() {
 
     CLOCK_MS.store(200, std::sync::atomic::Ordering::Relaxed);
     let again = a.add_socket(timed_tcp_socket()).ok().unwrap();
-    a.connect(again, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    a.connect(again, (Ipv4Address::new(10, 0, 0, 2).into(), 7), None, 49152).unwrap();
     run(&mut a, &mut b, &mut now, 10);
     assert_eq!(
         a.socket_mut::<tcp::Socket<'static>>(again).unwrap().state(),
@@ -1169,7 +1172,7 @@ fn fuzz(checksums: bool, seed: u64) {
     let server = b.add_socket(timed_tcp_socket()).ok().unwrap();
     b.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(7).unwrap();
     let client = a.add_socket(timed_tcp_socket()).ok().unwrap();
-    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2).into(), 7), None, 49152).unwrap();
     run(&mut a, &mut b, &mut now, 10);
     a.socket_mut::<tcp::Socket<'static>>(client).unwrap().send_slice(b"hello").unwrap();
     b.socket_mut::<tcp::Socket<'static>>(server).unwrap().send_slice(b"world").unwrap();
@@ -1178,13 +1181,13 @@ fn fuzz(checksums: bool, seed: u64) {
     let closing = b.add_socket(timed_tcp_socket()).ok().unwrap();
     b.socket_mut::<tcp::Socket<'static>>(closing).unwrap().listen(8).unwrap();
     let closed = a.add_socket(timed_tcp_socket()).ok().unwrap();
-    a.connect(closed, (Ipv4Address::new(10, 0, 0, 2), 8), None, 49153).unwrap();
+    a.connect(closed, (Ipv4Address::new(10, 0, 0, 2).into(), 8), None, 49153).unwrap();
     run(&mut a, &mut b, &mut now, 10);
     a.socket_mut::<tcp::Socket<'static>>(closed).unwrap().close();
     run(&mut a, &mut b, &mut now, 10);
     b.socket_mut::<tcp::Socket<'static>>(closing).unwrap().close();
     let refused = a.add_socket(timed_tcp_socket()).ok().unwrap();
-    a.connect(refused, (Ipv4Address::new(10, 0, 0, 2), 9), None, 49154).unwrap();
+    a.connect(refused, (Ipv4Address::new(10, 0, 0, 2).into(), 9), None, 49154).unwrap();
     run(&mut a, &mut b, &mut now, 10);
     // A socket that listens through it all.
     let listener = b.add_socket(timed_tcp_socket()).ok().unwrap();
@@ -1250,7 +1253,7 @@ fn fuzz(checksums: bool, seed: u64) {
     let server = b.add_socket(timed_tcp_socket()).ok().unwrap();
     b.socket_mut::<tcp::Socket<'static>>(server).unwrap().listen(10).unwrap();
     let client = a.add_socket(timed_tcp_socket()).ok().unwrap();
-    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 10), None, 50000).unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2).into(), 10), None, 50000).unwrap();
     run(&mut a, &mut b, &mut now, 2_000);
     let socket = a.socket_mut::<tcp::Socket<'static>>(client).unwrap();
     assert_eq!(socket.state(), tcp::State::Established);
@@ -1374,25 +1377,30 @@ fn lists_its_sockets_as_proc_net_does() {
     b.socket_mut::<udp::Socket<'static>>(datagrams).unwrap().bind(53).unwrap();
     let _unbound = b.add_socket(udp_memory().socket()).ok().unwrap();
     let client = a.add_socket(tcp_memory().socket()).ok().unwrap();
-    a.connect(client, (Ipv4Address::new(10, 0, 0, 2), 7), None, 49152).unwrap();
+    a.connect(client, (Ipv4Address::new(10, 0, 0, 2).into(), 7), None, 49152).unwrap();
     let mut now = 0;
     run(&mut a, &mut b, &mut now, 5);
     a.socket_mut::<tcp::Socket<'static>>(client).unwrap().send_slice(b"hi").unwrap();
-    let any = Ipv4Address::UNSPECIFIED;
     let shown = b.sockets().collect::<Vec<_>>();
     assert_eq!(shown.len(), 2, "the unbound socket is not shown");
     // The listening socket took the connection: smoltcp's are one each.
-    assert_eq!(shown[0].local, (Ipv4Address::new(10, 0, 0, 2), 7));
+    assert_eq!(shown[0].local, (Some(Ipv4Address::new(10, 0, 0, 2).into()), 7));
     assert_eq!(
         (shown[0].remote, shown[0].state),
-        ((Ipv4Address::new(10, 0, 0, 1), 49152), tcp::State::Established)
+        (Some((Ipv4Address::new(10, 0, 0, 1).into(), 49152)), tcp::State::Established)
     );
     assert!(shown[0].tcp && !shown[1].tcp);
-    assert_eq!((shown[1].local, shown[1].remote), ((any, 53), (any, 0)));
+    assert_eq!((shown[1].local, shown[1].remote), ((None, 53), None));
+    assert!(!shown[0].is_ipv6());
+    // On any address and of neither version alone, it is IPv6's as well.
+    assert!(shown[1].is_ipv6());
     let mine = a.sockets().next().unwrap();
     assert_eq!(
         (mine.local, mine.remote),
-        ((Ipv4Address::new(10, 0, 0, 1), 49152), (Ipv4Address::new(10, 0, 0, 2), 7))
+        (
+            (Some(Ipv4Address::new(10, 0, 0, 1).into()), 49152),
+            Some((Ipv4Address::new(10, 0, 0, 2).into(), 7))
+        )
     );
     assert_eq!((mine.send_queue, mine.receive_queue), (2, 0));
     // A socket that listens, before any connection.
@@ -1401,6 +1409,6 @@ fn lists_its_sockets_as_proc_net_does() {
     let listening = b.sockets().find(|s| s.local.1 == 8).unwrap();
     assert_eq!(
         (listening.local, listening.remote, listening.state),
-        ((any, 8), (any, 0), tcp::State::Listen)
+        ((None, 8), None, tcp::State::Listen)
     );
 }

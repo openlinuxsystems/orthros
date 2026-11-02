@@ -23,6 +23,12 @@
 //! loopback link passes its bytes straight across, in no packet at all,
 //! when it can ([`Stack::send_across`], ADR 0186).
 //!
+//! An Ethernet interface's IPv6 addresses are its own work, in
+//! [`ipv6`]: its link-local address, those it makes from the prefixes
+//! routers advertise (ADR 0330), and the routes and DNS servers they
+//! advertise; smoltcp answers neighbour solicitations for them, and
+//! sends what they carry.
+//!
 //! [`Pinger`] sends ICMP echo requests and matches their replies, for
 //! the kernel's own checks of a link (`selftest=net`). The stack itself
 //! answers echo requests to its addresses.
@@ -40,17 +46,22 @@
 #![forbid(unsafe_code)]
 
 mod across;
+pub mod ipv6;
 mod loopback;
 #[cfg(kani)]
 mod proofs;
 mod sockets;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests6;
 
 pub use across::{Across, OtherEnd};
 pub use loopback::Loopback;
 pub use smoltcp;
-pub use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv4Cidr};
+pub use smoltcp::wire::{
+    EthernetAddress, IpAddress, IpVersion, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr,
+};
 pub use sockets::{ConnectError, Shown, TcpMemory, UdpMemory};
 
 use core::cell::Cell;
@@ -60,7 +71,7 @@ use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet, Soc
 use smoltcp::phy::{self, Checksum, ChecksumCapabilities, DeviceCapabilities};
 use smoltcp::socket::{AnySocket, Socket, icmp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr};
+use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpCidr};
 
 /// The bytes of the longest Ethernet frame the stack sends or takes:
 /// its header and an IP packet of 1500 bytes, without the frame check
@@ -139,6 +150,10 @@ pub struct Stack<L: Link> {
     transmit: &'static mut [u8],
     /// The default route, which [`Stack::configure`] set.
     gateway: Option<Ipv4Address>,
+    /// Its IPv6 addresses and routers.
+    ipv6: ipv6::Ipv6,
+    /// Whether its addresses changed since [`Stack::take_moved`].
+    moved: bool,
     counted: Counted,
 }
 
@@ -210,6 +225,10 @@ struct Phy<'a, L: Link> {
     receive: &'a mut [u8],
     transmit: &'a mut [u8],
     counted: &'a Counted,
+    /// The interface's IPv6 state, which hears the router advertisements
+    /// and the claims on its addresses that come, at `now`.
+    ipv6: Option<&'a mut ipv6::Ipv6>,
+    now: u64,
 }
 
 impl<'a, L: Link> Phy<'a, L> {
@@ -220,7 +239,7 @@ impl<'a, L: Link> Phy<'a, L> {
         counted: &'a Counted,
     ) -> Phy<'a, L> {
         let in_place = link.loopback().is_some();
-        Phy { link, in_place, receive, transmit, counted }
+        Phy { link, in_place, receive, transmit, counted, ipv6: None, now: 0 }
     }
 }
 
@@ -323,6 +342,12 @@ impl<L: Link> phy::Device for Phy<'_, L> {
         let len = self.link.receive(self.receive)?;
         let len = len.min(self.receive.len());
         counted.received(len);
+        if let Some(ipv6) = self.ipv6.as_deref_mut()
+            && ipv6.enabled()
+            && let Some(heard) = ipv6::hear(&self.receive[..len])
+        {
+            ipv6.heard(heard, self.now);
+        }
         let sending = Sending::Copied { link: self.link, buffer: self.transmit, counted };
         Some((Received::Copied(&self.receive[..len]), sending))
     }
@@ -365,6 +390,7 @@ impl<L: Link> phy::Device for Phy<'_, L> {
         let mut checksum = ChecksumCapabilities::default();
         checksum.ipv4 = both;
         checksum.icmpv4 = both;
+        checksum.icmpv6 = both;
         checksum.udp = both;
         checksum.tcp = both;
         caps.checksum = checksum;
@@ -404,7 +430,18 @@ impl<L: Link> Stack<L> {
         let mut phy = Phy::new(&mut link, &mut *receive, &mut *transmit, &counted);
         let iface = Interface::new(config, &mut phy, instant(now_ns));
         let sockets = SocketSet::new(sockets);
-        Stack { link, iface, sockets, receive, transmit, gateway: None, counted }
+        let ipv6 = ipv6::Ipv6::new(link.mac(), seed.rotate_left(17) ^ 0x9e37_79b9_7f4a_7c15);
+        Stack {
+            link,
+            iface,
+            sockets,
+            receive,
+            transmit,
+            gateway: None,
+            ipv6,
+            moved: false,
+            counted,
+        }
     }
 
     /// Gives the interface `address` (with its prefix) as its only IPv4
@@ -420,14 +457,7 @@ impl<L: Link> Stack<L> {
     /// what they send goes nowhere, as on Linux.
     pub fn configure(&mut self, addresses: &[Ipv4Cidr], gateway: Option<Ipv4Address>) {
         self.gateway = gateway;
-        self.iface.update_ip_addrs(|addrs| {
-            addrs.clear();
-            for &address in addresses {
-                if addrs.push(IpCidr::Ipv4(address)).is_err() {
-                    break;
-                }
-            }
-        });
+        self.set_addresses(Some(addresses));
         let routes = self.iface.routes_mut();
         routes.remove_default_ipv4_route();
         if let Some(gateway) = gateway {
@@ -442,11 +472,102 @@ impl<L: Link> Stack<L> {
         self.ipv4_addresses().next()
     }
 
+    /// Gives smoltcp the interface's addresses: `v4`, or the IPv4 ones it
+    /// has for `None`, then the IPv6 ones that are the interface's, in the
+    /// order it is to choose among them, as many as fit (16).
+    fn set_addresses(&mut self, v4: Option<&[Ipv4Cidr]>) {
+        let mut kept = [Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0); 8];
+        let mut count = 0;
+        if v4.is_none() {
+            for (slot, cidr) in kept.iter_mut().zip(self.ipv4_addresses()) {
+                *slot = cidr;
+                count += 1;
+            }
+        }
+        let v4 = v4.unwrap_or(&kept[..count]);
+        let v6 = self.ipv6.ordered();
+        self.iface.update_ip_addrs(|addrs| {
+            addrs.clear();
+            let v4 = v4.iter().map(|&cidr| IpCidr::Ipv4(cidr));
+            let v6 = v6.iter().flatten().map(|&cidr| IpCidr::Ipv6(cidr));
+            for cidr in v4.chain(v6) {
+                if addrs.push(cidr).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Gives smoltcp the IPv6 addresses and default route the interface
+    /// has now, if they changed.
+    fn sync_ipv6(&mut self) -> bool {
+        if !self.ipv6.take_changed() {
+            return false;
+        }
+        self.moved = true;
+        self.set_addresses(None);
+        let routes = self.iface.routes_mut();
+        routes.remove_default_ipv6_route();
+        if let Some(router) = self.ipv6.router() {
+            let _ = routes.add_default_ipv6_route(router);
+        }
+        true
+    }
+
     /// The interface's IPv4 addresses, with their prefixes, the first
     /// first.
     pub fn ipv4_addresses(&self) -> impl Iterator<Item = Ipv4Cidr> + '_ {
-        // IPv4 is the stack's only protocol (until IPv6, in 12c).
-        self.iface.ip_addrs().iter().map(|&IpCidr::Ipv4(cidr)| cidr)
+        self.iface.ip_addrs().iter().filter_map(|cidr| match *cidr {
+            IpCidr::Ipv4(cidr) => Some(cidr),
+            IpCidr::Ipv6(_) => None,
+        })
+    }
+
+    /// Sets how the interface makes its IPv6 addresses, or turns IPv6 off
+    /// on it for `None`, and gives it `addresses` besides, tested before
+    /// they are its, and `router` as its default route while no router
+    /// advertises one (radix-network(2)'s `configure_ipv6`).
+    pub fn configure_ipv6(
+        &mut self,
+        settings: Option<ipv6::Settings>,
+        addresses: &[Ipv6Cidr],
+        router: Option<Ipv6Address>,
+    ) {
+        self.ipv6.configure(settings, addresses, router);
+        self.sync_ipv6();
+    }
+
+    /// Gives an interface with no neighbours, the loopback one,
+    /// `addresses` as its IPv6 addresses, as they are.
+    pub fn set_ipv6_addresses(&mut self, addresses: &[Ipv6Cidr]) {
+        self.ipv6.assign(addresses);
+        self.sync_ipv6();
+    }
+
+    /// Whether its addresses changed since the last call, which clears
+    /// it: those it makes for itself change as it polls.
+    pub fn take_moved(&mut self) -> bool {
+        core::mem::take(&mut self.moved)
+    }
+
+    /// What happened to its IPv6 since the last call, oldest first.
+    pub fn take_ipv6_event(&mut self) -> Option<ipv6::Event> {
+        self.ipv6.take_event()
+    }
+
+    /// The interface's IPv6 state: its addresses, tested or not, its
+    /// routers and the DNS servers they advertised.
+    pub fn ipv6(&self) -> &ipv6::Ipv6 {
+        &self.ipv6
+    }
+
+    /// The interface's IPv6 addresses that are its own, with their
+    /// prefixes.
+    pub fn ipv6_addresses(&self) -> impl Iterator<Item = Ipv6Cidr> + '_ {
+        self.iface.ip_addrs().iter().filter_map(|cidr| match *cidr {
+            IpCidr::Ipv6(cidr) => Some(cidr),
+            IpCidr::Ipv4(_) => None,
+        })
     }
 
     /// Whether `to` is the broadcast address of one of the interface's
@@ -458,6 +579,11 @@ impl<L: Link> Stack<L> {
     /// The interface's default route, if it has one.
     pub fn router(&self) -> Option<Ipv4Address> {
         self.gateway
+    }
+
+    /// The interface's default IPv6 route, if it has one.
+    pub fn router_ipv6(&self) -> Option<Ipv6Address> {
+        self.ipv6.router()
     }
 
     /// Gives the interface `addresses` as its IPv4 addresses, as many as
@@ -482,6 +608,8 @@ impl<L: Link> Stack<L> {
     pub fn set_mac(&mut self, mac: [u8; 6]) {
         if self.link.medium() == Medium::Ethernet {
             self.iface.set_hardware_addr(HardwareAddress::Ethernet(EthernetAddress(mac)));
+            self.ipv6.set_mac(mac);
+            self.sync_ipv6();
         }
     }
 
@@ -497,19 +625,35 @@ impl<L: Link> Stack<L> {
     }
 
     /// Whether `address` is one of the interface's own.
-    pub fn has_address(&self, address: Ipv4Address) -> bool {
-        self.iface.has_ip_addr(IpAddress::Ipv4(address))
+    pub fn has_address(&self, address: impl Into<IpAddress>) -> bool {
+        self.iface.has_ip_addr(address.into())
     }
 
-    /// Whether `to` is on one of the interface's networks.
-    pub fn reaches(&self, to: Ipv4Address) -> bool {
-        self.iface.ip_addrs().iter().any(|&IpCidr::Ipv4(cidr)| cidr.contains_addr(&to))
+    /// Whether `to` is on one of the interface's networks: for IPv6, a
+    /// link-local or link-scoped multicast address is on every
+    /// interface's that has IPv6.
+    pub fn reaches(&self, to: impl Into<IpAddress>) -> bool {
+        let to = to.into();
+        if let IpAddress::Ipv6(to) = to
+            && (ipv6::link_local(&to) || (to.is_multicast() && to.segments()[0] & 0xf <= 2))
+        {
+            return self.ipv6_addresses().next().is_some();
+        }
+        self.iface.ip_addrs().iter().any(|cidr| cidr.contains_addr(&to))
     }
 
-    /// Whether the interface can send to `to`: it has an address, and
-    /// `to` is on its network or it has a router.
-    pub fn routes_to(&self, to: Ipv4Address) -> bool {
-        self.reaches(to) || (self.ipv4().is_some() && self.gateway.is_some())
+    /// Whether the interface can send to `to`: it has an address of its
+    /// version of IP, and `to` is on its network or it has a router.
+    pub fn routes_to(&self, to: impl Into<IpAddress>) -> bool {
+        let to = to.into();
+        self.reaches(to)
+            || match to {
+                IpAddress::Ipv4(_) => self.ipv4().is_some() && self.gateway.is_some(),
+                IpAddress::Ipv6(_) => {
+                    self.ipv6_addresses().any(|cidr| !ipv6::link_local(&cidr.address()))
+                        && self.ipv6.router().is_some()
+                }
+            }
     }
 
     /// The longest IP packet the interface sends, its MTU.
@@ -536,6 +680,10 @@ impl<L: Link> Stack<L> {
         for _ in 0..POLL_ROUNDS {
             let mut phy =
                 Phy::new(&mut self.link, &mut *self.receive, &mut *self.transmit, &self.counted);
+            if phy.link.medium() == Medium::Ethernet {
+                phy.ipv6 = Some(&mut self.ipv6);
+                phy.now = now_ns;
+            }
             let result = self.iface.poll(instant(now_ns), &mut phy, &mut self.sockets);
             self.link.flush();
             changed |= result == PollResult::SocketStateChanged;
@@ -543,7 +691,21 @@ impl<L: Link> Stack<L> {
                 break;
             }
         }
-        changed
+        if self.ipv6.enabled() && self.link.medium() == Medium::Ethernet {
+            let (link, counted) = (&mut self.link, &self.counted);
+            self.ipv6.poll(now_ns, &mut |frame| {
+                let sent = link.can_send() && link.send(frame);
+                if sent {
+                    counted.sent(frame.len());
+                } else {
+                    counted.dropped();
+                }
+                sent
+            });
+            self.link.flush();
+        }
+        // New addresses may let sockets send what waited for one.
+        changed | self.sync_ipv6()
     }
 
     /// How long until [`Stack::poll`] has something to do even if no
@@ -554,9 +716,15 @@ impl<L: Link> Stack<L> {
         if self.link.pending() {
             return Some(0);
         }
-        self.iface
+        let ipv6 = self.ipv6.next_due().map(|due| due.saturating_sub(now_ns));
+        let sockets = self
+            .iface
             .poll_delay(instant(now_ns), &self.sockets)
-            .map(|delay| delay.total_micros().saturating_mul(1_000))
+            .map(|delay| delay.total_micros().saturating_mul(1_000));
+        match (ipv6, sockets) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Adds `socket` to the stack, or gives it back if every socket slot
@@ -738,8 +906,7 @@ impl Pinger {
     pub fn reply<L: Link>(&self, stack: &mut Stack<L>) -> Option<(u16, Ipv4Address)> {
         let socket = stack.socket_mut::<icmp::Socket<'static>>(self.handle)?;
         while let Ok((payload, from)) = socket.recv() {
-            // IPv4 is the stack's only protocol (until IPv6, in 12c).
-            let IpAddress::Ipv4(from) = from;
+            let IpAddress::Ipv4(from) = from else { continue };
             let Ok(packet) = Icmpv4Packet::new_checked(payload) else { continue };
             let Ok(repr) = Icmpv4Repr::parse(&packet, &ChecksumCapabilities::default()) else {
                 continue;

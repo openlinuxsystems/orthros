@@ -1576,7 +1576,7 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                     named.bytes()
                 }
                 AnySocket::Inet(socket) => {
-                    inet_named = inet::address_of(socket.name(a.peer)?);
+                    inet_named = socket.name(a.peer)?;
                     &inet_named[..]
                 }
             };
@@ -1623,7 +1623,7 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
             let a = file::ConnectAddressArgs::decode(args)?;
             let (file, socket) = inet_of(found, Rights::WRITE)?;
             network(user, a.network, Rights::SEND)?;
-            let to = peer_in(a.address)?;
+            let to = address_in(a.address)?;
             socket.connect(to, file.description().non_blocking)?;
             answer(label, 0, [0; 8])
         }
@@ -1635,7 +1635,7 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
                 inet::Kind::Stream => None,
                 inet::Kind::Datagram => {
                     network(user, a.network, Rights::SEND)?;
-                    Some(peer_in(a.address)?)
+                    Some(address_in(a.address)?)
                 }
             };
             let (address, len) = user_range(a.data)?;
@@ -1655,8 +1655,9 @@ pub fn file_method(user: &UserRef, found: &Found, label: u32, args: &[u64; 8]) -
             let mut out = UserOut { address, len };
             let non_blocking =
                 a.flags.contains(SocketFlags::DONT_WAIT) || file.description().non_blocking;
-            let (count, from) = socket.receive(&mut out, non_blocking)?;
-            let bytes = inet::address_of(from.map_or((None, 0), |(ip, port)| (Some(ip), port)));
+            let (count, from, scope) = socket.receive(&mut out, non_blocking)?;
+            let from = from.map_or((None, 0), |(ip, port)| (Some(ip), port));
+            let bytes = inet::address_of(from, socket.is_ipv6(), scope);
             let fits = &bytes[..bytes.len().min(from_len)];
             if !fits.is_empty() && !Arch::copy_to_user(from_address, fits) {
                 return Err(error(Kernel::BadAddress));
@@ -1777,7 +1778,7 @@ fn network(user: &UserRef, slot: u32, needs: Rights) -> Result<inet::Authority> 
 }
 
 /// The address, radix-network(2)'s Address, the caller's `buffer` holds.
-fn address_in(buffer: UserBuffer) -> Result<inet::Endpoint> {
+fn address_in(buffer: UserBuffer) -> Result<inet::Given> {
     let mut bytes = [0; radix_abi::network::Address::SIZE];
     if buffer.len != bytes.len() as u64 {
         return Err(error(Kernel::InvalidArgument));
@@ -1787,16 +1788,7 @@ fn address_in(buffer: UserBuffer) -> Result<inet::Endpoint> {
     {
         return Err(error(Kernel::BadAddress));
     }
-    inet::endpoint_of(&bytes)
-}
-
-/// The address the caller's `buffer` holds, as one to connect or send to:
-/// with an address and a port.
-fn peer_in(buffer: UserBuffer) -> Result<inet::Peer> {
-    match address_in(buffer)? {
-        (Some(ip), port) if port != 0 => Ok((ip, port)),
-        _ => Err(error(Kernel::InvalidArgument)),
-    }
+    inet::given_of(&bytes)
 }
 
 /// The files `send_files` sends: those whose slots the caller's `slots`
@@ -2097,7 +2089,7 @@ fn read_special(
     match target(file) {
         Target::Pipe(end) => end.pipe().read(out, non_blocking).map(|n| n as u64),
         Target::Socket(socket) => socket.receive(out, non_blocking).map(|n| n as u64),
-        Target::Inet(socket) => socket.receive(out, non_blocking).map(|(n, _)| n as u64),
+        Target::Inet(socket) => socket.receive(out, non_blocking).map(|(n, ..)| n as u64),
         Target::Tty(handle) => handle.read(user, out, non_blocking).map(|n| n as u64),
         Target::Kmsg => fs::kmsg::read(file, out, non_blocking).map(|n| n as u64),
         Target::Keyboard => fs::keyboard::read(file, out, non_blocking).map(|n| n as u64),

@@ -2,7 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Network sockets (Phase 12, ADR 0183): TCP's stream sockets and UDP's
-//! datagram sockets, over IPv4, on the kernel's stack (`crate::net`).
+//! datagram sockets, over IPv4 and IPv6, on the kernel's stack
+//! (`crate::net`).
+//!
+//! A socket is of one family, as POSIX's are: AF_INET's take IPv4 alone;
+//! AF_INET6's take IPv6, and IPv4 too unless they are IPV6_V6ONLY, its
+//! machines' addresses shown to them IPv4-mapped (::ffff:10.0.2.2), as on
+//! Linux (ADR 0331). A socket on any address is kept to its version of
+//! IP on each interface, so that one of IPv4's takes no IPv6 connection.
 //!
 //! A program makes one from a network capability (radix-network(2)'s
 //! `socket`), and binds and connects it through one (radix-file(2)'s
@@ -22,7 +29,9 @@
 //! and comes back when it is taken out (`net::memory`). A socket bound
 //! to an interface (SO_BINDTODEVICE, ADR 0190) is on that one alone, and
 //! sends through it; on one with no IPv4 address, a datagram goes from
-//! 0.0.0.0, as a DHCP client's does.
+//! 0.0.0.0, as a DHCP client's does. A link-local IPv6 address is on
+//! every card's network: the scope a program gives with it, an
+//! interface's number, says which, as sockaddr_in6's sin6_scope_id does.
 //!
 //! A call that cannot go on waits for networking's count of changes to
 //! move (`net::generation`), then looks again; the interfaces' threads
@@ -47,14 +56,14 @@ use radix_net::smoltcp::iface::SocketHandle;
 use radix_net::smoltcp::socket::{tcp, udp};
 use radix_net::smoltcp::time::Duration;
 use radix_net::smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
-use radix_net::{Across, ConnectError, Ipv4Address, OtherEnd, TcpMemory};
+use radix_net::{Across, ConnectError, IpVersion, Ipv4Address, Ipv6Address, OtherEnd, TcpMemory};
 use radix_sync::Mutex;
 use radix_vfs::mount::Location;
 use radix_vfs::{In, Kind as NodeKind, Node, NodeRef, Out, Stat, mem, next_id};
 
 use super::{Description, FileObject, FileRef, pipe};
 use crate::net::memory::{self, TcpLeases, UdpLeases};
-use crate::net::ports::{self, Held, Protocol};
+use crate::net::ports::{self, Held, Protocol, Versions};
 use crate::net::{self, Interface, Orphan};
 use crate::sched::{self, wait};
 use crate::user::posix::poll::{self, Polled};
@@ -80,8 +89,9 @@ const KEEP_COUNT: u8 = 9;
 const KEEP_SECS_MAX: u64 = 32_767;
 const KEEP_COUNT_MAX: u64 = 127;
 /// The bytes of an IPv4 header and a UDP header, which a datagram's
-/// interface's MTU holds with it.
+/// interface's MTU holds with it; and of an IPv6 header and a UDP header.
 const UDP_HEADERS: usize = 28;
+const UDP_HEADERS_IPV6: usize = 48;
 /// The bytes a datagram socket's first copy of a datagram has room for, at
 /// least: a DNS query's, say.
 const BOUNCE_FIRST: usize = 512;
@@ -123,40 +133,70 @@ impl Authority {
 }
 
 /// An address and a port; no address is any.
-pub type Endpoint = (Option<Ipv4Address>, u16);
+pub type Endpoint = (Option<IpAddress>, u16);
 
 /// An address and a port to connect or send to, or that sent.
-pub type Peer = (Ipv4Address, u16);
+pub type Peer = (IpAddress, u16);
 
-/// How many bytes a receive took, and from where.
-type Received = (usize, Option<Peer>);
+/// How many bytes a receive took, from where, and the interface it came
+/// by, by its number.
+type Received = (usize, Option<Peer>, u32);
 
-/// The endpoint `bytes`, an Address, is: not_supported for IPv6, until
-/// Phase 12c.
-pub fn endpoint_of(bytes: &[u8; Address::SIZE]) -> Result<Endpoint, Status> {
-    let word =
-        |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
-    match AddressFamily::from_raw(word(Address::OFFSET_FAMILY)) {
-        Some(AddressFamily::Ipv4) => {}
-        Some(_) => return Err(Kernel::NotSupported.status(0)),
-        None => return Err(Kernel::InvalidArgument.status(0)),
-    }
-    let port = u16::from_le_bytes([bytes[Address::OFFSET_PORT], bytes[Address::OFFSET_PORT + 1]]);
-    let at = Address::OFFSET_IP;
-    let ip = Ipv4Address::new(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]);
-    Ok(((!ip.is_unspecified()).then_some(ip), port))
+/// An address and port as a program gave it, radix-network(2)'s Address:
+/// of its family, an IPv4-mapped one as it is.
+#[derive(Clone, Copy, Debug)]
+pub struct Given {
+    v6: bool,
+    ip: IpAddress,
+    port: u16,
+    scope: u32,
 }
 
-/// `endpoint` as an Address's bytes.
-pub fn address_of(endpoint: Endpoint) -> [u8; Address::SIZE] {
+/// What `bytes`, an Address, says.
+pub fn given_of(bytes: &[u8; Address::SIZE]) -> Result<Given, Status> {
+    let word =
+        |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    let v6 = match AddressFamily::from_raw(word(Address::OFFSET_FAMILY)) {
+        Some(AddressFamily::Ipv4) => false,
+        Some(AddressFamily::Ipv6) => true,
+        None => return Err(Kernel::InvalidArgument.status(0)),
+    };
+    let port = u16::from_le_bytes([bytes[Address::OFFSET_PORT], bytes[Address::OFFSET_PORT + 1]]);
+    let at = Address::OFFSET_IP;
+    let ip = if v6 {
+        let mut octets = [0u8; 16];
+        octets.copy_from_slice(&bytes[at..at + 16]);
+        IpAddress::Ipv6(Ipv6Address::from(octets))
+    } else {
+        IpAddress::Ipv4(Ipv4Address::new(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]))
+    };
+    Ok(Given { v6, ip, port, scope: word(Address::OFFSET_SCOPE) })
+}
+
+/// `endpoint` as an Address's bytes, for a socket of IPv6 when `v6`: an
+/// IPv4 address mapped. `scope` goes with a link-local IPv6 address.
+pub fn address_of(endpoint: Endpoint, v6: bool, scope: u32) -> [u8; Address::SIZE] {
     let mut bytes = [0; Address::SIZE];
-    let family = AddressFamily::Ipv4.raw();
+    let family = if v6 { AddressFamily::Ipv6 } else { AddressFamily::Ipv4 };
     bytes[Address::OFFSET_FAMILY..Address::OFFSET_FAMILY + 4]
-        .copy_from_slice(&family.to_le_bytes());
+        .copy_from_slice(&family.raw().to_le_bytes());
     bytes[Address::OFFSET_PORT..Address::OFFSET_PORT + 2]
         .copy_from_slice(&endpoint.1.to_le_bytes());
-    let ip = endpoint.0.unwrap_or(Ipv4Address::UNSPECIFIED);
-    bytes[Address::OFFSET_IP..Address::OFFSET_IP + 4].copy_from_slice(&ip.octets());
+    let at = Address::OFFSET_IP;
+    match (endpoint.0, v6) {
+        (Some(IpAddress::Ipv4(ip)), false) => bytes[at..at + 4].copy_from_slice(&ip.octets()),
+        (Some(IpAddress::Ipv4(ip)), true) => {
+            bytes[at..at + 16].copy_from_slice(&ip.to_ipv6_mapped().octets());
+        }
+        (Some(IpAddress::Ipv6(ip)), _) => {
+            bytes[at..at + 16].copy_from_slice(&ip.octets());
+            if radix_net::ipv6::link_local(&ip) {
+                bytes[Address::OFFSET_SCOPE..Address::OFFSET_SCOPE + 4]
+                    .copy_from_slice(&scope.to_le_bytes());
+            }
+        }
+        (None, _) => {}
+    }
     bytes
 }
 
@@ -183,6 +223,8 @@ struct Taken {
     peer: Option<Peer>,
     /// The listening socket's options, which the connection has.
     options: Options,
+    /// The listening socket's family, which the connection's has.
+    v6: bool,
 }
 
 /// Where a socket is in its life.
@@ -214,6 +256,8 @@ struct Options {
     /// The interface it is bound to, by its number (`ifindex`): 0 for
     /// none.
     device: u32,
+    /// An IPv6 socket's IPV6_V6ONLY.
+    v6_only: bool,
 }
 
 impl Options {
@@ -229,6 +273,7 @@ impl Options {
         receive_timeout_ns: 0,
         send_timeout_ns: 0,
         device: 0,
+        v6_only: false,
     };
 
     /// Sets what they say on `socket`, a stream socket's connection.
@@ -270,6 +315,10 @@ struct State {
     /// Where it is connected, or for a datagram socket where its
     /// datagrams go.
     peer: Option<Peer>,
+    /// The interface a link-local peer is on, by its number: 0 for none.
+    scope: u32,
+    /// Whether it is an IPv6 socket.
+    v6: bool,
     parts: Vec<Part, Kmalloc>,
     /// When its connection began to be made.
     connect_started_ns: u64,
@@ -284,12 +333,50 @@ struct State {
 }
 
 impl State {
+    /// The versions of IP it takes: an IPv4 socket's, or an IPv6 one's
+    /// that is v6-only, one alone; else both.
+    fn versions(&self) -> Versions {
+        match (self.v6, self.options.v6_only) {
+            (false, _) => Versions::Ipv4,
+            (true, true) => Versions::Ipv6,
+            (true, false) => Versions::Both,
+        }
+    }
+
+    /// The version of IP its parts on any address are kept to, if one.
+    fn version(&self) -> Option<IpVersion> {
+        match self.versions() {
+            Versions::Ipv4 => Some(IpVersion::Ipv4),
+            Versions::Ipv6 => Some(IpVersion::Ipv6),
+            Versions::Both => None,
+        }
+    }
+
+    /// `given` as an endpoint of its own and its scope: of its family,
+    /// and for an IPv6 socket an IPv4-mapped address the IPv4 machine's,
+    /// unless it is v6-only. All zeros is no address.
+    fn endpoint(&self, given: Given) -> Result<(Endpoint, u32), Status> {
+        if given.v6 != self.v6 {
+            return Err(status(Kernel::InvalidArgument));
+        }
+        let ip = match given.ip {
+            IpAddress::Ipv6(ip) => match ip.to_ipv4_mapped() {
+                Some(_) if self.options.v6_only => return Err(status(Kernel::Unreachable)),
+                Some(v4) => IpAddress::Ipv4(v4),
+                None => IpAddress::Ipv6(ip),
+            },
+            v4 => v4,
+        };
+        Ok((((!ip.is_unspecified()).then_some(ip), given.port), given.scope))
+    }
+
     /// Puts a UDP socket bound to `address` and `port` on each interface
     /// it is on, as its parts.
-    fn datagram_parts(&mut self, address: Option<Ipv4Address>, port: u16) -> Result<(), Status> {
+    fn datagram_parts(&mut self, address: Option<IpAddress>, port: u16) -> Result<(), Status> {
         self.parts.try_reserve_exact(net::MAX_INTERFACES).map_err(|_| status(Kernel::NoMemory))?;
+        let version = self.version();
         for interface in interfaces_for(address, self.options.device) {
-            match udp_part(interface, address, port) {
+            match udp_part(interface, address, port, version) {
                 // Room was reserved for every interface.
                 Ok(part) => {
                     let _ = self.parts.push_within_capacity(part);
@@ -305,19 +392,21 @@ impl State {
 
     /// The interface a packet to `to` goes out through: the one it is
     /// bound to, if it can reach `to` (any interface reaches the
-    /// broadcast address), else the way the routes go.
-    fn route(&self, to: Ipv4Address) -> Result<&'static Interface, Status> {
+    /// broadcast address), else the way the routes go, through the
+    /// interface numbered `scope` for a link-local address.
+    fn route(&self, to: IpAddress, scope: u32) -> Result<&'static Interface, Status> {
         let interface = match self.options.device {
-            0 => net::route(to),
+            0 => net::route_scoped(to, scope),
             device => net::by_index(device)
                 .filter(|interface| to.is_broadcast() || interface.stack.lock().routes_to(to)),
         };
         interface.ok_or(status(Kernel::Unreachable))
     }
 
-    /// Starts its connection to `to`, under its lock.
-    fn start_connection(&mut self, to: Peer) -> Result<(), Status> {
-        let interface = self.route(to.0)?;
+    /// Starts its connection to `to`, through the interface numbered
+    /// `scope` if it is link-local, under its lock.
+    fn start_connection(&mut self, to: Peer, scope: u32) -> Result<(), Status> {
+        let interface = self.route(to.0, scope)?;
         let bound = self.local;
         if let Some((Some(address), _)) = bound
             && !interface.stack.lock().has_address(address)
@@ -328,7 +417,9 @@ impl State {
         let (held, from) = match bound {
             Some((_, port)) => (None, port),
             None => {
-                let held = ports::take_any(Protocol::Tcp).ok_or(status(Kernel::AddressInUse))?;
+                let versions = self.versions();
+                let held =
+                    ports::take_any(Protocol::Tcp, versions).ok_or(status(Kernel::AddressInUse))?;
                 let port = held.port();
                 (Some(held), port)
             }
@@ -368,6 +459,7 @@ impl State {
             self.local = Some((None, from));
         }
         self.peer = Some(to);
+        self.scope = interface.index();
         self.phase = Phase::Connecting;
         self.connect_started_ns = sched::now_ns();
         self.error = 0;
@@ -406,7 +498,7 @@ impl State {
             _ => {
                 self.options.apply(socket, true);
                 if let Some(local) = socket.local_endpoint() {
-                    self.local = Some((Some(v4(local.addr)), local.port));
+                    self.local = Some((Some(local.addr), local.port));
                 }
                 self.phase = Phase::Connected;
                 Ok(true)
@@ -474,7 +566,7 @@ fn keep<T: TryFrom<u64>>(value: u64, max: u64) -> Result<T, Status> {
 /// numbered `device` if not 0, is on: every one for any address, else
 /// those that have it; only `device`, when it is bound to one.
 fn interfaces_for(
-    address: Option<Ipv4Address>,
+    address: Option<IpAddress>,
     device: u32,
 ) -> impl Iterator<Item = &'static Interface> {
     net::interfaces().filter(move |interface| {
@@ -494,7 +586,7 @@ fn connect_failure(started_ns: u64) -> Status {
 }
 
 impl InetSocket {
-    fn new(kind: Kind) -> Result<InetSocket, Status> {
+    fn new(kind: Kind, v6: bool) -> Result<InetSocket, Status> {
         let mut parts = Vec::new_in(kmalloc());
         parts.try_reserve_exact(1).map_err(|_| status(Kernel::NoMemory))?;
         Ok(InetSocket {
@@ -507,6 +599,8 @@ impl InetSocket {
                 picked: false,
                 may_listen: false,
                 peer: None,
+                scope: 0,
+                v6,
                 parts,
                 connect_started_ns: 0,
                 error: 0,
@@ -521,6 +615,11 @@ impl InetSocket {
     /// What it carries.
     pub fn kind(&self) -> Kind {
         self.kind
+    }
+
+    /// Whether it is an IPv6 socket.
+    pub fn is_ipv6(&self) -> bool {
+        self.state.lock().v6
     }
 
     /// Waits until `attempt` gives an answer: it returns `None` when the
@@ -560,13 +659,14 @@ impl InetSocket {
         }
     }
 
-    /// Binds it to `endpoint` through `authority` (radix-file(2)'s
+    /// Binds it to `given` through `authority` (radix-file(2)'s
     /// `bind_address`).
-    pub fn bind(&self, endpoint: Endpoint, authority: Authority) -> Result<(), Status> {
+    pub fn bind(&self, given: Given, authority: Authority) -> Result<(), Status> {
         let mut state = self.state.lock();
         if state.local.is_some() || state.phase != Phase::Fresh {
             return Err(status(Kernel::InvalidArgument));
         }
+        let (endpoint, _) = state.endpoint(given)?;
         self.bind_locked(&mut state, endpoint, Some(authority))
     }
 
@@ -585,8 +685,14 @@ impl InetSocket {
         {
             return Err(status(Kernel::AddressNotAvailable));
         }
+        // One bound to an address takes its version's alone.
+        let versions = match address {
+            None => state.versions(),
+            Some(IpAddress::Ipv4(_)) => Versions::Ipv4,
+            Some(IpAddress::Ipv6(_)) => Versions::Ipv6,
+        };
         let held = if port == 0 {
-            ports::take_any(self.kind.protocol()).ok_or(status(Kernel::AddressInUse))?
+            ports::take_any(self.kind.protocol(), versions).ok_or(status(Kernel::AddressInUse))?
         } else {
             let authority = authority.ok_or(status(Kernel::InvalidArgument))?;
             if !authority.rights.contains(Rights::RECEIVE) {
@@ -596,7 +702,7 @@ impl InetSocket {
                 return Err(status(Kernel::OutOfRange));
             }
             // Sockets on other interfaces may hold it too (ADR 0191).
-            ports::take_on(self.kind.protocol(), port, state.options.device)
+            ports::take_on(self.kind.protocol(), versions, port, state.options.device)
                 .ok_or(status(Kernel::AddressInUse))?
         };
         let port = held.port();
@@ -635,9 +741,10 @@ impl InetSocket {
         let each = backlog.min(POOL);
         let mut pool = Vec::new_in(kmalloc());
         pool.try_reserve_exact(each * net::MAX_INTERFACES).map_err(|_| status(Kernel::NoMemory))?;
+        let version = state.version();
         for interface in interfaces_for(address, state.options.device) {
             for _ in 0..each {
-                match listening_part(interface, address, port, &state.options) {
+                match listening_part(interface, address, port, version, &state.options) {
                     // Room was reserved for every interface's.
                     Ok(part) => {
                         let _ = pool.push_within_capacity(part);
@@ -676,7 +783,9 @@ impl InetSocket {
             let part = state.parts.swap_remove(index);
             // Another socket listens in its place, if there is memory for one.
             let (address, port) = state.local.unwrap_or((None, 0));
-            if let Ok(again) = listening_part(part.interface, address, port, &state.options) {
+            let version = state.version();
+            let again = listening_part(part.interface, address, port, version, &state.options);
+            if let Ok(again) = again {
                 let _ = state.parts.push_within_capacity(again);
             }
             let (local, peer) = {
@@ -691,9 +800,10 @@ impl InetSocket {
             part.interface.kick();
             Ok(Some(Taken {
                 part,
-                local: local.map(|ip| (Some(v4(ip.addr)), ip.port)),
-                peer: peer.map(|ip| (v4(ip.addr), ip.port)),
+                local: local.map(|ip| (Some(ip.addr), ip.port)),
+                peer: peer.map(|ip| (ip.addr, ip.port)),
                 options: state.options,
+                v6: state.v6,
             }))
         })
     }
@@ -705,7 +815,9 @@ impl InetSocket {
         state.phase = Phase::Connected;
         state.local = taken.local;
         state.peer = taken.peer;
+        state.scope = taken.part.interface.index();
         state.options = taken.options;
+        state.v6 = taken.v6;
         // Room for one part was reserved when it was made.
         let _ = state.parts.push_within_capacity(taken.part);
     }
@@ -740,17 +852,22 @@ impl InetSocket {
         release_part(part, false, &mut None);
     }
 
-    /// Connects it to `to` (radix-file(2)'s `connect_address`), the caller
-    /// having checked the send right: waits for a stream socket's
+    /// Connects it to `given` (radix-file(2)'s `connect_address`), the
+    /// caller having checked the send right: waits for a stream socket's
     /// connection unless `non_blocking`.
-    pub fn connect(&self, to: Peer, non_blocking: bool) -> Result<(), Status> {
-        if to.1 == 0 || to.0.is_unspecified() {
-            return Err(status(Kernel::InvalidArgument));
-        }
+    pub fn connect(&self, given: Given, non_blocking: bool) -> Result<(), Status> {
+        let (to, scope) = {
+            let state = self.state.lock();
+            match state.endpoint(given)? {
+                ((Some(ip), port), scope) if port != 0 => ((ip, port), scope),
+                _ => return Err(status(Kernel::InvalidArgument)),
+            }
+        };
         if self.kind == Kind::Datagram {
             let mut state = self.state.lock();
             self.bind_if_not(&mut state)?;
             state.peer = Some(to);
+            state.scope = scope;
             state.phase = Phase::Connected;
             return Ok(());
         }
@@ -758,7 +875,7 @@ impl InetSocket {
             let mut state = self.state.lock();
             match state.phase {
                 Phase::Fresh => {
-                    state.start_connection(to)?;
+                    state.start_connection(to, scope)?;
                     if non_blocking {
                         return Err(status(Kernel::InProgress));
                     }
@@ -795,11 +912,18 @@ impl InetSocket {
     pub fn send(
         &self,
         data: &dyn In,
-        to: Option<Peer>,
+        to: Option<Given>,
         non_blocking: bool,
         signal: bool,
     ) -> Result<usize, Status> {
         if self.kind == Kind::Datagram {
+            let to = match to {
+                Some(given) => match self.state.lock().endpoint(given)? {
+                    ((Some(ip), port), scope) => Some(((ip, port), scope)),
+                    _ => return Err(status(Kernel::InvalidArgument)),
+                },
+                None => None,
+            };
             return self.send_datagram(data, to, non_blocking);
         }
         let timeout = self.state.lock().options.send_timeout_ns;
@@ -873,11 +997,12 @@ impl InetSocket {
         }
     }
 
-    /// Sends `data` as one datagram, to `to` or where it is connected.
+    /// Sends `data` as one datagram, to `to` (through the interface its
+    /// scope numbers, for a link-local address) or where it is connected.
     fn send_datagram(
         &self,
         data: &dyn In,
-        to: Option<Peer>,
+        to: Option<(Peer, u32)>,
         non_blocking: bool,
     ) -> Result<usize, Status> {
         let (to, interface, timeout) = {
@@ -885,16 +1010,22 @@ impl InetSocket {
             if state.shut_write {
                 return pipe::broken(0, false);
             }
-            let to = to.or(state.peer).ok_or(status(Kernel::NotConnected))?;
+            let connected = state.peer.map(|peer| (peer, state.scope));
+            let (to, scope) = to.or(connected).ok_or(status(Kernel::NotConnected))?;
             if to.1 == 0 {
                 return Err(status(Kernel::InvalidArgument));
             }
             self.bind_if_not(&mut state)?;
-            let interface = state.route(to.0)?;
+            let interface = state.route(to.0, scope)?;
             let (room, broadcast) = {
                 let stack = interface.stack.lock();
-                let room = stack.mtu().saturating_sub(UDP_HEADERS);
-                (room, to.0.is_broadcast() || stack.is_broadcast(to.0))
+                let (headers, broadcast) = match to.0 {
+                    IpAddress::Ipv4(ip) => {
+                        (UDP_HEADERS, ip.is_broadcast() || stack.is_broadcast(ip))
+                    }
+                    IpAddress::Ipv6(_) => (UDP_HEADERS_IPV6, false),
+                };
+                (stack.mtu().saturating_sub(headers), broadcast)
             };
             if broadcast && !state.options.broadcast {
                 // As on Linux, a program sends to everyone only when it
@@ -906,7 +1037,7 @@ impl InetSocket {
             }
             (to, interface, state.options.send_timeout_ns)
         };
-        let endpoint = IpEndpoint::new(IpAddress::Ipv4(to.0), to.1);
+        let endpoint = IpEndpoint::new(to.0, to.1);
         let len = data.len();
         self.wait(non_blocking, timeout, Kernel::WouldBlock, "send", |state| {
             // The datagram is copied in first, with only the socket's lock
@@ -929,9 +1060,16 @@ impl InetSocket {
             let bound_to_any = state.local.is_some_and(|(address, _)| address.is_none());
             let mut stack = interface.stack.lock();
             // An interface with no address of its own sends from 0.0.0.0,
-            // as smoltcp would otherwise drop the datagram.
-            let from = (bound_to_any && stack.ipv4().is_none())
-                .then_some(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED));
+            // as smoltcp would otherwise drop the datagram; to IPv6, from
+            // the address the interface picks, as smoltcp's own picking
+            // knows nothing of temporary addresses.
+            let from = match endpoint.addr {
+                IpAddress::Ipv4(_) if bound_to_any && stack.ipv4().is_none() => {
+                    Some(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED))
+                }
+                IpAddress::Ipv6(_) if bound_to_any => stack.source_for(endpoint.addr),
+                _ => None,
+            };
             let meta = udp::UdpMetadata { local_address: from, ..endpoint.into() };
             let socket = stack
                 .socket_mut::<udp::Socket<'static>>(part.handle)
@@ -956,7 +1094,7 @@ impl InetSocket {
         let timeout = self.state.lock().options.receive_timeout_ns;
         self.wait(non_blocking, timeout, Kernel::WouldBlock, "receive", |state| {
             if state.shut_read {
-                return Ok(Some((0, state.peer)));
+                return Ok(Some((0, state.peer, state.scope)));
             }
             match self.kind {
                 Kind::Stream => receive_stream(state, out),
@@ -991,14 +1129,17 @@ impl InetSocket {
         Ok(())
     }
 
-    /// Where it is bound, or with `peer` where it is connected.
-    pub fn name(&self, peer: bool) -> Result<Endpoint, Status> {
+    /// Where it is bound, or with `peer` where it is connected, as an
+    /// Address's bytes.
+    pub fn name(&self, peer: bool) -> Result<[u8; Address::SIZE], Status> {
         let state = self.state.lock();
-        if peer {
+        let endpoint = if peer {
             let peer = state.peer.filter(|_| state.phase == Phase::Connected);
-            return peer.map(|(ip, port)| (Some(ip), port)).ok_or(status(Kernel::NotConnected));
-        }
-        Ok(state.local.unwrap_or((None, 0)))
+            peer.map(|(ip, port)| (Some(ip), port)).ok_or(status(Kernel::NotConnected))?
+        } else {
+            state.local.unwrap_or((None, 0))
+        };
+        Ok(address_of(endpoint, state.v6, state.scope))
     }
 
     /// Whether it listens, and whether it is connected.
@@ -1024,6 +1165,27 @@ impl InetSocket {
             SocketOption::TimeToLive => u64::from(options.time_to_live),
             SocketOption::ReceiveTimeout => options.receive_timeout_ns,
             SocketOption::SendTimeout => options.send_timeout_ns,
+            SocketOption::V6Only => {
+                if !state.v6 {
+                    return Err(status(Kernel::NotSupported));
+                }
+                let old = flag(state.options.v6_only);
+                if let Some(value) = set {
+                    // As on Linux, before it is bound.
+                    if state.local.is_some() {
+                        return Err(status(Kernel::InvalidArgument));
+                    }
+                    state.options.v6_only = value != 0;
+                }
+                return Ok(old);
+            }
+            SocketOption::Family => {
+                if set.is_some() {
+                    return Err(status(Kernel::InvalidArgument));
+                }
+                let family = if state.v6 { AddressFamily::Ipv6 } else { AddressFamily::Ipv4 };
+                return Ok(u64::from(family.raw()));
+            }
             SocketOption::BindToDevice => {
                 let Some(value) = set else { return Ok(u64::from(options.device)) };
                 let old = u64::from(options.device);
@@ -1248,22 +1410,18 @@ fn release_part(part: Part, connected: bool, port: &mut Option<Held>) {
     interface.kick();
 }
 
-/// The IPv4 address `address` is: IPv4 is the stack's only protocol,
-/// until IPv6 in 12c.
-fn v4(address: IpAddress) -> Ipv4Address {
-    let IpAddress::Ipv4(address) = address;
-    address
-}
-
-/// A UDP socket on `interface`, bound to `address` and `port`.
+/// A UDP socket on `interface`, bound to `address` and `port`, kept to
+/// `version` of IP when it is any address.
 fn udp_part(
     interface: &'static Interface,
-    address: Option<Ipv4Address>,
+    address: Option<IpAddress>,
     port: u16,
+    version: Option<IpVersion>,
 ) -> Result<Part, Status> {
     let (leases, udp_memory) = memory::lend_udp().ok_or(status(Kernel::NoMemory))?;
     let mut socket = udp_memory.socket();
-    let endpoint = IpListenEndpoint { addr: address.map(IpAddress::Ipv4), port };
+    socket.set_version(version);
+    let endpoint = IpListenEndpoint { addr: address, port };
     if socket.bind(endpoint).is_err() {
         memory::give_back_udp(leases, socket);
         return Err(status(Kernel::InvalidArgument));
@@ -1281,17 +1439,20 @@ fn udp_part(
     }
 }
 
-/// A TCP socket on `interface` that listens at `address` and `port`.
+/// A TCP socket on `interface` that listens at `address` and `port`,
+/// kept to `version` of IP when it is any address.
 fn listening_part(
     interface: &'static Interface,
-    address: Option<Ipv4Address>,
+    address: Option<IpAddress>,
     port: u16,
+    version: Option<IpVersion>,
     options: &Options,
 ) -> Result<Part, Status> {
     let (leases, tcp_memory) = memory::lend_tcp().ok_or(status(Kernel::NoMemory))?;
     let mut socket = tcp_socket(tcp_memory);
     options.apply(&mut socket, true);
-    let endpoint = IpListenEndpoint { addr: address.map(IpAddress::Ipv4), port };
+    socket.set_listen_version(version);
+    let endpoint = IpListenEndpoint { addr: address, port };
     if socket.listen(endpoint).is_err() {
         memory::give_back_tcp(leases, socket);
         return Err(status(Kernel::InvalidArgument));
@@ -1337,7 +1498,7 @@ fn connection_events(state: &mut State) -> u16 {
 fn receive_stream(state: &mut State, out: &mut dyn Out) -> Result<Option<Received>, Status> {
     loop {
         let Some(index) = state.connection()? else { return Ok(None) };
-        let peer = state.peer;
+        let (peer, scope) = (state.peer, state.scope);
         let part = &mut state.parts[index];
         let interface = part.interface;
         let mut stack = interface.stack.lock();
@@ -1345,7 +1506,7 @@ fn receive_stream(state: &mut State, out: &mut dyn Out) -> Result<Option<Receive
             return Err(status(Kernel::Reset));
         };
         if out.is_empty() {
-            return Ok(Some((0, peer)));
+            return Ok(Some((0, peer, scope)));
         }
         // Whether the window it offers had shut to half its buffer or less.
         let narrow = connection.recv_queue() * 2 >= connection.recv_capacity();
@@ -1394,10 +1555,10 @@ fn receive_stream(state: &mut State, out: &mut dyn Out) -> Result<Option<Receive
                     None if narrow => interface.kick(),
                     None => {}
                 }
-                Ok(Some((n, peer)))
+                Ok(Some((n, peer, scope)))
             }
             // The other end sent its FIN, and all it sent has been read.
-            Err(tcp::RecvError::Finished) => Ok(Some((0, peer))),
+            Err(tcp::RecvError::Finished) => Ok(Some((0, peer, scope))),
             Err(tcp::RecvError::InvalidState) => Err(status(Kernel::Reset)),
         };
     }
@@ -1419,7 +1580,8 @@ fn receive_datagram(state: &mut State, out: &mut dyn Out) -> Result<Option<Recei
             index += 1;
             continue;
         };
-        let from = (v4(meta.endpoint.addr), meta.endpoint.port);
+        let from = (meta.endpoint.addr, meta.endpoint.port);
+        let scope = part.interface.index();
         if peer.is_some_and(|peer| peer != from) {
             let _ = socket.recv();
             continue;
@@ -1428,7 +1590,7 @@ fn receive_datagram(state: &mut State, out: &mut dyn Out) -> Result<Option<Recei
         match out.put_now(0, &data[..n]) {
             Ok(true) => {
                 let _ = socket.recv();
-                return Ok(Some((n, Some(from))));
+                return Ok(Some((n, Some(from), scope)));
             }
             // As in `receive_stream`, and this part is looked at again.
             Ok(false) => {
@@ -1474,7 +1636,7 @@ impl Node for InetSocket {
     // Reads and writes through the node itself (the kernel's own) never
     // wait.
     fn read(&self, _offset: u64, out: &mut dyn Out) -> radix_vfs::Result<usize> {
-        self.receive(out, true).map(|(n, _)| n).map_err(|_| radix_vfs::Error::NotSupported)
+        self.receive(out, true).map(|(n, ..)| n).map_err(|_| radix_vfs::Error::NotSupported)
     }
 
     fn write(&self, _offset: u64, data: &dyn In) -> radix_vfs::Result<usize> {
@@ -1505,15 +1667,16 @@ pub fn file(
         .ok_or(status(Kernel::NoMemory))
 }
 
-/// Makes a network socket of `kind` for `user`'s process, in slot `to`,
-/// with `flags` (radix-network(2)'s `socket`).
+/// Makes a network socket of `kind`, IPv6's if `v6`, for `user`'s
+/// process, in slot `to`, with `flags` (radix-network(2)'s `socket`).
 pub fn make(
     user: &crate::user::UserRef,
     to: u32,
     kind: Kind,
+    v6: bool,
     flags: PipeFlags,
 ) -> Result<(), Status> {
-    install(user, to, file(user, InetSocket::new(kind)?, flags)?, flags)
+    install(user, to, file(user, InetSocket::new(kind, v6)?, flags)?, flags)
 }
 
 /// Takes a connection made to `listener`, waiting for one unless
@@ -1530,7 +1693,9 @@ pub fn accept(
     non_blocking: bool,
 ) -> Result<(), Status> {
     let taken = listener.take(non_blocking)?;
-    let made = match InetSocket::new(Kind::Stream).and_then(|socket| file(user, socket, flags)) {
+    let v6 = listener.is_ipv6();
+    let made = match InetSocket::new(Kind::Stream, v6).and_then(|socket| file(user, socket, flags))
+    {
         Ok(made) => made,
         Err(err) => {
             listener.give_back(taken.part);

@@ -7,7 +7,7 @@
 
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::{Socket, tcp, udp};
-use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address};
+use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpVersion};
 
 use crate::{Link, Stack, lent};
 
@@ -122,7 +122,8 @@ impl<L: Link> Stack<L> {
 
     /// Has the TCP socket `handle` connect to port `port` of `to`, from
     /// port `from` of `local`, or of the address the interface sends to
-    /// `to` from. The handshake goes on as the stack polls.
+    /// `to` from: for IPv6, the one [`crate::ipv6::Ipv6::source`] picks.
+    /// The handshake goes on as the stack polls.
     ///
     /// # Errors
     ///
@@ -130,12 +131,13 @@ impl<L: Link> Stack<L> {
     pub fn connect(
         &mut self,
         handle: SocketHandle,
-        to: (Ipv4Address, u16),
-        local: Option<Ipv4Address>,
+        to: (IpAddress, u16),
+        local: Option<IpAddress>,
         from: u16,
     ) -> Result<(), ConnectError> {
-        let remote = IpEndpoint::new(IpAddress::Ipv4(to.0), to.1);
-        let local = IpListenEndpoint { addr: local.map(IpAddress::Ipv4), port: from };
+        let remote = IpEndpoint::new(to.0, to.1);
+        let local = local.or_else(|| self.source_for(to.0));
+        let local = IpListenEndpoint { addr: local, port: from };
         let socket = self
             .sockets
             .try_get_mut::<tcp::Socket<'static>>(handle)
@@ -147,21 +149,26 @@ impl<L: Link> Stack<L> {
     }
 
     /// The address the interface sends to `to` from, if it has one.
-    pub fn source_for(&self, to: Ipv4Address) -> Option<Ipv4Address> {
-        self.iface.get_source_address_ipv4(&to)
+    pub fn source_for(&self, to: IpAddress) -> Option<IpAddress> {
+        match to {
+            IpAddress::Ipv4(to) => self.iface.get_source_address_ipv4(&to).map(IpAddress::Ipv4),
+            IpAddress::Ipv6(to) => self.ipv6.source(&to).map(IpAddress::Ipv6),
+        }
     }
 }
 
 /// A TCP or UDP socket of a stack's, as `/proc/net/tcp` and
-/// `/proc/net/udp` show one.
+/// `/proc/net/udp` show one, and `tcp6` and `udp6`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shown {
     /// Whether it is TCP's, or UDP's.
     pub tcp: bool,
-    /// The address and port it is at: an address of 0.0.0.0 for any.
-    pub local: (Ipv4Address, u16),
-    /// Where it is connected: 0.0.0.0, port 0, for nowhere.
-    pub remote: (Ipv4Address, u16),
+    /// The address and port it is at: no address for any.
+    pub local: (Option<IpAddress>, u16),
+    /// Where it is connected, if it is.
+    pub remote: Option<(IpAddress, u16)>,
+    /// For one at any address, the version of IP it takes alone, if one.
+    pub version: Option<IpVersion>,
     /// A TCP socket's state; for UDP's, Closed.
     pub state: tcp::State,
     /// The bytes it has to send, not yet acknowledged for TCP.
@@ -170,11 +177,14 @@ pub struct Shown {
     pub receive_queue: usize,
 }
 
-/// The IPv4 address of `address`, or of any for none.
-fn v4(address: Option<IpAddress>) -> Ipv4Address {
-    match address {
-        Some(IpAddress::Ipv4(address)) => address,
-        None => Ipv4Address::UNSPECIFIED,
+impl Shown {
+    /// Whether it is of IPv6, for `tcp6` and `udp6`, or of IPv4: by its
+    /// address, or for one at any address whether it takes IPv6.
+    pub fn is_ipv6(&self) -> bool {
+        match self.local.0 {
+            Some(address) => address.version() == IpVersion::Ipv6,
+            None => self.version != Some(IpVersion::Ipv4),
+        }
     }
 }
 
@@ -186,15 +196,13 @@ impl Shown {
             Socket::Tcp(socket) => {
                 let state = socket.state();
                 let (local, remote) = match (socket.local_endpoint(), socket.remote_endpoint()) {
-                    (Some(local), remote) => {
-                        let remote = remote.map_or((Ipv4Address::UNSPECIFIED, 0), |remote| {
-                            (v4(Some(remote.addr)), remote.port)
-                        });
-                        ((v4(Some(local.addr)), local.port), remote)
-                    }
+                    (Some(local), remote) => (
+                        (Some(local.addr), local.port),
+                        remote.map(|remote| (remote.addr, remote.port)),
+                    ),
                     (None, _) if state == tcp::State::Listen => {
                         let listen = socket.listen_endpoint();
-                        ((v4(listen.addr), listen.port), (Ipv4Address::UNSPECIFIED, 0))
+                        ((listen.addr, listen.port), None)
                     }
                     (None, _) => return None,
                 };
@@ -202,6 +210,7 @@ impl Shown {
                     tcp: true,
                     local,
                     remote,
+                    version: socket.listen_version(),
                     state,
                     send_queue: socket.send_queue(),
                     receive_queue: socket.recv_queue(),
@@ -211,8 +220,9 @@ impl Shown {
                 let IpListenEndpoint { addr, port } = socket.endpoint();
                 (port != 0).then(|| Shown {
                     tcp: false,
-                    local: (v4(addr), port),
-                    remote: (Ipv4Address::UNSPECIFIED, 0),
+                    local: (addr, port),
+                    remote: None,
+                    version: socket.version(),
                     state: tcp::State::Closed,
                     send_queue: socket.send_queue(),
                     receive_queue: socket.recv_queue(),

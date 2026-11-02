@@ -28,9 +28,10 @@
 //! - `/processes/uptime`: nanoseconds since boot;
 //! - `/processes/acpi/button/lid/<name>/state`, Linux's, for each lid of
 //!   the firmware's (ADR 0201): `state:      open`, or `closed`;
-//! - `/processes/net/dev`, `route`, `tcp` and `udp`: the network
-//!   interfaces' counts, their routes and the sockets, in Linux's formats
-//!   (ADR 0190, `crate::net::proc`).
+//! - `/processes/net/dev`, `route`, `tcp` and `udp`, and for IPv6
+//!   `if_inet6`, `ipv6_route`, `tcp6` and `udp6`: the network
+//!   interfaces' counts, their addresses and routes and the sockets, in
+//!   Linux's formats (ADR 0190 and 0331, `crate::net::proc`).
 //!
 //! A newline or a backslash in a name or a path is written the same way,
 //! so that it cannot end its line early.
@@ -108,11 +109,15 @@ const _: () = assert!(ACPI_ID + 3 + 2 * MAX_LIDS as u64 <= NET_ID);
 
 /// `/processes/net`, then its files.
 const NET_ID: u64 = 16;
-const NET_FILES: [(&str, Generate); 4] = [
+const NET_FILES: [(&str, Generate); 8] = [
     ("dev", net::proc::dev),
     ("route", net::proc::route),
     ("tcp", net::proc::tcp),
     ("udp", net::proc::udp),
+    ("if_inet6", net::proc::if_inet6),
+    ("ipv6_route", net::proc::ipv6_route),
+    ("tcp6", net::proc::tcp6),
+    ("udp6", net::proc::udp6),
 ];
 const _: () = assert!(NET_ID + 1 + NET_FILES.len() as u64 <= PROCESS_ID_BASE);
 

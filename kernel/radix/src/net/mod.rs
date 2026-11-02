@@ -57,10 +57,12 @@ use radix_hw::pci::{Bar, Function, Msi, MsiX, capability};
 use radix_klog::{TextBuf, error, info, warn};
 use radix_mm::lease::{self, Lease};
 use radix_mm::{Flags, HEAP, Kmalloc};
+use radix_net::ipv6::{self, Event, Kind};
 use radix_net::smoltcp::iface::{SocketHandle, SocketStorage};
 use radix_net::smoltcp::socket::{AnySocket, icmp, tcp};
 use radix_net::{
-    FRAME, Ipv4Address, Ipv4Cidr, Link, Loopback, Medium, Memory, PingMemory, Pinger, Stack,
+    FRAME, IpAddress, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr, Link, Loopback, Medium, Memory,
+    PingMemory, Pinger, Stack,
 };
 use radix_nic::Nic;
 use radix_sync::{Mutex, Once};
@@ -104,6 +106,8 @@ pub const RESOLVER: Ipv4Address = Ipv4Address::new(127, 0, 0, 53);
 /// The loopback interface's own addresses: 127.0.0.1/8 first, which it
 /// shows, and the resolver's.
 const LOOPBACK_OWN: [Ipv4Cidr; 2] = [Ipv4Cidr::new(LOOPBACK, 8), Ipv4Cidr::new(RESOLVER, 32)];
+/// The loopback interface's own IPv6 address, ::1.
+pub const LOOPBACK_IPV6: Ipv6Address = Ipv6Address::LOCALHOST;
 /// How long an orphan has to finish closing before it is reset.
 pub const ORPHAN_NS: u64 = 60_000_000_000;
 
@@ -552,14 +556,71 @@ pub fn configure(
     Ok(())
 }
 
+/// Sets how the interface numbered `index` makes its IPv6 addresses,
+/// gives it `addresses` besides and `router` while no router advertises
+/// one: radix-network(2)'s `configure_ipv6`. `lo`'s are its own.
+///
+/// # Errors
+///
+/// When there is no such interface, or it is `lo`.
+pub fn configure_ipv6(
+    index: u32,
+    settings: Option<ipv6::Settings>,
+    addresses: &[Ipv6Cidr],
+    router: Option<Ipv6Address>,
+) -> Result<(), ConfigureError> {
+    let interface = by_index(index).ok_or(ConfigureError::NoInterface)?;
+    if interface.is_loopback() {
+        return Err(ConfigureError::Loopback);
+    }
+    let was = {
+        let mut stack = interface.stack.lock();
+        let was = stack.ipv6().settings();
+        stack.configure_ipv6(settings, addresses, router);
+        was
+    };
+    if was != settings || !addresses.is_empty() {
+        let how = match settings {
+            None => "off",
+            Some(ipv6::Settings { autoconf: false, .. }) => "on, with the addresses it is given",
+            Some(ipv6::Settings { temporary: false, .. }) => "on, with stable addresses",
+            Some(_) => "on, with stable and temporary addresses",
+        };
+        info!("Net: {}'s IPv6 is {how}", interface.name);
+    }
+    addresses_changed();
+    interface.kick();
+    changed();
+    Ok(())
+}
+
 /// The interface a packet to `to` goes out through: `lo` for the
 /// machine's own addresses, else the first card on `to`'s network, else
-/// the first with a router.
-pub fn route(to: Ipv4Address) -> Option<&'static Interface> {
-    if let Some(lo) = LO.get()
-        && lo.stack.lock().reaches(to)
+/// the first with a router. A link-local IPv6 address is on every card's
+/// network that has IPv6: the one numbered `scope` is taken, if not 0.
+pub fn route_scoped(to: IpAddress, scope: u32) -> Option<&'static Interface> {
+    if let IpAddress::Ipv6(address) = to
+        && scope != 0
+        && (ipv6::link_local(&address) || address.is_multicast())
     {
-        return Some(lo);
+        return by_index(scope).filter(|interface| interface.stack.lock().reaches(to));
+    }
+    route(to)
+}
+
+/// The interface a packet to `to` goes out through, as [`route_scoped`]
+/// says, with no scope.
+pub fn route(to: impl Into<IpAddress>) -> Option<&'static Interface> {
+    let to = to.into();
+    if let Some(lo) = LO.get() {
+        let stack = lo.stack.lock();
+        let own = match to {
+            IpAddress::Ipv4(_) => stack.reaches(to),
+            IpAddress::Ipv6(address) => address.is_loopback() || stack.has_address(to),
+        };
+        if own {
+            return Some(lo);
+        }
     }
     let mut cards = interfaces().filter(|interface| !interface.is_loopback());
     let mut routed = None;
@@ -647,6 +708,7 @@ fn start_loopback() -> Result<(), &'static str> {
     };
     let mut stack = Stack::new(card, memory, radix_random::u64(), sched::now_ns());
     stack.set_ipv4_addresses(&LOOPBACK_OWN);
+    stack.set_ipv6_addresses(&[Ipv6Cidr::new(LOOPBACK_IPV6, 128)]);
     let mut name = TextBuf::<8>::new();
     let _ = name.write_str("lo");
     let interface = interface(name, 0, stack, slots).ok_or("out of memory")?;
@@ -655,7 +717,7 @@ fn start_loopback() -> Result<(), &'static str> {
     }
     let lo = LO.get().ok_or("it is not there")?;
     info!(
-        "Net: lo is the loopback interface, at {LOOPBACK}/8, {RESOLVER} and every card's address"
+        "Net: lo is the loopback interface, at {LOOPBACK}/8, {RESOLVER}, {LOOPBACK_IPV6} and every card's address"
     );
     run_thread(lo)
 }
@@ -694,13 +756,33 @@ fn run_thread(interface: &'static Interface) -> Result<(), &'static str> {
     }
 }
 
-/// The most addresses `lo` has: its own two and the cards', as many as
-/// fit.
+/// The most addresses `lo` has of each version of IP: its own and the
+/// cards', as many as fit.
 const LOOPBACK_ADDRESSES: usize = 8;
 
 /// Gives `lo` the cards' addresses with its own, after a card's changed:
-/// each card's first, then their others, while there is room.
+/// each card's first, then their others, while there is room; and their
+/// IPv6 ones that are not link-local, likewise.
 fn addresses_changed() {
+    addresses_changed_ipv4();
+    let Some(lo) = LO.get() else { return };
+    let mut addresses = [Ipv6Cidr::new(LOOPBACK_IPV6, 128); LOOPBACK_ADDRESSES];
+    let mut count = 1;
+    for interface in interfaces().filter(|interface| !interface.is_loopback()) {
+        let stack = interface.stack.lock();
+        for cidr in stack.ipv6_addresses().filter(|cidr| !ipv6::link_local(&cidr.address())) {
+            if count == LOOPBACK_ADDRESSES {
+                break;
+            }
+            addresses[count] = Ipv6Cidr::new(cidr.address(), 128);
+            count += 1;
+        }
+    }
+    lo.stack.lock().set_ipv6_addresses(&addresses[..count]);
+}
+
+/// Gives `lo` the cards' IPv4 addresses, as [`addresses_changed`] says.
+fn addresses_changed_ipv4() {
     let Some(lo) = LO.get() else { return };
     let mut addresses = [LOOPBACK_OWN[0]; LOOPBACK_ADDRESSES];
     addresses[..LOOPBACK_OWN.len()].copy_from_slice(&LOOPBACK_OWN);
@@ -1357,7 +1439,7 @@ fn run(number: usize) {
     let polled = idle.is_some() && !interface.stack.lock().link().interrupts();
     let mut moved = 0;
     loop {
-        let (wake_at, changed) = {
+        let (wake_at, changed, moved) = {
             let mut stack = interface.stack.lock();
             let now = sched::now_ns();
             let changed = stack.poll(now);
@@ -1383,9 +1465,17 @@ fn run(number: usize) {
             // Under the stack's lock, so that a poller that sets a sooner
             // timer after this sees when the thread means to wake.
             interface.wake_at.store(wake_at.unwrap_or(u64::MAX), Ordering::Relaxed);
-            (wake_at, changed)
+            while let Some(event) = stack.take_ipv6_event() {
+                log_ipv6(interface, event);
+            }
+            (wake_at, changed, stack.take_moved())
         };
-        if changed {
+        // The addresses it made for itself are `lo`'s too, taken without
+        // its stack's lock.
+        if moved {
+            addresses_changed();
+        }
+        if changed || moved {
             self::changed();
         }
         match wake_at {
@@ -1393,6 +1483,35 @@ fn run(number: usize) {
             Some(at) => sched::block_until(at, "net"),
             None => sched::block("net"),
         }
+    }
+}
+
+/// What an IPv6 address of `kind` is called in the log.
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::LinkLocal => "link-local",
+        Kind::Stable => "stable",
+        Kind::Temporary => "temporary",
+        Kind::Static => "given",
+    }
+}
+
+/// Logs `event`, which happened to `interface`'s IPv6.
+fn log_ipv6(interface: &Interface, event: Event) {
+    let name = &interface.name;
+    match event {
+        Event::Assigned(cidr, kind) => {
+            info!("Net: {name} has the IPv6 address {cidr} ({})", kind_name(kind));
+        }
+        Event::Duplicate(address, kind) => warn!(
+            "Net: {name} gave up the IPv6 address {address} ({}): another machine on its network has it",
+            kind_name(kind)
+        ),
+        Event::Expired(address, kind) => {
+            info!("Net: {name}'s IPv6 address {address} ({}) expired", kind_name(kind));
+        }
+        Event::Router(router) => info!("Net: {name} has the IPv6 router {router}"),
+        Event::RouterGone(router) => info!("Net: {name}'s IPv6 router {router} went"),
     }
 }
 

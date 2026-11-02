@@ -23,9 +23,10 @@
 //! slots from SLOT_NETWORK.
 //!
 //! Its control right, whatever its ports, sets the interfaces up
-//! (`configure`): their addresses and their routers, which ip(8) does,
-//! and the DHCP client will (Phase 12a.4b; ADR 0190). Spark gives a service one with only that right
-//! when its file asks for admin.network. The interfaces are numbered as
+//! (`configure` and `configure_ipv6`): their addresses and their
+//! routers, which ip(8) and netd(8) do (ADR 0190), and how they make
+//! their IPv6 addresses (ADR 0330). Spark gives a service one with only
+//! that right when its file asks for admin.network. The interfaces are numbered as
 //! Linux numbers them: `lo` is 1, and the cards from 2 in the order they
 //! were found, `net0` first; `/kernel/class/net` has a directory for
 //! each, with its number in `ifindex`.
@@ -41,7 +42,7 @@ const EPHEMERAL_FIRST: u64 = 49152;
 enum AddressFamily: u32 {
     /// IPv4, POSIX's AF_INET.
     ipv4 = 4;
-    /// IPv6, POSIX's AF_INET6: from Phase 12c.
+    /// IPv6, POSIX's AF_INET6 (since Phase 12c, ADR 0331).
     ipv6 = 6;
 }
 
@@ -57,8 +58,10 @@ enum SocketType: u32 {
 
 /// An address and port: where a socket is bound or connected, or where a
 /// datagram goes or came from, as POSIX's sockaddr_in and sockaddr_in6.
+/// An IPv6 socket's are IPv6 addresses, those of IPv4 machines as
+/// IPv4-mapped ones, ::ffff:10.0.2.2.
 struct Address {
-    /// Which version of IP `ip` is of: an AddressFamily.
+    /// Which version of IP `ip` is of: an AddressFamily, the socket's.
     family: u32;
     /// The port, as a number: 0 for any, when binding.
     port: u16;
@@ -67,6 +70,11 @@ struct Address {
     /// The address, in network byte order: an IPv4 address in the first
     /// 4 bytes, the rest zero. All zero is any address, when binding.
     ip: [u8; 16];
+    /// For a link-local IPv6 address (fe80::/10), the interface it is on,
+    /// by its number, as sockaddr_in6's sin6_scope_id: 0 for whichever
+    /// has IPv6 first, or the one the socket is bound to. Zero otherwise.
+    /// (Since version 3.)
+    scope: u32;
 }
 
 /// The most IPv4 addresses `configure` gives an interface.
@@ -83,14 +91,54 @@ struct InterfaceAddress {
     reserved: [u8; 3];
 }
 
+/// The most IPv6 addresses `configure_ipv6` gives an interface besides
+/// those it makes itself.
+const ADDRESSES_IPV6_MAX: u64 = 4;
+
+/// An IPv6 address of an interface's, and its network's prefix length:
+/// what `configure_ipv6` takes, as `ip address add 2001:db8::5/64` writes
+/// it.
+struct InterfaceAddressIpv6 {
+    /// The address, in network byte order.
+    ip: [u8; 16];
+    /// The length of its network's prefix, 1 to 128.
+    prefix: u8;
+    /// Zero.
+    reserved: [u8; 7];
+}
+
+/// How an interface makes its IPv6 addresses (ADR 0330).
+flags Ipv6Flags: u32 {
+    /// It has IPv6: a link-local address, made from `secret`, and those
+    /// it is given. Without it, it has none, and takes no IPv6 packets.
+    enabled = 0;
+    /// It makes stable addresses from the prefixes routers advertise
+    /// (RFC 4862 and RFC 7217), and takes their routes and DNS servers.
+    autoconf = 1;
+    /// It makes temporary addresses from them too (RFC 8981), and sends
+    /// from those.
+    temporary = 2;
+}
+
+/// What `configure_ipv6` sets besides the addresses.
+struct Ipv6Settings {
+    /// Ipv6Flags.
+    flags: u32;
+    /// Zero.
+    reserved: u32;
+    /// The key its stable addresses are made with: the same at each boot,
+    /// so that they are, and secret, so that nobody else can tell them
+    /// apart from random ones. netd(8) keeps the machine's.
+    secret: [u8; 16];
+}
+
 /// A range of the network's ports, and the rights to connect out, to
 /// listen on them, and to set the interfaces up.
-interface network = 0x000f version 2 {
+interface network = 0x000f version 3 {
     kind = network;
     /// Makes a socket of `family` and `kind` in slot `to`, with `flags`:
-    /// one that is neither bound nor connected (POSIX's `socket`). Fails
-    /// with not_supported for IPv6 until Phase 12c. Needs the send or the
-    /// receive right.
+    /// one that is neither bound nor connected (POSIX's `socket`). Needs
+    /// the send or the receive right.
     method socket = 1 (to: slot, family: AddressFamily, kind: SocketType, flags: PipeFlags) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, occupied, no_memory,
                 not_supported];
@@ -114,6 +162,19 @@ interface network = 0x000f version 2 {
     /// for `lo`, whose addresses are its own and the cards'. Needs the
     /// control right. (Since version 2.)
     method configure = 4 (interface: u32, addresses: in bytes, router: in bytes) -> ()
+        raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
+                bad_address, no_device, not_supported];
+    /// Sets how the interface numbered `interface` makes its IPv6
+    /// addresses, `settings`, an Ipv6Settings structure, and gives it the
+    /// IPv6 addresses in `addresses`, InterfaceAddressIpv6 structures, at
+    /// most ADDRESSES_IPV6_MAX, in place of those it was given before;
+    /// and `router`, 16 bytes, as its default route while no router
+    /// advertises one, or none if `router` is empty. Each address is
+    /// tested first, as those it makes are, and given up if another
+    /// machine has it. The addresses it made are made again. Fails as
+    /// `configure` does. Needs the control right. (Since version 3.)
+    method configure_ipv6 = 5 (interface: u32, settings: in bytes, addresses: in bytes,
+                               router: in bytes) -> ()
         raises [no_such_slot, empty_slot, wrong_kind, missing_rights, invalid_argument,
                 bad_address, no_device, not_supported];
 }

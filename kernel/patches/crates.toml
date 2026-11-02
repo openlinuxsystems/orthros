@@ -12,7 +12,9 @@
 # when a socket closes (`into_buffers` and `into_storage`), gives the
 # socket set ways to add, find and remove sockets that do not panic and
 # has it iterate only up to its last socket, and acknowledges a FIN in
-# FIN-WAIT at once, as Linux does (ADR 0185).
+# FIN-WAIT at once, as Linux does (ADR 0185). It also lets a socket on any
+# address take one version of IP alone, and gives an interface 16
+# addresses (ADR 0331).
 [[crate]]
 name = "smoltcp"
 version = "0.14.0"

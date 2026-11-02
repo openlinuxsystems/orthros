@@ -182,6 +182,14 @@ enum SocketOption: u32 {
     /// sends from 0.0.0.0, as a DHCP client does. Set before the socket
     /// connects or listens.
     bind_to_device = 15;
+    /// IPV6_V6ONLY, a boolean, of an IPv6 socket's: whether it takes only
+    /// IPv6, or IPv4 too through IPv4-mapped addresses (::ffff:10.0.2.2),
+    /// as it does to begin with, as on Linux. Set before it is bound.
+    /// (Since Phase 12c.)
+    v6_only = 16;
+    /// SO_DOMAIN, read only: the socket's AddressFamily
+    /// (radix-network(2)). (Since Phase 12c.)
+    family = 17;
 }
 
 /// The most files one `send_files` sends, as Linux's SCM_MAX_FD.

@@ -17,24 +17,29 @@ bench = false
 # Without `alloc`: every buffer is lent to it (ADR 0180). A neighbour
 # cache of 64 entries, as each one is looked for in turn. `medium-ip` is
 # for the loopback interface, whose packets have no Ethernet header, and
-# which has every card's address with its own, 8 at most; TCP and UDP
-# are programs' sockets (ADR 0183), and TCP's congestion control is
-# CUBIC, as Linux's is, in the kernel patch's integer arithmetic.
+# which has every card's address with its own; TCP and UDP are programs'
+# sockets (ADR 0183), and TCP's congestion control is CUBIC, as Linux's
+# is, in the kernel patch's integer arithmetic. IPv6 without smoltcp's
+# SLAAC, which makes only addresses from the MAC address: the stack makes
+# its own (ADR 0330), 16 addresses at most, the kernel patch's.
 smoltcp = { version = "0.14.0", default-features = false, features = [
     "medium-ethernet",
     "medium-ip",
     "proto-ipv4",
+    "proto-ipv6",
     "socket-icmp",
     "socket-tcp",
     "socket-tcp-cubic",
     "socket-udp",
     "auto-icmp-echo-reply",
-    "iface-max-addr-count-8",
+    "iface-max-addr-count-16",
     "iface-neighbor-cache-count-64",
 ] }
 # smoltcp's buffers' storage, which a socket's buffers come back as (ADR
 # 0182); the version and features smoltcp has, without `alloc` or `std`.
 managed = { version = "0.8.0", default-features = false, features = ["map"] }
+# Stable IPv6 addresses' interface identifiers (RFC 7217).
+sha2 = { version = "0.10.9", default-features = false }
 
 [lints]
 workspace = true
