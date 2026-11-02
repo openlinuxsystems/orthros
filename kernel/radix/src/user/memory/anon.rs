@@ -366,7 +366,7 @@ impl SpaceObject {
     }
 
     /// The highest free range of `pages` pages below `top`, if one fits.
-    fn free_range(regions: &[Region], pages: u64, top: u64) -> Option<u64> {
+    pub(super) fn free_range(regions: &[Region], pages: u64, top: u64) -> Option<u64> {
         let size = pages.checked_mul(PAGE_SIZE)?;
         let mut ceiling = top;
         // The regions are sorted: look at the gaps from the top down.
@@ -890,7 +890,7 @@ impl SpaceObject {
                     Backing::Frame(frame) => {
                         let _ = frames.push_within_capacity(frame.clone());
                     }
-                    Backing::Ring(_) => continue,
+                    Backing::Ring(_) | Backing::Device(_) => continue,
                 }
                 // In the child's list before its pages are, so that the
                 // child's end lets go of whatever it got.
@@ -920,9 +920,11 @@ impl SpaceObject {
                     let anon = match region.map(|region| &region.backing) {
                         Some(Backing::Anon(anon)) => anon,
                         Some(Backing::Frame(_)) => return (PageEdit::Keep, Some(access)),
-                        // Rings are left out, as is whatever maps between
-                        // the regions.
-                        Some(Backing::Ring(_)) | None => return (PageEdit::Keep, None),
+                        // Rings and cards are left out, as is whatever maps
+                        // between the regions.
+                        Some(Backing::Ring(_) | Backing::Device(_)) | None => {
+                            return (PageEdit::Keep, None);
+                        }
                     };
                     if let Some(info) = FRAMES.info(phys) {
                         info.share();

@@ -16,7 +16,8 @@
 //! and 0211), and `logger` writes a line to it; `notifyd` passes
 //! notifications from `notify-send` and other programs to the console,
 //! and `notifications` lists them (ADR 0212).
-//! `netd` sets the network cards up (ADR 0191), and `resolved` answers
+//! `e1000d` drives Intel's e1000 and e1000e cards as a program (ADR
+//! 0198), `netd` sets the network cards up (ADR 0191), and `resolved` answers
 //! every program's DNS queries, which `resolvectl` shows (ADR 0193);
 //! `timed` keeps the clock right from the network over NTS, and
 //! `timedatectl` shows it and sets the time zone (ADR 0194); `netlog`
@@ -43,6 +44,7 @@ mod df;
 mod dhcp;
 mod diskhealth;
 mod dmesg;
+mod e1000d;
 mod ectool;
 mod eject;
 mod elevate;
@@ -135,6 +137,7 @@ const TOOLS: &[(&str, Tool)] = &[
     ("device", device::main),
     ("diskhealth", diskhealth::main),
     ("dmesg", dmesg::main),
+    ("e1000d", e1000d::main),
     ("ectool", ectool::main),
     ("eject", eject::main),
     ("elevate", elevate::main),

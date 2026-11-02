@@ -476,6 +476,15 @@ impl<L: Link> Stack<L> {
         }
     }
 
+    /// Gives the interface the MAC address `mac`, which its link reports
+    /// from now on too: a card whose driver program attached it gives its
+    /// own (ADR 0198). An IP link has none.
+    pub fn set_mac(&mut self, mac: [u8; 6]) {
+        if self.link.medium() == Medium::Ethernet {
+            self.iface.set_hardware_addr(HardwareAddress::Ethernet(EthernetAddress(mac)));
+        }
+    }
+
     /// What the interface has sent and received since it started.
     pub fn counters(&self) -> Counters {
         self.counted.get()

@@ -1078,6 +1078,16 @@ impl Xhci {
         Some(Event::decode(trb))
     }
 
+    /// Tells the controller how far the events have been read while the
+    /// driver goes on reading them, so that it has room for more: a
+    /// driver whose handling of events makes more (a transfer started
+    /// again at once, which completes at once) would otherwise fill the
+    /// ring before it is done. Linux does so every half ring; the
+    /// interrupt stays held off until [`Xhci::events_read`].
+    pub fn events_progress(&mut self) {
+        self.interrupter.write32(rt::ERDP, self.events.dequeue_phys() as u32);
+    }
+
     /// Tells the controller how far the events have been read, and that
     /// the driver is done with them for now, so that it interrupts again
     /// for the next (it does at once if more came meanwhile).

@@ -50,7 +50,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use radix_abi::address_space::PAGE_SIZE;
+use radix_abi::address_space::{ANONYMOUS_TOP, PAGE_SIZE};
 use radix_abi::capability::Rights as AbiRights;
 use radix_abi::errors::Kernel;
 use radix_cap::ObjectId;
@@ -61,6 +61,7 @@ use radix_sync::Mutex;
 
 pub use anon::{Anon, Fault, FileSource, Placement, SharedPages};
 
+use super::device::DevicePages;
 use super::ring::RingRef;
 use super::{Result, error};
 use crate::Arch;
@@ -85,6 +86,10 @@ pub enum Backing {
     Ring(RingRef),
     /// Anonymous memory, made page by page as it is touched (Phase 8).
     Anon(Anon),
+    /// A card's registers, memory it reaches, or its network link, which
+    /// its driver program maps (ADR 0198): never shared with a child, and
+    /// taken away when the card's capability goes.
+    Device(DevicePages),
 }
 
 impl Backing {
@@ -95,14 +100,17 @@ impl Backing {
         match self {
             Backing::Frame(frame) => Some(frame.phys + page * PAGE_SIZE),
             Backing::Ring(ring) => Some(ring.phys(page as usize)),
+            Backing::Device(pages) => Some(pages.phys(page)),
             Backing::Anon(_) => None,
         }
     }
 
+    /// Whether the two map the same thing; for a card, any of its parts.
     fn same(&self, other: &Backing) -> bool {
         match (self, other) {
             (Backing::Frame(a), Backing::Frame(b)) => Arc::ptr_eq(a, b),
             (Backing::Ring(a), Backing::Ring(b)) => Arc::ptr_eq(a, b),
+            (Backing::Device(a), Backing::Device(b)) => a.same_device(b),
             _ => false,
         }
     }
@@ -334,9 +342,44 @@ impl SpaceObject {
         offset: u64,
         access: UserAccess,
     ) -> Result<()> {
-        let end = user_pages(start, pages).ok_or(error(Kernel::InvalidArgument))?;
         let mut regions = self.regions.lock();
-        if overlaps(&regions, start, end) {
+        self.map_in(&mut regions, start, pages, backing, offset, access)
+    }
+
+    /// Maps as [`map`](Self::map) does, at `start`, or, with `start` 0,
+    /// where the kernel chooses, as it places anonymous memory given no
+    /// hint; returns where it went.
+    pub fn map_placed(
+        &self,
+        start: u64,
+        pages: u64,
+        backing: &Backing,
+        offset: u64,
+        access: UserAccess,
+    ) -> Result<u64> {
+        let mut regions = self.regions.lock();
+        let start = match start {
+            0 => Self::free_range(&regions, pages, self.anon_top)
+                .or_else(|| Self::free_range(&regions, pages, ANONYMOUS_TOP))
+                .ok_or(error(Kernel::NoMemory))?,
+            start => start,
+        };
+        self.map_in(&mut regions, start, pages, backing, offset, access)?;
+        Ok(start)
+    }
+
+    /// [`map`](Self::map), with the regions locked.
+    fn map_in(
+        &self,
+        regions: &mut Vec<Region, Kmalloc>,
+        start: u64,
+        pages: u64,
+        backing: &Backing,
+        offset: u64,
+        access: UserAccess,
+    ) -> Result<()> {
+        let end = user_pages(start, pages).ok_or(error(Kernel::InvalidArgument))?;
+        if overlaps(regions, start, end) {
             return Err(error(Kernel::AlreadyMapped));
         }
         regions.try_reserve(1).map_err(|_| error(Kernel::NoMemory))?;
@@ -351,11 +394,23 @@ impl SpaceObject {
             // pages (ADR 0121).
             let phys = frame.phys + offset * PAGE_SIZE;
             Arch::map_pages(&self.arch, start, phys, pages, access).map_err(failed)?;
+        } else if let Backing::Device(device) = backing
+            && let Some(phys) = device.contiguous()
+        {
+            // A card's memory follows one another too.
+            let phys = phys + offset * PAGE_SIZE;
+            Arch::map_pages(&self.arch, start, phys, pages, access).map_err(failed)?;
         } else {
+            let uncached = matches!(backing, Backing::Device(device) if device.uncached());
             for page in 0..pages {
                 let virt = start + page * PAGE_SIZE;
                 let phys = backing.phys(offset + page).ok_or(error(Kernel::InvalidArgument))?;
-                if let Err(err) = Arch::map_page(&self.arch, virt, phys, access) {
+                let mapped = if uncached {
+                    Arch::map_device_page(&self.arch, virt, phys)
+                } else {
+                    Arch::map_page(&self.arch, virt, phys, access)
+                };
+                if let Err(err) = mapped {
                     for done in 0..page {
                         Arch::unmap_page(&self.arch, start + done * PAGE_SIZE);
                     }
@@ -363,7 +418,7 @@ impl SpaceObject {
                 }
             }
         }
-        insert(&mut regions, Region { start, pages, backing: backing.clone(), offset });
+        insert(regions, Region { start, pages, backing: backing.clone(), offset });
         self.may_share.store(true, Ordering::Release);
         Ok(())
     }
@@ -437,7 +492,9 @@ impl SpaceObject {
     fn clear_region(&self, region: &Region) {
         match region.backing {
             Backing::Anon(_) => self.release_range(region.start, region.end()),
-            Backing::Frame(_) | Backing::Ring(_) => self.unmap_range(region.start, region.end()),
+            Backing::Frame(_) | Backing::Ring(_) | Backing::Device(_) => {
+                self.unmap_range(region.start, region.end());
+            }
         }
     }
 
@@ -534,6 +591,8 @@ impl SpaceObject {
                 (Arc::as_ptr(frame) as usize, futex::Held::Frame(frame.clone()))
             }
             Backing::Ring(ring) => (Arc::as_ptr(ring) as usize, futex::Held::Ring(ring.clone())),
+            // A card's memory is the driver's alone: no other space maps it.
+            Backing::Device(_) => return self.own_futex_key(address),
         };
         let index = region.offset + (page - region.start) / PAGE_SIZE;
         futex::Key { owner, offset: index * PAGE_SIZE + address % PAGE_SIZE, hold: Some(hold) }

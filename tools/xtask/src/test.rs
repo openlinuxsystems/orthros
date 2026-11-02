@@ -81,10 +81,12 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-acpi",
     "radix-ahci",
     "radix-amdvi",
+    "radix-atheros-net",
     "radix-bitlocker",
     "radix-bootfs",
     "radix-block",
     "radix-bootinfo",
+    "radix-broadcom-net",
     "radix-btrfs",
     "radix-cap",
     "radix-crosec",
@@ -120,7 +122,9 @@ pub const KERNEL_LIBRARIES: &[&str] = &[
     "radix-posix",
     "radix-pstate",
     "radix-random",
+    "radix-realtek-net",
     "radix-relocs",
+    "radix-rge-net",
     "radix-sched",
     "radix-scsi",
     "radix-sdhci",
@@ -4321,7 +4325,7 @@ fn boot_report(vm: &mut Vm, case: &Case) -> Result<(), String> {
     } else {
         vm.expect("Lock checker: ")?;
     }
-    vm.expect("Capabilities: ready; 22 object kinds, 13 rights")?;
+    vm.expect("Capabilities: ready; 23 object kinds, 13 rights")?;
     vm.expect("User mode: SYSCALL/SYSRET entry, user half ")?;
     vm.expect("Files: the root is a tmpfs; Spark mounts the rest")?;
     // Every test image carries the user test programs.
@@ -4419,7 +4423,7 @@ fn consoles(vm: &mut Vm, case: &Case) -> Result<(), String> {
     vm.expect("Boot complete.")?;
     vm.expect("spark: Spark v2 is process ")?;
     vm.expect("spark: listening at /system/live/spark/control")?;
-    vm.expect("spark: 11 services in /system/settings/spark/services, 11 enabled")?;
+    vm.expect("spark: 12 services in /system/settings/spark/services, 12 enabled")?;
     vm.expect("spark: started consoled (/system/commands/consoled) as process ")?;
     vm.expect("consoled: console of ")?;
     vm.expect("consoled: started /system/commands/nukesh on tty1 as process ")?;
@@ -7892,7 +7896,7 @@ fn principals(vm: &mut Vm, case: &Case) -> Result<(), String> {
 fn services(vm: &mut Vm, case: &Case) -> Result<(), String> {
     boot_report(vm, case)?;
     vm.expect("Boot complete.")?;
-    vm.expect_anywhere("spark: 11 services in /system/settings/spark/services, 11 enabled")?;
+    vm.expect_anywhere("spark: 12 services in /system/settings/spark/services, 12 enabled")?;
     vm.expect_ahead("spark: started /system/tests/posix/servicetest as process ")?;
     let code = program_line(vm, "(/system/tests/posix/servicetest) exited with code ")?;
     let log = vm.log();

@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The userspace-e1000 boot test's netd(8), as the system's own file has
+# it, which sets each card up by QEMU's DHCP server, before and after
+# e1000d(8) is killed.
+
+service_version = 1
+description = "Network setup"
+program = "/system/commands/netd"
+restart = "always"
+
+[limits]
+memory = "16M"
+
+[permissions]
+network.outbound = true
+network.listen = [68]
+admin.network = true
+files.read-write = ["/system/state/netd", "/system/live/netd"]

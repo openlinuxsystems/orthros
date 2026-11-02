@@ -53,6 +53,7 @@ use radix_xhci::{BUFFER_SIZE, Device, Event, Handoff, Host, MAX_ENDPOINTS, Place
 use super::STARTS;
 use super::hid::{self, Hid, HidPlan, MAX_HIDS};
 use super::hub::Hub;
+use super::net::{self, Ethernet};
 use super::serial::{self, MAX_SERIALS, Serial};
 use super::shown::{self, Interface, MAX_INTERFACES, RootHub, Shown};
 use super::storage::{LinkRef, StoragePlan};
@@ -146,6 +147,10 @@ impl fmt::Display for Name {
     }
 }
 
+/// How many events are read between the thread's telling the
+/// controller how far it read: a quarter of the ring.
+const PROGRESS_EVERY: usize = radix_xhci::ring::EVENT_TRBS / 4;
+
 /// A device the thread has set up.
 pub(super) struct Attached {
     pub(super) path: Path,
@@ -161,6 +166,8 @@ pub(super) struct Attached {
     pub(super) storage: Option<LinkRef>,
     /// Its serial ports that are carried.
     pub(super) serials: Vec<Serial, Kmalloc>,
+    /// Its Ethernet adapter, if it is one that is carried (ADR 0199).
+    pub(super) ethernet: Option<Ethernet>,
 }
 
 /// A controller, as its thread runs it.
@@ -232,6 +239,8 @@ pub(super) struct Plan {
     /// Its serial ports, the first `serial_count`.
     serials: [radix_usb::serial::Port; MAX_SERIALS],
     serial_count: usize,
+    /// Its Ethernet adapter's interfaces (ADR 0199).
+    pub(super) net: Option<radix_usb::net::Port>,
 }
 
 impl Plan {
@@ -273,7 +282,8 @@ pub fn run(index: usize) {
             | controller.work()
             | controller.lights()
             | controller.storage()
-            | controller.serial();
+            | controller.serial()
+            | controller.net();
         if controller.xhci.failed() {
             if controller.dbc {
                 super::dbc::stop();
@@ -283,6 +293,7 @@ pub fn run(index: usize) {
             }
             for device in &mut controller.devices {
                 serial::gone(&mut device.serials);
+                net::gone(&mut device.ethernet);
             }
             for device in &controller.devices {
                 shown::remove(controller.bus, device.path);
@@ -407,6 +418,7 @@ impl Controller {
     /// whether there were any.
     fn events(&mut self) -> bool {
         let mut any = false;
+        let mut read = 0;
         loop {
             let event = if self.host.kept.is_empty() {
                 match self.xhci.next_event() {
@@ -417,6 +429,12 @@ impl Controller {
                 self.host.kept.remove(0)
             };
             any = true;
+            // An adapter's transfers, started again as they end, can come
+            // faster than a ring's worth is read (ADR 0199).
+            read += 1;
+            if read % PROGRESS_EVERY == 0 {
+                self.xhci.events_progress();
+            }
             match event {
                 Event::Port { port } => self.port_changed(port),
                 Event::Transfer { trb, slot, endpoint, code, residual } => {
@@ -501,7 +519,9 @@ impl Controller {
             attached.hids.iter().position(|h| h.endpoint == endpoint && h.pending == trb)
         {
             self.hid_report(at, index, code, residual);
-        } else if !self.serial_transfer(at, trb, endpoint, code, residual) {
+        } else if !self.serial_transfer(at, trb, endpoint, code, residual)
+            && !self.net_transfer(at, trb, endpoint, code, residual)
+        {
             self.storage_transfer(at, trb, endpoint, code, residual);
         }
     }
@@ -533,6 +553,7 @@ impl Controller {
             shown::remove(bus, gone.path);
             hid::gone(&mut gone.hids);
             serial::gone(&mut gone.serials);
+            net::gone(&mut gone.ethernet);
             if let Some(link) = gone.storage.take() {
                 link.gone();
             }
@@ -676,6 +697,7 @@ impl Controller {
             hids: hid::none(),
             storage: None,
             serials: serial::none(),
+            ethernet: None,
         };
         let _ = self.devices.push_within_capacity(attached);
         if let Some(shown) = &shown
@@ -683,10 +705,19 @@ impl Controller {
         {
             warn!("USB: {}: too many devices to show in /kernel/bus/usb", Name(self.bus, path));
         }
+        self.start_drivers(slot, path, &plan, shown.as_ref());
+        Ok(())
+    }
+
+    /// Starts the drivers of the device just configured in slot `slot`,
+    /// at `path`, for what `plan` found in it, which `shown` shows. Kept
+    /// out of [`Controller::set_up`]'s frame, as the adapter's start is.
+    #[inline(never)]
+    fn start_drivers(&mut self, slot: u8, path: Path, plan: &Plan, shown: Option<&Shown>) {
         if let Some(status) = plan.hub {
             match self.start_hub(slot, status) {
                 Ok(()) => {
-                    let hub = shown.iter().flat_map(Shown::interfaces);
+                    let hub = shown.into_iter().flat_map(Shown::interfaces);
                     for i in hub.filter(|i| i.descriptor.class == class::HUB) {
                         shown::set_driver(self.bus, path, i.descriptor.number, "hub");
                     }
@@ -721,6 +752,19 @@ impl Controller {
                 ),
             }
         }
+        if let Some(port) = plan.net {
+            match self.start_net(slot, port) {
+                Ok(()) => {
+                    shown::set_driver(self.bus, path, port.control, port.protocol.driver());
+                    shown::set_driver(self.bus, path, port.data, port.protocol.driver());
+                }
+                Err(why) => warn!(
+                    "USB: {}: interface {}: its network adapter cannot be used: {why}",
+                    Name(self.bus, path),
+                    port.control
+                ),
+            }
+        }
         if let Some(storage) = plan.storage
             && let Err(why) = self.start_storage(slot, storage)
         {
@@ -730,7 +774,6 @@ impl Controller {
                 storage.interface
             );
         }
-        Ok(())
     }
 
     /// Gives the device at `place` a slot and its address, in `home`. Kept
@@ -821,18 +864,8 @@ pub(super) fn read_device(
     if name.is_empty() {
         let _ = name.write_str("a USB device");
     }
-    // Its first configuration: what its interfaces are, and their
-    // endpoints.
-    let header = Setup::get_descriptor(descriptor::CONFIGURATION, 0, 0, 9);
-    let total = control(header, &mut buffer[..9])
-        .ok()
-        .and_then(|came| Configuration::parse(&buffer[..came]))
-        .map_or(0, |config| usize::from(config.total_length).min(buffer.len()));
-    if total < 9 {
-        return Err(Why::Device("it has no configuration"));
-    }
-    let all = Setup::get_descriptor(descriptor::CONFIGURATION, 0, 0, total as u16);
-    let came = control(all, &mut buffer[..total])?;
+    // Its configuration: what its interfaces are, and their endpoints.
+    let came = choose_configuration(control, buffer, found.configurations)?;
     let config =
         Configuration::parse(&buffer[..came]).ok_or(Why::Device("its configuration is broken"))?;
     let mut plan = Plan {
@@ -850,6 +883,7 @@ pub(super) fn read_device(
             bulk_out: EndpointDescriptor::default(),
         }; MAX_SERIALS],
         serial_count: 0,
+        net: radix_usb::net::port(&config),
     };
     let mut named: [&str; 4] = [""; 4];
     let mut count = 0;
@@ -954,6 +988,59 @@ pub(super) fn read_device(
         serial,
     });
     Ok(plan)
+}
+
+/// Reads the configuration of index `index` whole into `buffer`; says how
+/// long it is.
+fn read_configuration(
+    control: &mut ControlIn<'_>,
+    buffer: &mut [u8],
+    index: u8,
+) -> Result<usize, Why> {
+    let header = Setup::get_descriptor(descriptor::CONFIGURATION, index, 0, 9);
+    let total = control(header, &mut buffer[..9])
+        .ok()
+        .and_then(|came| Configuration::parse(&buffer[..came]))
+        .map_or(0, |config| usize::from(config.total_length).min(buffer.len()));
+    if total < 9 {
+        return Err(Why::Device("it has no configuration"));
+    }
+    let all = Setup::get_descriptor(descriptor::CONFIGURATION, index, 0, total as u16);
+    control(all, &mut buffer[..total])
+}
+
+/// The most configurations of a device looked at for an Ethernet adapter.
+const MAX_CONFIGURATIONS: u8 = 4;
+
+/// Reads the configuration to set up into `buffer`, of the device's
+/// `configurations`, and says how long it is: its first, unless that one
+/// is its maker's own or Microsoft's (`radix_usb::net::passed_over`) and
+/// another is an Ethernet adapter's, which is chosen then (ADR 0199).
+fn choose_configuration(
+    control: &mut ControlIn<'_>,
+    buffer: &mut [u8],
+    configurations: u8,
+) -> Result<usize, Why> {
+    let came = read_configuration(control, buffer, 0)?;
+    let passed_over = Configuration::parse(&buffer[..came]).is_some_and(|config| {
+        radix_usb::net::port(&config).is_none()
+            && config
+                .interfaces()
+                .next()
+                .is_some_and(|i| radix_usb::net::passed_over(&i.descriptor))
+    });
+    if !passed_over {
+        return Ok(came);
+    }
+    for index in 1..configurations.min(MAX_CONFIGURATIONS) {
+        let Ok(came) = read_configuration(control, buffer, index) else { continue };
+        let adapter = Configuration::parse(&buffer[..came])
+            .is_some_and(|config| radix_usb::net::port(&config).is_some());
+        if adapter {
+            return Ok(came);
+        }
+    }
+    read_configuration(control, buffer, 0)
 }
 
 /// The speeds below high speed, which a high-speed hub's Transaction

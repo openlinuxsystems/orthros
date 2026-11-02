@@ -88,12 +88,15 @@ pub fn build_release(
         let staging = ctx.out.join("root-staging");
         make_root(ctx, &programs.bootfs, &staging, &root, overrides.account.as_ref())?;
     }
+    // The features' flags go on whichever command line the image boots.
+    let cmdline = overrides.cmdline.as_deref().unwrap_or(&ctx.config.boot.cmdline);
+    let cmdline = ctx.config.features.cmdline(cmdline);
     let built = build(
         ctx,
         &ImageSpec {
             kernel: &kernel,
             timeout: ctx.config.boot.timeout,
-            cmdline: overrides.cmdline.as_deref().unwrap_or(&ctx.config.boot.cmdline),
+            cmdline: &cmdline,
             microcode,
             programs: Some(&programs),
             disk_check: overrides.disk_check.as_deref(),

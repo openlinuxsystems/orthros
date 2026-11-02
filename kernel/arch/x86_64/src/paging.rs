@@ -291,6 +291,12 @@ pub(crate) fn user_flags(access: Access) -> u64 {
     }
 }
 
+/// The flags of a user page of device registers: readable and writable,
+/// uncached and, where the CPU has NX, never executable (ADR 0198).
+pub(crate) fn user_device_flags() -> u64 {
+    user_flags(Access::ReadWrite) | Cache::Uncached.bits()
+}
+
 /// The entry that links in the page table at `phys` for user mode, as
 /// [`table_of`] links the tables it makes.
 pub(crate) fn user_table(phys: u64) -> u64 {

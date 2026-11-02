@@ -43,16 +43,17 @@
 pub mod memory;
 pub mod ports;
 pub mod proc;
+pub mod program;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::{self, Write};
 use core::ptr;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use radix_hal::{Devices, Timer};
 use radix_hw::Mmio;
-use radix_hw::pci::{Bar, Function, Msi, MsiX};
+use radix_hw::pci::{Bar, Function, Msi, MsiX, capability};
 use radix_klog::{TextBuf, error, info, warn};
 use radix_mm::lease::{self, Lease};
 use radix_mm::{Flags, HEAP, Kmalloc};
@@ -108,29 +109,42 @@ pub const ORPHAN_NS: u64 = 60_000_000_000;
 
 /// What an interface's stack sends and receives through: a virtio network
 /// card, a card of one of the drivers that share `radix-nic` (ADR 0197),
-/// or the loopback link.
+/// a card a program drives (ADR 0198), or the loopback link.
 #[expect(clippy::large_enum_variant, reason = "each is made once, in its interface's place")]
 pub enum Card {
     Virtio { net: Net, vector: Option<u32> },
     Nic { nic: Box<dyn Nic, Kmalloc>, vector: Option<u32> },
+    Program(program::Program),
     Loopback(Loopback),
 }
 
 impl Card {
-    /// Whether the card stopped with an error.
+    /// Whether the card stopped with an error. One a program drives
+    /// never does: its driver may come back.
     pub fn failed(&self) -> bool {
         match self {
             Card::Virtio { net, .. } => net.failed(),
             Card::Nic { nic, .. } => nic.failed(),
-            Card::Loopback(_) => false,
+            Card::Program(_) | Card::Loopback(_) => false,
+        }
+    }
+
+    /// Whether the card's link is down: it stopped with an error, or no
+    /// driver drives it, or its driver says its link is down.
+    pub fn down(&self) -> bool {
+        match self {
+            Card::Program(card) => !card.up(),
+            card => card.failed(),
         }
     }
 
     /// Whether the card raises an interrupt when it has something for the
-    /// stack; one that does not is polled.
+    /// stack; one that does not is polled. A program's driver wakes the
+    /// stack itself.
     fn interrupts(&self) -> bool {
         match self {
             Card::Virtio { vector, .. } | Card::Nic { vector, .. } => vector.is_some(),
+            Card::Program(_) => true,
             Card::Loopback(_) => false,
         }
     }
@@ -139,14 +153,14 @@ impl Card {
 impl Link for Card {
     fn medium(&self) -> Medium {
         match self {
-            Card::Virtio { .. } | Card::Nic { .. } => Medium::Ethernet,
+            Card::Virtio { .. } | Card::Nic { .. } | Card::Program(_) => Medium::Ethernet,
             Card::Loopback(link) => link.medium(),
         }
     }
 
     fn pending(&self) -> bool {
         match self {
-            Card::Virtio { .. } | Card::Nic { .. } => false,
+            Card::Virtio { .. } | Card::Nic { .. } | Card::Program(_) => false,
             Card::Loopback(link) => link.pending(),
         }
     }
@@ -155,6 +169,7 @@ impl Link for Card {
         match self {
             Card::Virtio { net, .. } => net.info().mac,
             Card::Nic { nic, .. } => nic.info().mac,
+            Card::Program(card) => card.mac(),
             Card::Loopback(link) => link.mac(),
         }
     }
@@ -163,6 +178,7 @@ impl Link for Card {
         match self {
             Card::Virtio { net, .. } => net.receive(frame),
             Card::Nic { nic, .. } => nic.receive(frame),
+            Card::Program(card) => card.receive(frame),
             Card::Loopback(link) => link.receive(frame),
         }
     }
@@ -171,6 +187,7 @@ impl Link for Card {
         match self {
             Card::Virtio { net, .. } => net.can_send(),
             Card::Nic { nic, .. } => nic.can_send(),
+            Card::Program(card) => card.can_send(),
             Card::Loopback(link) => link.can_send(),
         }
     }
@@ -179,6 +196,7 @@ impl Link for Card {
         match self {
             Card::Virtio { net, .. } => frame.len() <= MAX_FRAME && net.send(frame).is_ok(),
             Card::Nic { nic, .. } => nic.send(frame),
+            Card::Program(card) => card.send(frame),
             Card::Loopback(link) => link.send(frame),
         }
     }
@@ -187,6 +205,7 @@ impl Link for Card {
         match self {
             Card::Virtio { net, .. } => net.notify(),
             Card::Nic { nic, .. } => nic.flush(),
+            Card::Program(card) => card.flush(),
             Card::Loopback(link) => link.flush(),
         }
     }
@@ -194,14 +213,14 @@ impl Link for Card {
     fn needs_checksums(&self) -> bool {
         match self {
             // No card's checksum offloads are used.
-            Card::Virtio { .. } | Card::Nic { .. } => true,
+            Card::Virtio { .. } | Card::Nic { .. } | Card::Program(_) => true,
             Card::Loopback(link) => link.needs_checksums(),
         }
     }
 
     fn loopback(&mut self) -> Option<&mut Loopback> {
         match self {
-            Card::Virtio { .. } | Card::Nic { .. } => None,
+            Card::Virtio { .. } | Card::Nic { .. } | Card::Program(_) => None,
             Card::Loopback(link) => link.loopback(),
         }
     }
@@ -220,7 +239,8 @@ impl Drop for Card {
                 nic.stop();
                 *vector
             }
-            Card::Loopback(_) => None,
+            // Its driver's device capability stops the card.
+            Card::Program(_) | Card::Loopback(_) => None,
         };
         if let Some(vector) = vector {
             <Arch as Devices>::free_interrupt(vector);
@@ -581,10 +601,20 @@ pub fn changed() {
 
 /// The address and router of the `ip=` and `gateway=` flags.
 static FLAGS: Once<(Option<Ipv4Cidr>, Option<Ipv4Address>)> = Once::new();
+/// `e1000=program`: the e1000 and e1000e cards an IOMMU isolates are
+/// left to a driver program (ADR 0198).
+static E1000_PROGRAM: AtomicBool = AtomicBool::new(false);
 
-/// Reads the `ip=` and `gateway=` flags, before the PCI scan, and starts
-/// the loopback interface.
-pub fn init(ip: Option<&str>, gateway: Option<&str>) {
+/// Reads the `ip=`, `gateway=` and `e1000=` flags, before the PCI scan,
+/// and starts the loopback interface.
+pub fn init(ip: Option<&str>, gateway: Option<&str>, e1000: Option<&str>) {
+    match e1000 {
+        Some("program") => E1000_PROGRAM.store(true, Ordering::Relaxed),
+        None | Some("kernel") => {}
+        Some(other) => {
+            warn!("Net: e1000={other} is neither program nor kernel; the kernel drives them");
+        }
+    }
     let address = ip.and_then(|text| {
         let parsed = radix_net::parse_cidr(text);
         if parsed.is_none() {
@@ -815,6 +845,14 @@ pub enum Known {
     Ena,
     /// Google's virtual network card (`radix-gve`).
     Gve,
+    /// One of Realtek's (`radix-realtek-net`).
+    Realtek(radix_realtek_net::Model),
+    /// One of Atheros' or a Killer (`radix-atheros-net`).
+    Atheros(radix_atheros_net::Model),
+    /// One of Broadcom's NetXtreme chips (`radix-broadcom-net`).
+    Broadcom(radix_broadcom_net::Model),
+    /// One of Realtek's 2.5 and 5 gigabit chips (`radix-rge-net`).
+    Rge(radix_rge_net::Model),
 }
 
 impl Known {
@@ -822,6 +860,10 @@ impl Known {
     fn msi(self) -> bool {
         match self {
             Known::Intel(model) => model.msi(),
+            Known::Realtek(model) => model.msi(),
+            Known::Atheros(model) => model.msi(),
+            Known::Broadcom(model) => model.msi(),
+            Known::Rge(model) => model.msi(),
             Known::Vmxnet3 | Known::Ena | Known::Gve => true,
         }
     }
@@ -835,7 +877,9 @@ impl Known {
     fn article(self) -> &'static str {
         match self {
             Known::Intel(_) | Known::Ena => "an",
-            Known::Vmxnet3 | Known::Gve => "a",
+            Known::Vmxnet3 | Known::Gve | Known::Realtek(_) | Known::Rge(_) => "a",
+            Known::Atheros(model) => model.article(),
+            Known::Broadcom(model) => model.article(),
         }
     }
 }
@@ -848,6 +892,10 @@ impl fmt::Display for Known {
             Known::Vmxnet3 => f.write_str("VMware VMXNET3"),
             Known::Ena => f.write_str("Amazon ENA"),
             Known::Gve => f.write_str("Google gVNIC"),
+            Known::Realtek(model) => write!(f, "Realtek {}", model.name),
+            Known::Atheros(model) => f.write_str(model.name),
+            Known::Broadcom(model) => f.write_str(model.name),
+            Known::Rge(model) => f.write_str(model.name.unwrap_or("Realtek RTL8125/RTL8126")),
         }
     }
 }
@@ -865,6 +913,18 @@ pub fn identify(function: &Function) -> Option<Known> {
     if (vendor, device) == (radix_gve::VENDOR, radix_gve::DEVICE) {
         return Some(Known::Gve);
     }
+    if let Some(model) = radix_realtek_net::identify(vendor, device, function.subsystem_id()) {
+        return Some(Known::Realtek(model));
+    }
+    if let Some(model) = radix_atheros_net::identify(vendor, device) {
+        return Some(Known::Atheros(model));
+    }
+    if let Some(model) = radix_broadcom_net::identify(vendor, device) {
+        return Some(Known::Broadcom(model));
+    }
+    if let Some(model) = radix_rge_net::identify(vendor, device) {
+        return Some(Known::Rge(model));
+    }
     radix_intel_net::identify(vendor, device).map(Known::Intel)
 }
 
@@ -873,9 +933,48 @@ pub fn identify(function: &Function) -> Option<Known> {
 #[inline(never)]
 pub fn bind_card(function: &Function, card: Known) {
     let Some(index) = free_index(function) else { return };
+    if leaves(card) {
+        if <Arch as Devices>::isolate(function.address()) {
+            if let Err(why) = leave_card(function, card, index) {
+                warn!(
+                    "Net: could not leave the {card} network card at {} to a program: {why}",
+                    function.address()
+                );
+            }
+            return;
+        }
+        warn!(
+            "Net: the kernel drives the {card} network card at {} itself, though e1000=program \
+             asks for a program: no IOMMU confines it, with its interrupts, to its own memory",
+            function.address()
+        );
+    }
     if let Err(why) = start_card(function, card, index) {
         warn!("Net: could not set up the {card} network card at {}: {why}", function.address());
     }
+}
+
+/// Whether `card` is one `e1000=program` leaves to a program: an e1000
+/// or e1000e, radix-intel-net's `em` family.
+fn leaves(card: Known) -> bool {
+    E1000_PROGRAM.load(Ordering::Relaxed)
+        && matches!(card, Known::Intel(model) if matches!(model.kind, radix_intel_net::Kind::Em(_)))
+}
+
+/// Leaves the card `function`, which an IOMMU isolates, to a driver
+/// program, numbered `index` among the cards: its interface comes now,
+/// down until a driver attaches it (`program`).
+fn leave_card(function: &Function, card: Known, index: usize) -> Result<(), Failure> {
+    let left = crate::user::device::leave(function, index).ok_or("too many cards are left")?;
+    let interface =
+        add_interface(index, Card::Program(program::Program::new(left, fallback_mac())))?;
+    info!(
+        "Net: {} is {} {card} network card at {}, left for a driver program (e1000=program)",
+        interface.name,
+        card.article(),
+        function.address()
+    );
+    run_thread(interface).map_err(Failure::Other)
 }
 
 /// The number the next card found takes, if there is room for it.
@@ -987,13 +1086,26 @@ fn map_registers(function: &Function, bar: usize) -> Result<Mmio, Failure> {
 
 fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Failure> {
     function.enable_memory_and_dma();
-    let regs = map_registers(function, 0)?;
-    // VMXNET3's commands are in a second BAR, and gVNIC's doorbells in
-    // its third.
+    // Realtek's registers are in their first memory BAR, after one of
+    // I/O ports: the second on the PCI RTL8169, the third on the PCI
+    // Express chips.
+    let first = match card {
+        Known::Realtek(_) | Known::Rge(_) => (0..6)
+            .find(|&bar| matches!(function.bar(bar), Some(Bar::Memory { .. })))
+            .ok_or("its registers are not in memory")?,
+        _ => 0,
+    };
+    let regs = map_registers(function, first)?;
+    // VMXNET3's commands are in a second BAR, gVNIC's doorbells in its
+    // third, and the APE of Broadcom's chips that have one too.
     let more = match card {
         Known::Vmxnet3 => Some(map_registers(function, 1)?),
         Known::Gve => Some(map_registers(function, 2)?),
-        Known::Intel(_) | Known::Ena => None,
+        Known::Broadcom(model) if model.ape() => Some(map_registers(function, 2)?),
+        Known::Broadcom(_) => None,
+        Known::Intel(_) | Known::Ena | Known::Realtek(_) | Known::Atheros(_) | Known::Rge(_) => {
+            None
+        }
     };
     let source = function.address();
     // One interrupt, for everything, if the card should have one and it
@@ -1008,7 +1120,11 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
             Some(vector)
         })
     };
-    let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(source, pages, false);
+    // The older Realtek chips reach only the first 4 GiB, Atheros' rings
+    // share the high half of their addresses, and Broadcom's hang on a
+    // DMA across a 4 GiB line, which memory below 4 GiB cannot cross.
+    let below_4g = matches!(card, Known::Realtek(_) | Known::Atheros(_) | Known::Broadcom(_));
+    let mut alloc = |pages: usize| <Arch as Devices>::alloc_dma(source, pages, below_4g);
     let mut delay = delay;
     let how = match interrupt {
         Some(_) => radix_nic::Interrupt::Msi,
@@ -1043,6 +1159,56 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
                 )
             })
             .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
+        Known::Realtek(_) => radix_realtek_net::start(
+            function.device_id(),
+            regs,
+            how,
+            fallback_mac(),
+            &mut alloc,
+            &mut delay,
+        )
+        .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
+        Known::Atheros(model) => {
+            let pci = radix_atheros_net::Pci {
+                revision: function.revision(),
+                subsystem: function.subsystem(),
+                express: function.find_capability(capability::EXPRESS),
+            };
+            radix_atheros_net::start(
+                model,
+                pci,
+                regs,
+                how,
+                fallback_mac(),
+                &mut alloc,
+                &mut delay,
+                sched::now_ns,
+            )
+            .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory))
+        }
+        Known::Broadcom(model) => radix_broadcom_net::start(
+            model,
+            function,
+            regs,
+            more,
+            how,
+            fallback_mac(),
+            &mut alloc,
+            &mut delay,
+            sched::now_ns,
+        )
+        .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
+        Known::Rge(model) => radix_rge_net::start(
+            model,
+            regs,
+            function.find_capability(capability::EXPRESS),
+            how,
+            fallback_mac(),
+            &mut alloc,
+            &mut delay,
+            sched::now_ns,
+        )
+        .and_then(|nic| boxed(nic).ok_or(radix_nic::Error::NoMemory)),
     };
     let nic = started.map_err(|err| {
         if let Some(vector) = interrupt {
@@ -1053,7 +1219,12 @@ fn start_card(function: &Function, card: Known, index: usize) -> Result<(), Fail
     // From here a failure drops the card, which stops it.
     let info = nic.info();
     let mut about = About::new(info.mac, info.receive_slots, info.transmit_slots);
-    let _ = write!(about.what, "{} {card} network card", card.article());
+    // A Realtek card is named by its chip, which only its registers say.
+    let _ = match card {
+        Known::Realtek(_) => write!(about.what, "a Realtek {} network card", info.model),
+        Known::Rge(_) => write!(about.what, "a {} network card", info.model),
+        _ => write!(about.what, "{} {card} network card", card.article()),
+    };
     let kind = if card.msix() { "MSI-X" } else { "MSI" };
     let _ = match interrupt {
         Some(vector) => write!(about.how, "{kind} vector {vector:#x}"),
@@ -1106,30 +1277,9 @@ impl About {
 
 /// Gives the card `card`, numbered `index`, an interface and its thread.
 fn attach(function: &Function, index: usize, card: Card, about: &About) -> Result<(), Failure> {
-    let (slots, sockets) = slots(SOCKETS).ok_or("out of memory")?;
-    let memory = Memory {
-        receive: forever(FRAME).ok_or("out of memory")?,
-        transmit: forever(FRAME).ok_or("out of memory")?,
-        sockets,
-    };
-    let mut stack = Stack::new(card, memory, radix_random::u64(), sched::now_ns());
+    let interface = add_interface(index, card)?;
+    let name = &interface.name;
     let flags = FLAGS.get().copied().unwrap_or((None, None));
-    if index == 0
-        && let (Some(address), gateway) = flags
-    {
-        stack.set_ipv4(address, gateway);
-    }
-    let mut name = TextBuf::<8>::new();
-    let _ = write!(name, "net{index}");
-    let interface =
-        interface(name.clone(), index + 1, stack, slots).ok_or(Failure::Other("out of memory"))?;
-    if INTERFACES[index].set(interface).is_err() {
-        return Err(Failure::Other("its slot is taken"));
-    }
-    COUNT.store(index + 1, Ordering::Release);
-    let Some(interface) = INTERFACES[index].get() else {
-        return Err(Failure::Other("its slot is empty"));
-    };
     let mac = about.mac;
     info!(
         "Net: {name} is {} at {}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, \
@@ -1157,6 +1307,33 @@ fn attach(function: &Function, index: usize, card: Card, about: &About) -> Resul
         addresses_changed();
     }
     run_thread(interface).map_err(Failure::Other)
+}
+
+/// Gives the card `card`, numbered `index`, its interface, `netN`, with
+/// the first card's address from the flags.
+fn add_interface(index: usize, card: Card) -> Result<&'static Interface, Failure> {
+    let (slots, sockets) = slots(SOCKETS).ok_or("out of memory")?;
+    let memory = Memory {
+        receive: forever(FRAME).ok_or("out of memory")?,
+        transmit: forever(FRAME).ok_or("out of memory")?,
+        sockets,
+    };
+    let mut stack = Stack::new(card, memory, radix_random::u64(), sched::now_ns());
+    let flags = FLAGS.get().copied().unwrap_or((None, None));
+    if index == 0
+        && let (Some(address), gateway) = flags
+    {
+        stack.set_ipv4(address, gateway);
+    }
+    let mut name = TextBuf::<8>::new();
+    let _ = write!(name, "net{index}");
+    let interface =
+        interface(name, index + 1, stack, slots).ok_or(Failure::Other("out of memory"))?;
+    if INTERFACES[index].set(interface).is_err() {
+        return Err(Failure::Other("its slot is taken"));
+    }
+    COUNT.store(index + 1, Ordering::Release);
+    INTERFACES[index].get().ok_or(Failure::Other("its slot is empty"))
 }
 
 /// The interface numbered `number`: `lo`, or a card's.

@@ -22,6 +22,7 @@ pub const KEYS: &[&str] = &[
     "run.media",
     "run.memory",
     "run.cpus",
+    "features.userspace-e1000",
 ];
 
 /// The whole file.
@@ -36,6 +37,8 @@ pub struct Config {
     pub image: Image,
     /// `[run]`
     pub run: Run,
+    /// `[features]`
+    pub features: Features,
 }
 
 /// `[build]`: what to compile.
@@ -91,6 +94,38 @@ pub struct Run {
 impl Default for Run {
     fn default() -> Self {
         Self { firmware: Firmware::Uefi, media: Media::Usb, memory: "1G".into(), cpus: 4 }
+    }
+}
+
+/// `[features]`: what the image's system does that it might not.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Features {
+    /// The e1000 and e1000e cards an IOMMU isolates are driven by a
+    /// program, e1000d(8), not the kernel: the image boots with
+    /// `e1000=program` unless its command line says `e1000=` itself
+    /// (ADR 0198).
+    pub userspace_e1000: bool,
+}
+
+impl Default for Features {
+    fn default() -> Self {
+        Self { userspace_e1000: true }
+    }
+}
+
+impl Features {
+    /// The kernel command line `cmdline` with the flags these features
+    /// add.
+    pub fn cmdline(&self, cmdline: &str) -> String {
+        let mut words: Vec<&str> = cmdline.split_ascii_whitespace().collect();
+        // The kernel's flags end at a lone `--`, after which the words
+        // are Spark's.
+        let end = words.iter().position(|&word| word == "--").unwrap_or(words.len());
+        if self.userspace_e1000 && !words[..end].iter().any(|word| word.starts_with("e1000=")) {
+            words.insert(end, "e1000=program");
+        }
+        words.join(" ")
     }
 }
 
@@ -274,6 +309,25 @@ mod tests {
         assert!(Config::parse("[run]\nmemory = \"M\"").is_err());
         assert!(Config::parse("[run]\nmemory = \"512M\"").is_ok());
         assert!(Config::parse("[run]\ncpus = 0").is_err());
+    }
+
+    #[test]
+    fn userspace_e1000_adds_its_flag_before_sparks_words() {
+        let on = Features::default();
+        assert_eq!(on.cmdline(""), "e1000=program");
+        assert_eq!(on.cmdline(" log=debug "), "log=debug e1000=program");
+        assert_eq!(on.cmdline("log=debug -- --services"), "log=debug e1000=program -- --services");
+        assert_eq!(on.cmdline("-- --services"), "e1000=program -- --services");
+        assert_eq!(on.cmdline("--"), "e1000=program --");
+        assert_eq!(on.cmdline("log=debug --"), "log=debug e1000=program --");
+        assert_eq!(on.cmdline("-- e1000=kernel"), "e1000=program -- e1000=kernel");
+        // A command line that chooses keeps its choice.
+        assert_eq!(on.cmdline("e1000=kernel"), "e1000=kernel");
+        let off = Features { userspace_e1000: false };
+        assert_eq!(off.cmdline("log=debug"), "log=debug");
+        let config: Config = toml::from_str("[features]\nuserspace-e1000 = false\n").unwrap();
+        assert!(!config.features.userspace_e1000);
+        assert!(Config::default().features.userspace_e1000);
     }
 
     #[test]

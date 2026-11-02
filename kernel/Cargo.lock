@@ -252,9 +252,11 @@ dependencies = [
  "radix-arch-aarch64",
  "radix-arch-riscv64",
  "radix-arch-x86_64",
+ "radix-atheros-net",
  "radix-bitlocker",
  "radix-block",
  "radix-bootfs",
+ "radix-broadcom-net",
  "radix-btrfs",
  "radix-cap",
  "radix-crosec",
@@ -288,6 +290,8 @@ dependencies = [
  "radix-posix",
  "radix-pstate",
  "radix-random",
+ "radix-realtek-net",
+ "radix-rge-net",
  "radix-sched",
  "radix-scsi",
  "radix-sdhci",
@@ -380,6 +384,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-atheros-net"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
+]
+
+[[package]]
 name = "radix-bitlocker"
 version = "0.11.0"
 dependencies = [
@@ -412,6 +424,14 @@ dependencies = [
 [[package]]
 name = "radix-bootinfo"
 version = "0.11.0"
+
+[[package]]
+name = "radix-broadcom-net"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
+]
 
 [[package]]
 name = "radix-btrfs"
@@ -677,8 +697,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "radix-realtek-net"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
+]
+
+[[package]]
 name = "radix-relocs"
 version = "0.11.0"
+
+[[package]]
+name = "radix-rge-net"
+version = "0.11.0"
+dependencies = [
+ "radix-hw",
+ "radix-nic",
+]
 
 [[package]]
 name = "radix-sched"

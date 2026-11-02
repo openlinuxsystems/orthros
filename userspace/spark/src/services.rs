@@ -25,8 +25,10 @@
 //! 0190). `admin.hardware = true` gives it the platform capability, which
 //! sets the fans, the LEDs and the ARGB header (ADR 0208), and
 //! `admin.time = true` the clock capability, which sets the time of day
-//! and the real-time clock (ADR 0194). It reaches the
-//! tree only through the view Spark builds of what its file declares
+//! and the real-time clock (ADR 0194). A driver program's
+//! `devices.pci` names the cards it drives, and Spark gives it each card
+//! the kernel left for a program that one matches (ADR 0198). It reaches
+//! the tree only through the view Spark builds of what its file declares
 //! (`views`, ADR 0217).
 
 use alloc::format;
@@ -36,7 +38,7 @@ use alloc::vec::Vec;
 use libradix::abi::capability::Rights;
 use libradix::abi::errors::File as FileError;
 use libradix::abi::resource_domain::OomClass;
-use manifest::service::{self, Oom, Place};
+use manifest::service::{self, Oom, PciId, Place};
 use radix_rt::fs::Dir;
 use radix_rt::println;
 
@@ -88,6 +90,8 @@ pub struct Spec {
     pub names: bool,
     /// The names of its secrets.
     pub secrets: Vec<String>,
+    /// The PCI cards it drives: devices.pci.
+    pub devices: Vec<PciId>,
 }
 
 impl Spec {
@@ -133,6 +137,7 @@ pub fn parse(name: &str, text: &str) -> Result<Spec, String> {
         whole_tree: file.permissions.runs_with_your_access,
         names: file.permissions.names,
         secrets: file.secrets,
+        devices: file.permissions.devices.pci,
     })
 }
 

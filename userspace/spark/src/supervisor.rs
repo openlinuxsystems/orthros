@@ -41,12 +41,21 @@
 //! of that from its loop (ADR 0143): a Spark that stops responding, or a
 //! kernel that stops running it, restarts the machine, as systemd's
 //! RuntimeWatchdogSec does.
+//!
+//! A driver program's service (`devices.pci`) gets the cards it drives
+//! from the root device capability the kernel gave Spark (radix-device(2),
+//! ADR 0198): Spark opens each card that matches, up to DEVICE_SLOTS,
+//! gives the service the card's capability in SLOT_DEVICE and the slots
+//! after it, and keeps no copy, so the card stops when the service ends
+//! and is free for the service's next start. A service whose file names
+//! cards of which the kernel left none is not started.
 
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use libradix::abi::capability::{self, ObjectKind, Rights};
+use libradix::abi::device::{self, DeviceInfo};
 use libradix::abi::directory::{FileKind, OpenFlags};
 use libradix::abi::file::{self as file_abi, DescriptionFlags};
 use libradix::abi::notification::WaitFlags;
@@ -55,8 +64,8 @@ use libradix::abi::process::{
 };
 use libradix::abi::resource_domain::{self, NO_LIMIT};
 use libradix::abi::startup::{
-    SLOT_CLOCK, SLOT_FD_BASE, SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_NETWORK, SLOT_PLATFORM,
-    SLOT_PROCESS, SLOT_RANDOM, SLOT_ROOT,
+    DEVICE_SLOTS, SLOT_CLOCK, SLOT_DEVICE, SLOT_FD_BASE, SLOT_FIRST_EXTRA, SLOT_LOG, SLOT_NETWORK,
+    SLOT_PLATFORM, SLOT_PROCESS, SLOT_RANDOM, SLOT_ROOT,
 };
 use libradix::abi::{network, power, signal, syscalls};
 use radix_rt::fs::{Dir, File};
@@ -219,6 +228,92 @@ fn grant_clock(clock: Option<u32>, spec: &Spec, child: u32) -> Result<(), String
         .map_err(|status| format!("giving it the clock failed: {:#x}", status.0))
 }
 
+/// A card the kernel left for a driver program: its PCI address, vendor
+/// and device.
+#[derive(Clone, Copy, Debug)]
+struct Card {
+    address: u32,
+    vendor: u16,
+    device: u16,
+}
+
+/// The cards the kernel left for driver programs, held or not, as the
+/// root device capability `devices` lists them.
+fn cards(devices: u32) -> Vec<Card> {
+    let mut buffer = [0u8; device::DEVICES_MAX as usize * DeviceInfo::SIZE];
+    let Ok(listed) = device::list(&SYS, devices, &mut buffer) else { return Vec::new() };
+    let count = (listed.count as usize).min(device::DEVICES_MAX as usize);
+    buffer
+        .as_chunks::<{ DeviceInfo::SIZE }>()
+        .0
+        .iter()
+        .take(count)
+        .map(|info| {
+            let u16_at = |at: usize| u16::from_le_bytes([info[at], info[at + 1]]);
+            let at = DeviceInfo::OFFSET_ADDRESS;
+            Card {
+                address: u32::from_le_bytes([info[at], info[at + 1], info[at + 2], info[at + 3]]),
+                vendor: u16_at(DeviceInfo::OFFSET_VENDOR),
+                device: u16_at(DeviceInfo::OFFSET_DEVICE),
+            }
+        })
+        .collect()
+}
+
+/// The cards in `devices` that `spec` drives, at most DEVICE_SLOTS.
+fn cards_for(devices: Option<u32>, spec: &Spec) -> Vec<Card> {
+    let Some(devices) = devices.filter(|_| !spec.devices.is_empty()) else { return Vec::new() };
+    let mut cards = cards(devices);
+    cards.retain(|card| spec.devices.iter().any(|id| id.matches(card.vendor, card.device)));
+    cards.truncate(DEVICE_SLOTS as usize);
+    cards
+}
+
+/// A PCI address as lspci(8) writes it.
+fn pci_address(address: u32) -> String {
+    format!(
+        "{:04x}:{:02x}:{:02x}.{}",
+        address >> 16,
+        (address >> 8) & 0xff,
+        (address >> 3) & 0x1f,
+        address & 7
+    )
+}
+
+/// Gives `child` the cards `spec` drives, in SLOT_DEVICE and the slots
+/// after it, with the read and control rights. Spark keeps no copy: a
+/// card is open only while its driver holds it. A card another holds is
+/// skipped; the kernel waits for one whose last driver is still letting
+/// go of it. Fails if `spec` names cards and none could be given.
+fn grant_devices(devices: Option<u32>, spec: &Spec, child: u32) -> Result<(), String> {
+    if spec.devices.is_empty() {
+        return Ok(());
+    }
+    let devices = devices.ok_or("Spark has no device capability to give")?;
+    let rights = Rights::READ.union(Rights::CONTROL);
+    let mut given = 0;
+    let mut refused = None;
+    for card in cards_for(Some(devices), spec) {
+        let slot = slots::take().ok_or("no free slot")?;
+        let shared = device::open(&SYS, devices, card.address, slot)
+            .and_then(|()| process::share(&SYS, child, slot, SLOT_DEVICE + given, rights, 0));
+        let _ = capability::delete(&SYS, slot);
+        slots::give_back(slot);
+        match shared {
+            Ok(()) => given += 1,
+            Err(status) => refused = Some((card.address, status.0)),
+        }
+    }
+    match (given, refused) {
+        (0, Some((address, status))) => Err(format!(
+            "it was given none of the cards it drives: opening {} failed: {status:#x}",
+            pci_address(address)
+        )),
+        (0, None) => Err("the kernel left it none of the cards it drives".into()),
+        _ => Ok(()),
+    }
+}
+
 /// Where a service is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
@@ -364,6 +459,8 @@ pub struct Supervisor {
     platform: Option<u32>,
     names: Option<u32>,
     clock: Option<u32>,
+    /// The root device capability (ADR 0198), from the kernel.
+    devices: Option<u32>,
     /// The notification the kernel signals when a child changes.
     children: Option<u32>,
     /// The notification the kernel signals when the power button is
@@ -397,6 +494,7 @@ impl Supervisor {
         let platform = SLOT_FIRST_EXTRA + 4;
         let names = SLOT_FIRST_EXTRA + 5;
         let clock = SLOT_FIRST_EXTRA + 6;
+        let devices = SLOT_FIRST_EXTRA + 7;
         let children = slots::take().filter(|&slot| {
             process::create(&SYS, SLOT_PROCESS, ObjectKind::Notification, 0, slot).is_ok()
                 && process::notify_children(&SYS, SLOT_PROCESS, slot).is_ok()
@@ -421,6 +519,7 @@ impl Supervisor {
             platform: holds(platform, ObjectKind::Platform).then_some(platform),
             names: holds(names, ObjectKind::Names).then_some(names),
             clock: holds(clock, ObjectKind::Clock).then_some(clock),
+            devices: holds(devices, ObjectKind::Device).then_some(devices),
             children,
             button,
             listener: None,
@@ -628,6 +727,17 @@ impl Supervisor {
     /// Starts service `index`, as its file says now.
     fn start(&mut self, index: usize) {
         self.reread(index);
+        let spec = &self.services[index].spec;
+        if !spec.devices.is_empty() && cards_for(self.devices, spec).is_empty() {
+            // Not an end: there is nothing for it to drive, as on a
+            // machine where the kernel drives its cards itself.
+            let why = String::from("the kernel left it none of the cards it drives");
+            println!("spark: not starting {}: {why}", spec.name);
+            let service = &mut self.services[index];
+            service.state = State::Stopped;
+            service.why = Some(why);
+            return;
+        }
         let started = self.spawn(index);
         let service = &mut self.services[index];
         match started {
@@ -777,6 +887,7 @@ impl Supervisor {
             .and_then(|()| grant_network(self.network, spec, child))
             .and_then(|()| grant_platform(self.platform, spec, child))
             .and_then(|()| grant_clock(self.clock, spec, child))
+            .and_then(|()| grant_devices(self.devices, spec, child))
             .and_then(|()| {
                 let block = exec_block(&spec.program, &args, &environment);
                 process::exec(&SYS, child, program.slot(), &block)

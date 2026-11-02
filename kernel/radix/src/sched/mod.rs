@@ -291,6 +291,13 @@ impl Options {
         self
     }
 
+    /// With `pages` pages of stack, not [`STACK_PAGES`]: for a thread that
+    /// must call something with a frame too big for those (ADR 0058).
+    pub fn stack_pages(mut self, pages: usize) -> Options {
+        self.stack_pages = pages.max(STACK_PAGES);
+        self
+    }
+
     /// Made but not started until [`release`]d (Phase 8), so that its
     /// maker can finish setting it up (its thread pointer and registers)
     /// before it first runs on any CPU.

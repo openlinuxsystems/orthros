@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-atheros-net"
+description = "Atheros' gigabit and fast Ethernet controllers for the Radix kernel: the AR813x, AR815x, AR816x and AR817x, and the Killer E2200 to E2500"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+radix-hw = { path = "../../lib/hw" }
+radix-nic = { path = "../nic" }
+
+[dev-dependencies]
+radix-hw = { path = "../../lib/hw", features = ["fake"] }
+
+[lints]
+workspace = true

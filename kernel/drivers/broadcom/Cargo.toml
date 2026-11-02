@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 The Dukovo contributors
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+[package]
+name = "radix-broadcom-net"
+description = "Broadcom's NetXtreme gigabit Ethernet controllers for the Radix kernel: the BCM5717 family, the BCM5761 and BCM5762, and the BCM57765 and BCM57780 families"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+radix-hw = { path = "../../lib/hw" }
+radix-nic = { path = "../nic" }
+
+[dev-dependencies]
+radix-hw = { path = "../../lib/hw", features = ["fake"] }
+
+[lints]
+workspace = true

@@ -75,6 +75,10 @@ Spark gets what every program gets (see *radix-startup*(2)) and more:
 - the platform capability in slot 12 (below);
 - the names capability in slot 13, the one that gives processes and
   capabilities the names they act for (*radix-names*(2), ADR 0214);
+- the clock capability in slot 14, which sets the time of day and the
+  real-time clock (*radix-clock*(2), ADR 0194);
+- the root device capability in slot 15, which opens the cards the
+  kernel left for driver programs (below);
 - an image placed at a random address, as every position-independent
   program is (see *radix-processes*(7)).
 
@@ -453,6 +457,26 @@ that does not ask cannot
 change them; the hardware monitor's files under _/kernel/class/hwmon_
 still show the fans and sensors to everyone (*radix-sysfs*(5)).
 
+# DEVICES
+
+The kernel gives Spark the root device capability, which lists the PCI
+cards the kernel left for driver programs and opens them, one holder at
+a time (*radix-device*(2), ADR 0198): with *e1000=program*
+(*dukovo-boot*(7)), the e1000 and e1000e cards that an IOMMU confines.
+A service whose file names cards in *devices.pci* (*service.toml*(5))
+gets a capability to each card that one names, at most 4, in
+_SLOT_DEVICE_ and the slots after it (*radix-startup*(2)), with the
+read and control rights only. Spark opens each card for the service and
+keeps no copy, so the card is open only while the service holds it:
+when the service ends, the kernel stops the card, and Spark's next start
+of the service opens it again, the kernel waiting for a card that is
+still stopping. A service whose file names cards of which the kernel
+left none, as when the kernel drives them itself, is not started:
+
+```
+spark: not starting e1000d: the kernel left it none of the cards it drives
+```
+
 # NAMES
 
 Spark acts for root, and its root directory has the bypass right, which
@@ -635,4 +659,5 @@ _name_ *(process* _n_*) was ended by signal 9 (stopped by the out-of-memory poli
 *radix-files*(7), *radix-processes*(7), *radix-posix*(7), *radix-proc*(5),
 *radix-sysfs*(5), *radix-directory*(2), *radix-process*(2),
 *radix-resource-domain*(2), *radix-power*(2), *radix-platform*(2),
-*radix-names*(2), *radix-startup*(2), *ob*(1), *watchdog*(8), *ectool*(8)
+*radix-names*(2), *radix-device*(2), *radix-startup*(2), *ob*(1), *watchdog*(8),
+*ectool*(8), *e1000d*(8)

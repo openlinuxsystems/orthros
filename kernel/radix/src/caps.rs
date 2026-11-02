@@ -118,7 +118,8 @@ pub fn init() {
 /// Runs `f` on the store with its lock held, if the store is set up.
 /// Processes that `f` released and that have no thread left to finish
 /// them are finished before the lock goes (`user::process`); files it
-/// released are dropped after (`fs::drop_deferred`).
+/// released are dropped after (`fs::drop_deferred`), and cards it released
+/// stopped (`user::device::close_deferred`).
 pub fn with<R>(f: impl FnOnce(&mut Locked) -> R) -> Result<R, CapError> {
     let mut store = STORE.lock();
     let result = match store.as_mut() {
@@ -146,6 +147,9 @@ pub fn with<R>(f: impl FnOnce(&mut Locked) -> R) -> Result<R, CapError> {
     // Files the change released go now, with the lock gone: the last of
     // a removed file frees its space on the disk.
     crate::fs::drop_deferred();
+    // Cards whose capabilities it released stop now: that takes the
+    // network stack's and address spaces' locks (`user::device`).
+    crate::user::device::close_deferred();
     // Processes it finished tell their parents now: that may send
     // signals, which may end more processes (Phase 8).
     crate::user::process::report_finished();

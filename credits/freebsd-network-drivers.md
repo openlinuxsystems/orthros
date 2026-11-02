@@ -23,3 +23,20 @@ Section: Specifications and papers
   admin queue by address on revision 1
   ([ADR 0197](docs/adr/0197-network-cards-share-one-driver-interface-and-copy-frames-through-slots.md)).
   No code is taken from any of them.
+- FreeBSD's `re(4)` and its `if_rlreg.h` (BSD-4-Clause, Copyright Bill
+  Paul), the reference for the registers, descriptors, chip revisions
+  and their quirks, and the start and stop sequences from which
+  `radix-realtek-net` drives Realtek's RTL8169, RTL8168 and RTL810x
+  chips. No code is taken from it.
+- FreeBSD's `alc(4)` and `atphy(4)` (BSD-2-Clause, Copyright Pyun
+  YongHyeon), the reference for the registers, rings, PHY reset and
+  power-state sequences of the two chip families, and their quirks, from
+  which `radix-atheros-net` drives Atheros' AR813x, AR815x, AR816x and
+  Killer E2x00 chips. No code is taken from them.
+- FreeBSD's `bge(4)` and `brgphy(4)` (BSD-4-Clause, Copyright Bill Paul
+  and Wind River Systems), the reference for the registers, rings,
+  status block, chip IDs, reset and state machine sequences, the APE's
+  locks and events, the PHY fixes and each chip's quirks, from which
+  `radix-broadcom-net` drives Broadcom's BCM5717 family, BCM5761,
+  BCM5762, BCM57765 family and BCM57780 chips. No code is taken from
+  them.

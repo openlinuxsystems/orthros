@@ -69,6 +69,7 @@ pub const KEYS: &[&str] = &[
     "admin.hardware",
     "admin.time",
     "names",
+    "devices.pci",
 ];
 
 /// The order of a service whose file gives none.
@@ -187,6 +188,8 @@ pub struct Permissions {
     /// gives processes and capabilities another user's name: authd's, to
     /// build sessions with.
     pub names: bool,
+    /// `devices.*`: the cards it drives, as a driver program.
+    pub devices: Devices,
 }
 
 impl Permissions {
@@ -220,6 +223,79 @@ pub struct Admin {
     /// time of day and writes the real-time clock (ADR 0194).
     #[serde(default)]
     pub time: bool,
+}
+
+/// The devices group: `devices.pci`, the cards the kernel left for a
+/// driver program that the service drives (ADR 0198).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Devices {
+    /// `devices.pci`: the PCI cards it drives, by vendor and device ID.
+    /// Spark gives it each card the kernel left that one matches, up to
+    /// [`DEVICES_MAX`], and does not start it while none does.
+    #[serde(default, deserialize_with = "pci_ids")]
+    pub pci: Vec<PciId>,
+}
+
+/// The most cards a service is given: the slots a program has for them.
+pub const DEVICES_MAX: usize = radix_abi::startup::DEVICE_SLOTS as usize;
+
+/// A PCI card's vendor and device IDs, as `devices.pci` names them:
+/// `"8086:100e"`, or `"8086:*"` for any of the vendor's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciId {
+    /// The vendor's ID.
+    pub vendor: u16,
+    /// The device's ID, `None` for any.
+    pub device: Option<u16>,
+}
+
+impl PciId {
+    /// Reads one written as `devices.pci` writes it.
+    pub fn parse(text: &str) -> Option<PciId> {
+        let (vendor, device) = text.split_once(':')?;
+        let id = |part: &str| {
+            (part.len() == 4 && part.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| u16::from_str_radix(part, 16).ok())
+                .flatten()
+        };
+        let device = if device == "*" { None } else { Some(id(device)?) };
+        Some(PciId { vendor: id(vendor)?, device })
+    }
+
+    /// Whether the card with these IDs is one it names.
+    pub fn matches(self, vendor: u16, device: u16) -> bool {
+        self.vendor == vendor && self.device.is_none_or(|own| own == device)
+    }
+}
+
+impl fmt::Display for PciId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.device {
+            Some(device) => write!(f, "{:04x}:{device:04x}", self.vendor),
+            None => write!(f, "{:04x}:*", self.vendor),
+        }
+    }
+}
+
+/// `devices.pci`: PCI IDs, each once.
+fn pci_ids<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<PciId>, D::Error> {
+    let texts = Vec::<String>::deserialize(d)?;
+    let mut ids: Vec<PciId> = Vec::new();
+    for text in &texts {
+        let id = PciId::parse(text).ok_or_else(|| {
+            de::Error::custom(format!(
+                "devices.pci takes a card's vendor and device IDs in hexadecimal, such as \
+                 \"8086:100e\", or \"8086:*\" for any of the vendor's, not `{}`",
+                text.escape_debug()
+            ))
+        })?;
+        if ids.contains(&id) {
+            return Err(de::Error::custom(format!("devices.pci names {id} twice")));
+        }
+        ids.push(id);
+    }
+    Ok(ids)
 }
 
 /// The files group: the places of the tree a service's view holds, each
@@ -315,6 +391,8 @@ struct RawPermissions {
     admin: Admin,
     #[serde(default)]
     names: bool,
+    #[serde(default)]
+    devices: Devices,
 }
 
 impl TryFrom<RawPermissions> for Permissions {
@@ -327,6 +405,7 @@ impl TryFrom<RawPermissions> for Permissions {
             runs_with_your_access: raw.runs_with_your_access,
             admin: raw.admin,
             names: raw.names,
+            devices: raw.devices,
         };
         let grants = permissions.network.grants() + usize::from(permissions.admin.network);
         if grants > NETWORK_SLOTS as usize {
@@ -477,6 +556,9 @@ admin.time = false
 # Giving processes and files another user's name: only for authd, which
 # signs people in.
 names = false
+# The cards it drives, as a driver program does, by their PCI vendor and
+# device IDs, such as "8086:100e", or "8086:*" for any of the vendor's.
+devices.pci = []
 "#;
 
 /// The file `service new` writes for the service `name`.

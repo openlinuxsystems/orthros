@@ -106,11 +106,12 @@ const STATISTICS: [(&str, Statistic); 8] = [
 ];
 
 /// `operstate`: `lo` has no link to be up or down, as on Linux; a card's
-/// is down once it stopped with an error.
+/// is down once it stopped with an error, and one a program drives while
+/// no driver has attached it or its driver says so (ADR 0198).
 fn operstate(interface: &Interface) -> &'static str {
     if interface.is_loopback() {
         "unknown"
-    } else if interface.stack.lock().link().failed() {
+    } else if interface.stack.lock().link().down() {
         "down"
     } else {
         "up"

@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use alloc::{format, vec};
 
 use crate::legacy;
-use crate::service::{self, Oom, Place, Ports, Restart};
+use crate::service::{self, Oom, PciId, Place, Ports, Restart};
 
 /// The service files Dukovo ships, and those of the boot tests.
 const SHIPPED: &[(&str, &str)] = &[
@@ -21,6 +21,9 @@ const SHIPPED: &[(&str, &str)] = &[
     ("driver", include_str!("../../../spark/tests/services/stop/driver.toml")),
     ("leaver", include_str!("../../../spark/tests/services/stop/leaver.toml")),
     ("stubborn", include_str!("../../../spark/tests/services/stop/stubborn.toml")),
+    ("e1000d", include_str!("../../../defaults/spark/services/e1000d.toml")),
+    ("e1000d", include_str!("../../../spark/tests/services/e1000d/e1000d.toml")),
+    ("netd", include_str!("../../../spark/tests/services/e1000d/netd.toml")),
     ("authd", include_str!("../../../defaults/spark/services/authd.toml")),
     ("netd", include_str!("../../../defaults/spark/services/netd.toml")),
     ("netd", include_str!("../../../spark/tests/services/dhcp/netd.toml")),
@@ -78,6 +81,33 @@ fn only_authd_holds_the_names_capability() {
     assert!(!service::from_toml(&file("")).unwrap().permissions.names);
     let asked = service::from_toml(&file("[permissions]\nnames = true\n")).unwrap();
     assert!(asked.permissions.names);
+}
+
+#[test]
+fn devices_name_the_cards_a_driver_drives() {
+    // Of the shipped services only e1000d drives cards (ADR 0198).
+    for (name, text) in SHIPPED {
+        let service = service::from_toml(text).unwrap();
+        assert_eq!(!service.permissions.devices.pci.is_empty(), *name == "e1000d", "{name}");
+    }
+    let intel = PciId { vendor: 0x8086, device: None };
+    let (_, e1000d) = SHIPPED.iter().find(|(name, _)| *name == "e1000d").unwrap();
+    assert_eq!(service::from_toml(e1000d).unwrap().permissions.devices.pci, [intel]);
+    assert!(intel.matches(0x8086, 0x100e) && intel.matches(0x8086, 0x10d3));
+    assert!(!intel.matches(0x10ec, 0x8136));
+    let text = file("[permissions]\ndevices.pci = [\"8086:10D3\", \"10ec:*\"]\n");
+    let two = service::from_toml(&text).unwrap().permissions.devices.pci;
+    let e1000e = PciId { vendor: 0x8086, device: Some(0x10d3) };
+    assert_eq!(two, [e1000e, PciId { vendor: 0x10ec, device: None }]);
+    assert!(e1000e.matches(0x8086, 0x10d3) && !e1000e.matches(0x8086, 0x100e));
+    assert_eq!((two[0].to_string(), two[1].to_string()), ("8086:10d3".into(), "10ec:*".into()));
+    for bad in ["8086", "8086:100", "808g:100e", "*:100e", "8086:100e:0", "8086:+10e"] {
+        let text = file(&format!("[permissions]\ndevices.pci = [\"{bad}\"]\n"));
+        assert!(error(&text).contains("devices.pci takes a card's vendor and device IDs"), "{bad}");
+    }
+    let twice = file("[permissions]\ndevices.pci = [\"8086:100e\", \"8086:100E\"]\n");
+    assert!(error(&twice).contains("devices.pci names 8086:100e twice"));
+    assert!(service::from_toml(&file("")).unwrap().permissions.devices.pci.is_empty());
 }
 
 #[test]
@@ -228,8 +258,12 @@ fn errors_name_their_line_in_plain_words() {
             "line 4: network.listen: 70-90 overlaps 80",
         ),
         (
+            "[permissions]\nsensors.camera = true",
+            "line 4: `sensors` is not a setting here; service.toml(5) lists them",
+        ),
+        (
             "[permissions]\ndevices.camera = true",
-            "line 4: `devices` is not a setting here; service.toml(5) lists them",
+            "line 4: `camera` is not a setting here; service.toml(5) lists them",
         ),
         (
             "[permissions]\nfiles.read = [\"/\"]",

@@ -28,6 +28,45 @@ IPv6, the firewall and WireGuard. This page grows with each.
   `network-cards` boot test runs; the others are checked against
   models of the cards, and the first boot on each kind of machine is
   their real test.
+- **Realtek's chips**: the RTL8169, RTL8168 and RTL8111 at 1 Gb/s and
+  the RTL810x at 100 Mb/s, the onboard Ethernet of most boards that is
+  not Intel's (re(4)). No emulator has them: a model of the chips tests
+  the driver, and the Dell Inspiron 15 5570 the real thing.
+- **Realtek's 2.5 and 5 gigabit chips**: the RTL8125A, RTL8125B and
+  RTL8125D at 2.5 Gb/s and the RTL8126A at 5 Gb/s, among them Killer's
+  E3000 and E5000 and the Framework Desktop's port (rge(4)). The driver
+  sets them up as OpenBSD's does, translated from its code, without the
+  firmware Realtek ships for the chips, which is closed: they run on
+  the code in their own ROMs. Its tests check its register reads and
+  writes on each chip against OpenBSD's own code, run on a model of the
+  chips; the first boot on a machine with one is its real test.
+- **Atheros' chips**: the AR8131, AR8151, AR8161 and AR8171 at 1 Gb/s,
+  the AR8132, AR8152, AR8162 and AR8172 at 100 Mb/s, and the Killer
+  E2200, E2400 and E2500 built on them, on many laptops from 2009 to
+  2018 (alc(4)). They too are tested against a model of the chips.
+- **Broadcom's NetXtreme chips**: the BCM5717, BCM5718, BCM5719 and
+  BCM5720 of many servers, the BCM5761 and BCM5762 of desktop boards,
+  and the BCM57765 family and BCM57780 of laptops and Macs, copper ports
+  only (bge(4)). On the chips with Broadcom's APE, which can share the
+  port with a server's management controller, the driver takes the
+  APE's locks and tells its firmware when it starts and stops. A model
+  of the chips tests them too.
+- **A card's driver can run as a program**: with `e1000=program`, which
+  the images `ob image` builds have, the kernel leaves the e1000 and
+  e1000e cards an IOMMU confines to e1000d(8), which drives them with
+  the same driver in a process of its own; when it ends, the kernel
+  stops the card and Spark starts it again
+  ([ADR 0198](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0198-a-card-s-driver-can-run-as-a-program-on-a-device-capability.md)).
+  The `userspace-e1000` boot test kills it halfway through 2 MiB of
+  traffic, which comes back whole.
+- **USB Ethernet adapters**: CDC-ECM and CDC-NCM on an xHCI
+  controller, the protocols of most USB-C docks and of Realtek's RTL8153
+  in its class configuration (cdc_ether(4)). An adapter gets its
+  interface when it is plugged in, after the PCI cards', and the same
+  one back when it is plugged in again
+  ([ADR 0199](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0199-usb-ethernet-adapters-share-the-driver-program-link.md)).
+  The `usb-ethernet` boot test runs QEMU's `usb-net` through DHCP, 2 MiB
+  of traffic, and an unplug.
 - **The TCP/IP stack runs in the kernel**, built on
   [smoltcp](https://github.com/smoltcp-rs/smoltcp) in safe Rust
   ([ADR 0180](https://github.com/openlinuxsystems/orthros/blob/main/docs/adr/0180-the-tcp-ip-stack-runs-in-the-kernel-on-smoltcp.md)).

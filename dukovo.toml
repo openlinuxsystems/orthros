@@ -21,3 +21,6 @@ firmware = "uefi"      # "uefi" (OVMF) or "bios" (SeaBIOS)
 media = "usb"          # attach the image as "usb", "cdrom" or "disk"
 memory = "1G"
 cpus = 4
+
+[features]
+userspace-e1000 = true # e1000 and e1000e cards driven by e1000d, not the kernel

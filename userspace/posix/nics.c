@@ -10,9 +10,17 @@
 // the card's rings many times. The card's counters must have seen them,
 // and the stack never have had a frame to send without a slot for it.
 // Spark gives it the whole network (--network).
+//
+// The userspace-e1000 boot test runs it with `-k e1000d` first (ADR
+// 0198): halfway through the first card's 2 MiB it kills the driver
+// program with SIGKILL, and the bytes must still all come back, once
+// Spark has started the driver again and the card is back up; the
+// stack's counters may then count frames dropped while it was down.
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -80,6 +88,44 @@ static int wait_for_address(const char *card, const char *want) {
 
 static uint8_t out[CHUNK], back[CHUNK];
 
+// The program -k names, until it is killed.
+static const char *to_kill;
+
+// The number of a running process called `name`, from /processes, or 0.
+static int process_named(const char *name) {
+	DIR *dir = opendir("/processes");
+	if(!dir)
+		return 0;
+	int found = 0;
+	struct dirent *entry;
+	char want[64];
+	snprintf(want, sizeof(want), "name: %s\n", name);
+	while(!found && (entry = readdir(dir))) {
+		int number = atoi(entry->d_name);
+		if(number <= 0)
+			continue;
+		char path[64], text[512];
+		snprintf(path, sizeof(path), "/processes/%d/status", number);
+		if(read_text(path, text, sizeof(text)) == 0 && strstr(text, want) &&
+				!strstr(text, "state: exited"))
+			found = number;
+	}
+	closedir(dir);
+	return found;
+}
+
+// Kills `to_kill` with SIGKILL, once, while bytes go through `card`.
+static void kill_driver(const char *card, uint32_t got) {
+	int pid = process_named(to_kill);
+	CHECK(pid > 0);
+	if(pid > 0) {
+		CHECK(kill(pid, SIGKILL) == 0);
+		printf("nics: killed %s (process %d) with %u KiB of %s's 2 MiB back\n", to_kill, pid,
+				got >> 10, card);
+	}
+	to_kill = NULL;
+}
+
 // Sends ECHOED bytes through `card` to `cat` at `echo` port 7 and reads
 // them back, as they come, checking each.
 static void echo_through(const char *card, const char *address, const char *echo, uint32_t seed) {
@@ -131,6 +177,8 @@ static void echo_through(const char *card, const char *address, const char *echo
 			for(ssize_t i = 0; i < n; i++)
 				wrong += back[i] != pattern(got + (uint32_t)i, seed);
 			got += (uint32_t)n;
+			if(to_kill && got >= ECHOED / 2)
+				kill_driver(card, got);
 		}
 	}
 	long long took = now_ms() - started;
@@ -160,18 +208,29 @@ static void card(const char *card, const char *net, uint32_t seed) {
 	long long received = card_number(card, "statistics/rx_packets");
 	long long sent = card_number(card, "statistics/tx_packets");
 	long long lost = card_number(card, "statistics/tx_dropped");
+	int killing = to_kill != NULL;
 	echo_through(card, address, echo, seed);
 	// 2 MiB in frames of 1460 bytes at most is 1437 of them each way, and
-	// none was sent while the card had no slot for it.
+	// none was sent while the card had no slot for it, unless its driver
+	// was killed meanwhile.
 	CHECK(card_number(card, "statistics/rx_packets") - received >= 1437);
 	CHECK(card_number(card, "statistics/tx_packets") - sent >= 1437);
-	CHECK(card_number(card, "statistics/tx_dropped") == lost);
+	if(killing)
+		printf("nics: %s dropped %lld frames to send while its driver was gone\n", card,
+				card_number(card, "statistics/tx_dropped") - lost);
+	else
+		CHECK(card_number(card, "statistics/tx_dropped") == lost);
 }
 
 int main(int argc, char **argv) {
 	check_start("nics");
-	CHECK(argc >= 3 && argc % 2 == 1);
-	for(int at = 1; at + 1 < argc; at += 2) {
+	int first = 1;
+	if(argc >= 3 && !strcmp(argv[1], "-k")) {
+		to_kill = argv[2];
+		first = 3;
+	}
+	CHECK(argc >= first + 2 && (argc - first) % 2 == 0);
+	for(int at = first; at + 1 < argc; at += 2) {
 		printf("nics: %s\n", argv[at]);
 		card(argv[at], argv[at + 1], (uint32_t)at);
 	}

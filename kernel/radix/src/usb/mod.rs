@@ -51,6 +51,7 @@ pub mod dbc;
 mod hid;
 mod hub;
 mod legacy;
+mod net;
 mod serial;
 pub mod shown;
 pub mod storage;
@@ -179,6 +180,18 @@ fn wake(index: usize) {
     on_interrupt(index);
 }
 
+/// The pages of stack an xHCI controller's thread has: enough for
+/// `net::add_interface`, which builds an Ethernet adapter's interface on
+/// it (tools/xtask/src/frames.rs).
+const XHCI_STACK_PAGES: usize = 12;
+
+/// Wakes the thread of the controller with index `index`: the stack of
+/// one of its Ethernet adapters has frames for it, or made room for what
+/// it receives (ADR 0199).
+pub fn wake_controller(index: usize) {
+    on_interrupt(index);
+}
+
 /// Notes the USB controller `function`, found by the PCI scan, for
 /// [`bind_found`].
 pub fn found(function: &Function) {
@@ -283,7 +296,13 @@ fn bind(function: &Function, kind: Kind) {
     let mut thread_name = radix_klog::TextBuf::<8>::new();
     let _ = core::fmt::Write::write_fmt(&mut thread_name, format_args!("usb{}", index + 1));
     let options = Options::new().held().policy(Policy::Fair { nice: -5 });
-    let main = if kind == Kind::Xhci { controller::run } else { legacy::run };
+    // An xHCI controller's thread builds the stack of an Ethernet
+    // adapter's interface, whose frame is 20 KiB (ADR 0199).
+    let (main, options) = if kind == Kind::Xhci {
+        (controller::run as fn(usize), options.stack_pages(XHCI_STACK_PAGES))
+    } else {
+        (legacy::run as fn(usize), options)
+    };
     match sched::spawn(thread_name.as_str(), main, index, options) {
         Ok(thread) => {
             let _ = THREADS[index].set(thread.clone());

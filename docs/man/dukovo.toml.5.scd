@@ -85,6 +85,20 @@ timeout and the flags each test needs.
 	Number of virtual CPUs, from 1 to 64. The default is 4. The kernel
 	starts all of them.
 
+# FEATURES SECTION
+
+*[features]* turns on or off what the image's system does that it need
+not. Each one only adds flags to the kernel command line of the images
+*ob image* and *ob run* build; the boot tests set their own.
+
+*features.userspace-e1000* = true | false
+	Whether Intel's e1000 and e1000e network cards are driven by a
+	program, *e1000d*(8), rather than by the kernel (ADR 0198). When true,
+	the default, the image boots with *e1000=program*, unless its command
+	line sets *e1000=* itself; the kernel then leaves each such card that
+	an IOMMU confines to its own memory for e1000d, and drives the others
+	itself. See *e1000*(4) and *dukovo-boot*(7).
+
 # EXAMPLE
 
 The file shipped in the repository:
@@ -106,8 +120,11 @@ firmware = "uefi"
 media = "usb"
 memory = "1G"
 cpus = 4
+
+[features]
+userspace-e1000 = true
 ```
 
 # SEE ALSO
 
-*ob*(1), *dukovo-boot*(7), *radix-debug*(7)
+*ob*(1), *dukovo-boot*(7), *radix-debug*(7), *e1000d*(8)

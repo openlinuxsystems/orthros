@@ -36,6 +36,7 @@ use radix_hal::MAX_CPUS;
 use radix_mm::{Flags, HEAP, Kmalloc};
 
 use super::account::Charge;
+use super::device::{DeviceObject, DeviceRef};
 use super::ipc::{Endpoint, EndpointRef};
 use super::memory::{FrameObject, FrameRef, SpaceObject, SpaceRef};
 use super::notify::{Notification, NotificationRef};
@@ -80,6 +81,10 @@ pub enum Object {
     Names,
     /// The time of day and the real-time clock (radix-clock(2)).
     Clock,
+    /// The cards the kernel left for driver programs (radix-device(2)).
+    Devices,
+    /// A card a driver program drives.
+    Device(DeviceRef),
 }
 
 impl Object {
@@ -101,6 +106,7 @@ impl Object {
             Object::Platform => ObjectKind::Platform,
             Object::Names => ObjectKind::Names,
             Object::Clock => ObjectKind::Clock,
+            Object::Devices | Object::Device(_) => ObjectKind::Device,
         }
     }
 }
@@ -275,6 +281,8 @@ enum Kept {
     Platform,
     Names,
     Clock,
+    Devices,
+    Device(Weak<DeviceObject, Kmalloc>),
 }
 
 impl Kept {
@@ -295,6 +303,8 @@ impl Kept {
             Object::Platform => Kept::Platform,
             Object::Names => Kept::Names,
             Object::Clock => Kept::Clock,
+            Object::Devices => Kept::Devices,
+            Object::Device(device) => Kept::Device(Arc::downgrade(device)),
         }
     }
 
@@ -316,6 +326,8 @@ impl Kept {
             Kept::Platform => Object::Platform,
             Kept::Names => Object::Names,
             Kept::Clock => Object::Clock,
+            Kept::Devices => Object::Devices,
+            Kept::Device(device) => Object::Device(device.upgrade()?),
         })
     }
 }
@@ -608,13 +620,17 @@ pub fn released(registry: &mut Registry, released: &Released) {
         // whose space is freed on the disk when it goes: that waits until
         // the store's lock has gone (`fs::release`, `fs::drop_deferred`).
         Object::File(file) | Object::Directory(file) => crate::fs::release(file),
+        // Its card stops once the store's lock has gone
+        // (`device::close_deferred`).
+        Object::Device(device) => super::device::released(&device),
         Object::Space(_)
         | Object::Random
         | Object::KernelLog
         | Object::Power
         | Object::Platform
         | Object::Names
-        | Object::Clock => {}
+        | Object::Clock
+        | Object::Devices => {}
     }
     // What it was charged is given back once it has closed.
     drop(charge);

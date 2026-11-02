@@ -19,6 +19,8 @@ bench = false
 radix-abi = { path = "../abi" }
 radix-acpi = { path = "../lib/acpi" }
 radix-ahci = { path = "../drivers/ahci" }
+radix-atheros-net = { path = "../drivers/atheros" }
+radix-broadcom-net = { path = "../drivers/broadcom" }
 radix-ide = { path = "../drivers/ide" }
 radix-nvme = { path = "../drivers/nvme" }
 radix-sdhci = { path = "../drivers/sdhci" }
@@ -59,6 +61,8 @@ radix-net = { path = "../net" }
 radix-nic = { path = "../drivers/nic" }
 radix-posix = { path = "../lib/posix" }
 radix-pstate = { path = "../lib/pstate" }
+radix-realtek-net = { path = "../drivers/realtek" }
+radix-rge-net = { path = "../drivers/rge" }
 radix-random = { path = "../lib/random" }
 radix-sched = { path = "../sched" }
 radix-scsi = { path = "../drivers/scsi" }
