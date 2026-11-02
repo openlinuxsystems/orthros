@@ -388,6 +388,13 @@ fn fat_volumes_check_and_read_with_dosfstools_and_mtools() {
 /// A FAT volume made by mkfs.fat, with files and directories from
 /// mtools.
 fn filled(bits: u8, size: u64) -> Image {
+    filled_in_order(bits, size, false)
+}
+
+/// [`filled`], its files and folder copied in by name, or in the reverse
+/// order if `reverse`, as the order a directory lists them in differs
+/// between filesystems.
+fn filled_in_order(bits: u8, size: u64, reverse: bool) -> Image {
     let image = Image::new(size);
     let (ok, text) = run("mkfs.fat", &["-F", &bits.to_string(), "-n", "FILLED", image.path()]);
     assert!(ok, "{text}");
@@ -399,8 +406,13 @@ fn filled(bits: u8, size: u64) -> Image {
     std::fs::write(dir.join("Some Folder/deeper/b.bin"), vec![b'b'; 5000]).unwrap();
     std::fs::write(dir.join("SMALL.TXT"), b"small\n").unwrap();
     std::fs::write(dir.join("empty"), b"").unwrap();
-    for entry in std::fs::read_dir(&dir).unwrap() {
-        let path = entry.unwrap().path();
+    let mut paths: Vec<PathBuf> =
+        std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+    paths.sort();
+    if reverse {
+        paths.reverse();
+    }
+    for path in paths {
         let (ok, text) = run("mcopy", &["-s", "-i", image.path(), path.to_str().unwrap(), "::/"]);
         assert!(ok, "{text}");
     }
@@ -490,7 +502,15 @@ fn fsck_fat_finds_and_mends_what_fsck_fat_finds() {
 
 #[test]
 fn fsck_fat_mends_cross_links_and_dirty_volumes() {
-    let image = filled(32, 40 << 20);
+    // SMALL.TXT before the folder, which then loses its first cluster to
+    // it and is taken out with its long name; and after it.
+    for reverse in [false, true] {
+        cross_linked_and_dirty(reverse);
+    }
+}
+
+fn cross_linked_and_dirty(reverse: bool) {
+    let image = filled_in_order(32, 40 << 20, reverse);
     let device = image.device(512);
     let mut boot = [0u8; 512];
     device.read_at(0, &mut boot).unwrap();
@@ -518,7 +538,7 @@ fn fsck_fat_mends_cross_links_and_dirty_volumes() {
     let mended = fatck::check(&device, fatck::Options { repair: true }).unwrap();
     assert!(mended.clean());
     let (ok, after) = run("fsck.fat", &["-n", image.path()]);
-    assert!(ok, "{after}");
+    assert!(ok, "copied in {} order: {after}", if reverse { "reverse" } else { "name" });
     let _ = bpb;
 }
 

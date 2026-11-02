@@ -506,9 +506,11 @@ impl Checker<'_> {
                 long_name = part;
                 continue;
             }
-            // A short entry, with the long name before it, if it is its.
+            // A short entry, with the long name before it, if it is its:
+            // taken out with it, if it is taken out.
             let name = short_name(&entry);
             let mut shown = name.clone();
+            let mut its_long: Vec<(u64, [u8; 32])> = Vec::new();
             if !long.is_empty() {
                 let sum = name_checksum(&entry);
                 let count = (long[0].1[0] & 0x1f) as usize;
@@ -520,6 +522,7 @@ impl Checker<'_> {
                 if ordered {
                     let end = long_name.iter().position(|&u| u == 0).unwrap_or(long_name.len());
                     shown = String::from_utf16_lossy(&long_name[..end]);
+                    its_long = std::mem::take(&mut long);
                 } else {
                     self.orphans(&long, dir);
                 }
@@ -540,9 +543,7 @@ impl Checker<'_> {
                         self.done("it was taken out", "mending takes it out")
                     );
                     if self.problem(text, true) {
-                        let mut gone = entry;
-                        gone[0] = 0xe5;
-                        self.patches.push(Patch { offset, entry: gone });
+                        self.take_out(offset, entry, &its_long);
                     }
                 } else {
                     self.report.label =
@@ -621,9 +622,7 @@ impl Checker<'_> {
                         self.done("it was taken out", "mending takes it out")
                     );
                     if self.problem(text, true) {
-                        let mut gone = entry;
-                        gone[0] = 0xe5;
-                        self.patches.push(Patch { offset, entry: gone });
+                        self.take_out(offset, entry, &its_long);
                     }
                     continue;
                 }
@@ -716,6 +715,16 @@ impl Checker<'_> {
         }
         self.orphans(&long, dir);
         Ok(())
+    }
+
+    /// Marks the short entry at `offset` free, and the entries of its long
+    /// name, `long`, with it, as fsck.fat would otherwise find them orphaned.
+    fn take_out(&mut self, offset: u64, entry: [u8; 32], long: &[(u64, [u8; 32])]) {
+        for &(at, part) in long.iter().chain([(offset, entry)].iter()) {
+            let mut gone = part;
+            gone[0] = 0xe5;
+            self.patches.push(Patch { offset: at, entry: gone });
+        }
     }
 
     /// Long name entries with no short entry of theirs after them.
