@@ -80,7 +80,8 @@ impl Table {
             16 => u32::from(u16::from_le_bytes([self.bytes[2 * n], self.bytes[2 * n + 1]])),
             _ => {
                 let at = 4 * n;
-                u32::from_le_bytes(self.bytes[at..at + 4].try_into().unwrap_or_default()) & 0x0fff_ffff
+                u32::from_le_bytes(self.bytes[at..at + 4].try_into().unwrap_or_default())
+                    & 0x0fff_ffff
             }
         }
     }
@@ -92,7 +93,11 @@ impl Table {
                 let at = n + n / 2;
                 let mut pair = u16::from_le_bytes([self.bytes[at], self.bytes[at + 1]]);
                 let value = value as u16 & 0xfff;
-                pair = if n.is_multiple_of(2) { (pair & 0xf000) | value } else { (pair & 0x000f) | (value << 4) };
+                pair = if n.is_multiple_of(2) {
+                    (pair & 0xf000) | value
+                } else {
+                    (pair & 0x000f) | (value << 4)
+                };
                 self.bytes[at..at + 2].copy_from_slice(&pair.to_le_bytes());
             }
             16 => self.bytes[2 * n..2 * n + 2].copy_from_slice(&(value as u16).to_le_bytes()),
@@ -192,14 +197,17 @@ pub fn check(device: &Device, options: Options) -> Result<Report, String> {
             // FAT32 keeps a copy at sector 6, of 512 or 4096 bytes.
             let backup = [512u64, 4096].into_iter().find_map(|size| {
                 let sector = read(6 * size, 512).ok()?;
-                Bpb::parse(&sector).ok().filter(|bpb| bpb.bits == 32 && u64::from(bpb.sector_size) == size)
+                Bpb::parse(&sector)
+                    .ok()
+                    .filter(|bpb| bpb.bits == 32 && u64::from(bpb.sector_size) == size)
             });
             let Some(bpb) = backup else {
                 return Err(format!("this is no FAT filesystem that can be checked: {why}"));
             };
             let size = u64::from(bpb.sector_size);
             let mended = options.repair
-                && read(6 * size, size as usize).is_ok_and(|copy| device.write_at(0, &copy).is_ok());
+                && read(6 * size, size as usize)
+                    .is_ok_and(|copy| device.write_at(0, &copy).is_ok());
             problems.push((
                 format!(
                     "The boot sector is damaged ({why}); its backup at sector 6 is good, and was {}.",
@@ -223,11 +231,18 @@ pub fn check(device: &Device, options: Options) -> Result<Report, String> {
     }
     let fat_bytes = bpb.fat_sectors as usize * bpb.sector_size as usize;
     let fat_at = u64::from(bpb.reserved) * u64::from(bpb.sector_size);
-    let active = if bpb.bits == 32 && bpb.ext_flags & 0x80 != 0 { u32::from(bpb.ext_flags & 0xf) } else { 0 };
+    let active = if bpb.bits == 32 && bpb.ext_flags & 0x80 != 0 {
+        u32::from(bpb.ext_flags & 0xf)
+    } else {
+        0
+    };
     if active >= bpb.fats {
         return Err(format!("the active table is number {active}, of {}", bpb.fats));
     }
-    let fat = Table { bytes: read(fat_at + u64::from(active) * fat_bytes as u64, fat_bytes)?, bits: bpb.bits };
+    let fat = Table {
+        bytes: read(fat_at + u64::from(active) * fat_bytes as u64, fat_bytes)?,
+        bits: bpb.bits,
+    };
     let clusters = bpb.clusters;
     let mut checker = Checker {
         device,
@@ -261,6 +276,12 @@ pub fn check(device: &Device, options: Options) -> Result<Report, String> {
 }
 
 impl Checker<'_> {
+    /// What mending does, in words: `did` when it is done, `would` when
+    /// only checking.
+    fn done(&self, did: &'static str, would: &'static str) -> &'static str {
+        if self.repair { did } else { would }
+    }
+
     fn problem(&mut self, text: String, mendable: bool) -> bool {
         let mended = mendable && self.repair;
         self.report.problems.push((text, mended));
@@ -276,12 +297,14 @@ impl Checker<'_> {
     fn check_tables(&mut self, fat_at: u64, fat_bytes: usize, active: u32) -> Result<(), String> {
         let mirrored = !(self.bpb.bits == 32 && self.bpb.ext_flags & 0x80 != 0);
         // Only the entries of clusters that are; the rest may differ.
-        let used = ((u64::from(self.bpb.clusters) + 2) * u64::from(self.bpb.bits)).div_ceil(8) as usize;
+        let used =
+            ((u64::from(self.bpb.clusters) + 2) * u64::from(self.bpb.bits)).div_ceil(8) as usize;
         if mirrored {
             for n in (0..self.bpb.fats).filter(|&n| n != active) {
                 let other = self.read(fat_at + u64::from(n) * fat_bytes as u64, fat_bytes)?;
                 if other[..used] != self.fat.bytes[..used] {
-                    let text = format!("Allocation table {} differs from table {}.", n + 1, active + 1);
+                    let text =
+                        format!("Allocation table {} differs from table {}.", n + 1, active + 1);
                     if self.problem(text, true) {
                         self.fat_changed = true;
                     }
@@ -388,7 +411,13 @@ impl Checker<'_> {
     /// Reads every directory from the root.
     fn walk(&mut self) -> Result<(), String> {
         let mut queue = VecDeque::new();
-        queue.push_back(Dir { first: 0, chain: Vec::new(), parent: 0, path: String::new(), depth: 0 });
+        queue.push_back(Dir {
+            first: 0,
+            chain: Vec::new(),
+            parent: 0,
+            path: String::new(),
+            depth: 0,
+        });
         self.next_owner = 1;
         let root_owner = self.next_owner;
         if self.bpb.bits == 32 {
@@ -398,7 +427,10 @@ impl Checker<'_> {
                 return Err(format!("the root directory's first cluster, {root}, is not one"));
             }
             if let Some(why) = broken {
-                let text = format!("The root directory's chain {why}; it was cut there.");
+                let text = format!(
+                    "The root directory's chain {why}; {}.",
+                    self.done("it was cut there", "mending cuts it there")
+                );
                 if self.problem(text, true) {
                     self.cut(&chain);
                 }
@@ -418,7 +450,8 @@ impl Checker<'_> {
     /// clusters' starts, or of FAT12 and FAT16's root.
     fn places(&self, dir: &Dir) -> Vec<(u64, usize)> {
         if dir.first == 0 {
-            let at = (u64::from(self.bpb.reserved) + u64::from(self.bpb.fats) * u64::from(self.bpb.fat_sectors))
+            let at = (u64::from(self.bpb.reserved)
+                + u64::from(self.bpb.fats) * u64::from(self.bpb.fat_sectors))
                 * u64::from(self.bpb.sector_size);
             return vec![(at, self.bpb.root_entries as usize * 32)];
         }
@@ -464,7 +497,9 @@ impl Checker<'_> {
                 long.push((offset, entry));
                 let mut units: Vec<u16> = Vec::new();
                 for range in [1..11, 14..26, 28..32] {
-                    units.extend(entry[range].as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)));
+                    units.extend(
+                        entry[range].as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)),
+                    );
                 }
                 let mut part = units;
                 part.append(&mut long_name);
@@ -478,9 +513,10 @@ impl Checker<'_> {
                 let sum = name_checksum(&entry);
                 let count = (long[0].1[0] & 0x1f) as usize;
                 let ordered = long.len() == count
-                    && long.iter().enumerate().all(|(i, (_, e))| {
-                        (e[0] & 0x1f) as usize == count - i && e[13] == sum
-                    });
+                    && long
+                        .iter()
+                        .enumerate()
+                        .all(|(i, (_, e))| (e[0] & 0x1f) as usize == count - i && e[13] == sum);
                 if ordered {
                     let end = long_name.iter().position(|&u| u == 0).unwrap_or(long_name.len());
                     shown = String::from_utf16_lossy(&long_name[..end]);
@@ -490,19 +526,27 @@ impl Checker<'_> {
                 long.clear();
                 long_name.clear();
             }
-            let path = if dir.path.is_empty() { format!("/{shown}") } else { format!("{}/{shown}", dir.path) };
+            let path = if dir.path.is_empty() {
+                format!("/{shown}")
+            } else {
+                format!("{}/{shown}", dir.path)
+            };
             if attr & 0x08 != 0 && attr & 0x10 == 0 {
                 labels += 1;
                 if !is_root || labels > 1 {
-                    let text = format!("{path}: a volume label {}; it was taken out.",
-                        if is_root { "after the first" } else { "outside the root directory" });
+                    let text = format!(
+                        "{path}: a volume label {}; {}.",
+                        if is_root { "after the first" } else { "outside the root directory" },
+                        self.done("it was taken out", "mending takes it out")
+                    );
                     if self.problem(text, true) {
                         let mut gone = entry;
                         gone[0] = 0xe5;
                         self.patches.push(Patch { offset, entry: gone });
                     }
                 } else {
-                    self.report.label = Some(String::from_utf8_lossy(&entry[..11]).trim_end().to_string());
+                    self.report.label =
+                        Some(String::from_utf8_lossy(&entry[..11]).trim_end().to_string());
                 }
                 continue;
             }
@@ -510,16 +554,31 @@ impl Checker<'_> {
                 let bad = b < 0x20 && !(i == 0 && b == 0x05) || b"\"*+,/:;<=>?[\\]|".contains(&b);
                 bad.then_some(b)
             }) {
-                self.problem(format!("{path}: its short name holds the byte {c:#04x}, which no short name may."), false);
+                self.problem(
+                    format!(
+                        "{path}: its short name holds the byte {c:#04x}, which no short name may."
+                    ),
+                    false,
+                );
             }
-            let hi = if self.bpb.bits == 32 { u32::from(u16::from_le_bytes([entry[20], entry[21]])) } else { 0 };
+            let hi = if self.bpb.bits == 32 {
+                u32::from(u16::from_le_bytes([entry[20], entry[21]]))
+            } else {
+                0
+            };
             let start = hi << 16 | u32::from(u16::from_le_bytes([entry[26], entry[27]]));
             let size = u32::from_le_bytes([entry[28], entry[29], entry[30], entry[31]]);
             let dot = &entry[..11] == b".          ";
             let dotdot = &entry[..11] == b"..         ";
             if dot || dotdot {
                 if is_root {
-                    self.problem(format!("The root directory has a \"{}\" entry.", if dot { "." } else { ".." }), false);
+                    self.problem(
+                        format!(
+                            "The root directory has a \"{}\" entry.",
+                            if dot { "." } else { ".." }
+                        ),
+                        false,
+                    );
                     continue;
                 }
                 let want = if dot { dir.first } else { dir.parent };
@@ -544,7 +603,10 @@ impl Checker<'_> {
             if attr & 0x10 != 0 {
                 self.report.directories += 1;
                 if size != 0 {
-                    let text = format!("{path}: a directory with a size, {size}; it was set to 0.");
+                    let text = format!(
+                        "{path}: a directory with a size, {size}; {}.",
+                        self.done("it was set to 0", "mending sets it to 0")
+                    );
                     if self.problem(text, true) {
                         let mut fixed = entry;
                         fixed[28..32].fill(0);
@@ -554,7 +616,10 @@ impl Checker<'_> {
                 let (chain, broken) = self.chain(start, me);
                 if chain.is_empty() {
                     let why = broken.unwrap_or_default();
-                    let text = format!("{path}: a directory whose first cluster {why}; it was taken out.");
+                    let text = format!(
+                        "{path}: a directory whose first cluster {why}; {}.",
+                        self.done("it was taken out", "mending takes it out")
+                    );
                     if self.problem(text, true) {
                         let mut gone = entry;
                         gone[0] = 0xe5;
@@ -563,7 +628,10 @@ impl Checker<'_> {
                     continue;
                 }
                 if let Some(why) = broken {
-                    let text = format!("{path}: the directory's chain {why}; it was cut there.");
+                    let text = format!(
+                        "{path}: the directory's chain {why}; {}.",
+                        self.done("it was cut there", "mending cuts it there")
+                    );
                     if self.problem(text, true) {
                         self.cut(&chain);
                     }
@@ -586,7 +654,10 @@ impl Checker<'_> {
             let cluster = self.bpb.cluster_bytes();
             if size == 0 {
                 if start != 0 {
-                    let text = format!("{path}: an empty file that holds clusters; they were freed.");
+                    let text = format!(
+                        "{path}: an empty file that holds clusters; {}.",
+                        self.done("they were freed", "mending frees them")
+                    );
                     if self.problem(text, true) {
                         let mut fixed = entry;
                         fixed[20..22].fill(0);
@@ -603,15 +674,22 @@ impl Checker<'_> {
             if broken.is_none() && chain.len() > wanted {
                 why = Some(format!("holds {} clusters, more than its size needs", chain.len()));
             } else if broken.is_none() && chain.len() < wanted {
-                why = Some(format!("ends after {} clusters, fewer than its size needs", chain.len()));
+                why =
+                    Some(format!("ends after {} clusters, fewer than its size needs", chain.len()));
             }
             if let Some(why) = why {
                 let short = keep < wanted;
                 let new_size = if short { (keep as u64 * u64::from(cluster)) as u32 } else { size };
                 let text = if short {
-                    format!("{path}: its chain {why}; the file was cut to {new_size} bytes.")
+                    format!(
+                        "{path}: its chain {why}; {} to {new_size} bytes.",
+                        self.done("the file was cut", "mending cuts the file")
+                    )
                 } else {
-                    format!("{path}: its chain {why}; the rest was freed.")
+                    format!(
+                        "{path}: its chain {why}; {}.",
+                        self.done("the rest was freed", "mending frees the rest")
+                    )
                 };
                 if self.problem(text, true) {
                     keep = keep.min(chain.len());
@@ -646,7 +724,11 @@ impl Checker<'_> {
             return;
         }
         let place = if dir.path.is_empty() { "/" } else { &dir.path };
-        let text = format!("{place}: {} long name entries belong to no file; they were taken out.", long.len());
+        let text = format!(
+            "{place}: {} long name entries belong to no file; {}.",
+            long.len(),
+            self.done("they were taken out", "mending takes them out")
+        );
         if self.problem(text, true) {
             for (offset, entry) in long {
                 let mut gone = *entry;
@@ -678,9 +760,10 @@ impl Checker<'_> {
         }
         let chains = lost.iter().filter(|&&n| !pointed[n as usize]).count().max(1);
         let text = format!(
-            "{} clusters in {chains} {} are marked used but no file holds them; they were freed.",
+            "{} clusters in {chains} {} are marked used but no file holds them; {}.",
             lost.len(),
-            if chains == 1 { "chain" } else { "chains" }
+            if chains == 1 { "chain" } else { "chains" },
+            self.done("they were freed", "mending frees them")
         );
         if self.problem(text, true) {
             for n in lost {
@@ -699,14 +782,17 @@ impl Checker<'_> {
         }
         let at = u64::from(self.bpb.fsinfo) * u64::from(self.bpb.sector_size);
         let mut info = self.read(at, 512)?;
-        let u32_at = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        let u32_at =
+            |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
         let signed = u32_at(&info, 0) == 0x4161_5252 && u32_at(&info, 484) == 0x6141_7272;
         let max = self.bpb.clusters + 1;
-        let free = (2..=max).filter(|&n| {
-            let v = self.fat.get(n);
-            // Clusters the repair frees count as free.
-            v == 0
-        }).count() as u32;
+        let free = (2..=max)
+            .filter(|&n| {
+                let v = self.fat.get(n);
+                // Clusters the repair frees count as free.
+                v == 0
+            })
+            .count() as u32;
         let said = u32_at(&info, 488);
         let next = u32_at(&info, 492);
         let mut fix = false;
@@ -759,7 +845,9 @@ impl Checker<'_> {
         if !self.repair {
             return Ok(());
         }
-        let w = |device: &Device, at: u64, bytes: &[u8]| device.write_at(at, bytes).map_err(|e| format!("cannot write: {e}"));
+        let w = |device: &Device, at: u64, bytes: &[u8]| {
+            device.write_at(at, bytes).map_err(|e| format!("cannot write: {e}"))
+        };
         if self.fat_changed {
             for n in 0..self.bpb.fats {
                 w(self.device, fat_at + u64::from(n) * fat_bytes as u64, &self.fat.bytes)?;

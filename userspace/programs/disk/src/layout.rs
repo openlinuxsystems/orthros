@@ -31,7 +31,10 @@ use crate::size;
 use crate::table::{ATTRIBUTES, End, New, Scheme, Table};
 use crate::types;
 
-#[allow(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if passes a reference")]
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -120,11 +123,10 @@ pub fn scheme(name: &str) -> Result<Scheme, String> {
 pub fn attribute_bits(names: &[String]) -> Result<u64, String> {
     let mut bits = 0u64;
     for name in names {
-        let bit = ATTRIBUTES
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|&(_, bit)| bit)
-            .or_else(|| name.strip_prefix("bit-").and_then(|n| n.parse().ok()).filter(|&b| b < 64));
+        let bit =
+            ATTRIBUTES.iter().find(|(n, _)| n == name).map(|&(_, bit)| bit).or_else(|| {
+                name.strip_prefix("bit-").and_then(|n| n.parse().ok()).filter(|&b| b < 64)
+            });
         let Some(bit) = bit else {
             let known: Vec<&str> = ATTRIBUTES.iter().map(|(n, _)| *n).collect();
             return Err(format!(
@@ -160,7 +162,9 @@ fn disk_id(table: &mut Table, uuid: &str) -> Result<(), String> {
             table.signature = u32::from_str_radix(hex, 16)
                 .ok()
                 .filter(|_| !hex.is_empty() && hex.len() <= 8)
-                .ok_or_else(|| format!("\"{uuid}\" is not an MBR's signature, such as 0x1234abcd"))?;
+                .ok_or_else(|| {
+                    format!("\"{uuid}\" is not an MBR's signature, such as 0x1234abcd")
+                })?;
         }
     }
     Ok(())
@@ -219,13 +223,18 @@ pub fn apply(
 /// What `part` asks for.
 fn new_partition(part: &Part, scheme: Scheme, sector_size: u32) -> Result<New, String> {
     let kind = types::parse(&part.kind, scheme).ok_or_else(|| {
-        format!("\"{}\" is no type of a {}; `rdisk --list-types` lists them", part.kind, scheme.name())
+        format!(
+            "\"{}\" is no type of a {}; `rdisk --list-types` lists them",
+            part.kind,
+            scheme.name()
+        )
     })?;
     let end = if part.size == "rest" {
         End::Rest
     } else {
-        let amount = size::parse(&part.size)
-            .ok_or_else(|| format!("\"{}\" is not a size, such as 512MiB, 2048s or rest", part.size))?;
+        let amount = size::parse(&part.size).ok_or_else(|| {
+            format!("\"{}\" is not a size, such as 512MiB, 2048s or rest", part.size)
+        })?;
         End::Sectors(amount.sectors_up(sector_size))
     };
     let first = match &part.start {
@@ -317,10 +326,12 @@ pub fn dump(table: &Table) -> Result<Layout, String> {
 /// As [`dump`].
 pub fn dump_text(table: &Table) -> Result<String, String> {
     let layout = dump(table)?;
-    serde_json::to_string_pretty(&layout).map(|mut text| {
-        text.push('\n');
-        text
-    }).map_err(|e| e.to_string())
+    serde_json::to_string_pretty(&layout)
+        .map(|mut text| {
+            text.push('\n');
+            text
+        })
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -391,16 +402,19 @@ mod tests {
         let more = r#"{"table":"mbr","keep":true,"delete":[1],"partitions":[
             {"type":"swap","size":"rest"}]}"#;
         let kept = apply(&parse(more).unwrap(), 512, 1 << 20, Some(&table), &mut rng).unwrap();
-        let spans: Vec<(u32, u64, u64, String)> =
-            kept.partitions.iter().map(|p| (p.number, p.first, p.last, p.kind.to_string())).collect();
+        let spans: Vec<(u32, u64, u64, String)> = kept
+            .partitions
+            .iter()
+            .map(|p| (p.number, p.first, p.last, p.kind.to_string()))
+            .collect();
         assert_eq!(
             spans,
-            vec![
-                (1, 2048, 133_119, "0x82".to_string()),
-                (2, 133_120, 264_191, "0x83".to_string())
-            ]
+            vec![(1, 2048, 133_119, "0x82".to_string()), (2, 133_120, 264_191, "0x83".to_string())]
         );
-        assert_eq!(attribute_bits(&["legacy-bios-bootable".into(), "bit-48".into()]), Ok(1 << 2 | 1 << 48));
+        assert_eq!(
+            attribute_bits(&["legacy-bios-bootable".into(), "bit-48".into()]),
+            Ok(1 << 2 | 1 << 48)
+        );
         assert_eq!(attribute_names(1 << 2 | 1 << 48), ["legacy-bios-bootable", "bit-48"]);
     }
 }

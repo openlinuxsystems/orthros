@@ -10,9 +10,9 @@
 //! keeps the logical ones a disk has as they are, so their records are
 //! never written.
 
+use crate::guid::Guid;
 use crate::table::{Partition, Scheme, Table};
 use crate::types::Kind;
-use crate::guid::Guid;
 
 /// The type of a protective MBR's entry: the disk has a GPT.
 pub const PROTECTIVE: u8 = 0xee;

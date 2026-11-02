@@ -135,6 +135,26 @@ fn ram_disk_and_slices() {
 }
 
 #[test]
+fn a_retired_slice_fails_and_its_disk_goes_on() {
+    let (disk, device) = shared(RamDisk::new(64, false));
+    disk.load(512 * 10, b"tenth sector").unwrap();
+    let slice = Slice::new(device.clone(), 8, 16).unwrap();
+    let mut sector = [0u8; 512];
+    crate::read_sector(&slice, 2, &mut sector).unwrap();
+    slice.retire();
+    assert_eq!(crate::read_sector(&slice, 2, &mut sector), Err(Error::Io));
+    let page = CachePage::new().unwrap();
+    let seg = [crate::Segment { page: &page, offset: 0, len: 512 }];
+    assert_eq!(slice.write(0, &seg), Err(Error::Io));
+    assert_eq!(slice.flush(), Err(Error::Io));
+    assert_eq!(slice.discard(0, 1), Err(Error::Io));
+    // The disk is not retired with it, nor is it by its own retire.
+    device.retire();
+    crate::read_sector(&*device, 10, &mut sector).unwrap();
+    assert_eq!(&sector[..12], b"tenth sector");
+}
+
+#[test]
 fn discards_and_writes_through() {
     let (disk, device) = shared(RamDisk::new(64, false));
     disk.load(0, &std::vec![0xaa; 64 * 512]).unwrap();

@@ -352,6 +352,24 @@ the disk's own: 512 bytes, or 4096 on a disk of 4 KiB sectors, which
 a disk that holds a mounted filesystem damages the filesystem, as on
 every system.
 
+Once *rdisk*(8) has written a disk's partition table, it asks the kernel
+to read the table again (*BLKRRPART*, ADR 0301). A partition the new
+table has where it was, of the size it was, stays as it is, open or
+mounted; one the table no longer has leaves _/devices_ and
+_/kernel/block_, and every request on it fails with *io*; one new to the
+table appears. If a partition that would go or change is mounted, swap
+that is on, a disk of a mounted Btrfs or an unlocked BitLocker volume,
+or the disk itself is, nothing changes and the request fails with
+*in_use* (EBUSY). Dukovo's own request says what uses a device, which
+*rdisk*(8) and the *mkfs*(8) tools ask before they write.
+
+_/devices/disk_ leads to _/system/live/disk_, where links name each
+disk and partition by what it holds, as udev's do on Linux (ADR 0303):
+_by-uuid/_ and _by-label/_ by its filesystem's UUID and label,
+_by-partuuid/_ and _by-partlabel/_ by its GPT entry's GUID and name. A
+space in a name is _\\x20_ and a slash _\\x2f_. *volumed*(8) keeps them,
+and the tools that change a disk's table or filesystem renew them.
+
 # DIAGNOSTICS
 
 Errors of files and directories are in the *file* domain (2) of the

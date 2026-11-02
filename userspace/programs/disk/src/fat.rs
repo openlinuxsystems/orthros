@@ -69,7 +69,8 @@ impl Bpb {
 
     /// The first sector of the data area: cluster 2's.
     pub fn first_data(&self) -> u64 {
-        u64::from(self.reserved) + u64::from(self.fats) * u64::from(self.fat_sectors)
+        u64::from(self.reserved)
+            + u64::from(self.fats) * u64::from(self.fat_sectors)
             + u64::from(self.root_sectors())
     }
 
@@ -151,7 +152,8 @@ impl Bpb {
             return Err("its tables leave no room for data".to_string());
         }
         let clusters = (total_sectors - first_data) / u64::from(cluster_sectors);
-        bpb.clusters = u32::try_from(clusters).map_err(|_| "it has too many clusters".to_string())?;
+        bpb.clusters =
+            u32::try_from(clusters).map_err(|_| "it has too many clusters".to_string())?;
         bpb.bits = match clusters {
             0..4085 => 12,
             4085..65525 => 16,
@@ -268,7 +270,8 @@ pub fn label_bytes(text: &str) -> Result<[u8; 11], String> {
     if upper.len() > 11 {
         return Err(format!("a FAT label holds at most 11 characters, and \"{text}\" has more"));
     }
-    if let Some(c) = upper.chars().find(|&c| !c.is_ascii() || c < ' ' || "\"*+,./:;<=>?[\\]|".contains(c))
+    if let Some(c) =
+        upper.chars().find(|&c| !c.is_ascii() || c < ' ' || "\"*+,./:;<=>?[\\]|".contains(c))
     {
         return Err(format!("a FAT label may not hold \"{c}\""));
     }
@@ -441,7 +444,8 @@ pub fn dos_time(unix: u64) -> (u16, u16) {
         return (0x21, 0);
     }
     let date = (((year - 1980).min(127) as u16) << 9) | ((month as u16) << 5) | day as u16;
-    let time = ((secs / 3600) as u16) << 11 | (((secs / 60) % 60) as u16) << 5 | ((secs % 60) / 2) as u16;
+    let time =
+        ((secs / 3600) as u16) << 11 | (((secs / 60) % 60) as u16) << 5 | ((secs % 60) / 2) as u16;
     (date, time)
 }
 
@@ -462,9 +466,7 @@ fn civil(days: i64) -> (i64, u32, u32) {
 
 /// The seconds since 1970 now.
 pub fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// The boot code of a volume nothing boots from: it says so, waits for a
@@ -649,7 +651,8 @@ mod tests {
         assert_eq!((g.bits, g.cluster_sectors), (32, 1));
         for total in [2880, mib(16), mib(100), mib(600), mib(9000)] {
             let g = plan(total, 512, &Options::default()).unwrap();
-            let data = u64::from(g.reserved) + 2 * u64::from(g.fat_sectors)
+            let data = u64::from(g.reserved)
+                + 2 * u64::from(g.fat_sectors)
                 + u64::from((g.root_entries * 32).div_ceil(512));
             assert_eq!(data % u64::from(g.cluster_sectors), 0, "{total}");
             let needed = (u64::from(g.clusters) + 2) * u64::from(g.bits);
@@ -665,7 +668,10 @@ mod tests {
         assert!(label_bytes("ünï").is_err());
         assert_eq!(dos_time(0), (0x21, 0));
         // 2026-11-02 01:15:52 UTC.
-        assert_eq!(dos_time(1_793_582_152), ((46 << 9) + (11 << 5) + 2, (1 << 11) + (15 << 5) + 26));
+        assert_eq!(
+            dos_time(1_793_582_152),
+            ((46 << 9) + (11 << 5) + 2, (1 << 11) + (15 << 5) + 26)
+        );
         assert_eq!(volume_id_text(0x1234_abcd), "1234-ABCD");
     }
 

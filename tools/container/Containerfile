@@ -21,7 +21,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl git build-essential \
         qemu-system-x86 ovmf \
-        grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools exfatprogs sleuthkit \
+        grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools dosfstools exfatprogs gdisk fdisk sleuthkit \
         btrfs-progs e2fsprogs ntfs-3g dislocker libbde-utils openssh-server scdoc mandoc gdb default-jre-headless \
         udftools udfclient genisoimage \
         clang-20 lld-20 llvm-20 libclang-rt-20-dev meson ninja-build cmake bison pkgconf autoconf xz-utils \

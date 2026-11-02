@@ -82,7 +82,8 @@ fn sfdisk(image: &Image) -> (String, Vec<Read>) {
     assert!(ok, "{text}");
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
     let table = &json["partitiontable"];
-    let field = |p: &serde_json::Value, key: &str| p[key].as_str().unwrap_or_default().to_lowercase();
+    let field =
+        |p: &serde_json::Value, key: &str| p[key].as_str().unwrap_or_default().to_lowercase();
     let parts = table["partitions"].as_array().map_or_else(Vec::new, |parts| {
         parts
             .iter()
@@ -115,7 +116,9 @@ fn sgdisk_and_sfdisk_read_the_gpts_it_writes() {
             {"type":"efi","size":"512MiB","name":"EFI system"},
             {"type":"swap","size":"64MiB"},
             {"type":"dukovo-root","size":"rest","name":"Dukovo root","attributes":["no-automount"]}]}"#;
-        let table = layout::apply(&layout::parse(text).unwrap(), sector, disk.sectors(), None, &mut rng).unwrap();
+        let table =
+            layout::apply(&layout::parse(text).unwrap(), sector, disk.sectors(), None, &mut rng)
+                .unwrap();
         write(&disk, &table);
         if sector == 512 {
             let (ok, text) = run("sgdisk", &["-v", image.path()]);
@@ -144,10 +147,26 @@ fn it_reads_the_gpts_sgdisk_writes() {
     let (ok, text) = run(
         "sgdisk",
         &[
-            "-U", "11111111-2222-4333-8444-555555555555",
-            "-n", "1:2048:+100M", "-t", "1:ef00", "-c", "1:EFI",
-            "-n", "3:0:+20M", "-t", "3:8200", "-u", "3:01234567-89AB-4CDE-8F01-23456789ABCD",
-            "-n", "2:0:0", "-t", "2:0700", "-c", "2:Données",
+            "-U",
+            "11111111-2222-4333-8444-555555555555",
+            "-n",
+            "1:2048:+100M",
+            "-t",
+            "1:ef00",
+            "-c",
+            "1:EFI",
+            "-n",
+            "3:0:+20M",
+            "-t",
+            "3:8200",
+            "-u",
+            "3:01234567-89AB-4CDE-8F01-23456789ABCD",
+            "-n",
+            "2:0:0",
+            "-t",
+            "2:0700",
+            "-c",
+            "2:Données",
             image.path(),
         ],
     );
@@ -155,8 +174,11 @@ fn it_reads_the_gpts_sgdisk_writes() {
     let found = crate::read(&image.device(512)).unwrap();
     let table = found.table.unwrap();
     assert_eq!(table.disk_guid, Guid::known("11111111-2222-4333-8444-555555555555"));
-    let parts: Vec<(u32, u64, Option<&str>, String)> =
-        table.partitions.iter().map(|p| (p.number, p.sectors(), p.kind.alias(), p.name.clone())).collect();
+    let parts: Vec<(u32, u64, Option<&str>, String)> = table
+        .partitions
+        .iter()
+        .map(|p| (p.number, p.sectors(), p.kind.alias(), p.name.clone()))
+        .collect();
     assert_eq!(parts[0], (1, 204_800, Some("efi"), "EFI".to_string()));
     assert_eq!(parts[1].2, Some("windows-data"));
     assert_eq!(parts[1].3, "Données");
@@ -203,7 +225,11 @@ fn a_disk_that_grew_gets_its_backup_moved_to_the_end() {
     File::options().write(true).open(&image.0).unwrap().set_len(64 << 20).unwrap();
     let disk = image.device(512);
     let found = crate::read(&disk).unwrap();
-    assert!(found.notes.iter().any(|n| n.contains("larger than the table says")), "{:?}", found.notes);
+    assert!(
+        found.notes.iter().any(|n| n.contains("larger than the table says")),
+        "{:?}",
+        found.notes
+    );
     let mut table = found.table.unwrap();
     assert_eq!(table.last_usable, disk.sectors() - 34);
     table.add(New::of(kind("swap", Scheme::Gpt), End::Rest), &mut rng).unwrap();
@@ -410,7 +436,10 @@ fn fsck_fat_finds_and_mends_what_fsck_fat_finds() {
         let device = image.device(512);
         let clean = fatck::check(&device, fatck::Options::default()).unwrap();
         assert!(clean.clean(), "FAT{bits}: {:?}", clean.problems);
-        assert_eq!((clean.files, clean.directories, clean.label.as_deref()), (4, 3, Some("FILLED")));
+        assert_eq!(
+            (clean.files, clean.directories, clean.label.as_deref()),
+            (4, 3, Some("FILLED"))
+        );
         let mut boot = [0u8; 512];
         device.read_at(0, &mut boot).unwrap();
         let bpb = fat::Bpb::parse(&boot).unwrap();
@@ -427,7 +456,8 @@ fn fsck_fat_finds_and_mends_what_fsck_fat_finds() {
                     let mut pair = [0u8; 2];
                     device.read_at(fat_at + at, &mut pair).unwrap();
                     let v = u16::from_le_bytes(pair);
-                    let v = if n.is_multiple_of(2) { (v & 0xf000) | 0xfff } else { (v & 0xf) | 0xfff0 };
+                    let v =
+                        if n.is_multiple_of(2) { (v & 0xf000) | 0xfff } else { (v & 0xf) | 0xfff0 };
                     (at, v.to_le_bytes().to_vec())
                 }
                 16 => (u64::from(2 * n), vec![0xff, 0xff]),
@@ -441,7 +471,10 @@ fn fsck_fat_finds_and_mends_what_fsck_fat_finds() {
         let report = fatck::check(&device, fatck::Options::default()).unwrap();
         let said: Vec<&str> = report.problems.iter().map(|(t, _)| t.as_str()).collect();
         assert!(!report.clean());
-        assert!(said.iter().any(|t| t.contains("/SMALL.TXT") && t.contains("fewer than its size")), "{said:?}");
+        assert!(
+            said.iter().any(|t| t.contains("/SMALL.TXT") && t.contains("fewer than its size")),
+            "{said:?}"
+        );
         assert!(said.iter().any(|t| t.contains("1 clusters in 1 chain")), "{said:?}");
         assert!(said.iter().any(|t| t.contains("Allocation table 2 differs")), "{said:?}");
         let mended = fatck::check(&device, fatck::Options { repair: true }).unwrap();
@@ -491,11 +524,17 @@ fn fsck_fat_mends_cross_links_and_dirty_volumes() {
 
 #[test]
 fn exfat_volumes_check_with_exfatprogs() {
-    for (size, sector, cluster) in [(8u64 << 20, 512u32, None), (300 << 20, 512, None), (128 << 20, 4096, Some(64 << 10))] {
+    for (size, sector, cluster) in
+        [(8u64 << 20, 512u32, None), (300 << 20, 512, None), (128 << 20, 4096, Some(64 << 10))]
+    {
         let image = Image::new(size);
         let device = image.device(sector);
         let mut rng = Rng::seeded(size + 1);
-        let options = exfat::Options { label: Some("Stick".into()), cluster_bytes: cluster, ..Default::default() };
+        let options = exfat::Options {
+            label: Some("Stick".into()),
+            cluster_bytes: cluster,
+            ..Default::default()
+        };
         let made = exfat::format(&device, &options, &mut rng).unwrap();
         let (ok, text) = run("fsck.exfat", &["-n", "-v", image.path()]);
         assert!(ok, "fsck.exfat on {size} bytes of {sector}-byte sectors: {text}");
@@ -564,11 +603,19 @@ fn disks_for_windows() {
         let p = table.get(1).unwrap();
         let volume = disk.part(p.first, p.sectors()).unwrap();
         if fs == "exfat" {
-            exfat::format(&volume, &exfat::Options { label: Some("DUKOVO".into()), ..Default::default() }, &mut rng)
-                .unwrap();
+            exfat::format(
+                &volume,
+                &exfat::Options { label: Some("DUKOVO".into()), ..Default::default() },
+                &mut rng,
+            )
+            .unwrap();
         } else {
             let bits = fs[3..].parse().unwrap();
-            let options = fat::Options { bits: Some(bits), label: Some("DUKOVO".into()), ..Default::default() };
+            let options = fat::Options {
+                bits: Some(bits),
+                label: Some("DUKOVO".into()),
+                ..Default::default()
+            };
             fat::format(&volume, &options, &mut rng).unwrap();
             assert!(fatck::check(&volume, fatck::Options::default()).unwrap().problems.is_empty());
         }

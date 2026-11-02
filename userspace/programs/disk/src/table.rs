@@ -191,7 +191,12 @@ impl Table {
     /// # Errors
     ///
     /// If the disk is too small for a table and a partition of 1 MiB.
-    pub fn new(scheme: Scheme, sector_size: u32, disk_sectors: u64, rng: &mut Rng) -> Result<Table, Error> {
+    pub fn new(
+        scheme: Scheme,
+        sector_size: u32,
+        disk_sectors: u64,
+        rng: &mut Rng,
+    ) -> Result<Table, Error> {
         if !matches!(sector_size, 512 | 1024 | 2048 | 4096) {
             return error(format!("rdisk does not know disks of {sector_size}-byte sectors"));
         }
@@ -234,7 +239,8 @@ impl Table {
 
     /// The sectors a GPT's entries take: 32 of 512 bytes.
     pub fn entry_sectors(&self) -> u64 {
-        (u64::from(self.entry_count) * u64::from(self.entry_size)).div_ceil(u64::from(self.sector_size))
+        (u64::from(self.entry_count) * u64::from(self.entry_size))
+            .div_ceil(u64::from(self.sector_size))
     }
 
     /// The sectors in a MiB, which new partitions start on.
@@ -414,7 +420,8 @@ impl Table {
             bootable: self.scheme == Scheme::Mbr && new.bootable,
             logical: false,
         };
-        let at = self.partitions.iter().position(|p| p.number > number).unwrap_or(self.partitions.len());
+        let at =
+            self.partitions.iter().position(|p| p.number > number).unwrap_or(self.partitions.len());
         self.partitions.insert(at, partition);
         Ok(number)
     }
@@ -630,7 +637,10 @@ mod tests {
         assert_eq!((table.first_usable, table.last_usable), (34, 41_943_006));
         assert_eq!(table.free(), vec![(34, 41_943_006)]);
         let table = Table::new(Scheme::Gpt, 4096, 1 << 20, &mut rng).unwrap();
-        assert_eq!((table.first_usable, table.last_usable, table.alignment()), (6, (1 << 20) - 6, 256));
+        assert_eq!(
+            (table.first_usable, table.last_usable, table.alignment()),
+            (6, (1 << 20) - 6, 256)
+        );
         let table = Table::new(Scheme::Mbr, 512, 1 << 33, &mut rng).unwrap();
         assert_eq!((table.first_usable, table.last_usable), (1, u64::from(u32::MAX)));
         assert!(Table::new(Scheme::Gpt, 512, 4096, &mut rng).is_err());

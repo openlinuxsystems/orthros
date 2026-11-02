@@ -576,11 +576,157 @@ pub fn for_each(mut f: impl FnMut(&Entry)) {
     }
 }
 
+/// Whether the BitLocker volume on the disk or partition `name` is
+/// unlocked: a device named after it with `-unlocked` after it is there.
+pub fn is_unlocked(name: &str) -> bool {
+    for_each_find(|entry| {
+        entry.name.as_str().strip_suffix(UNLOCKED).is_some_and(|locked| locked == name)
+    })
+}
+
+/// Whether `name` is one of the partitions of the disk `disk`: `vda1` of
+/// `vda`, `nvme0n1p2` of `nvme0n1`.
+fn partition_of(disk: &str, name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(disk) else { return false };
+    let digit = disk.ends_with(|c: char| c.is_ascii_digit());
+    let rest = if digit { rest.strip_prefix('p') } else { Some(rest) };
+    rest.is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Re-reads of partition tables, one at a time: two at once could add a
+/// partition twice.
+static REREAD: Mutex<()> = Mutex::new(());
+
+/// REREAD_PARTITIONS: reads the partition table of the disk `device`
+/// again (ADR 0301). The partitions it has where they were, of the sizes
+/// they were, stay; those it no longer has go, retired, so that what has
+/// them open writes nowhere; those new to it come. Refused with `in_use`,
+/// before anything changes, if one that would go is in use, or the disk.
+#[inline(never)]
+fn reread(device: &DeviceRef) -> Result<(), Status> {
+    let _one = REREAD.lock();
+    let mut disk = None;
+    for_each(|entry| {
+        if Arc::ptr_eq(&entry.device, device) {
+            disk = Some((entry.name.clone(), entry.place.is_none()));
+        }
+    });
+    let Some((name, whole)) = disk else { return Err(Kernel::InvalidArgument.status(0)) };
+    if !whole || name.as_str().ends_with(UNLOCKED) {
+        return Err(Kernel::InvalidArgument.status(0));
+    }
+    let info = device.info();
+    let mut read = |sector: u64, out: &mut [u8; 512]| {
+        radix_block::read_sector(&**device, sector, out).map_err(|_| partition::Error::Io)
+    };
+    let (scheme, found) = partition::read(info.sectors, info.unit(), &mut read).map_err(|err| {
+        warn!("Disk: {name}: {err}");
+        match err {
+            partition::Error::Io => FileError::Io.status(0),
+            partition::Error::Damaged(_) => FileError::Corrupt.status(0),
+            partition::Error::NoMemory => Kernel::NoMemory.status(0),
+        }
+    })?;
+    // The partitions there are: whether each stays, and who uses those
+    // that would not.
+    let mut going = alloc::vec::Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+    let mut staying = alloc::vec::Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+    let mut listed = Ok(());
+    for_each(|entry| {
+        let Some(place) = entry.place else { return };
+        if listed.is_err() || !partition_of(name.as_str(), entry.name.as_str()) {
+            return;
+        }
+        let sectors = entry.device.info().sectors;
+        let stays = found
+            .iter()
+            .any(|p| p.number == place.number && p.first == place.first && p.sectors == sectors);
+        let list = if stays { &mut staying } else { &mut going };
+        listed = list.try_reserve(1).map_err(|_| Kernel::NoMemory.status(0));
+        let _ = list.push_within_capacity((place.number, entry.device.clone()));
+    });
+    listed?;
+    let coming = {
+        let mut coming = alloc::vec::Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+        for part in &found {
+            if !staying.iter().any(|(number, _)| *number == part.number) {
+                coming.try_reserve(1).map_err(|_| Kernel::NoMemory.status(0))?;
+                let _ = coming.push_within_capacity(part);
+            }
+        }
+        coming
+    };
+    let changes = !going.is_empty() || !coming.is_empty();
+    if changes && super::uses(device) != 0 {
+        warn!("Disk: {name}: its partition table was not read again: the disk is in use");
+        return Err(FileError::InUse.status(0));
+    }
+    for (number, part) in &going {
+        if super::uses(part) != 0 {
+            warn!(
+                "Disk: {name}: its partition table was not read again: partition {number}, \
+                 which it changes, is in use"
+            );
+            return Err(FileError::InUse.status(0));
+        }
+    }
+    // The partitions that stay take the kinds the table gives them now.
+    {
+        let mut disks = DISKS.lock();
+        for entry in disks.iter_mut().flatten() {
+            let Some(place) = entry.place.as_mut() else { continue };
+            if !partition_of(name.as_str(), entry.name.as_str()) {
+                continue;
+            }
+            if let Some(part) = found.iter().find(|p| p.number == place.number) {
+                place.kind = part.kind;
+            }
+        }
+    }
+    // Those that go, retired once they are out of the list.
+    let mut gone = alloc::vec::Vec::new_in(HEAP.with(Flags::MAY_SLEEP));
+    {
+        let mut disks = DISKS.lock();
+        let Some(disks) = disks.as_mut() else { return Ok(()) };
+        let mut at = 0;
+        while at < disks.len() {
+            let leaves = going.iter().any(|(_, part)| Arc::ptr_eq(part, &disks[at].device));
+            if leaves && gone.try_reserve(1).is_ok() {
+                let _ = gone.push_within_capacity(disks.remove(at));
+            } else {
+                at += 1;
+            }
+        }
+    }
+    for entry in &gone {
+        super::devfs::remove_block(entry.name.as_str());
+        entry.device.retire();
+        info!("Disk: {}: gone from {name}'s partition table", entry.name);
+    }
+    for part in &coming {
+        add_partition(&name, device, part);
+    }
+    let scheme = match scheme {
+        partition::Scheme::None => "no partition table",
+        partition::Scheme::Mbr => "an MBR",
+        partition::Scheme::Gpt | partition::Scheme::GptBackup => "a GPT",
+    };
+    info!(
+        "Disk: {name}'s partition table read again: {scheme} with {} {}, {} new, {} gone",
+        found.len(),
+        if found.len() == 1 { "partition" } else { "partitions" },
+        coming.len(),
+        gone.len()
+    );
+    Ok(())
+}
+
 /// radix-block(2)'s `control` requests on `device`: `argument` is the
 /// caller's address of the value a request writes or reads, and
 /// `may_write` whether the caller's capability has the write right, which
-/// DISCARD, FLUSH, SWAP_ON and SWAP_OFF need, and UNLOCK but to unlock
-/// read-only. Any other request is not one of a block device.
+/// DISCARD, FLUSH, SWAP_ON, SWAP_OFF and REREAD_PARTITIONS need, and
+/// UNLOCK but to unlock read-only. Any other request is not one of a
+/// block device.
 pub fn control(
     device: &DeviceRef,
     request: u32,
@@ -607,7 +753,13 @@ pub fn control(
         }
         request::GET_READ_ONLY => put(&u32::from(info.read_only).to_le_bytes()),
         request::GET_ROTATIONAL => put(&u16::from(info.rotational).to_le_bytes()),
-        request::DISCARD | request::FLUSH | request::SWAP_ON | request::SWAP_OFF if !may_write => {
+        request::DISCARD
+        | request::FLUSH
+        | request::SWAP_ON
+        | request::SWAP_OFF
+        | request::REREAD_PARTITIONS
+            if !may_write =>
+        {
             Err(Kernel::MissingRights.status(0))
         }
         request::DISCARD => {
@@ -638,6 +790,8 @@ pub fn control(
         }
         request::SWAP_OFF => crate::swap::off(device),
         request::GET_HEALTH => health(device, argument),
+        request::GET_IN_USE => put(&super::uses(device).to_le_bytes()),
+        request::REREAD_PARTITIONS => reread(device),
         request::UNLOCK => unlock(device, argument, may_write),
         _ => Err(Kernel::NotTerminal.status(0)),
     }

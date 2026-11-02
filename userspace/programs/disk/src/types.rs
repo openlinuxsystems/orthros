@@ -78,7 +78,13 @@ pub struct Type {
     pub code: Option<u16>,
 }
 
-const fn gpt(alias: &'static str, name: &'static str, guid: &str, mbr: Option<u8>, code: u16) -> Type {
+const fn gpt(
+    alias: &'static str,
+    name: &'static str,
+    guid: &str,
+    mbr: Option<u8>,
+    code: u16,
+) -> Type {
     Type { alias, name, gpt: Some(Guid::known(guid)), mbr, code: Some(code) }
 }
 
@@ -100,8 +106,20 @@ pub const TYPES: &[Type] = &[
     gpt("linux-home", "Linux home", "933AC7E1-2EB4-4F13-B844-0E14E2AEF915", None, 0x8302),
     gpt("linux-raid", "Linux RAID", "A19D880F-05FC-4D3B-A006-743F0F84911E", Some(0xfd), 0xfd00),
     gpt("linux-lvm", "Linux LVM", "E6D6D379-F507-44C2-A23C-238F2A3DF928", Some(0x8e), 0x8e00),
-    gpt("windows-data", "Microsoft basic data", "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7", Some(0x07), 0x0700),
-    gpt("windows-reserved", "Microsoft reserved", "E3C9E316-0B5C-4DB8-817D-F92DF00215AE", None, 0x0c01),
+    gpt(
+        "windows-data",
+        "Microsoft basic data",
+        "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+        Some(0x07),
+        0x0700,
+    ),
+    gpt(
+        "windows-reserved",
+        "Microsoft reserved",
+        "E3C9E316-0B5C-4DB8-817D-F92DF00215AE",
+        None,
+        0x0c01,
+    ),
     gpt(
         "windows-recovery",
         "Windows recovery environment",
@@ -174,7 +192,10 @@ mod tests {
         let efi = Guid::known("C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
         assert_eq!(parse("efi", Scheme::Gpt), Some(Kind::Gpt(efi)));
         assert_eq!(parse("EF00", Scheme::Gpt), Some(Kind::Gpt(efi)));
-        assert_eq!(parse("c12a7328-f81f-11d2-ba4b-00a0c93ec93b", Scheme::Gpt), Some(Kind::Gpt(efi)));
+        assert_eq!(
+            parse("c12a7328-f81f-11d2-ba4b-00a0c93ec93b", Scheme::Gpt),
+            Some(Kind::Gpt(efi))
+        );
         assert_eq!(parse("efi", Scheme::Mbr), Some(Kind::Mbr(0xef)));
         assert_eq!(parse("0x83", Scheme::Mbr), Some(Kind::Mbr(0x83)));
         assert_eq!(parse("dukovo-root", Scheme::Mbr), Some(Kind::Mbr(0x83)));

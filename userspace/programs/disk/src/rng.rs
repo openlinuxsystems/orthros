@@ -17,12 +17,14 @@ pub struct Rng {
 }
 
 impl Rng {
-    /// Seeded from the system's generator: `/dev/urandom`, which Dukovo
-    /// links to `/devices/urandom`. If it cannot be read, from the time.
+    /// Seeded from the system's generator: Dukovo's `/devices/urandom`,
+    /// or Linux's `/dev/urandom`. If neither can be read, from the time.
     pub fn system() -> Rng {
         let mut seed = [0u8; 8];
-        let read = File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut seed));
-        if read.is_err() {
+        let read = ["/devices/urandom", "/dev/urandom"]
+            .iter()
+            .any(|path| File::open(path).and_then(|mut f| f.read_exact(&mut seed)).is_ok());
+        if !read {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos() as u64);

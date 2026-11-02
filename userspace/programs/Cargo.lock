@@ -1204,6 +1204,7 @@ version = "0.11.0"
 dependencies = [
  "accounts",
  "blake2",
+ "disk",
  "ed25519-compact",
  "keymap",
  "libc",

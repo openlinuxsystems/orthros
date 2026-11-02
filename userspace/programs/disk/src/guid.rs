@@ -135,7 +135,8 @@ mod tests {
         assert_eq!(efi.to_string(), "C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
         assert_eq!(efi.lower(), "c12a7328-f81f-11d2-ba4b-00a0c93ec93b");
         assert_eq!(Guid::from_text("{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}"), Some(efi));
-        for bad in ["", "C12A7328F81F11D2BA4B00A0C93EC93B", "C12A7328-F81F-11D2-BA4B-00A0C93EC93G"] {
+        for bad in ["", "C12A7328F81F11D2BA4B00A0C93EC93B", "C12A7328-F81F-11D2-BA4B-00A0C93EC93G"]
+        {
             assert_eq!(Guid::from_text(bad), None, "{bad}");
         }
     }

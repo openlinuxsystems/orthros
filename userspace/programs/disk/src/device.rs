@@ -38,9 +38,17 @@ impl Device {
         let sector = u64::from(self.sector);
         let (base, len) = (first.saturating_mul(sector), sectors.saturating_mul(sector));
         if base.checked_add(len).is_none_or(|end| end > self.len) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "the part is not on the device"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the part is not on the device",
+            ));
         }
-        Ok(Device { file: self.file.try_clone()?, base: self.base + base, len, sector: self.sector })
+        Ok(Device {
+            file: self.file.try_clone()?,
+            base: self.base + base,
+            len,
+            sector: self.sector,
+        })
     }
 
     /// Its size in bytes.

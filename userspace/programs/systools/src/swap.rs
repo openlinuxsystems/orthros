@@ -240,6 +240,8 @@ pub fn mkswap(args: &mut Args) -> Result<i32, Fail> {
     write(&mut device).map_err(|e| {
         util::fail(format!("unable to write signature page: {}", util::strip_os_error(&e)))
     })?;
+    // The links of /devices/disk follow the area's label and UUID.
+    crate::links::refresh_quietly();
     if !quiet {
         let size = (u64::from(last_page)) * PAGE as u64;
         let mut out = io::stdout().lock();

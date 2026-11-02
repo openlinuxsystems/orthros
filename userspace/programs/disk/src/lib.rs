@@ -253,8 +253,9 @@ pub fn plan(disk: &Device, table: &Table) -> io::Result<Vec<Write>> {
                 if &sector[..8] != gpt::SIGNATURE {
                     continue;
                 }
-                let count = gpt::parse_header(&sector, lba, table.disk_sectors)
-                    .map_or(1, |h| if lba == 1 { 1 + h.entry_sectors(table.sector_size) } else { 1 });
+                let count = gpt::parse_header(&sector, lba, table.disk_sectors).map_or(1, |h| {
+                    if lba == 1 { 1 + h.entry_sectors(table.sector_size) } else { 1 }
+                });
                 let what = format!("zeros over the old GPT's header at sector {lba}");
                 zero(&mut writes, lba, count, what);
             }
@@ -266,7 +267,9 @@ pub fn plan(disk: &Device, table: &Table) -> io::Result<Vec<Write>> {
     for found in signatures::find(disk) {
         let lba = found.offset / size;
         let end = (found.offset + found.len as u64).div_ceil(size);
-        if lba == 0 || writes.iter().any(|w| w.lba <= lba && lba < w.lba + w.bytes.len() as u64 / size) {
+        if lba == 0
+            || writes.iter().any(|w| w.lba <= lba && lba < w.lba + w.bytes.len() as u64 / size)
+        {
             continue;
         }
         let what = format!("zeros over the {} signature at sector {lba}", found.name);

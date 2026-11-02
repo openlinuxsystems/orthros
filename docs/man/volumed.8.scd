@@ -34,6 +34,14 @@ and udisks leave it. A volume BitLocker locked is left for *unlock*(8),
 and the volume it unlocks, _/devices/_*name*-unlocked, is mounted as
 one plugged in (ADR 0240).
 
+A partition that appears on a disk that was there already was made by
+partitioning it (*rdisk*(8)), not plugged in: volumed leaves it
+unmounted, for its maker to put a filesystem on (ADR 0301):
+
+```
+volumed: vda3 is new on vda, which was partitioned again; left unmounted
+```
+
 When a disk is pulled out, volumed unmounts what is mounted at
 _/volumes_ from it and its partitions, including what Spark mounted
 there at boot, and removes the directories. Unmount a volume with
@@ -52,8 +60,14 @@ volumed: mounted the FAT filesystem of sdb at /volumes/DUKOVOUSB
 volumed: sdc is a locked BitLocker volume; `unlock sdc` unlocks it
 ```
 
-Its service file gives it _/devices_ and _/volumes_ and nothing else of
-the tree (*service.toml*(5)). Spark hands it _/volumes_ as descriptor 3
+volumed also keeps the links in _/devices/disk_ that name each disk and
+partition by its filesystem's UUID and label, and its GPT entry's GUID
+and name (ADR 0303; *radix-files*(7)): at its start, and whenever disks
+and partitions come or go.
+
+Its service file gives it _/devices_, _/system/live/disk_, where those
+links are, and _/volumes_, and nothing else of the tree
+(*service.toml*(5)). Spark hands it _/volumes_ as descriptor 3
 as well, as *files.mount* says and *MOUNT_PLACES* names, since nothing
 is mounted through a service's view; volumed mounts and unmounts through
 it, and through the root when *MOUNT_PLACES* names nothing, as for
@@ -77,4 +91,4 @@ service, volumed does not exit.
 # SEE ALSO
 
 *eject*(1), *remount*(8), *unlock*(8), *spark*(8), *findmnt*(8), *blkid*(8),
-*radix-files*(7), *systools*(1)
+*rdisk*(8), *radix-files*(7), *systools*(1)

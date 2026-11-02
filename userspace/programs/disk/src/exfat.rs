@@ -168,7 +168,11 @@ pub fn format(device: &Device, options: &Options, rng: &mut Rng) -> Result<Made,
     let per_cluster = u64::from(cluster / sector);
     // The table and the heap start on whole MiB, or on whole clusters on
     // a volume too small to give up two MiB.
-    let boundary = if bytes >= 64 << 20 { ((1u64 << 20) / u64::from(sector)).max(per_cluster) } else { per_cluster };
+    let boundary = if bytes >= 64 << 20 {
+        ((1u64 << 20) / u64::from(sector)).max(per_cluster)
+    } else {
+        per_cluster
+    };
     let fat_offset = 24u64.div_ceil(boundary) * boundary;
     let mut fat_length = 1u64;
     let (heap_offset, clusters) = loop {
@@ -251,10 +255,14 @@ pub fn format(device: &Device, options: &Options, rng: &mut Rng) -> Result<Made,
     write(12 * sector64, &region)?;
 
     let mut fat = vec![0u8; ((root_first + 1) * 4) as usize];
-    let mut set = |n: u64, v: u32| fat[(n * 4) as usize..(n * 4 + 4) as usize].copy_from_slice(&v.to_le_bytes());
+    let mut set = |n: u64, v: u32| {
+        fat[(n * 4) as usize..(n * 4 + 4) as usize].copy_from_slice(&v.to_le_bytes());
+    };
     set(0, 0xffff_fff8);
     set(1, 0xffff_ffff);
-    for (first, count) in [(bitmap_first, bitmap_clusters), (upcase_first, upcase_clusters), (root_first, 1)] {
+    for (first, count) in
+        [(bitmap_first, bitmap_clusters), (upcase_first, upcase_clusters), (root_first, 1)]
+    {
         for n in first..first + count {
             set(n, if n + 1 == first + count { 0xffff_ffff } else { (n + 1) as u32 });
         }
@@ -308,7 +316,8 @@ mod tests {
     #[test]
     fn the_upcase_table_maps_what_it_should() {
         let table = upcase_table();
-        let units: Vec<u16> = table.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).collect();
+        let units: Vec<u16> =
+            table.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).collect();
         let mut map = Vec::new();
         let mut i = 0;
         while i < units.len() {
